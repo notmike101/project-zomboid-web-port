@@ -107,6 +107,23 @@ function submit(action) {
 }
 
 /**
+ * Replace input ownership only after a non-keyboard action commits.
+ *
+ * @param {object} action - Requested pointer, form or toggle action.
+ * @param {string} [direction] - Toggle heading to announce when not replaced.
+ * @returns {void} Preserves held keys and assistance when vetoed or rejected.
+ */
+function takeover(action, direction) {
+    const result = submit(action);
+
+    if (result?.committed) {
+        held.clear();
+        toggledDirection = result.modifiedBy.length === 0 ? direction : undefined;
+        refresh();
+    }
+}
+
+/**
  * Stop held/manual and assisted movement. Safety cancellation is never vetoed.
  *
  * @returns {void} Leaves the engine idle.
@@ -124,7 +141,6 @@ function stop() {
  * @returns {void} Changes movement direction.
  */
 function manual() {
-    toggledDirection = undefined;
     let x = 0;
     let y = 0;
 
@@ -137,8 +153,9 @@ function manual() {
 
     if (held.size === 0) {
         stop();
-    } else {
-        submit({ type: 'walk', x, y });
+    } else if (submit({ type: 'walk', x, y })?.committed) {
+        toggledDirection = undefined;
+        refresh();
     }
 }
 
@@ -219,11 +236,9 @@ function pointDestination(event) {
     }
 
     canvas.focus();
-    held.clear();
-    toggledDirection = undefined;
     const point = worldFromCanvas(canvas, event.clientX, event.clientY);
 
-    submit({ type: 'moveTo', x: point.x, y: point.y });
+    takeover({ type: 'moveTo', x: point.x, y: point.y });
 }
 
 /**
@@ -236,17 +251,10 @@ function toggleWalking(event) {
     const button = event.currentTarget;
     const [x, y] = button.dataset.walk.split(',').map(Number);
 
-    held.clear();
-
     if (engine?.snapshot().action === 2 && toggledDirection === button.dataset.walk) {
         stop();
     } else {
-        const result = submit({ type: 'walk', x, y });
-
-        if (result?.committed) {
-            toggledDirection = result.modifiedBy.length === 0 ? button.dataset.walk : undefined;
-            refresh();
-        }
+        takeover({ type: 'walk', x, y }, button.dataset.walk);
     }
 }
 
@@ -258,9 +266,7 @@ function toggleWalking(event) {
  */
 function formDestination(event) {
     event.preventDefault();
-    held.clear();
-    toggledDirection = undefined;
-    submit({ type: 'moveTo', x: Number(document.querySelector('#target-x').value), y: Number(document.querySelector('#target-y').value) });
+    takeover({ type: 'moveTo', x: Number(document.querySelector('#target-x').value), y: Number(document.querySelector('#target-y').value) });
 }
 
 /**

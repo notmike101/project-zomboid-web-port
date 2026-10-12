@@ -1,8 +1,8 @@
-# Roadmap and M1 implementation plan
+# Roadmap and implementation plan
 
 > For agentic workers: use subagent-driven-development; preserve the complete product brief as the destination. This file is the authoritative plan; avoid duplicate plans/status files.
 
-**Goal:** prove real imported content → WebGPU canvas, WASM-owned actions, browser input/cancellation and executable JavaScript gameplay modification with native game closed.
+**Goal:** complete the standalone browser recreation against the full engineering brief: recognizable gameplay and presentation, substantial WASM simulation, genuine WebGPU, functional animation/effects/audio, persistent saves, accessible desktop/mobile use, comprehensive documented JavaScript mods, portable content/save transfer and asset-free reproducible delivery. Milestones are verification and backup checkpoints, not stopping conditions.
 **Architecture:** dependency-free Rust C ABI, direct browser WebGPU, accessible HTML host, trusted JavaScript ES-module mods.
 **Tech stack:** Rust 1.96.0; Node 26.10.0/npm 11.19.1; vendored JavaScript/JSDoc ESLint configs.
 **Spec:** DECISIONS.md integration contract and user's engineering brief.
@@ -17,12 +17,15 @@ No original binaries/assets, converted caches, content packs or saves tracked or
 |---|---|---|---|
 | M0 Grounded setup | Verified environment, exact build evidence, assets classified, lint configs, bot attribution, reproducible commands | Local installation/toolchains, GitHub access | Verified; private remote and bot pushes established |
 | M1 Architecture proof | Real-content WebGPU rendering, WASM movement/cancel, browser input, mod changes actual WASM rule, standalone evidence | M0 local discovery; WebGPU browser | Verified prototype; source pushed, asset-free release audited, Windows CI passed |
-| M2 First accessibility slice | Real tile environment, collision, character, door/pickup, accessible UI, browser save/export/import/reload, basic local mod management | M1 | Pending |
+| M2 First accessibility slice | Real tile environment, collision, character, door/pickup, accessible UI, browser save/export/import/reload, basic local mod management | M1 | In progress: input ownership fix verified; independent atlas, character and world-rule research active |
 | M3 Gameplay expansion | Coherent increments: items/equipment, zombies/perception/AI, combat, health/needs, crafting/building, world loading, animation, audio, lighting/effects; public extension points per system | M2 and build-specific behavior evidence | Pending |
 | M4 Portability/resilience | Portable content/save transfer, physical mobile and second-device proof, quotas/recovery, mod migrations, GPU loss and measured performance budgets | M2/M3, physical devices | Pending |
 | M5 Release/handoff | Pinned Windows CI, asset-free versioned release, static hosting/update/rollback docs, exact capability matrix; incomplete releases labelled previews | M4 and remaining fidelity inventory | Pending |
 
 Full-port completion remains all required systems and fidelity gaps in COMPATIBILITY.md, not completion of M1 or a generic zombie demo.
+
+Completion remains blocked until every required system, delivered mod extension, fidelity obligation and supported-device acceptance gate is implemented and exercised. Missing physical devices do not excuse leaving independent implementation unfinished; their evidence gap remains explicit.
+
 
 ## M1 execution slices
 

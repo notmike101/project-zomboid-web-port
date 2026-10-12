@@ -2,7 +2,7 @@
 
 ## Current increment
 
-M1 integrated architecture proof verified and backed up; full port remains incomplete. Real WebGPU, authoritative WASM movement and the public JavaScript mod path execute without the native game. Asset-free preview release and Windows CI pass. No native streaming/client-control implementation.
+Full-game continuation is active. M1 architecture proof remains verified and backed up, but is not the completion goal. The next playable slice adds real imported tiles/character content, WASM collision/navigation/interaction, save restoration and local mod management; full gameplay, portability and fidelity requirements remain open. No native streaming/client-control implementation.
 
 ## Grounded observations
 
@@ -43,6 +43,8 @@ M1 integrated architecture proof verified and backed up; full port remains incom
 - Release guards exercised: independently authored unexpected `.txt` content and dirty source were rejected; probe removed. Clean `Windows.ps1 Release` prepared 10 application files plus manifest at `release/0.1.0-preview.1-72e238bc2b96`; each byte count and SHA-256 verified against packaged bytes. Repeated release rejected EEXIST without overwrite. No original content is packaged.
 - Actual [Windows CI run 38256463874](https://github.com/notmike101/project-zomboid-web-port/actions/runs/38256463874) completed successfully: pinned setup, build/check, identified release and artifact upload. CI supplies synthetic contract/delivery proof, not GPU or physical-device proof.
 - Scoped final re-review found no remaining actionable defects in the five corrected callback/UI boundaries; no execution was delegated to reviewers.
+- Continuing correctness check reproduced a held-W → vetoed pointer destination → release-W defect: WASM remained walking because input ownership had been cleared before commit. Shared non-keyboard takeover now clears held keys/assistance only after commitment. Actual compiled-WASM browser checks pass for pointer, coordinate form and direction-button vetoes; release stops in all three. [Failing-before/passing-after metadata](evidence/input-veto-release.json).
+- Runnable browser regression: import `checkHeldVeto` from `scripts/check-browser-input.mjs` in the development browser runner and call `tab.run(checkHeldVeto, { args: [mode] })` for `pointer`, `form`, and `toggle`. It operates the built UI with an independently authored public-API veto mod; no private state exposure or proprietary bytes.
 
 ## Blockers and outstanding acceptance
 
