@@ -346,5 +346,32 @@
     "rustTests": 15,
     "nodeTests": 52,
     "documentationFiles": 6
+  },
+  "release": {
+    "directory": "release/0.1.0-preview.1-72e238bc2b96",
+    "revision": "72e238bc2b961b78bf34ee83565198c4c8751941",
+    "assetFree": true,
+    "applicationFiles": 10,
+    "allByteCountsAndSha256Verified": true,
+    "rejectedUnexpectedExtension": true,
+    "rejectedDirtySource": true,
+    "rejectedExistingDestination": true
+  },
+  "sourceCheckpoint": {
+    "revision": "72e238bc2b961b78bf34ee83565198c4c8751941",
+    "author": "agent-notmike101[bot]",
+    "committer": "agent-notmike101[bot]",
+    "repositoryPrivate": true
+  },
+  "windowsCi": {
+    "runId": 38256463874,
+    "url": "https://github.com/notmike101/project-zomboid-web-port/actions/runs/38256463874",
+    "conclusion": "success",
+    "gpuEvidence": false
+  },
+  "finalScopedReview": {
+    "findings": [],
+    "scope": "Five corrected hook/lifecycle and UI-state boundaries",
+    "readOnly": true
   }
 }

@@ -2,7 +2,7 @@
 
 ## Current increment
 
-M1 integrated architecture proof exercised in a real browser; final review, source checkpoint and release verification are in progress. Full port remains incomplete. No native streaming/client-control implementation.
+M1 integrated architecture proof verified and backed up; full port remains incomplete. Real WebGPU, authoritative WASM movement and the public JavaScript mod path execute without the native game. Asset-free preview release and Windows CI pass. No native streaming/client-control implementation.
 
 ## Grounded observations
 
@@ -21,6 +21,7 @@ M1 integrated architecture proof exercised in a real browser; final review, sour
 
 - Pushed `6f3690984a3033527346090b1c51e64be2312a0e` — `docs: record grounded M1 architecture and discovery`; GitHub commit metadata links both author and committer to agent-notmike101[bot].
 - Pushed `8a5157e` — `build: pin vendored lint tooling and enforce zero warnings`. Installed config import smoke returned six JS flat configs and three JSDoc configs. Completed lint-config slice passed zero-warning ESLint.
+- Pushed `72e238bc2b961b78bf34ee83565198c4c8751941` — `feat(port): deliver verified standalone WASM and mod proof`; GitHub API confirms both author and committer are agent-notmike101[bot], repository remains private.
 - Final `scripts/Windows.ps1 Check` passed after review corrections: asset-free browser build; `eslint . --max-warnings 0` with zero errors/warnings; Rust formatting; clippy with warnings denied; 15 native Rust tests; 52 Node tests instantiating compiled WASM and exercising delivery/mod contracts; relative links in six maintained documents.
 - Initial Windows Setup failed because this Node manager provides npm.exe, not npm.cmd. Get-Command inspection established the root cause. Resolver now accepts either installed Windows executable; rerun Setup passed, installed pinned Rust components and 256 locked packages. No machine-specific executable path baked into the script.
 - Privacy regression reproduced with independently authored text only: a junction out of dist let the old server disclose `SYNTHETIC_PRIVACY_PROBE_ONLY`. After realpath containment, the same request returned 404. Source staging uses an explicit application-file allowlist and rejects selected links/ancestor escapes; isolated delivery regressions pass. Probe files were removed; original assets were never used.
@@ -39,11 +40,13 @@ M1 integrated architecture proof exercised in a real browser; final review, sour
 - Invalid PNG followed by the real valid PNG exposed obsolete recoverable feedback; browser confirmation after the fix: alert hidden, text empty, real asset metadata visible.
 - Final static delivery review found no actionable high/medium defects. Core findings fixed: withdrawn hooks are skipped, rejected async lifecycle values are observed/attributed, throwing then getters stay inside the hook boundary, vetoed directions preserve the active toggle, and pending mod-import failure cannot replace a fatal backend message. Five new compiled-WASM regressions pass; built-browser veto and loss/import-race checks pass.
 - Further built-browser checks: resize from 390×844 to 900×700 changed the GPU canvas from 326×376 to 453×381; after-startup offline movement/Stop continued locally. This is not cold-start offline provisioning. A null adapter produced an explicit stopped error, not fallback; semantic controls/status/alert and keyboard-visible focus were observed, not a screen-reader session. [Integrated metadata evidence](evidence/m1-acceptance.json).
-- Release guards exercised: independently authored unexpected `.txt` content was rejected; dirty source was rejected. Probe removed. Clean-source artifact audit remains to be recorded.
+- Release guards exercised: independently authored unexpected `.txt` content and dirty source were rejected; probe removed. Clean `Windows.ps1 Release` prepared 10 application files plus manifest at `release/0.1.0-preview.1-72e238bc2b96`; each byte count and SHA-256 verified against packaged bytes. Repeated release rejected EEXIST without overwrite. No original content is packaged.
+- Actual [Windows CI run 38256463874](https://github.com/notmike101/project-zomboid-web-port/actions/runs/38256463874) completed successfully: pinned setup, build/check, identified release and artifact upload. CI supplies synthetic contract/delivery proof, not GPU or physical-device proof.
+- Scoped final re-review found no remaining actionable defects in the five corrected callback/UI boundaries; no execution was delegated to reviewers.
 
 ## Blockers and outstanding acceptance
 
-- Remote access resolved: `https://github.com/notmike101/project-zomboid-web-port` exists and `isPrivate:true` verified; agent-app access confirmed. First checkpoint push and final implementation push tracked below as they occur.
+- Remote access resolved: private repository and app-authenticated source push verified. Latest source release provenance is `72e238bc2b961b78bf34ee83565198c4c8751941`; subsequent handoff-documentation checkpoints do not change the implementation.
 - Physical mobile/second device: no named connected target; actual mobile performance/touch/memory/background proof unverified. Emulation will not count as physical acceptance.
 - Deployment: destination unspecified; prepare asset-free release rather than publish to a guessed destination.
 - Full gameplay/assets/saves/mod management/portability remain pending M2–M5, visible in COMPATIBILITY/ROADMAP.
@@ -51,4 +54,4 @@ M1 integrated architecture proof exercised in a real browser; final review, sour
 
 ## Next runnable step
 
-Complete final review regressions, rerun `.\scripts\Windows.ps1 Check`, commit/push with bot attribution, then run `.\scripts\Windows.ps1 Release` from clean source and audit its manifest. Next implementation experiment: bounded inspection of `media/texturepacks/Tiles2x.pack` headers/page/subtexture metadata, followed by an in-browser atlas decode; no whole-bank read or native converter.
+Run `.\scripts\Windows.ps1 Run`, open localhost in a WebGPU-capable browser, and import a PNG from your own installation to exercise the delivered proof. Next implementation experiment: bounded inspection of `media/texturepacks/Tiles2x.pack` headers/page/subtexture metadata, followed by an in-browser atlas decode. Preserve original inputs; no whole-bank read or native converter. M2 also requires real tile collision/character/interaction, browser save transfer and local mod management before gameplay claims.

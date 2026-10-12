@@ -16,7 +16,7 @@ No original binaries/assets, converted caches, content packs or saves tracked or
 | Milestone | Acceptance | Dependencies | Status |
 |---|---|---|---|
 | M0 Grounded setup | Verified environment, exact build evidence, assets classified, lint configs, bot attribution, reproducible commands | Local installation/toolchains, GitHub access | Verified; private remote and bot pushes established |
-| M1 Architecture proof | Real-content WebGPU rendering, WASM movement/cancel, browser input, mod changes actual WASM rule, standalone evidence | M0 local discovery; WebGPU browser | Verified prototype; final source/release checkpoint in progress |
+| M1 Architecture proof | Real-content WebGPU rendering, WASM movement/cancel, browser input, mod changes actual WASM rule, standalone evidence | M0 local discovery; WebGPU browser | Verified prototype; source pushed, asset-free release audited, Windows CI passed |
 | M2 First accessibility slice | Real tile environment, collision, character, door/pickup, accessible UI, browser save/export/import/reload, basic local mod management | M1 | Pending |
 | M3 Gameplay expansion | Coherent increments: items/equipment, zombies/perception/AI, combat, health/needs, crafting/building, world loading, animation, audio, lighting/effects; public extension points per system | M2 and build-specific behavior evidence | Pending |
 | M4 Portability/resilience | Portable content/save transfer, physical mobile and second-device proof, quotas/recovery, mod migrations, GPU loss and measured performance budgets | M2/M3, physical devices | Pending |
