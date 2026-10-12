@@ -31,7 +31,7 @@ REA `inspect_pe_resources` observed the x64 PE launcher (990720 bytes), SHA-256 
 
 | Content | Browser path | Status/limitation |
 |---|---|---|
-| Standalone PNG gameplay art | File → bounded header validation → createImageBitmap → GPUTexture | M1; local memory only, one marker resource |
+| Standalone PNG gameplay art | File → bounded header validation → createImageBitmap → GPUTexture | Renderer smoke verified with original 64×64 AppleRotten.png; local memory only, one marker resource; valid PNG color/depth pairs and Adam7 accepted, 16-bit downconverted to RGBA8, animated PNG first frame only |
 | Texture/sprite `.pack` | Requires bounded browser parser/atlas metadata | Not implemented; target next format experiment |
 | Item/script definitions | Text parsers and engine-equivalent rules | Definitions are reference evidence, not runnable standalone Java/Lua engine |
 | Meshes/models/animations | Browser-compatible decoding and skeleton/animation integration | Not implemented; inspect exact source formats before loader selection |
@@ -59,10 +59,10 @@ File sizes rounded where inventory reported rounded values; these are format dis
 
 | Target | Eligibility | Project validation |
 |---|---|---|
-| Windows Chromium 154 | HTTPS/localhost + adapter | Browser execution pending recorded M1 evidence |
+| Windows Chromium 154 | HTTPS/localhost + adapter | Headless renderer-only smoke: real game texture, nonfallback NVIDIA/ampere, bgra8unorm; integrated M1 pending |
 | Other Windows Chrome/Edge, Firefox | GPU/driver/browser capability dependent | Unverified |
 | macOS Safari 26 / Chrome | WebGPU-capable device | Unverified |
-| Android Chrome, physical device | Android 12+, eligible GPU + secure context | No physical target supplied; unverified release requirement |
+| Android Chrome, physical device | Android 12+, eligible GPU + secure context | Existing SDK adb devices-list empty; no attached target, unverified release requirement |
 | iOS/iPadOS Safari 26, physical device | Eligible WebGPU device + secure context | No physical target supplied; unverified release requirement |
 | Software/headless/emulated browser | Actual adapter must be recorded | Contract/render proof only; never mobile/hardware-performance claim |
 
@@ -70,6 +70,6 @@ M1 controls target ≥48 px, responsive layout, canvas DPR capped, pointer input
 
 ## Resource and timing limits
 
-Input PNG ≤16 MiB, dimensions ≤4096 each, decoded RGBA ≤64 MiB, also bounded by adapter limits. Fixed 60 Hz simulation, at most 100 ms frame catch-up; hidden/pause cancels movement and drops backlog. No shared-memory threads/COOP/COEP requirement. File import/copy decoding is asynchronous; one image only.
+Input PNG ≤16 MiB, dimensions ≤4096 each, estimated RGBA8 GPU texture ≤64 MiB, also bounded by adapter limits. Browser decoder peak allocation is not measured or guaranteed to equal four bytes/pixel, especially for 16-bit sources. Fixed 60 Hz simulation, at most 100 ms frame catch-up; hidden/pause cancels movement and drops backlog. No shared-memory threads/COOP/COEP requirement. File import/copy decoding is asynchronous; one image only.
 
 These are guardrails, not measured device performance budgets. Record actual frame times, source/decoded memory, import duration and latency before establishing budgets. Audio and storage budgets cannot be claimed for absent systems.
