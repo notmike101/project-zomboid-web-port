@@ -31,7 +31,7 @@ REA `inspect_pe_resources` observed the x64 PE launcher (990720 bytes), SHA-256 
 
 | Content | Browser path | Status/limitation |
 |---|---|---|
-| Standalone PNG gameplay art | File → bounded header validation → createImageBitmap → GPUTexture | Renderer smoke verified with original 64×64 AppleRotten.png; local memory only, one marker resource; valid PNG color/depth pairs and Adam7 accepted, 16-bit downconverted to RGBA8, animated PNG first frame only |
+| Standalone PNG gameplay art | File → bounded header validation → createImageBitmap → GPUTexture | Integrated WebGPU/WASM/mod smoke verified with original 64×64 AppleRotten.png; local memory only, one marker resource; valid PNG color/depth pairs and Adam7 accepted, 16-bit downconverted to RGBA8, animated PNG first frame only |
 | Texture/sprite `.pack` | Requires bounded browser parser/atlas metadata | Not implemented; target next format experiment |
 | Item/script definitions | Text parsers and engine-equivalent rules | Definitions are reference evidence, not runnable standalone Java/Lua engine |
 | Meshes/models/animations | Browser-compatible decoding and skeleton/animation integration | Not implemented; inspect exact source formats before loader selection |
@@ -59,7 +59,7 @@ File sizes rounded where inventory reported rounded values; these are format dis
 
 | Target | Eligibility | Project validation |
 |---|---|---|
-| Windows Chromium 154 | HTTPS/localhost + adapter | Headless renderer-only smoke: real game texture, nonfallback NVIDIA/ampere, bgra8unorm; integrated M1 pending |
+| Windows Chromium 154 | HTTPS/localhost + adapter | Built integrated app: real game texture, WASM movement/cancel, multifile mod displacement/cleanup, nonfallback NVIDIA/ampere, bgra8unorm; device-loss stop and import recovery confirmed |
 | Other Windows Chrome/Edge, Firefox | GPU/driver/browser capability dependent | Unverified |
 | macOS Safari 26 / Chrome | WebGPU-capable device | Unverified |
 | Android Chrome, physical device | Android 12+, eligible GPU + secure context | Existing SDK adb devices-list empty; no attached target, unverified release requirement |

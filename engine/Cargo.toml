@@ -1,0 +1,20 @@
+[package]
+name = "pz_engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Authoritative M1 movement rules exposed as a dependency-free C ABI."
+publish = false
+
+[lib]
+name = "pz_engine"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"

@@ -11,7 +11,7 @@
     "test": "node --test tests/*.test.js",
     "lint": "eslint . --max-warnings 0",
     "docs:check": "node scripts/docs-check.mjs",
-    "check": "npm run lint && cargo fmt --manifest-path engine/Cargo.toml -- --check && cargo test --manifest-path engine/Cargo.toml && npm test && npm run docs:check",
+    "check": "npm run lint && cargo fmt --manifest-path engine/Cargo.toml -- --check && cargo clippy --manifest-path engine/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path engine/Cargo.toml && npm test && npm run docs:check",
     "release": "npm run build && node scripts/release.mjs"
   },
   "devDependencies": {
