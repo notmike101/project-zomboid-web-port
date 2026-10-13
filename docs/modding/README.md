@@ -77,6 +77,9 @@ method on that handle throws (`stage: 'api'`).
 | `api.character.moodles()` | detached `ModMoodle[]` | Ordered original opaque IDs/levels `0..4`, statically derived rules over explicit inputs; no invented neutral fallback. |
 | `api.character.moodleInputs()` / `.inputLimits()` | detached named inputs / validation metadata | WASM-owned values/limits; numeric `{min,max,default,integer}` or boolean `{type:'boolean',default}`. |
 | `api.character.setStat(name, value)` / `.setMoodleInputs(inputs)` | `ModCommandResult` | Single stat or atomic partial input update through precommit hooks; exact names/types/full-precision limits required. |
+| `api.character.bodyParts()` / `.bodyPartInputLimits()` | detached `ModBodyPart[]` / native field limits | Seventeen real WASM injury/skin-node records; readonly pain/anatomy derives from native state, not source metadata. |
+| `api.character.thermalActionModifier()` | number | Source float32 cold-hand/arm weighting over actual node temperatures; no constant neutral fallback. |
+| `api.character.setBodyPart(part, values)` / `.setInjurySeverity(severity)` | `ModCommandResult` | Atomic partial native changes through the same precommit hooks; severity is `'low'|'normal'|'high'`. |
 | `api.ui.readOptions(modOptionsID)` / `.writeOptions(modOptionsID, values)` | detached JSON or `undefined` / `undefined` | This owner's `saveData.nativeUIOptions` entry; preserves other namespace fields, existing schema guard and complete 256 KiB cap; no new UI panel. |
 | `api.audio.load(id, bytes, { override = false })` | `Promise<ModAudioAsset>` | Owner-qualified registration; native decoding consumes the ArrayBuffer. Forbidden during synchronous activation; missing host adapter throws an attributed unsupported error. |
 | `api.audio.play(id, position)` | `ModAudioVoice` | Real positional voice owned by this mod; host must have unlocked audio. Registered qualified shared cues may be played, not replaced or unloaded by another owner. |
@@ -109,6 +112,8 @@ extents; WASM additionally refuses unloaded tiles, solid destinations and blocke
 { type: 'setHealth', health }
 { type: 'setCharacterStat', name, value }
 { type: 'setMoodleInputs', inputs }
+{ type: 'setBodyPart', part: 'Hand_L', values: { scratchTime: 10, skinTemperature: 20 } }
+{ type: 'setInjurySeverity', severity: 'normal' }
 ```
 
 Movement actions from browser clicks, keyboard, destination forms, accessible buttons
@@ -175,6 +180,39 @@ ordering/unsubscribe/synchronous-return rules; failures do not undo death and ar
 attributed to `onCharacterDeath`/`onCharacterDeath.late`. The Lua bridge dispatches
 original `OnPlayerDeath` with real player index zero. This is a port health/event
 policy, not native injury, survival or death-avatar animation.
+
+### Body-part state and action modifiers
+
+[`ModBodyPartId`, `ModBodyPartValues`, `ModBodyPart`, `ModBodyPartInputLimits`
+and `ModBodyState`](../../types/mod-api.d.ts) describe real native records.
+Canonical anatomy has 17 parts; `MAX` is a sentinel, not an editable part.
+Mutable fields are `health`, `scratchTime`, `cutTime`, `biteTime`,
+`deepWoundTime`, `stitchTime`, `fractureTime`, `splintFactor`, `burnTime`,
+`woundInfectionLevel`, `additionalPain`, `stiffness`, `bandaged`, `haveBullet`,
+`haveGlass` and `skinTemperature`. Use native `bodyPartInputLimits()` rather
+than guessing ranges. Every full-precision component validates before conversion
+or any commit; unknown fields and malformed updates refuse atomically.
+
+`pain`, `skinSurface` and `distToCore` are readonly. Pain follows source float32
+injury/treatment order: bandaging reduces accumulated wound pain before infection,
+additional pain and stiffness, followed by the source injury-severity pain
+factor. It is not the separate general damage multiplier. Signed additional
+pain remains signed; individually valid fields may produce a derived positive
+Infinity. Derived pain and thermal factors are not saved as extra fields.
+
+The native skin-node constructor starts at 33 °C. Cold timing weights only
+hands, forearms and upper arms using source anatomy; cold feet/torso do not
+silently add an invented action penalty. Live Lua body/part/list/thermal-node
+userdata preserve identity and query this state. Unmodeled inner-node climate
+values, treatment lifecycle methods such as `setBandaged`, and unknown APIs
+refuse instead of returning fabricated values.
+
+These are authoritative explicit injury/skin inputs and derived timing
+prerequisites, not automatic healing, climate/thermal progression, combat or a
+native aggregate-health cutover. The existing scalar health and moodle inputs
+retain their documented separate port policies. Ground pickup is still immediate;
+the native timed-action queue and original accessible context remain open.
+
 
 ### Original door state
 
@@ -258,6 +296,14 @@ draw and mod activation; malformed or mismatched rows fail staged restoration.
 Legacy saves without this field initialize from source. New-world lock rolls use
 the port's nonzero seeded RNG and the original LockedHouses probability table,
 not native CellularAutomaton RNG parity.
+
+Optional version-1 `bodyState` shares the envelope integrity hash and restores
+on the staged engine after actor/moodle state. It retains injury severity and
+exactly one row per canonical part with mutable native fields only; anatomy,
+derived pain and thermal aggregates are never persisted. Missing legacy state
+uses actual constructor defaults. Duplicate/missing/unknown parts, malformed
+fields and unsupported versions refuse before publication without altering the
+live game. Actor format 2/12 words and ABI 1 remain unchanged.
 
 ### `beforeAction` hook
 

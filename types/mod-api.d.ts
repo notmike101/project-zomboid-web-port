@@ -46,7 +46,9 @@ export type ModAction =
   | { type: 'setActualWeight'; id: number; actualWeight: number }
   | { type: 'setHealth'; health: number }
   | { type: 'setCharacterStat'; name: string; value: number }
-  | { type: 'setMoodleInputs'; inputs: Record<string, number | boolean> };
+  | { type: 'setMoodleInputs'; inputs: Record<string, number | boolean> }
+  | { type: 'setBodyPart'; part: ModBodyPartId; values: Partial<ModBodyPartValues> }
+  | { type: 'setInjurySeverity'; severity: ModInjurySeverity };
 
 /** Omitted count/condition are resolved by WASM's real definition, not the SDK. */
 export interface ModItemSpawn {
@@ -104,6 +106,55 @@ export interface ModInventoryState {
 export interface ModMoodle {
   id: string;
   level: 0 | 1 | 2 | 3 | 4;
+}
+
+/** Canonical source anatomy order contains these 17 parts; MAX is not a part. */
+export type ModBodyPartId = 'Hand_L' | 'Hand_R' | 'ForeArm_L' | 'ForeArm_R'
+  | 'UpperArm_L' | 'UpperArm_R' | 'Torso_Upper' | 'Torso_Lower' | 'Head' | 'Neck'
+  | 'Groin' | 'UpperLeg_L' | 'UpperLeg_R' | 'LowerLeg_L' | 'LowerLeg_R' | 'Foot_L' | 'Foot_R';
+export type ModInjurySeverity = 'low' | 'normal' | 'high';
+
+/** Mutable native fields; every numeric input is finite and must fit its native limits. */
+export interface ModBodyPartValues {
+  health: number;
+  scratchTime: number;
+  cutTime: number;
+  biteTime: number;
+  deepWoundTime: number;
+  stitchTime: number;
+  fractureTime: number;
+  splintFactor: number;
+  burnTime: number;
+  woundInfectionLevel: number;
+  /** Signed, uncapped within finite native f32 range. */
+  additionalPain: number;
+  stiffness: number;
+  bandaged: boolean;
+  haveBullet: boolean;
+  haveGlass: boolean;
+  /** Real thermal-node state; source construction starts at 33, not climate simulation. */
+  skinTemperature: number;
+}
+
+export interface ModBodyPart extends ModBodyPartValues {
+  readonly id: ModBodyPartId;
+  /** Source f32 arithmetic, uncapped: may be negative or overflow to positive Infinity. */
+  readonly pain: number;
+  readonly skinSurface: number;
+  readonly distToCore: number;
+}
+
+export type ModBodyPartInputLimits = {
+  [K in keyof ModBodyPartValues]: ModBodyPartValues[K] extends boolean
+    ? { type: 'boolean'; default: boolean }
+    : { min: number; max: number; default: number; integer: boolean };
+};
+
+/** Derived pain and immutable anatomy are never persisted. */
+export interface ModBodyState {
+  version: 1;
+  injurySeverity: ModInjurySeverity;
+  parts: (ModBodyPartValues & { id: ModBodyPartId })[];
 }
 
 /** Spawn commands additionally expose the stable item id, not an SDK-generated id. */
@@ -347,6 +398,13 @@ export interface ModApi {
     /** Both mutations pass through synchronous beforeAction hooks before WASM commit. */
     setStat(name: string, value: number): ModCommandResult;
     setMoodleInputs(inputs: Record<string, number | boolean>): ModCommandResult;
+    /** Real native queries; unsupported optional engines throw ModError, never healthy defaults. */
+    bodyParts(): ModBodyPart[];
+    bodyPartInputLimits(): ModBodyPartInputLimits;
+    /** Native cold-node action factor; may overflow to positive Infinity. */
+    thermalActionModifier(): number;
+    setBodyPart(part: ModBodyPartId, values: Partial<ModBodyPartValues>): ModCommandResult;
+    setInjurySeverity(severity: ModInjurySeverity): ModCommandResult;
   };
   /** Persist original UI options inside this mod's saveData.nativeUIOptions map.
    * Exact nonempty IDs of at most 128 characters; strict cloned JSON under the
@@ -525,6 +583,11 @@ export interface ModEngine {
     cantSprintTimer: number;
   };
   moodleInputLimits?(): Record<string, { min: number; max: number; default: number; integer: boolean } | { type: 'boolean'; default: boolean }>;
+  bodyParts?(): ModBodyPart[];
+  bodyPartInputLimits?(): ModBodyPartInputLimits;
+  thermalActionModifier?(): number;
+  saveBodyState?(): ModBodyState;
+  loadBodyState?(value: ModBodyState): void;
 }
 
 /** Host surface returned by `createModHost`. */

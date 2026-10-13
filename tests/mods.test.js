@@ -1567,3 +1567,201 @@ export function activate(api) { fx.api = api; }`));
 export function activate() { throw new Error('reserved base owner reached activation'); }`)), { stage: 'manifest' });
     host.dispose();
 });
+
+test('public body injury changes respect shared veto and cannot leak nested edits to another hook', async (t) => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    const api = host.api;
+    const veto = api.hooks.beforeAction((action) => action.type === 'setBodyPart' ? false : undefined);
+
+    assert.equal(api.character.setBodyPart('Hand_L', { scratchTime: 10 }).cancelled, true);
+    assert.equal(api.character.bodyParts().find((part) => part.id === 'Hand_L').pain, 0);
+    veto();
+    const mutated = api.hooks.beforeAction((action) => {
+        if (action.type === 'setBodyPart') {
+            action.values.scratchTime = 80;
+        }
+    });
+    const values = { scratchTime: 10 };
+
+    assert.equal(api.character.setBodyPart('Hand_L', values).committed, true);
+    assert.deepEqual(values, { scratchTime: 10 });
+    assert.equal(api.character.bodyParts().find((part) => part.id === 'Hand_L').pain, 17);
+    mutated();
+    const parts = api.character.bodyParts();
+
+    parts.find((part) => part.id === 'Hand_L').scratchTime = 90;
+    assert.equal(api.character.bodyParts().find((part) => part.id === 'Hand_L').pain, 17);
+    const before = api.character.bodyParts();
+
+    assert.throws(() => api.character.setBodyPart('Hand_L', { scratchTime: 30, stiffness: Infinity }), {
+        name: 'ModError', stage: 'action',
+    });
+    assert.deepEqual(api.character.bodyParts(), before);
+});
+
+test('empty body submissions are refused before hooks and empty replacements preserve the last valid mutation', async (t) => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-body-empty-owner')}
+export function activate(api) {
+    fx.api = api;
+    api.hooks.beforeAction((action) => action.type === 'setBodyPart'
+        ? {...action, values: {scratchTime: 20}} : undefined);
+}`));
+    const api = fx.api;
+
+    await host.load(moduleUrl(`${manifestSource('fx-body-empty-hook')}
+export function activate(api) {
+    api.hooks.beforeAction((action) => action.type === 'setBodyPart'
+        ? {...action, values: {}} : undefined, {priority: 10});
+}`));
+    const observed = [];
+
+    host.api.hooks.beforeAction((action) => {
+        if (action.type === 'setBodyPart') {
+            observed.push(action.values.scratchTime);
+        }
+    }, { priority: 20 });
+    const before = api.character.bodyParts();
+
+    assert.throws(() => api.character.setBodyPart('Hand_L', {}), {
+        name: 'ModError', modId: 'fx-body-empty-owner', stage: 'action',
+    });
+    assert.throws(() => host.command({ type: 'setBodyPart', part: 'Hand_L', values: {} }), {
+        name: 'ModError', modId: 'host', stage: 'action',
+    });
+    assert.deepEqual(observed, []);
+    assert.equal(host.diagnostics().counts.commands, 0);
+    assert.deepEqual(api.character.bodyParts(), before);
+    const values = { scratchTime: 10 };
+    const result = api.character.setBodyPart('Hand_L', values);
+
+    assert.equal(result.committed, true);
+    assert.equal(result.submittedBy, 'fx-body-empty-owner');
+    assert.deepEqual(result.modifiedBy, ['fx-body-empty-owner']);
+    assert.deepEqual(observed, [20]);
+    assert.deepEqual(values, { scratchTime: 10 });
+    assert.equal(api.character.bodyParts()[0].scratchTime, 20);
+    assert.equal(api.character.bodyParts()[0].pain, 34);
+    assert.deepEqual(host.diagnostics().errors.map((error) => [error.modId, error.stage]), [
+        ['fx-body-empty-hook', 'beforeAction'],
+    ]);
+});
+
+test('body hook replacements validate native limits, isolate each hook and retain owner attribution through cleanup', async (t) => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-body-owner')}
+export function activate(api) {
+    fx.api = api;
+    const stop = api.hooks.beforeAction((action) => action.type === 'setBodyPart'
+        ? {...action, values: {scratchTime: 20}} : undefined);
+    return () => { stop(); api.character.setBodyPart('Hand_L', {scratchTime: 0}); };
+}`));
+    const api = fx.api;
+    const observed = [];
+    const replace = host.api.hooks.beforeAction((action) => {
+        if (action.type === 'setBodyPart') {
+            observed.push(action.values.scratchTime);
+            action.values.scratchTime = 90;
+
+            return { ...action, values: { scratchTime: 100 + Number.EPSILON * 100 } };
+        }
+    }, { priority: 10 });
+    const watch = host.api.hooks.beforeAction((action) => {
+        if (action.type === 'setBodyPart') {
+            observed.push(action.values.scratchTime);
+        }
+    }, { priority: 20 });
+    const result = api.character.setBodyPart('Hand_L', { scratchTime: 10 });
+
+    assert.deepEqual(observed, [20, 20]);
+    assert.equal(result.submittedBy, 'fx-body-owner');
+    assert.deepEqual(result.modifiedBy, ['fx-body-owner']);
+    assert.equal(api.character.bodyParts()[0].pain, 34);
+    assert.ok(host.diagnostics().errors.some((error) => error.modId === 'host' && error.stage === 'beforeAction'));
+    replace();
+    watch();
+    const veto = host.api.hooks.beforeAction((action) => action.type === 'setInjurySeverity' ? false : undefined);
+
+    assert.equal(api.character.setInjurySeverity('high').cancelled, true);
+    assert.equal(api.character.bodyParts()[0].pain, 34);
+    veto();
+    assert.equal(api.character.setInjurySeverity('high').submittedBy, 'fx-body-owner');
+    assert.ok(Math.abs(api.character.bodyParts()[0].pain - 44.2) < 0.000_01);
+    host.dispose();
+    assert.equal(engine.bodyParts()[0].scratchTime, 0, 'cleanup runs with the owner API alive and its hooks withdrawn');
+    assert.throws(() => api.character.bodyParts(), { modId: 'fx-body-owner', stage: 'api' });
+    assert.throws(() => api.character.bodyPartInputLimits(), { modId: 'fx-body-owner', stage: 'api' });
+    assert.throws(() => api.character.thermalActionModifier(), { modId: 'fx-body-owner', stage: 'api' });
+    assert.throws(() => api.character.setBodyPart('Hand_L', { scratchTime: 2 }), { modId: 'fx-body-owner', stage: 'api' });
+    assert.throws(() => api.character.setInjurySeverity('normal'), { modId: 'fx-body-owner', stage: 'api' });
+});
+
+test('body ingress refuses full-precision invalid inputs before hooks while queries retain native signed pain and overflow', async (t) => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+    const api = host.api;
+    let seen = 0;
+
+    t.after(() => host.dispose());
+    const stop = api.hooks.beforeAction(() => {
+        seen += 1;
+    });
+    const before = api.character.bodyParts();
+    const limits = api.character.bodyPartInputLimits();
+
+    limits.scratchTime.max = 200;
+    assert.equal(api.character.bodyPartInputLimits().scratchTime.max, 100);
+
+    for (const [part, values] of [
+        ['MAX', { scratchTime: 10 }], ['Hand_L', { pain: 10 }],
+        ['Hand_L', { scratchTime: 100 + Number.EPSILON * 100 }],
+        ['Hand_L', { scratchTime: -Number.MIN_VALUE }],
+        ['Hand_L', { scratchTime: 10, bandaged: 1 }],
+        ['Hand_L', { skinTemperature: 3.402_823_466_385_289e38 }],
+        ['Hand_L', { additionalPain: Number.NaN }],
+    ]) {
+        assert.throws(() => api.character.setBodyPart(part, values), { name: 'ModError', stage: 'action' });
+    }
+
+    assert.throws(() => api.character.setInjurySeverity('LOW'), { stage: 'action' });
+    assert.equal(seen, 0);
+    assert.deepEqual(api.character.bodyParts(), before);
+    stop();
+    api.character.setBodyPart('Hand_L', { additionalPain: -4 });
+    assert.equal(api.character.bodyParts()[0].pain, -4);
+    api.character.setBodyPart('Hand_L', { deepWoundTime: 3.402_823_466_385_288_6e38, skinTemperature: -3.402_823_466_385_288_6e38 });
+    assert.equal(api.character.bodyParts()[0].pain, Infinity);
+    assert.equal(api.character.thermalActionModifier(), Infinity);
+});
+
+test('body capabilities refuse movement-only engines explicitly without preventing movement activation', async (t) => {
+    const engine = await newEngine();
+    const host = createModHost({ snapshot: engine.snapshot, command: engine.command, setSpeed: engine.setSpeed });
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-body-core')}
+export function activate(api) { fx.api = api; api.movement.setSpeed(2); }`));
+    const api = fx.api;
+
+    for (const query of [api.character.bodyParts, api.character.bodyPartInputLimits, api.character.thermalActionModifier]) {
+        assert.throws(query, { name: 'ModError', modId: 'fx-body-core', stage: 'character', message: /unsupported/ });
+    }
+
+    assert.throws(() => api.character.setBodyPart('Hand_L', { scratchTime: 10 }), {
+        name: 'ModError', modId: 'fx-body-core', stage: 'action', message: /unsupported/,
+    });
+    assert.throws(() => api.character.setInjurySeverity('normal'), {
+        name: 'ModError', modId: 'fx-body-core', stage: 'action', message: /unsupported/,
+    });
+    assert.equal(host.command({ type: 'walk', x: 1, y: 0 }).committed, true);
+    assert.equal(engine.bodyParts()[0].pain, 0);
+});

@@ -194,6 +194,74 @@ test('synchronous Lua ticks move the compiled actor and cleanup stops callbacks'
     }
 });
 
+test('Lua body userdata retain identity while real ticks observe native pain and cold-hand timing', async () => {
+    const { engine, host, session, saved } = await fixture();
+
+    try {
+        const cleanup = activate(session, host, `
+            local player = getPlayer()
+            local body = player:getBodyDamage()
+            local parts = body:getBodyParts()
+            local hand = body:getBodyPart(BodyPartType.Hand_L)
+            local thermal = body:getThermoregulator()
+            local node = hand:getThermalNode()
+            assert(type(body) == 'userdata' and type(parts) == 'userdata')
+            assert(type(hand) == 'userdata' and type(BodyPartType.Hand_L) == 'userdata')
+            assert(parts:size() == 17 and parts:get(0) == hand)
+            assert(BodyPartType.ToIndex(BodyPartType.MAX) == 17)
+            assert(BodyPartType.FromIndex(0) == BodyPartType.Hand_L)
+            assert(thermal:getNodeSize() == 17 and thermal:getNode(0) == node)
+            assert(thermal:getNodeForType(BodyPartType.Hand_L) == node)
+            assert(thermal:getNodeForType(BodyPartType.MAX) == nil)
+            assert(hand:getSkinTemperature() == 33 and node:getSkinCelcius() == 33)
+            hand:setScratchTime(10)
+            assert(hand:getPain() == 17)
+            getModData().bodyTiming = {ticks = 0}
+            Events.OnTick.Add(function()
+                assert(body == player:getBodyDamage() and parts == body:getBodyParts())
+                assert(hand == body:getBodyPart(BodyPartType.Hand_L))
+                assert(node == hand:getThermalNode() and thermal == body:getThermoregulator())
+                local result = getModData().bodyTiming
+                result.ticks = result.ticks + 1
+                result.pain = hand:getPain()
+                result.bandaged = hand:bandaged()
+                result.skin = hand:getSkinTemperature()
+                result.nodeSkin = node:getSkinCelcius()
+                result.factor = player:getTimedActionTimeModifier()
+                assert(result.factor == thermal:getTimedActionTimeModifier())
+            end)
+        `, 'body-timing');
+
+        host.api.character.setBodyPart('Hand_L', { bandaged: true, skinTemperature: 20 });
+        host.step(1 / 60);
+        session.flushSaveData();
+        const first = saved.get('host').data.nativePlayerData.bodyTiming;
+
+        assert.equal(first.ticks, 1);
+        assert.equal(first.bandaged, true);
+        assert.equal(first.skin, 20);
+        assert.equal(first.nodeSkin, 20);
+        assert.ok(Math.abs(first.pain - 17 / 1.5) < 0.000_001);
+        assert.ok(Math.abs(first.factor - 1.000_75) < 0.000_001);
+        host.api.character.setBodyPart('Hand_L', { scratchTime: 0, additionalPain: -4, skinTemperature: 33 });
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.deepEqual(saved.get('host').data.nativePlayerData.bodyTiming, {
+            ticks: 2, pain: -4, bandaged: true, skin: 33, nodeSkin: 33, factor: 1,
+        });
+        assert.equal(engine.bodyParts()[0].pain, -4);
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+        cleanup();
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.equal(saved.get('host').data.nativePlayerData.bodyTiming.ticks, 2);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
 test('Lua item weights stay live and independent while inventory carry uses native worn load', async () => {
     const { engine, host, session, saved } = await fixture();
 

@@ -43,6 +43,126 @@ async function fixture() {
     return { engine, record: await signed(payload), store: createSaveStore({ engineSource: bytes, appVersion: 'test' }) };
 }
 
+/**
+ * Encodes a WASM section length, export count or function body length.
+ *
+ * @param {number} value - Unsigned integer to encode.
+ * @returns {number[]} Unsigned LEB128 bytes.
+ */
+function encode(value) {
+    const result = [];
+
+    do {
+        const byte = value & 127;
+
+        value >>>= 7;
+        result.push(byte | (value ? 128 : 0));
+    } while (value);
+
+    return result;
+}
+
+/**
+ * Remove optional body exports or trap their native reader in the real module.
+ * Like engine.test.js's legacyModule fixture, only WASM sections are changed.
+ *
+ * @param {Uint8Array} bytes - Compiled engine module.
+ * @param {'pre-body' | 'trap'} mode - Native capability or capture failure.
+ * @returns {Uint8Array} Independent native module fixture.
+ */
+function bodyModule(bytes, mode) {
+    const output = [...bytes.subarray(0, 8)];
+    let offset = 8;
+    let bodyReader;
+    /**
+     * Reads an unsigned LEB128 word and advances the section cursor.
+     *
+     * @returns {number} Decoded unsigned integer.
+     */
+    const unsigned = () => {
+        let value = 0;
+        let shift = 0;
+        let byte;
+
+        do {
+            byte = bytes[offset++];
+            value |= (byte & 127) << shift;
+            shift += 7;
+        } while (byte & 128);
+
+        return value;
+    };
+
+    while (offset < bytes.length) {
+        const start = offset;
+        const id = bytes[offset++];
+        const length = unsigned();
+        const end = offset + length;
+
+        if (id === 7) {
+            const count = unsigned();
+            const entries = [];
+
+            for (let index = 0; index < count; index++) {
+                const entry = offset;
+                const nameLength = unsigned();
+                const name = new TextDecoder().decode(bytes.subarray(offset, offset + nameLength));
+
+                offset += nameLength;
+                const kind = bytes[offset++];
+                const target = unsigned();
+
+                if (name === 'body_part_value' && kind === 0) {
+                    bodyReader = target;
+                }
+
+                if (mode !== 'pre-body' || !(name.startsWith('body_')
+                    || name === 'thermal_action_modifier' || name === 'set_injury_severity')) {
+                    entries.push(bytes.subarray(entry, offset));
+                }
+            }
+
+            const payload = [...encode(entries.length), ...entries.flatMap((entry) => [...entry])];
+
+            output.push(id, ...encode(payload.length), ...payload);
+        } else if (id === 10 && mode === 'trap') {
+            const count = unsigned();
+            const payload = [...encode(count)];
+
+            assert.notEqual(bodyReader, undefined, 'fixture requires the native body reader export');
+
+            /* createEngine instantiates without imports, so export function
+               indices identify the corresponding code bodies directly. */
+            for (let index = 0; index < count; index++) {
+                const size = unsigned();
+                const body = index === bodyReader ? [0, 0, 0x0B] : bytes.subarray(offset, offset + size);
+
+                payload.push(...encode(body.length));
+
+                for (const byte of body) {
+                    payload.push(byte);
+                }
+
+                offset += size;
+            }
+
+            output.push(id, ...encode(payload.length));
+
+            for (const byte of payload) {
+                output.push(byte);
+            }
+        } else {
+            for (const byte of bytes.subarray(start, end)) {
+                output.push(byte);
+            }
+        }
+
+        offset = end;
+    }
+
+    return new Uint8Array(output);
+}
+
 test('exported save restores movement continuation in an independent WASM instance', async () => {
     const { engine, record, store } = await fixture();
     const loaded = await store.restore(record);
@@ -407,4 +527,90 @@ test('door metadata mismatch fails staged native restore without altering the pr
     assert.throws(() => staged.engine.loadDoorState(staged.doorState), /identit/iu);
     assert.deepEqual(staged.engine.saveDoorState(), candidateBefore);
     assert.deepEqual(engine.saveDoorState(), before);
+});
+
+test('portable body injuries and cold nodes survive real export restore without expanding actor words', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.command({
+        type: 'setBodyPart', part: 'Hand_L',
+        values: { scratchTime: 10, bandaged: true, skinTemperature: 20 },
+    });
+    engine.command({ type: 'setInjurySeverity', severity: 'high' });
+    const exported = JSON.parse(await (await store.exportLive(engine, {
+        cells: [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }],
+    })).text());
+    const restored = await store.restore(exported);
+
+    assert.equal(exported.engine.state.values.length, 12);
+    assert.deepEqual(restored.engine.bodyParts(), engine.bodyParts());
+    assert.equal(restored.engine.thermalActionModifier(), engine.thermalActionModifier());
+    const before = engine.saveBodyState();
+
+    exported.bodyState.parts[0].scratchTime = 80;
+    await assert.rejects(store.restore(exported), /integrity/u);
+    assert.deepEqual(engine.saveBodyState(), before);
+    const invalid = structuredClone(exported);
+
+    delete invalid.integrity;
+    invalid.bodyState.parts[1].id = invalid.bodyState.parts[0].id;
+    await assert.rejects(store.restore(await signed(invalid)));
+    assert.deepEqual(engine.saveBodyState(), before);
+    const legacy = await store.restore(record);
+
+    legacy.engine.command({ type: 'setBodyPart', part: 'Hand_L', values: { scratchTime: 10 } });
+    assert.equal(legacy.engine.bodyParts().find((part) => part.id === 'Hand_L').pain, 17);
+    assert.equal(Object.hasOwn(legacy.record, 'bodyState'), false);
+});
+
+test('pre-body ABI1 native modules still export and restore portable saves without body state', async () => {
+    const bytes = bodyModule(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    )), 'pre-body');
+    const engine = await createEngine(bytes);
+    const store = createSaveStore({ engineSource: bytes, appVersion: 'test' });
+    const cells = new Uint8Array(1_026);
+
+    cells[1] = 1;
+    engine.worldImportCell(0, 0, cells);
+    engine.command({ type: 'moveTo', x: 24.5, y: 18.5 });
+    engine.step(0.1);
+    engine.command({ type: 'setMoodleInputs', inputs: { pain: 80, hunger: 0.8 } });
+    const exported = JSON.parse(await (await store.exportLive(engine, {
+        cells: [{ x: 0, y: 0, bytes: cells }], modState: { retained: { data: 42 } },
+    })).text());
+    const restored = await store.restore(exported);
+
+    assert.equal(exported.engine.abiVersion, 1);
+    assert.equal(exported.engine.state.values.length, 12);
+    assert.equal(Object.hasOwn(exported, 'bodyState'), false);
+    assert.equal(Object.hasOwn(restored.record, 'bodyState'), false);
+    assert.deepEqual(restored.record.modState, { retained: { data: 42 } });
+    assert.deepEqual(restored.engine.saveState(), engine.saveState());
+    assert.deepEqual(restored.engine.saveMoodleState(), engine.saveMoodleState());
+    assert.throws(() => engine.saveBodyState(), /unsupported/u);
+    engine.step(0.1);
+    restored.engine.step(0.1);
+    assert.deepEqual(restored.engine.snapshot(), engine.snapshot());
+});
+
+test('native body capture traps propagate through save and live export instead of omitting body state', async () => {
+    const bytes = bodyModule(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    )), 'trap');
+    const engine = await createEngine(bytes);
+    const store = createSaveStore({ engineSource: bytes, appVersion: 'test' });
+    const before = engine.saveState();
+
+    const { canSaveBodyState, ...customEngine } = engine;
+
+    assert.equal(canSaveBodyState(), true);
+
+    await Promise.all([engine, customEngine].map((handle) => {
+        assert.throws(() => store.save(handle), WebAssembly.RuntimeError);
+
+        return assert.rejects(store.exportLive(handle), WebAssembly.RuntimeError);
+    }));
+
+    assert.deepEqual(engine.saveState(), before);
 });

@@ -25,6 +25,7 @@
 
 use std::cell::RefCell;
 
+mod body;
 mod doors;
 
 /// Engine ABI version; the host refuses any other value.
@@ -975,6 +976,7 @@ pub extern "C" fn reset() {
     mutate(|engine| *engine = Engine::initial());
     ITEMS.with(|items| items.borrow_mut().reset());
     moodle_reset();
+    body::reset();
 }
 
 /// Sets movement speed in world units per second; only [0.1, 10] is accepted.

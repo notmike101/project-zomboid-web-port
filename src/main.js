@@ -1188,6 +1188,12 @@ function createSessionModHost(binding) {
          */
         items: () => binding.engine.items(),
         /**
+         * Read this session's native inventory mass and independent capacity limits.
+         *
+         * @returns {import('../types/mod-api').ModInventoryState} Detached carry state.
+         */
+        inventoryState: () => binding.engine.inventoryState(),
+        /**
          * Atomically restore explicit item identities in this session.
          *
          * @param {import('../types/mod-api').ModItem[]} records - Complete detached replacement records.
@@ -1237,6 +1243,24 @@ function createSessionModHost(binding) {
          * @returns {{version: 1, inputs: Record<string, number|boolean>, painTimer: number, painLevel: number, cantSprintTimer: number}} Detached persistence state.
          */
         saveMoodleState: () => binding.engine.saveMoodleState(),
+        /**
+         * Read this session's real native injury and skin-node records.
+         *
+         * @returns {import('../types/mod-api').ModBodyPart[]} Detached canonical body parts.
+         */
+        bodyParts: () => binding.engine.bodyParts(),
+        /**
+         * Read native full-precision limits before any mod body mutation.
+         *
+         * @returns {import('../types/mod-api').ModBodyPartInputLimits} Detached field limits.
+         */
+        bodyPartInputLimits: () => binding.engine.bodyPartInputLimits(),
+        /**
+         * Derive action timing from this session's actual native skin nodes.
+         *
+         * @returns {number} Source float32 cold-hand/arm factor.
+         */
+        thermalActionModifier: () => binding.engine.thermalActionModifier(),
         /**
          * Apply mod speed changes to the current engine.
          *

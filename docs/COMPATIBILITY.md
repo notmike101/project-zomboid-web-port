@@ -18,7 +18,7 @@ REA `inspect_pe_resources` observed the x64 PE launcher (990720 bytes), SHA-256 
 | Character/traits/skills/professions | Actual ASCII X parsing and four-weight WebGPU skinning; original 617-vertex/916-triangle/28-bone MaleBody with Bob idle/walk and original body texture rendered from directory assets | Character scale uncalibrated; equipped clothing is not connected to skinned apparel rendering (avatar remains in underwear); appearance composition, traits, skills/professions and other character rules pending |
 | Items/equipment/loot/containers | WASM-owned numeric definitions, owner-scoped activation rollback/freeze, stable never-reused u32 IDs, atomic import and ground/inventory/pickup/drop/wear/unequip/condition operations; actual original FlipFlop equip/condition/save/reload exercised through public SDK | Bounded original footwear subset only, not full inventory, containers or loot; ground/equipped item visuals, weight/run-speed/tear dynamics and broader item behavior pending |
 | Zombies/perception/AI | None | Native perception, decisions/population/pathing behavior pending |
-| Combat/health/needs/effects | WASM health queries/update and ordered original vanilla moodle levels from explicit named inputs; Build 42.21.0 static rule derivation with persisted hidden pain/CantSprint timers; actual health-zero command yielded dead level 4 and original death-handler moodle UI cleanup | Port health-zero policy only; avatar remains standing, not native death animation; native survival progression, damage, injury, treatment, nutrition, sleep and effects pending |
+| Combat/health/needs/effects | WASM scalar health and ordered original moodle rules over explicit inputs; hidden pain/CantSprint timers; 17 native mutable injury/skin-node records with source-ordered wound/treatment pain and six-arm cold action factor, shared SDK/live Lua access and integrity-covered portable body persistence | Scalar health/death remains port policy, not body-derived aggregate health; avatar remains standing. Body inputs/derived getters are not automatic combat, injury/healing/treatment/climate progression. Nutrition, sleep, effects and native survival acceptance remain open |
 | Crafting/building/dismantling | None | Recipes, requirements, tools and processing pending |
 | Time/weather/lighting/effects | Fixed simulation ticks only | Native time/weather/environment/lighting and effects pending |
 | Audio | None | Decoding/event mapping/positional audio and gesture startup pending |
@@ -49,6 +49,16 @@ Original Lua UI resources are loaded privately from the selected engine/module c
 Vanilla moodle levels use static original Build 42.21.0 rule evidence over WASM-owned named inputs. Queries do not advance hidden timers; accepted engine updates do. Explicit load/environment/toxic/cold/food inputs do not supply native weight, weather, illness or survival dynamics. Thermal chevrons, voices and wiggles remain unimplemented even where texture resources exist. Source discovery and static FBX parsing alone do not prove ground-item presentation or equipped-clothing rendering.
 
 Browser envelope format 2 preserves ABI 1 and a twelve-word actor state. Legacy v1 is authenticated against its original integrity before detached migration; first ten actor words, world bytes, namespace schemas/data and revision metadata survive, with default health/next-ID and empty item tables appended. Storage is not rewritten merely by reading. Restore orders cells, definitions, items, actor and then optional version-1 `moodleState` (named inputs, pain timer/level and CantSprint timer). Its absence on earlier saves is backward-compatible and uses fresh-engine defaults; malformed present state refuses staged restore.
+
+Native body state persists mutable injury/skin fields and source severity only.
+Readonly anatomy/pain and thermal action factors are recomputed from real native
+records after staged restore; they are not copied from script metadata or cached
+as neutral values. Actual public SDK veto/atomic-refusal and genuine Lua tick
+scenarios passed. A fresh Node SDK export/restore retained hand pain
+23.833330154418945 and thermal factor 1.002062439918518 in a 6079-byte backup,
+without changing the twelve-word actor state. This is a numeric timing prerequisite,
+not a complete physiological simulation or a queued-pickup completion claim.
+
 
 
 ### Browser texture-pack format and index API

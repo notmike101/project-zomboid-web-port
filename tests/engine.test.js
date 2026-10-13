@@ -587,6 +587,13 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.saveDoorState(),
         () => subject.loadDoorState({}),
         () => subject.command({ type: 'toggleDoor', id: 'door:10:10:0:0' }),
+        () => subject.bodyParts(),
+        () => subject.bodyPartInputLimits(),
+        () => subject.thermalActionModifier(),
+        () => subject.saveBodyState(),
+        () => subject.loadBodyState({}),
+        () => subject.command({ type: 'setBodyPart', part: 'Hand_L', values: { scratchTime: 1 } }),
+        () => subject.command({ type: 'setInjurySeverity', severity: 'normal' }),
     ]) {
         assert.throws(attempt, /unsupported/u);
     }
@@ -2089,4 +2096,174 @@ test('native door render history survives toggling back and portable restoration
     restored.importDoors(rows.map((row) => ({ ...row, toggled: true })), { squares });
     assert.ok(restored.doors().every(({ toggled }) => toggled === false),
         'source imports cannot spoof native successful-toggle history');
+});
+
+test('native body wound pain uses actual injury and treatment state for action timing', async () => {
+    const subject = await engine();
+
+    subject.command({ type: 'setBodyPart', part: 'Hand_L', values: { scratchTime: 10 } });
+    assert.equal(subject.bodyParts().find((part) => part.id === 'Hand_L').pain, 17);
+    subject.command({ type: 'setBodyPart', part: 'Hand_L', values: { bandaged: true } });
+    assert.ok(near(subject.bodyParts().find((part) => part.id === 'Hand_L').pain, 17 / 1.5));
+    subject.command({
+        type: 'setBodyPart', part: 'Hand_L',
+        values: { woundInfectionLevel: 3, additionalPain: 2, stiffness: 7 },
+    });
+    assert.ok(near(subject.bodyParts().find((part) => part.id === 'Hand_L').pain, 17 / 1.5 + 7));
+    const before = subject.bodyParts();
+
+    assert.throws(() => subject.command({
+        type: 'setBodyPart', part: 'Hand_L', values: { scratchTime: 20, stiffness: Number.NaN },
+    }));
+    assert.deepEqual(subject.bodyParts(), before, 'a rejected multi-field injury change cannot partially heal or injure');
+});
+
+test('native cold action factor uses real arm nodes and does not charge unrelated body regions', async () => {
+    const subject = await engine();
+
+    subject.command({ type: 'setBodyPart', part: 'Foot_L', values: { skinTemperature: 20 } });
+    assert.equal(subject.thermalActionModifier(), 1);
+    subject.command({ type: 'setBodyPart', part: 'Hand_L', values: { skinTemperature: 20 } });
+    assert.ok(near(subject.thermalActionModifier(), 1.000_75));
+    subject.command({ type: 'setBodyPart', part: 'ForeArm_R', values: { skinTemperature: 20 } });
+    assert.ok(near(subject.thermalActionModifier(), 1.002_062_5));
+    subject.command({ type: 'setBodyPart', part: 'UpperArm_L', values: { skinTemperature: 20 } });
+    assert.ok(near(subject.thermalActionModifier(), 1.003_187_5));
+    subject.command({ type: 'setBodyPart', part: 'Hand_L', values: { skinTemperature: 33 } });
+    assert.ok(near(subject.thermalActionModifier(), 1.002_437_5));
+    const saved = subject.saveBodyState();
+    const restored = await engine();
+
+    restored.loadBodyState(saved);
+    assert.deepEqual(restored.bodyParts(), subject.bodyParts());
+    assert.equal(restored.thermalActionModifier(), subject.thermalActionModifier());
+});
+
+test('native body bite stitch fracture and severity preserve source treatment order', async () => {
+    const subject = await engine();
+
+    subject.command({
+        type: 'setBodyPart', part: 'Hand_R',
+        values: {
+            biteTime: 1, stitchTime: 10, fractureTime: 40, splintFactor: 1,
+            haveBullet: true, haveGlass: true,
+        },
+    });
+    assert.equal(subject.bodyParts()[1].pain, 155);
+    subject.command({
+        type: 'setBodyPart', part: 'Hand_R',
+        values: { bandaged: true, woundInfectionLevel: 4, additionalPain: 3, stiffness: 7 },
+    });
+    assert.ok(near(subject.bodyParts()[1].pain, 90.666_666_666_7));
+    subject.command({ type: 'setInjurySeverity', severity: 'low' });
+    assert.ok(near(subject.bodyParts()[1].pain, 63.466_666_666_7));
+    subject.command({ type: 'setInjurySeverity', severity: 'high' });
+    assert.ok(near(subject.bodyParts()[1].pain, 117.866_666_666_7));
+    subject.command({ type: 'setInjurySeverity', severity: 'normal' });
+    subject.command({ type: 'setBodyPart', part: 'Hand_R', values: { stitchTime: 35, splintFactor: 0 } });
+    assert.ok(near(subject.bodyParts()[1].pain, 95.666_666_666_7));
+});
+
+test('native body restore refuses malformed rows and precision violations without publishing a prefix', async () => {
+    const subject = await engine();
+
+    subject.command({ type: 'setBodyPart', part: 'Neck', values: { additionalPain: -10, skinTemperature: -5 } });
+    const before = subject.saveBodyState();
+    const invalidStates = [
+        { ...before, version: 2 },
+        { ...before, injurySeverity: 'HIGH' },
+        { ...before, parts: before.parts.slice(1) },
+        { ...before, parts: [...before.parts.slice(0, 16), before.parts[0]] },
+    ];
+
+    for (const mutate of [
+        (state) => {
+            state.parts[16].pain = 0;
+        },
+        (state) => {
+            delete state.parts[16].bandaged;
+        },
+        (state) => {
+            state.parts[16].stiffness = 100 + 1e-10;
+        },
+        (state) => {
+            state.parts[16].deepWoundTime = -Number.MIN_VALUE;
+        },
+    ]) {
+        const state = structuredClone(before);
+
+        state.parts[0].health = 3;
+        mutate(state);
+        invalidStates.push(state);
+    }
+
+    for (const state of invalidStates) {
+        assert.throws(() => subject.loadBodyState(state));
+        assert.deepEqual(subject.saveBodyState(), before);
+    }
+
+    for (const values of [
+        { cutTime: 100 + 1e-10 }, { burnTime: -Number.MIN_VALUE },
+        { additionalPain: 3.402_823_466_385_288_6e38 * (1 + Number.EPSILON) },
+        { bandaged: 1 }, { pain: 20 }, { skinSurface: 1 },
+    ]) {
+        assert.throws(() => subject.command({ type: 'setBodyPart', part: 'Hand_L', values }));
+        assert.deepEqual(subject.saveBodyState(), before);
+    }
+
+    const reversed = structuredClone(before);
+
+    reversed.parts.reverse();
+    subject.loadBodyState(reversed);
+    assert.deepEqual(subject.saveBodyState(), before);
+    const detached = subject.bodyParts();
+
+    detached[0].health = 0;
+    assert.equal(subject.bodyParts()[0].health, 100);
+    subject.command({
+        type: 'setBodyPart', part: 'Hand_L',
+        values: { deepWoundTime: 3.402_823_466_385_288_6e38, skinTemperature: -3.402_823_466_385_288_6e38 },
+    });
+    assert.equal(subject.bodyParts()[0].pain, Infinity);
+    assert.equal(subject.thermalActionModifier(), Infinity);
+    assert.equal(subject.saveBodyState().parts[0].deepWoundTime, 3.402_823_466_385_288_6e38);
+});
+
+test('direct native body transactions validate all words before publishing and retain actor ABI', async () => {
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+    const native = instance.exports;
+
+    assert.equal(native.api_version(), 1);
+    assert.equal(native.state_size(), 12);
+    assert.equal(native.scratch_size(), 96);
+    assert.equal(native.body_part_value(0, 0), 100);
+    assert.equal(native.body_part_value(0, 15), 33);
+    assert.equal(native.body_update_begin(0), 0);
+    assert.equal(native.body_update_stage(1, 10), 0);
+    assert.notEqual(native.body_update_stage(11, 100 + 1e-10), 0);
+    assert.notEqual(native.body_update_commit(), 0);
+    assert.equal(native.body_part_value(0, 1), 0);
+    assert.equal(native.body_import_begin(2), 0);
+    assert.equal(native.body_import_stage(0, 4), 0);
+    assert.notEqual(native.body_import_stage(1, -Number.MIN_VALUE), 0);
+    assert.notEqual(native.body_import_commit(), 0);
+    assert.equal(native.body_part_value(0, 0), 100);
+    assert.equal(native.body_injury_severity(), 1);
+    assert.equal(native.body_import_begin(2), 0);
+    assert.equal(native.body_import_stage(0, 4), 0);
+    assert.notEqual(native.body_import_commit(), 0);
+    assert.equal(native.body_part_value(0, 0), 100);
+    assert.equal(native.body_update_begin(0), 0);
+    assert.equal(native.body_update_stage(1, 10), 0);
+    assert.notEqual(native.body_update_stage(1, 20), 0);
+    assert.notEqual(native.body_update_commit(), 0);
+    assert.equal(native.body_part_value(0, 1), 0);
+    assert.equal(native.body_update_begin(0), 0);
+    assert.equal(native.body_update_stage(1, 10), 0);
+    assert.equal(native.body_update_commit(), 0);
+    assert.equal(native.body_part_value(0, 16), 17);
+    assert.equal(native.set_injury_severity(0), 0);
+    native.reset();
+    assert.equal(native.body_part_value(0, 16), 0);
+    assert.equal(native.body_injury_severity(), 1);
 });

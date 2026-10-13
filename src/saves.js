@@ -370,6 +370,10 @@ function createSaveStore({ engineSource, appVersion }) {
             engine.loadMoodleState(validated.moodleState);
         }
 
+        if (Object.hasOwn(validated, 'bodyState')) {
+            engine.loadBodyState(validated.bodyState);
+        }
+
         return {
             engine, record: validated,
             ...(Object.hasOwn(validated, 'doorState') ? { doorState: structuredClone(validated.doorState) } : {}),
@@ -394,6 +398,10 @@ function createSaveStore({ engineSource, appVersion }) {
             items: engine.items(),
             moodleState: engine.saveMoodleState(),
             ...(typeof engine.saveDoorState === 'function' ? { doorState: engine.saveDoorState() } : {}),
+            ...(typeof engine.saveBodyState === 'function'
+                && (typeof engine.canSaveBodyState !== 'function' || engine.canSaveBodyState())
+                ? { bodyState: engine.saveBodyState() }
+                : {}),
             world: {
                 cells: (captured.cells ?? []).map((cell) => ({
                     x: cell.x, y: cell.y, bytes: encodeCell(cell.bytes),

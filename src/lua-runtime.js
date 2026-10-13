@@ -198,6 +198,102 @@ Registries = {MOODLE_TYPE = {values=function()
 end}}
 `;
 
+const BODY_PRELUDE = String.raw`
+local bodyNames = {'Hand_L','Hand_R','ForeArm_L','ForeArm_R','UpperArm_L','UpperArm_R',
+    'Torso_Upper','Torso_Lower','Head','Neck','Groin','UpperLeg_L','UpperLeg_R',
+    'LowerLeg_L','LowerLeg_R','Foot_L','Foot_R','MAX'}
+local bodyTypes, bodyIndices = {}, {}
+for index, name in ipairs(bodyNames) do
+    local value = nativeObject('BodyPartType')
+    bodyTypes[name], bodyIndices[value] = value, index - 1
+end
+BodyPartType = setmetatable({}, {__index = function(_, name)
+    if bodyTypes[name] then return bodyTypes[name] end
+    return unsupported('BodyPartType.' .. tostring(name))
+end})
+function BodyPartType.ToIndex(value)
+    local index = bodyIndices[value]
+    assert(index ~= nil, 'invalid BodyPartType')
+    return index
+end
+function BodyPartType.FromIndex(index)
+    assert(type(index) == 'number' and index % 1 == 0 and index >= 0 and index <= 17, 'body part index out of range')
+    return bodyTypes[bodyNames[index + 1]]
+end
+local bodyParts, thermalNodes = {}, {}
+local function bodyIndex(value)
+    local index = BodyPartType.ToIndex(value)
+    assert(index < 17, 'BodyPartType.MAX is not a body part')
+    return index
+end
+for index = 0, 16 do
+    local id = bodyNames[index + 1]
+    local part, node = nativeObject('BodyPart'), nativeObject('ThermalNode')
+    local function record() return hostCall('bodyPart', id) end
+    for _, pair in ipairs({{'getHealth','health'}, {'getScratchTime','scratchTime'},
+        {'getCutTime','cutTime'}, {'getBiteTime','biteTime'}, {'getDeepWoundTime','deepWoundTime'},
+        {'getStitchTime','stitchTime'}, {'getFractureTime','fractureTime'}, {'getSplintFactor','splintFactor'},
+        {'getBurnTime','burnTime'}, {'getWoundInfectionLevel','woundInfectionLevel'},
+        {'getAdditionalPain','additionalPain'}, {'getStiffness','stiffness'}, {'bandaged','bandaged'},
+        {'haveBullet','haveBullet'}, {'haveGlass','haveGlass'}, {'getPain','pain'},
+        {'getSkinTemperature','skinTemperature'}, {'getSkinSurface','skinSurface'}, {'getDistToCore','distToCore'}}) do
+        local field = pair[2]
+        part[pair[1]] = function(self, ...)
+            assert(select('#', ...) == 0, 'unsupported BodyPart getter overload')
+            return record()[field]
+        end
+    end
+    for _, pair in ipairs({{'SetHealth','health'}, {'setScratchTime','scratchTime'},
+        {'setCutTime','cutTime'}, {'setBiteTime','biteTime'}, {'setDeepWoundTime','deepWoundTime'},
+        {'setStitchTime','stitchTime'}, {'setFractureTime','fractureTime'}, {'setSplintFactor','splintFactor'},
+        {'setBurnTime','burnTime'}, {'setWoundInfectionLevel','woundInfectionLevel'},
+        {'setAdditionalPain','additionalPain'}, {'setStiffness','stiffness'}, {'setHaveGlass','haveGlass'}}) do
+        local field = pair[2]
+        part[pair[1]] = function(self, value, ...)
+            assert(select('#', ...) == 0, 'unsupported BodyPart setter overload')
+            hostCall('setBodyPart', id, field, value)
+        end
+    end
+    function part:getType() record(); return bodyTypes[id] end
+    function part:getIndex() record(); return index end
+    function part:getThermalNode() record(); return node end
+    function node:getSkinCelcius() return record().skinTemperature end
+    function node:getSkinSurface() return record().skinSurface end
+    function node:getDistToCore() return record().distToCore end
+    bodyParts[index + 1], thermalNodes[index + 1] = part, node
+end
+local bodyList = nativeObject('ArrayList')
+function bodyList:size() return #hostCall('bodyParts') end
+function bodyList:get(index)
+    assert(type(index) == 'number' and index % 1 == 0 and index >= 0 and index < 17, 'body part index out of range')
+    hostCall('bodyParts')
+    return bodyParts[index + 1]
+end
+local thermoregulator = nativeObject('Thermoregulator')
+function thermoregulator:getNodeSize() return #hostCall('bodyParts') end
+function thermoregulator:getNode(index)
+    bodyList:get(index)
+    return thermalNodes[index + 1]
+end
+function thermoregulator:getNodeForType(value)
+    local index = BodyPartType.ToIndex(value)
+    hostCall('bodyParts')
+    if index == 17 then return nil end
+    return thermalNodes[index + 1]
+end
+function thermoregulator:getTimedActionTimeModifier() return hostCall('thermalActionModifier') end
+local bodyDamage = nativeObject('BodyDamage')
+function bodyDamage:getBodyPart(value)
+    local index = bodyIndex(value)
+    hostCall('bodyParts')
+    return bodyParts[index + 1]
+end
+function bodyDamage:getBodyParts() hostCall('bodyParts'); return bodyList end
+function bodyDamage:getThermoregulator() hostCall('bodyParts'); return thermoregulator end
+function player:getBodyDamage() hostCall('bodyParts'); return bodyDamage end
+function player:getTimedActionTimeModifier() return hostCall('thermalActionModifier') end
+`;
+
 /* All wrappers are Lua functions: colon arguments and event function identity
    never depend on JS object proxies or roundtripped Lua function wrappers. */
 const PRELUDE = `
@@ -369,6 +465,7 @@ local function unsupportedObject(name)
 end
 for _, name in ipairs({'PZAPI', 'Calendar', 'java', 'UIFont', 'ItemBodyLocation', 'SandboxVars'}) do root[name] = unsupportedObject(name) end
 ${UI_PRELUDE}
+${BODY_PRELUDE}
 -- Lua's ordinary optional global lookups remain nil. No blanket _G trap.
 io = nil
 os.execute, os.exit, os.getenv, os.remove, os.rename, os.tmpname = nil, nil, nil, nil, nil, nil
@@ -844,6 +941,18 @@ export async function createLuaSession(options = {}) {
             }
             case 'health': return capability('character', 'getHealth');
             case 'isDead': return capability('character', 'isDead');
+            case 'bodyParts': return capability('character', 'bodyParts');
+            case 'bodyPart': {
+                const part = capability('character', 'bodyParts').find((value) => value.id === args[0]);
+
+                if (!part) {
+                    throw new Error(`unsupported authoritative body part '${args[0]}'`);
+                }
+
+                return part;
+            }
+            case 'setBodyPart': return capability('character', 'setBodyPart', args[0], { [args[1]]: args[2] });
+            case 'thermalActionModifier': return capability('character', 'thermalActionModifier');
             case 'moodleType': {
                 const id = options.moodleTypes?.[args[0]];
 

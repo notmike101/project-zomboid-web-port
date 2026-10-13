@@ -120,6 +120,12 @@
  * @property {function(): object} saveMoodleState Private-host detached version1 state.
  * @property {function(object): void} loadMoodleState Atomic private-host full restore.
  * @property {function(): void} resetMoodleState Source defaults plus explicit bounded-world policies.
+ * @property {function(): object[]} bodyParts Detached source body/thermal records.
+ * @property {function(): object} bodyPartInputLimits Native mutable-field validation metadata.
+ * @property {function(): number} thermalActionModifier Source six-arm weighted thermal factor.
+ * @property {function(): boolean} canSaveBodyState Reports actual optional native body capture support.
+ * @property {function(): object} saveBodyState Mutable-only portable version1 body state.
+ * @property {function(object): void} loadBodyState Atomic complete native body restore.
  * @property {function(object[], object): void} importDoors Atomically imports native placements and source squares.
  * @property {function(): object[]} doors Reads detached stable-ID native door state.
  * @property {function(): number} doorRevision Reads the native door revision without allocating door records.
@@ -146,6 +152,18 @@ const MOODLE_INPUT_NAMES = Object.freeze([
     'protectedFromToxic', 'corpseImpactEnabled', 'cantSprint', 'healthFromFoodTimer',
     'standardHealthFromFoodTime',
 ]);
+
+const BODY_PART_IDS = Object.freeze([
+    'Hand_L', 'Hand_R', 'ForeArm_L', 'ForeArm_R', 'UpperArm_L', 'UpperArm_R',
+    'Torso_Upper', 'Torso_Lower', 'Head', 'Neck', 'Groin', 'UpperLeg_L', 'UpperLeg_R',
+    'LowerLeg_L', 'LowerLeg_R', 'Foot_L', 'Foot_R',
+]);
+const BODY_FIELDS = Object.freeze([
+    'health', 'scratchTime', 'cutTime', 'biteTime', 'deepWoundTime', 'stitchTime',
+    'fractureTime', 'splintFactor', 'burnTime', 'woundInfectionLevel', 'additionalPain',
+    'stiffness', 'bandaged', 'haveBullet', 'haveGlass', 'skinTemperature',
+]);
+const INJURY_SEVERITIES = Object.freeze(['low', 'normal', 'high']);
 
 /** C ABI functions the compiled module must export. */
 const ABI = [
@@ -358,6 +376,22 @@ function requireMoodleObject(value, label) {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
         throw new TypeError(`${label} must be an object.`);
     }
+}
+
+/**
+ * Maps public normalized severity without conflating damage multipliers.
+ *
+ * @param {unknown} severity - low, normal or high.
+ * @returns {number} Native severity index.
+ */
+function injurySeverity(severity) {
+    const index = typeof severity === 'string' ? INJURY_SEVERITIES.indexOf(severity) : -1;
+
+    if (index === -1) {
+        throw new RangeError('Injury severity must be low, normal or high.');
+    }
+
+    return index;
 }
 
 /**
@@ -632,6 +666,13 @@ async function createEngine(source) {
                 loadMoodleState(state);
                 break;
             }
+            case 'setBodyPart':
+                setBodyPart(action.part, action.values);
+                break;
+            case 'setInjurySeverity':
+                requireOptional('setInjurySeverity', ['set_injury_severity']);
+                requireAccepted(api.set_injury_severity(injurySeverity(action.severity)), 'setInjurySeverity');
+                break;
 
             default:
                 throw new TypeError(`Unknown engine command: ${String(action?.type)}.`);
@@ -1555,6 +1596,198 @@ async function createEngine(source) {
         api.moodle_reset();
     }
 
+    /**
+     * Reads source injury/thermal fields and uncapped native derived pain.
+     *
+     * @returns {object[]} Detached canonical body records.
+     */
+    function bodyParts() {
+        requireOptional('bodyParts', ['body_part_value']);
+
+        return BODY_PART_IDS.map((id, part) => ({
+            id,
+            ...Object.fromEntries(BODY_FIELDS.map((name, field) => [
+                name, field >= 12 && field <= 14
+                    ? api.body_part_value(part, field) !== 0
+                    : api.body_part_value(part, field),
+            ])),
+            pain: api.body_part_value(part, 16),
+            skinSurface: api.body_part_value(part, 17),
+            distToCore: api.body_part_value(part, 18),
+        }));
+    }
+
+    /**
+     * Reads validation metadata from native mutable-field rules.
+     *
+     * @returns {object} Detached field-scoped limits.
+     */
+    function bodyPartInputLimits() {
+        requireOptional('bodyPartInputLimits', ['body_part_input_limit']);
+
+        return Object.fromEntries(BODY_FIELDS.map((name, field) => [
+            name, api.body_part_input_limit(field, 3) === 2
+                ? { type: 'boolean', default: api.body_part_input_limit(field, 2) !== 0 }
+                : {
+                        min: api.body_part_input_limit(field, 0), max: api.body_part_input_limit(field, 1),
+                        default: api.body_part_input_limit(field, 2), integer: false,
+                    },
+        ]));
+    }
+
+    /**
+     * Validates original host precision before native f32 conversion.
+     *
+     * @param {string} name - Mutable field identity.
+     * @param {unknown} value - Original input.
+     * @returns {number} Numeric native field word.
+     */
+    function validateBodyField(name, value) {
+        requireOptional('body input', ['body_part_input_limit']);
+        const field = BODY_FIELDS.indexOf(name);
+
+        if (field === -1) {
+            throw new RangeError(`Unknown mutable body field: ${String(name)}.`);
+        }
+
+        if (api.body_part_input_limit(field, 3) === 2) {
+            if (typeof value !== 'boolean') {
+                throw new TypeError(`${name} must be boolean.`);
+            }
+
+            return Number(value);
+        }
+
+        const numeric = requireCoordinate(value, name);
+        const min = api.body_part_input_limit(field, 0);
+        const max = api.body_part_input_limit(field, 1);
+
+        if (numeric < min || numeric > max) {
+            throw new RangeError(`${name} must be inside [${min}, ${max}].`);
+        }
+
+        return numeric;
+    }
+
+    /**
+     * Stages a validated partial record; no valid prefix changes live state.
+     *
+     * @param {string} part - Canonical body identity.
+     * @param {object} values - Mutable field patch.
+     */
+    function setBodyPart(part, values) {
+        requireOptional('setBodyPart', ['body_update_begin', 'body_update_stage',
+            'body_update_commit', 'body_import_abort', 'body_part_input_limit']);
+        const index = BODY_PART_IDS.indexOf(part);
+
+        if (index === -1) {
+            throw new RangeError(`Unknown body part: ${String(part)}.`);
+        }
+
+        requireMoodleObject(values, 'Body part values');
+        const fields = Object.keys(values).map((name) => [
+            BODY_FIELDS.indexOf(name), validateBodyField(name, values[name]),
+        ]);
+
+        if (fields.length === 0) {
+            throw new TypeError('Body part values require at least one mutable field.');
+        }
+
+        requireAccepted(api.body_update_begin(index), 'setBodyPart');
+        try {
+            for (const [field, value] of fields) {
+                requireAccepted(api.body_update_stage(field, value), 'setBodyPart');
+            }
+
+            requireAccepted(api.body_update_commit(), 'setBodyPart commit');
+        } finally {
+            api.body_import_abort();
+        }
+    }
+
+    /**
+     * Reads the actual six-arm weighted native thermal factor.
+     *
+     * @returns {number} Native f32 result, including derived overflow.
+     */
+    function thermalActionModifier() {
+        requireOptional('thermalActionModifier', ['thermal_action_modifier']);
+
+        return api.thermal_action_modifier();
+    }
+
+    /**
+     * Checks native exports without reading or substituting body state.
+     *
+     * @returns {boolean} Whether native body capture is supported.
+     */
+    function canSaveBodyState() {
+        return typeof api.body_injury_severity === 'function' && typeof api.body_part_value === 'function';
+    }
+
+    /**
+     * Persists only native mutable fields, never derived/anatomy values.
+     *
+     * @returns {object} Exact portable version1 body payload.
+     */
+    function saveBodyState() {
+        requireOptional('saveBodyState', ['body_injury_severity', 'body_part_value']);
+
+        return {
+            version: 1,
+            injurySeverity: INJURY_SEVERITIES[api.body_injury_severity()],
+            parts: bodyParts().map((part) => ({
+                id: part.id, ...Object.fromEntries(BODY_FIELDS.map((name) => [name, part[name]])),
+            })),
+        };
+    }
+
+    /**
+     * Validates complete canonical identity coverage before atomic native load.
+     *
+     * @param {object} state - Exact version1 body payload.
+     */
+    function loadBodyState(state) {
+        requireOptional('loadBodyState', ['body_import_begin', 'body_import_stage',
+            'body_import_commit', 'body_import_abort', 'body_part_input_limit']);
+        requireMoodleObject(state, 'Body state');
+        const keys = ['version', 'injurySeverity', 'parts'];
+
+        if (state.version !== 1 || Object.keys(state).length !== keys.length
+            || keys.some((key) => !Object.hasOwn(state, key))
+            || !Array.isArray(state.parts) || state.parts.length !== BODY_PART_IDS.length) {
+            throw new TypeError('Body state requires exact version1 shape and every body part.');
+        }
+
+        const severity = injurySeverity(state.injurySeverity);
+        const rows = new Map();
+
+        for (const row of state.parts) {
+            requireMoodleObject(row, 'Body state part');
+
+            if (!Object.hasOwn(row, 'id') || !BODY_PART_IDS.includes(row.id) || rows.has(row.id)
+                || Object.keys(row).length !== BODY_FIELDS.length + 1
+                || BODY_FIELDS.some((name) => !Object.hasOwn(row, name))) {
+                throw new TypeError('Body state requires unique canonical parts and exactly their mutable fields.');
+            }
+
+            rows.set(row.id, BODY_FIELDS.map((name) => validateBodyField(name, row[name])));
+        }
+
+        const words = BODY_PART_IDS.flatMap((id) => rows.get(id));
+
+        requireAccepted(api.body_import_begin(severity), 'loadBodyState');
+        try {
+            for (const [index, value] of words.entries()) {
+                requireAccepted(api.body_import_stage(index, value), 'loadBodyState');
+            }
+
+            requireAccepted(api.body_import_commit(), 'loadBodyState commit');
+        } finally {
+            api.body_import_abort();
+        }
+    }
+
     return Object.freeze({
         snapshot, command, setSpeed, step, reset,
         worldImportCell, navFlags, worldBounds, saveState, loadState, worldReset,
@@ -1563,6 +1796,7 @@ async function createEngine(source) {
         items, inventoryState, importItems, wornItem, getHealth, isDead,
         moodles, moodleInputLimits, saveMoodleState, loadMoodleState, resetMoodleState,
         importDoors, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,
+        bodyParts, bodyPartInputLimits, thermalActionModifier, canSaveBodyState, saveBodyState, loadBodyState,
     });
 }
 

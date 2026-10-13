@@ -29,7 +29,7 @@ const WORLD_MAX = 10;
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 10;
 const MAX_SAVE_BYTES = 256 * 1_024;
-const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel', 'toggleDoor', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setWeight', 'setActualWeight', 'setHealth', 'setCharacterStat', 'setMoodleInputs']);
+const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel', 'toggleDoor', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setWeight', 'setActualWeight', 'setHealth', 'setCharacterStat', 'setMoodleInputs', 'setBodyPart', 'setInjurySeverity']);
 /** Reserved internal attribution id for page input; a mod cannot claim it. */
 const RESERVED_ID = 'host';
 
@@ -105,15 +105,17 @@ const RESERVED_ID = 'host';
  */
 
 /**
- * Copies an action and its scalar moodle input map so hooks cannot mutate the pending command.
+ * Copies an action and its scalar input maps so hooks cannot mutate the pending command.
  *
  * @param {ModAction} action - Validated action.
  * @returns {ModAction} Detached copy.
  */
 function detach(action) {
-    return action.type === 'setMoodleInputs'
-        ? { ...action, inputs: { ...action.inputs } }
-        : { ...action };
+    if (action.type === 'setMoodleInputs') {
+        return { ...action, inputs: { ...action.inputs } };
+    }
+
+    return action.type === 'setBodyPart' ? { ...action, values: { ...action.values } } : { ...action };
 }
 
 /**
@@ -678,6 +680,49 @@ export function createModHost(engine, options = {}) {
             return value;
         };
 
+        if (type === 'setBodyPart' || type === 'setInjurySeverity') {
+            const parts = capability('bodyParts')();
+            const limits = capability('bodyPartInputLimits')();
+
+            if (type === 'setInjurySeverity') {
+                if (!['low', 'normal', 'high'].includes(candidate.severity)) {
+                    throw modError(modId, 'action', 'injury severity must be low, normal or high');
+                }
+
+                return { type, severity: candidate.severity };
+            }
+
+            const part = identity(candidate.part, 'body part');
+
+            if (!parts.some((value) => value.id === part)) {
+                throw modError(modId, 'action', `unknown authoritative body part '${part}'`);
+            }
+
+            if (!candidate.values || typeof candidate.values !== 'object' || Array.isArray(candidate.values)) {
+                throw modError(modId, 'action', 'body part values must be an object');
+            }
+
+            const values = {};
+
+            for (const [name, value] of Object.entries(candidate.values)) {
+                const limit = Object.hasOwn(limits, name) ? limits[name] : undefined;
+
+                if (!limit || (limit.type === 'boolean'
+                    ? typeof value !== 'boolean'
+                    : typeof value !== 'number' || !Number.isFinite(value) || value < limit.min || value > limit.max || (limit.integer && !Number.isInteger(value)))) {
+                    throw modError(modId, 'action', `invalid authoritative body part input '${name}'`);
+                }
+
+                Object.defineProperty(values, name, { value, enumerable: true });
+            }
+
+            if (Object.keys(values).length === 0) {
+                throw modError(modId, 'action', 'body part values must contain at least one input');
+            }
+
+            return { type, part, values };
+        }
+
         if (type === 'setCharacterStat' || type === 'setMoodleInputs') {
             const limits = capability('moodleInputLimits')();
             const inputs = type === 'setCharacterStat' ? { [identity(candidate.name, 'stat name')]: candidate.value } : candidate.inputs;
@@ -1138,6 +1183,39 @@ export function createModHost(engine, options = {}) {
                  * @returns {ModCommandResult} Attributed atomic input-update outcome.
                  */
                 setMoodleInputs: (inputs) => mutate({ type: 'setMoodleInputs', inputs }),
+                /**
+                 * Read real native parts, including uncapped derived pain, detached from the engine.
+                 *
+                 * @returns {import('../types/mod-api').ModBodyPart[]} Canonical live body state.
+                 */
+                bodyParts: () => access('character', () => structuredClone(capability('bodyParts')())),
+                /**
+                 * Read native full-precision ingress limits; no host anatomy or default synthesis.
+                 *
+                 * @returns {import('../types/mod-api').ModBodyPartInputLimits} Detached validation metadata.
+                 */
+                bodyPartInputLimits: () => access('character', () => structuredClone(capability('bodyPartInputLimits')())),
+                /**
+                 * Read the real native cold-node factor; arithmetic may overflow to Infinity.
+                 *
+                 * @returns {number} Native thermal action multiplier.
+                 */
+                thermalActionModifier: () => access('character', () => capability('thermalActionModifier')()),
+                /**
+                 * Atomically update mutable injury or skin-temperature fields through shared hooks.
+                 *
+                 * @param {import('../types/mod-api').ModBodyPartId} part - Canonical body part identity.
+                 * @param {Partial<import('../types/mod-api').ModBodyPartValues>} values - Explicit mutable values.
+                 * @returns {ModCommandResult} Attributed update outcome.
+                 */
+                setBodyPart: (part, values) => mutate({ type: 'setBodyPart', part, values }),
+                /**
+                 * Update the native source pain severity through the shared action pipeline.
+                 *
+                 * @param {import('../types/mod-api').ModInjurySeverity} severity - Source severity name.
+                 * @returns {ModCommandResult} Attributed update outcome.
+                 */
+                setInjurySeverity: (severity) => mutate({ type: 'setInjurySeverity', severity }),
             },
             ui: {
                 /**
