@@ -1,10 +1,11 @@
 /**
- * @file Delivery boundary tests: staging copies only approved real files, and the
- * preview server refuses anything whose real path leaves its root.
+ * @file Delivery boundary tests: staging and releases copy only approved real
+ * files, and the preview server refuses paths outside its root.
  */
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { applicationFiles, stageApplication } from '../scripts/build.mjs';
 
 const serveScript = fileURLToPath(new URL('../scripts/serve.mjs', import.meta.url));
+const releaseScript = fileURLToPath(new URL('../scripts/release.mjs', import.meta.url));
 const secretBytes = 'SYNTHETIC_PRIVACY_PROBE_ONLY';
 const approvedHtml = '<!doctype html>approved index';
 const approvedWasm = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 127, 3, 2, 1, 0, 7, 10, 1, 6, 97, 110, 115, 119, 101, 114, 0, 0, 10, 6, 1, 4, 0, 65, 42, 11]);
@@ -164,6 +166,124 @@ test('a selected symbolic link cannot deliver a private file', async (t) => {
     }
 
     await assert.rejects(stageApplication(root), /outside the checkout|non-regular source/u);
+});
+
+/**
+ * Run a real Git command in an isolated delivery fixture.
+ *
+ * @param {string} root - Fixture checkout directory.
+ * @param {string[]} args - Git arguments.
+ * @returns {string} Successful command output.
+ */
+function git(root, args) {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+
+    assert.equal(result.status, 0, result.stderr);
+
+    return result.stdout.trim();
+}
+
+/**
+ * Stage approved files, including the real dependency licenses, in a clean checkout.
+ *
+ * @param {import('node:test').TestContext} context - Test that owns the checkout.
+ * @returns {Promise<{root: string, outside: string, revision: string}>} Release fixture.
+ */
+async function makeReleaseFixture(context) {
+    const { root, outside } = await makeFixture(context);
+
+    await writeSources(root);
+    await Promise.all(applicationFiles.filter((file) => file.target.startsWith('dist/licenses/')).map(async (file) => {
+        await put(root, file.source, await readFile(new URL(`../${file.source}`, import.meta.url)));
+    }));
+    await put(root, '.gitignore', '/dist/\n/release/\n/node_modules/\n/engine/target/\n/private/\n');
+    await put(root, 'private/original-assets.json', secretBytes);
+    await stageApplication(root);
+    git(root, ['-c', 'init.templateDir=', 'init']);
+    git(root, ['add', '.']);
+    git(root, ['-c', 'user.name=Delivery Test', '-c', 'user.email=delivery@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=.git/hooks', 'commit', '-m', 'release fixture']);
+
+    return { root, outside, revision: git(root, ['rev-parse', 'HEAD']) };
+}
+
+/**
+ * Execute the production release CLI against the fixture filesystem and checkout.
+ *
+ * @param {string} root - Fixture checkout directory.
+ * @returns {import('node:child_process').SpawnSyncReturns<string>} Release process result.
+ */
+function runRelease(root) {
+    return spawnSync(process.execPath, [releaseScript], { cwd: root, encoding: 'utf8' });
+}
+
+test('a real release includes both dependency licenses with audited bytes and never overwrites output', async (t) => {
+    const { root, revision } = await makeReleaseFixture(t);
+    const stagedPaths = await listFiles(join(root, 'dist'), join(root, 'dist'));
+    const result = runRelease(root);
+
+    assert.equal(result.status, 0, result.stderr);
+    const directory = join(root, 'release', `0.1.0-preview.1-${revision.slice(0, 12)}`);
+    const manifestBytes = await readFile(join(directory, 'release-manifest.json'));
+    const manifest = JSON.parse(manifestBytes.toString());
+
+    assert.equal(manifest.revision, revision);
+    assert.equal(manifest.assetFree, true);
+    assert.deepEqual(manifest.files.map((file) => file.path), stagedPaths);
+    assert.deepEqual(await listFiles(directory, directory), [...stagedPaths, 'release-manifest.json'].sort());
+    assert.equal(stagedPaths.includes('licenses/lua.txt'), true);
+    assert.equal(stagedPaths.includes('licenses/wasmoon.txt'), true);
+    assert.equal(stagedPaths.includes('build.json'), true);
+    await Promise.all(manifest.files.map(async (file) => {
+        const expectedBytes = await readFile(join(root, 'dist', file.path));
+        const releasedBytes = await readFile(join(directory, file.path));
+
+        assert.deepEqual(releasedBytes, expectedBytes, file.path);
+        assert.equal(file.bytes, expectedBytes.length, file.path);
+        assert.equal(file.sha256, createHash('sha256').update(expectedBytes).digest('hex'), file.path);
+        assert.equal(releasedBytes.includes(secretBytes), false, file.path);
+    }));
+
+    const repeated = runRelease(root);
+
+    assert.notEqual(repeated.status, 0);
+    assert.match(repeated.stderr, /EEXIST/u);
+    assert.deepEqual(await readFile(join(directory, 'release-manifest.json')), manifestBytes);
+});
+
+test('a release rejects private files even when their extension is otherwise shipped', async (t) => {
+    await Promise.all(['licenses/private.txt', 'private.json', 'src/private.js', 'engine/private.wasm'].map(async (path) => {
+        const { root } = await makeReleaseFixture(t);
+
+        await put(root, `dist/${path}`, secretBytes);
+        const result = runRelease(root);
+
+        assert.notEqual(result.status, 0, path);
+        assert.match(result.stderr, /Release rejects unknown content/u, path);
+        assert.equal((await readdir(root)).includes('release'), false, path);
+    }));
+});
+
+test('a release refuses a dirty source checkout', async (t) => {
+    const { root } = await makeReleaseFixture(t);
+
+    await put(root, 'index.html', secretBytes);
+    const result = runRelease(root);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Release requires a clean committed source checkout/u);
+    assert.equal((await readdir(root)).includes('release'), false);
+});
+
+test('a release refuses a junction to private content', async (t) => {
+    const { root, outside } = await makeReleaseFixture(t);
+
+    await put(outside, 'private.json', secretBytes);
+    await makeOutsideLink(outside, join(root, 'dist', 'private'));
+    const result = runRelease(root);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Release rejects symbolic link/u);
+    assert.equal((await readdir(root)).includes('release'), false);
 });
 
 /**

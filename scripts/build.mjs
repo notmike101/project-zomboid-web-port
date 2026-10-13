@@ -25,6 +25,8 @@ const applicationFiles = [
     { source: 'src/world-session.js', target: 'dist/src/world-session.js' },
     { source: 'src/content.js', target: 'dist/src/content.js' },
     { source: 'src/lua-runtime.js', target: 'dist/src/lua-runtime.js' },
+    { source: 'src/lua-requires.js', target: 'dist/src/lua-requires.js' },
+    { source: 'src/native-mod-loader.js', target: 'dist/src/native-mod-loader.js' },
     { source: 'node_modules/wasmoon/dist/index.js', target: 'dist/runtime/wasmoon.js' },
     { source: 'node_modules/wasmoon/dist/glue.wasm', target: 'dist/runtime/glue.wasm' },
     { source: 'node_modules/wasmoon/LICENSE', target: 'dist/licenses/wasmoon.txt' },

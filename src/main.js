@@ -1,8 +1,9 @@
 import { openContentDirectory } from './content.js';
 import { createEngine } from './engine.js';
 import { openMapCell } from './map-tiles.js';
-import { createModManager } from './mod-manager.js';
+import { createModManager, parseModPackage, readPackageFile, resolveModOrder } from './mod-manager.js';
 import { createModHost } from './mods.js';
+import { bindNativeSession, closeNativeSession, discoverNativePackages, nativePackageFiles, prepareNativeSession } from './native-mod-loader.js';
 import { openPack } from './packs.js';
 import { createRenderer, worldFromCanvas } from './renderer.js';
 import { createSaveStore } from './saves.js';
@@ -49,6 +50,9 @@ let tileLayer;
 let importedPacks = [];
 let geometryCells = [];
 let nativePackages = [];
+let luaSession;
+let activeNativeDescriptors = [];
+let liveModContext;
 let packageBusy = false;
 let packagesActivated = false;
 let paused = true;
@@ -118,7 +122,7 @@ function refresh() {
 
     diagnostics.textContent = JSON.stringify({
         engine: snapshot, renderer: renderer?.diagnostics(), mods: mods?.diagnostics(),
-        packages: packages?.diagnostics(), nativePackages, safeMods,
+        packages: packages?.diagnostics(), nativePackages, lua: luaSession?.diagnostics(), safeMods,
         startup, sessionReady, savedRevision, navigationCells: worldCells.map(({ x, y }) => ({ x, y })),
         tiles: tiles ? { cells: geometryCells.length, ...tiles } : null,
         paused, failed, hidden: document.hidden, fixedStepSeconds: 1 / 60,
@@ -285,14 +289,24 @@ async function refreshPackages() {
     const installed = await packages.list();
     const evidence = packages.diagnostics();
     const activation = evidence.lastActivation;
-    const activeIds = new Set(activation?.disposed ? [] : activation?.activated.map((entry) => entry.id));
+    const activeIds = new Set(mods.diagnostics().mods.map((entry) => entry.id));
     const entries = installed.map((entry) => {
         const item = document.createElement('li');
         const name = document.createElement('p');
         const label = document.createElement('label');
         const enabled = document.createElement('input');
 
-        name.textContent = `${entry.name} · ${entry.version} · ${activeIds.has(entry.id) ? 'active' : 'inactive'}`;
+        const nativeVersion = entry.settings?.nativeLua ? entry.settings.nativeVersion ?? 'unspecified' : entry.version;
+
+        let packageState = 'inactive';
+
+        if (activeIds.has(entry.id)) {
+            packageState = 'active';
+        } else if (activation?.errors.some((failure) => failure.id === entry.id)) {
+            packageState = 'error';
+        }
+
+        name.textContent = `${entry.name} · ${nativeVersion} · ${packageState}`;
         enabled.type = 'checkbox';
         enabled.checked = entry.enabled;
         enabled.addEventListener('change', () => {
@@ -320,7 +334,18 @@ async function refreshPackages() {
     for (const entry of nativePackages) {
         const item = document.createElement('li');
 
-        item.textContent = `${entry.root} · ${entry.fileCount} native Lua files · ${entry.message}`;
+        const active = mods.diagnostics().mods.some((mod) => mod.id === entry.id);
+        const failure = evidence.errors.findLast((cause) => cause.id === entry.id);
+
+        let nativeState = entry.blocked ?? 'inactive; enable the package above and reload';
+
+        if (active) {
+            nativeState = 'active';
+        } else if (failure) {
+            nativeState = `error: ${failure.message}`;
+        }
+
+        item.textContent = `${entry.nativeId} · ${entry.nativeVersion ?? 'version unspecified'} · ${entry.tree} · ${entry.fileCount} indexed files · ${nativeState}`;
         packageList.append(item);
     }
 
@@ -339,7 +364,7 @@ async function refreshPackages() {
  * @returns {Promise<void>} Completes after visible feedback.
  */
 async function changePackage(change, message) {
-    if (!packages || packageBusy) {
+    if (!packages || packageBusy || sessionBusy || startup === 'loading') {
         return;
     }
 
@@ -460,6 +485,14 @@ function resumeGame() {
 function keyDown(event) {
     const key = event.key.toLowerCase();
 
+    if (sessionReady && !paused && !failed && document.activeElement === canvas) {
+        try {
+            luaSession?.dispatch(event.repeat ? 'OnKeyKeepPressed' : 'OnKeyPressed', event.keyCode);
+        } catch (cause) {
+            reportPackageError(cause);
+        }
+    }
+
     if (key === 'escape') {
         event.preventDefault();
 
@@ -502,6 +535,14 @@ function keyDown(event) {
 function keyUp(event) {
     const key = event.key.toLowerCase();
 
+    if (sessionReady && !paused && !failed && document.activeElement === canvas) {
+        try {
+            luaSession?.dispatch('OnKeyReleased', event.keyCode);
+        } catch (cause) {
+            reportPackageError(cause);
+        }
+    }
+
     if (!held.has(key)) {
         return;
     }
@@ -537,6 +578,8 @@ async function toggleMod() {
         if (modCheckbox.checked) {
             await mods.load(new URL('../mods/accessible-walking/main.js', import.meta.url).href);
         } else {
+            closeNativeSession();
+            luaSession = undefined;
             mods.dispose();
         }
 
@@ -567,6 +610,14 @@ function pageHidden(event) {
     stop();
 
     if (!event.persisted) {
+        try {
+            closeNativeSession();
+        } catch (cause) {
+            reportPackageError(cause);
+            closeNativeSession({ discardSaveData: true });
+        }
+
+        luaSession = undefined;
         mods?.dispose();
         renderer?.destroy();
         clearInterval(autosave);
@@ -632,10 +683,11 @@ function publishSession(staged) {
  * Reject restores unless every saved mod has the exact running identity.
  *
  * @param {object[]} required - Saved mod provenance.
+ * @param {object} [host] - Candidate host when validating an uncommitted transition.
  * @returns {void} Allows only a matching running set.
  */
-function requireSessionMods(required) {
-    const active = new Map(mods.diagnostics().mods.map((entry) => [entry.id, entry]));
+function requireSessionMods(required, host = mods) {
+    const active = new Map(host.diagnostics().mods.map((entry) => [entry.id, entry]));
 
     for (const saved of required) {
         const running = active.get(saved.id);
@@ -651,8 +703,105 @@ function requireSessionMods(required) {
 }
 
 /**
- * Bind the target engine and namespaces before activation or schema migration.
- * Rollback covers host-owned state/hooks, not arbitrary trusted JavaScript effects.
+ * Bind one host to its own engine and namespace backing throughout staging or rollback.
+ *
+ * @param {object} binding - Session-owned engine, cells and namespaces.
+ * @returns {object} Existing public mod host.
+ */
+function createSessionModHost(binding) {
+    // Each callback retains this binding, including while a different session is staged.
+    return createModHost({
+        /**
+         * Read this host's own authoritative engine.
+         *
+         * @returns {object} Detached snapshot.
+         */
+        snapshot: () => binding.engine.snapshot(),
+        /**
+         * Submit through this session's authoritative engine, never a global replacement.
+         *
+         * @param {object} action - Validated mod action.
+         * @returns {object} Post-command snapshot.
+         */
+        command: (action) => binding.engine.command(action),
+        /**
+         * Apply mod speed changes to the current engine.
+         *
+         * @param {number} speed - Tiles per second.
+         * @returns {void} Changes engine speed.
+         */
+        setSpeed: (speed) => binding.engine.setSpeed(speed),
+        /**
+         * Advance the current engine through the fixed-step contract.
+         *
+         * @param {number} seconds - Simulation step.
+         * @returns {void} Advances simulation.
+         */
+        step: (seconds) => binding.engine.step(seconds),
+        /**
+         * Reset the current session.
+         *
+         * @returns {void} Drops engine world and movement.
+         */
+        reset: () => binding.engine.reset(),
+        /**
+         * Query navigation extents belonging to this host's own session.
+         *
+         * @returns {object} Detached cell bounds.
+         */
+        worldBounds: () => binding.engine.worldBounds(),
+        /**
+         * Query an absolute navigation tile.
+         *
+         * @param {number} x - Integer world tile x.
+         * @param {number} y - Integer world tile y.
+         * @returns {number} Navigation flags or unloaded sentinel.
+         */
+        navFlags: (x, y) => binding.engine.navFlags(x, y),
+        /**
+         * Commit a validated mod cell and retain the exact source for saves.
+         *
+         * @param {number} x - Cell x.
+         * @param {number} y - Cell y.
+         * @param {Uint8Array} bytes - Full navigation cell.
+         * @returns {void} Updates authoritative navigation and retained provenance.
+         */
+        worldImportCell: (x, y, bytes) => {
+            binding.engine.worldImportCell(x, y, bytes);
+            const retained = binding.cells.filter((cell) => cell.x !== x || cell.y !== y);
+
+            retained.push({ x, y, bytes: bytes.slice() });
+            binding.cells = retained;
+
+            if (binding === liveModContext) {
+                worldCells = retained;
+                renderer?.setWorldMode(true);
+            }
+        },
+    }, {
+        /**
+         * Return only an explicitly saved namespace, never object prototypes.
+         *
+         * @param {string} id - Validated mod identifier.
+         * @returns {object|undefined} Saved schema document.
+         */
+        readModState: (id) => Object.hasOwn(binding.namespaces, id) ? binding.namespaces[id] : undefined,
+        /**
+         * Retain a validated detached mod record in the session envelope.
+         *
+         * @param {string} id - Validated mod identifier.
+         * @param {object} record - Schema version and JSON data.
+         * @returns {void} Replaces only this namespace.
+         */
+        writeModState: (id, record) => {
+            Object.defineProperty(binding.namespaces, id, { value: record, enumerable: true, configurable: true, writable: true });
+        },
+    });
+}
+
+/**
+ * Activate against an isolated target host/VM while the committed session stays alive.
+ * Failure discards only the target; Lua locals and prior hooks survive without bootstrap replay.
  *
  * @param {object} staged - Validated target engine and navigation.
  * @param {object} namespaces - Fresh or retained namespace documents.
@@ -661,70 +810,108 @@ function requireSessionMods(required) {
  */
 async function activateSession(staged, namespaces, required) {
     const running = mods.diagnostics().mods;
-    const previous = {
-        engine, cells: worldCells, namespaces: Object.assign(Object.create(null), savedModState),
-        state: engine.saveState(),
-    };
 
-    mods.dispose();
-    engine = staged.engine;
-    worldCells = staged.cells;
-    savedModState = Object.assign(Object.create(null), namespaces);
+    // Capture mutable Lua tables while the old bound save APIs still own their namespaces.
+    luaSession?.flushSaveData();
+    const previous = { mods, lua: luaSession, native: activeNativeDescriptors };
+    const installed = await packages.list();
+    let selectedNative = previous.native;
+
+    if (!packagesActivated) {
+        if (safeMods) {
+            selectedNative = [];
+        } else {
+            // Missing dependencies and cycles fail before either JavaScript or Lua code runs.
+            resolveModOrder(installed, mods.api.version);
+            selectedNative = [];
+
+            for (const entry of installed.filter((item) => item.enabled && item.settings?.nativeLua)) {
+                // eslint-disable-next-line no-await-in-loop
+                const file = await readPackageFile(entry.id, entry.revision, 'native.json');
+
+                if (!file) {
+                    throw new Error(`Native package ${entry.id} is missing its stored descriptor.`);
+                }
+
+                const descriptor = JSON.parse(new TextDecoder().decode(file.bytes));
+
+                if (descriptor.id !== entry.id || descriptor.manifest.version !== entry.version || descriptor.nativeId !== entry.settings.nativeId || descriptor.nativeVersion !== entry.settings.nativeVersion) {
+                    throw new Error(`Native package ${entry.id} descriptor identity differs from its installed identity.`);
+                }
+
+                selectedNative.push(descriptor);
+            }
+        }
+    }
+
+    const targetContext = { engine: staged.engine, cells: staged.cells, namespaces: Object.assign(Object.create(null), namespaces) };
+    const targetMods = createSessionModHost(targetContext);
+    // After boot the committed manager is configuration/reporting only; later transitions load targetMods directly.
+    const targetPackages = packagesActivated ? packages : createModManager(targetMods);
+    let targetLua;
+
     try {
+        targetLua = await prepareNativeSession(selectedNative, content, { staged: true });
+
         if (!packagesActivated) {
-            const activation = await packages.activateEnabled({ safeMode: safeMods });
+            const activation = await targetPackages.activateEnabled({ safeMode: safeMods });
 
             if (activation.errors.length > 0) {
                 throw new Error(activation.errors.map((entry) => `${entry.id} [${entry.stage}]: ${entry.message}`).join('\n'));
             }
 
-            packageStatus.textContent = safeMods ? 'Safe mode: no local JavaScript packages executed. Discovered new packages remain disabled.' : 'Directory packages discovered. New packages are disabled; only your enabled packages activate on reload.';
-
             if (!safeMods && required?.some(({ id }) => id === 'accessible-walking')) {
-                await mods.load(new URL('../mods/accessible-walking/main.js', import.meta.url).href);
+                await targetMods.load(new URL('../mods/accessible-walking/main.js', import.meta.url).href);
             }
         } else {
             for (const { url } of running) {
-                // Reactivate the running set, not next-reload package configuration.
+                // Reactivate the committed running set, not next-reload package configuration.
                 // eslint-disable-next-line no-await-in-loop
-                await mods.load(url);
+                await targetMods.load(url);
             }
         }
 
         if (required) {
-            requireSessionMods(required);
+            requireSessionMods(required, targetMods);
         }
 
         if (failed) {
             throw new Error('Renderer is no longer active.');
         }
 
-        packagesActivated = true;
+        if (required) {
+            targetLua?.dispatch('OnLoad');
+        }
+
+        targetLua?.dispatch('OnCreatePlayer', 0);
+        targetLua?.dispatch('OnGameStart');
+
+        // Ordinary close can refuse a failed flush; until it succeeds the committed VM stays intact.
+        previous.lua?.close();
     } catch (cause) {
+        targetLua?.close({ discardSaveData: true });
+        targetMods.dispose();
+        bindNativeSession(previous.lua, previous.native);
+
         if (!failed) {
             reportPackageError(cause);
         }
 
-        mods.dispose();
-        engine = previous.engine;
-        worldCells = previous.cells;
-        savedModState = Object.assign(Object.create(null), previous.namespaces);
-        try {
-            for (const { url } of running) {
-                // Restore host-owned hooks against the prior namespace backing.
-                // eslint-disable-next-line no-await-in-loop
-                await mods.load(url);
-            }
-        } catch (rollbackError) {
-            reportPackageError(rollbackError);
-            report(new Error(`Previous session mods could not be reactivated: ${rollbackError.message}. Reload the page before continuing.`));
-        } finally {
-            engine.loadState(previous.state);
-            savedModState = previous.namespaces;
-        }
-
         throw cause;
     }
+
+    // Commit is synchronous after successful bootstrap/retirement; no prior callbacks are reconstructed.
+    previous.mods.dispose();
+    liveModContext = targetContext;
+    engine = targetContext.engine;
+    worldCells = targetContext.cells;
+    savedModState = targetContext.namespaces;
+    mods = targetMods;
+    packages = targetPackages;
+    luaSession = targetLua;
+    activeNativeDescriptors = selectedNative;
+    packagesActivated = true;
+    packageStatus.textContent = safeMods ? 'Safe mode: no local JavaScript or Lua packages executed. Discovered new packages remain disabled.' : 'Directory packages discovered. New packages are disabled; only your enabled packages activate on reload.';
 }
 
 /**
@@ -734,7 +921,7 @@ async function activateSession(staged, namespaces, required) {
  * @returns {Promise<void>} Completes after operation feedback.
  */
 async function sessionOperation(action) {
-    if (sessionBusy || failed || !content || !saves) {
+    if (sessionBusy || packageBusy || failed || !content || !saves) {
         return;
     }
 
@@ -743,6 +930,7 @@ async function sessionOperation(action) {
 
     paused = true;
     document.querySelector('#session-controls').disabled = true;
+    packageControls.disabled = true;
     try {
         await action();
     } catch (cause) {
@@ -756,6 +944,7 @@ async function sessionOperation(action) {
         sessionBusy = false;
         paused = failed || !sessionReady || wasPaused || pauseMenu.open;
         document.querySelector('#session-controls').disabled = false;
+        packageControls.disabled = startup === 'loading';
         refresh();
     }
 }
@@ -769,6 +958,8 @@ async function saveSession() {
     if (!sessionReady) {
         throw new Error('No successfully loaded session to save. Retained browser saves have not been changed.');
     }
+
+    luaSession?.flushSaveData();
 
     const record = await saves.save(engine, {
         cells: worldCells,
@@ -824,6 +1015,10 @@ async function loadSession(id, prepared) {
  * @returns {Promise<void>} Initiates a user-selected local download.
  */
 async function exportSession() {
+    if (sessionReady) {
+        luaSession?.flushSaveData();
+    }
+
     const blob = sessionReady
         ? await saves.exportLive(engine, {
                 cells: worldCells,
@@ -1032,14 +1227,22 @@ async function newSession() {
 }
 
 /**
- * Install static-directory JavaScript packages without enabling new code.
+ * Install static-directory JavaScript and native Lua adapters without enabling new code.
  *
  * @returns {Promise<void>} Completes discovery before any package activation.
  */
 async function discoverPackages() {
-    nativePackages = content.manifest.mods.filter((entry) => entry.kind === 'native-lua').map(({ root, files }) => ({
-        root, fileCount: files.length, supported: false,
-        message: 'Discovered native Lua package; the native Lua runtime is not yet integrated. No Lua code executed.',
+    const installed = await packages.list();
+    const storedNative = installed.filter((entry) => entry.settings?.nativeLua).map((entry) => ({
+        id: entry.id, nativeId: entry.settings.nativeId, manifest: { version: entry.version },
+    }));
+    const discovered = await discoverNativePackages(content, [], storedNative);
+    const stagedJavascript = [];
+    const javascriptIds = new Set(installed.filter((entry) => !entry.settings?.nativeLua).map(({ id }) => id));
+    const claimedJavascriptIds = new Set();
+
+    nativePackages = discovered.map(({ id, nativeId, nativeVersion, root, tree, blocked, fileCount }) => ({
+        id, nativeId, nativeVersion, root, tree, blocked, fileCount,
     }));
 
     for (const entry of content.manifest.mods.filter((item) => item.kind === 'javascript')) {
@@ -1067,7 +1270,34 @@ async function discoverPackages() {
             files.push(file);
         }
 
-        // New installations are atomically disabled; updates retain consent.
+        // Validate every identity before overwriting any installed package or its consent.
+        // eslint-disable-next-line no-await-in-loop
+        const parsed = await parseModPackage(files);
+        const id = parsed.manifest.id;
+
+        if (claimedJavascriptIds.has(id) || installed.some((record) => record.id === id && record.settings?.nativeLua)) {
+            throw new Error(`Directory SDK id collision: JavaScript package ${id} has another owner.`);
+        }
+
+        claimedJavascriptIds.add(id);
+        javascriptIds.add(id);
+        stagedJavascript.push(files);
+    }
+
+    for (const descriptor of discovered) {
+        if (javascriptIds.has(descriptor.id)) {
+            throw new Error(`Native SDK id collision: ${descriptor.nativeId} maps to JavaScript package ${descriptor.id}`);
+        }
+
+        const previous = installed.find((entry) => entry.id === descriptor.id);
+
+        if (previous?.settings?.nativeLua && previous.settings.nativeId !== descriptor.nativeId) {
+            throw new Error(`Native SDK id collision: stored ${previous.settings.nativeId} and discovered ${descriptor.nativeId} both map to ${descriptor.id}`);
+        }
+    }
+
+    for (const files of [...stagedJavascript, ...discovered.map(nativePackageFiles)]) {
+        // New installations are atomically disabled; updates retain consent only after collision checks.
         // eslint-disable-next-line no-await-in-loop
         await packages.install(files);
     }
@@ -1120,90 +1350,8 @@ try {
         restoreError = cause;
     }
 
-    // Mod callbacks retain this session handle, not a superseded WASM instance.
-    mods = createModHost({
-        /**
-         * Read the currently published engine, including after save restoration.
-         *
-         * @returns {object} Detached snapshot.
-         */
-        snapshot: () => engine.snapshot(),
-        /**
-         * Submit through the current session's authoritative engine.
-         *
-         * @param {object} action - Validated mod action.
-         * @returns {object} Post-command snapshot.
-         */
-        command: (action) => engine.command(action),
-        /**
-         * Apply mod speed changes to the current engine.
-         *
-         * @param {number} speed - Tiles per second.
-         * @returns {void} Changes engine speed.
-         */
-        setSpeed: (speed) => engine.setSpeed(speed),
-        /**
-         * Advance the current engine through the fixed-step contract.
-         *
-         * @param {number} seconds - Simulation step.
-         * @returns {void} Advances simulation.
-         */
-        step: (seconds) => engine.step(seconds),
-        /**
-         * Reset the current session.
-         *
-         * @returns {void} Drops engine world and movement.
-         */
-        reset: () => engine.reset(),
-        /**
-         * Query loaded navigation extents from the currently published world.
-         *
-         * @returns {object} Detached cell bounds.
-         */
-        worldBounds: () => engine.worldBounds(),
-        /**
-         * Query an absolute navigation tile.
-         *
-         * @param {number} x - Integer world tile x.
-         * @param {number} y - Integer world tile y.
-         * @returns {number} Navigation flags or unloaded sentinel.
-         */
-        navFlags: (x, y) => engine.navFlags(x, y),
-        /**
-         * Commit a validated mod cell and retain the exact source for saves.
-         *
-         * @param {number} x - Cell x.
-         * @param {number} y - Cell y.
-         * @param {Uint8Array} bytes - Full navigation cell.
-         * @returns {void} Updates authoritative navigation and retained provenance.
-         */
-        worldImportCell: (x, y, bytes) => {
-            engine.worldImportCell(x, y, bytes);
-            const retained = worldCells.filter((cell) => cell.x !== x || cell.y !== y);
-
-            retained.push({ x, y, bytes: bytes.slice() });
-            worldCells = retained;
-            renderer?.setWorldMode(true);
-        },
-    }, {
-        /**
-         * Return only an explicitly saved namespace, never object prototypes.
-         *
-         * @param {string} id - Validated mod identifier.
-         * @returns {object|undefined} Saved schema document.
-         */
-        readModState: (id) => Object.hasOwn(savedModState, id) ? savedModState[id] : undefined,
-        /**
-         * Retain a validated detached mod record in the session envelope.
-         *
-         * @param {string} id - Validated mod identifier.
-         * @param {object} record - Schema version and JSON data.
-         * @returns {void} Replaces only this namespace.
-         */
-        writeModState: (id, record) => {
-            Object.defineProperty(savedModState, id, { value: record, enumerable: true, configurable: true, writable: true });
-        },
-    });
+    liveModContext = { engine, cells: worldCells, namespaces: savedModState };
+    mods = createSessionModHost(liveModContext);
     try {
         packages = createModManager(mods);
         await discoverPackages();

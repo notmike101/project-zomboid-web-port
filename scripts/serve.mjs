@@ -1,7 +1,7 @@
 import { createReadStream } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
+import { lstat, realpath, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { extname, resolve, sep } from 'node:path';
+import { dirname, extname, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
 import { isContentPath } from './provision-content.mjs';
@@ -33,6 +33,41 @@ function contains(directory, path) {
 }
 
 /**
+ * Canonicalize content without treating Windows short names as directory links.
+ *
+ * @returns {Promise<string>} Separate content root with no linked ancestors.
+ */
+async function approvedContentRoot() {
+    let directory = contentRoot;
+
+    for (;;) {
+        // eslint-disable-next-line no-await-in-loop -- Inspect every lexical ancestor before canonicalizing aliases.
+        const info = await lstat(directory);
+
+        if (info.isSymbolicLink() || !info.isDirectory()) {
+            throw new Error('Content root has a linked or non-directory ancestor');
+        }
+
+        const parent = dirname(directory);
+
+        if (parent === directory) {
+            break;
+        }
+
+        directory = parent;
+    }
+
+    const realRoot = await realpath(contentRoot);
+    const realApplicationRoot = await realpath(root);
+
+    if (contains(realApplicationRoot, realRoot) || contains(realRoot, realApplicationRoot)) {
+        throw new Error('Content and application roots overlap');
+    }
+
+    return realRoot;
+}
+
+/**
  * Resolve application or separately provisioned content without escaping either root.
  *
  * @param {string} pathname - Percent-encoded request pathname.
@@ -48,13 +83,10 @@ async function resolveFile(pathname) {
     }
 
     const content = requested.startsWith('/content/');
-    const selectedRoot = content ? contentRoot : root;
-    const realRoot = await realpath(selectedRoot);
+    const realRoot = content ? await approvedContentRoot() : await realpath(root);
     const path = content ? requested.slice('/content/'.length) : requested.slice(1);
 
-    if (content && (realRoot.toLowerCase() !== selectedRoot.toLowerCase()
-        || contains(root, realRoot) || contains(realRoot, root)
-        || (path !== 'manifest.json' && !isContentPath(path)))) {
+    if (content && path !== 'manifest.json' && !isContentPath(path)) {
         throw new Error('Content root or path is not approved');
     }
 

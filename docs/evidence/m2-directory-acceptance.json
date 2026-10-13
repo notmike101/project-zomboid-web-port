@@ -1,18 +1,18 @@
 {
-  "scope": "Directory startup and game-only presentation; not complete game or native-Lua package compatibility acceptance",
+  "scope": "Directory startup, game-only presentation and owned native-Lua loader/lifecycle integration; not complete gameplay or unmodified Workshop feature compatibility",
   "sourceBuild": {
     "version": "42.21.0",
     "revision": "4a0e9546ec",
     "steamBuildId": "25485521"
   },
   "checks": {
-    "command": "npm run check && npm run build",
+    "command": "node --test tests/content-root.test.js && npm run check && npm run build",
     "rustPassed": 28,
-    "nodePassed": 168,
+    "nodePassed": 202,
     "nodeSkipped": 1,
     "skipReason": "case-sensitive Linux ambiguity fixture on Windows",
     "eslint": "zero errors and warnings",
-    "docsLinked": 7,
+    "docsLinked": 6,
     "build": "asset-free dist",
     "nonFailingNote": "Windows cargo incremental cache finalization Access is denied; checks completed successfully"
   },
@@ -1071,6 +1071,186 @@
         }
       ]
     },
+    "browserLuaCleanup": {
+      "interpreter": "wasmoon",
+      "healthy": {
+        "schemaVersion": 1,
+        "data": {
+          "nativePlayerData": {
+            "good": {
+              "count": 2
+            }
+          }
+        }
+      },
+      "broken": {
+        "schemaVersion": 1,
+        "data": {
+          "nativePlayerData": {
+            "bad": {
+              "count": 1
+            }
+          }
+        }
+      },
+      "action": 0,
+      "cleanupErrors": [
+        {
+          "modId": "broken",
+          "stage": "cleanup"
+        }
+      ],
+      "nativeErrors": [
+        {
+          "modId": "broken",
+          "path": "<save>"
+        }
+      ],
+      "scope": "Actual browser engine and Lua WASM; synthetic packages. Failed backing write disposes broken callback while healthy callback advances; retained broken save is unchanged."
+    },
     "browserHarness": "Named spawned handles share one owned Chromium target; tests explicitly navigate origin to isolate IndexedDB. Hold CDP focus emulation through each helper so background-tab RAF and viewport actions run."
+  },
+  "nativePackageIntegration": {
+    "scope": "Independently authored unchanged Lua; real application manager/VM/WASM/save path, not an existing Workshop feature",
+    "nativeGameProcessPreflight": {
+      "count": 0,
+      "method": "PowerShell process inspection for ProjectZomboid executables and game/server Java command lines"
+    },
+    "observedNumericSourceBuild": "42.21.0",
+    "browser": {
+      "id": "native-nativeloaderproof",
+      "nativeVersion": "proof-a",
+      "before": {
+        "revision": 1,
+        "mods": [
+          {
+            "id": "native-nativeloaderproof",
+            "version": "00.0.103708614365424993",
+            "apiVersion": "0.1.0"
+          }
+        ],
+        "namespace": {
+          "creates": 1,
+          "loads": 0,
+          "starts": 1,
+          "ticks": 15
+        }
+      },
+      "after": {
+        "revision": 2,
+        "mods": [
+          {
+            "id": "native-nativeloaderproof",
+            "version": "00.0.103708614365424993",
+            "apiVersion": "0.1.0"
+          }
+        ],
+        "namespace": {
+          "creates": 2,
+          "loads": 1,
+          "starts": 2,
+          "ticks": 18
+        }
+      },
+      "afterRollback": {
+        "revision": 4,
+        "mods": [
+          {
+            "id": "native-nativeloaderproof",
+            "version": "00.0.103708614365424993",
+            "apiVersion": "0.1.0"
+          }
+        ],
+        "namespace": {
+          "creates": 2,
+          "failLoad": false,
+          "loads": 1,
+          "starts": 2,
+          "ticks": 42
+        }
+      },
+      "safeModeSkipped": true,
+      "disabledCleanup": true,
+      "retainedClosureRollback": true,
+      "racingConsentRejected": true
+    }
+  },
+  "isolatedHostJavaScriptMigration": {
+    "scope": "Existing owned browser-proof package version 1.0.0; seeded integrity-valid schema 1 fixture, current isolated host implementation",
+    "result": {
+      "activated": {
+        "schemaVersion": 2,
+        "data": {
+          "initialized": 8,
+          "migrated": true
+        }
+      },
+      "explicitlyLoaded": {
+        "schemaVersion": 2,
+        "data": {
+          "initialized": 8,
+          "migrated": true
+        }
+      },
+      "rebooted": {
+        "schemaVersion": 2,
+        "data": {
+          "initialized": 8,
+          "migrated": true
+        }
+      },
+      "initialized": {
+        "schemaVersion": 2,
+        "data": {
+          "initialized": 7
+        }
+      }
+    }
+  },
+  "isolatedHostGameOnlySurface": {
+    "scope": "Fresh actual metadata and visual inspection after session transitions; screenshot temporary/untracked",
+    "viewport": {
+      "width": 900,
+      "height": 700,
+      "dpr": 1.2499999701976776
+    },
+    "canvas": {
+      "x": 0,
+      "y": 0,
+      "width": 900,
+      "height": 700,
+      "bufferWidth": 1125,
+      "bufferHeight": 875
+    },
+    "scroll": {
+      "width": 900,
+      "height": 700
+    },
+    "menuOpen": false,
+    "diagnosticsVisible": false,
+    "backend": "WebGPU",
+    "ready": true,
+    "failed": false,
+    "renderedInstances": 1265,
+    "residentSprites": 160,
+    "residentPages": 30,
+    "textureBytes": 5558916,
+    "sourceMissingSpriteCount": 9,
+    "actor": {
+      "apiVersion": 1,
+      "tick": 7512,
+      "x": 190.5,
+      "y": 187.73739624023438,
+      "speed": 3.25,
+      "action": 0
+    }
+  },
+  "integratedDeliveryChecks": {
+    "canonicalContentRootTestsPassed": 8,
+    "realWindowsShortNameAlias": true,
+    "deliveryTestsPassed": 9,
+    "teardownRootFix": "One fixture finalizer awaits owned preview server exit before removing its working directory; no suppression or retry",
+    "productionRelease": "pending clean source checkpoint and release",
+    "hostedWindowsCI": "pending new run; previous hosted short-name cause remains inference"
   }
 }

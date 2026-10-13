@@ -431,20 +431,116 @@ it — the UI shows that rather than pretending an arbitrary live undo.
 `activateEnabled({ safeMode: true })` imports nothing at all, which is how a broken
 package is gotten past at startup.
 
-In the app's **Local mod packages** section, provisioned JavaScript packages are
-already installed from the content manifest. Explicitly enable each new package's
-**Enable … on next reload** checkbox, then use **Reload to apply saved configuration**.
-Disable or remove stored packages through the same manager; configuration changes
-do not run or unload code live. The UI reports actual `requiresReload` evidence,
-activation order, skipped packages and attributed errors; detailed metadata and
-revisions appear in Execution evidence. Package, storage and service-worker failures
-are recoverable messages and do not stop the simulation.
+In the app's **Local mod packages** section, provisioned JavaScript packages and
+native Lua adapters are installed from the content manifest. New packages are
+disabled. Explicitly enable each package's **Enable … after reload** checkbox,
+then use **Reload to apply saved configuration**. Disable or remove stored
+packages through the same manager; configuration changes do not run or unload code
+live. The UI reports actual running identities, activation order, skipped packages
+and attributed errors. Storage and package failures remain separate from GPU errors.
 
-Manifest entries with `kind:'native-lua'` identify existing native packages, not
-JavaScript modules: discovery alone neither activates them through this SDK nor
-proves original engine API support. Existing Lua mod compatibility remains a full-game
-requirement; the Lua 5.4 Wasmoon runtime and Lua 5.1 compatibility preamble are work
-in progress, not Kahlua equivalence or completed native-mod compatibility.
+### Native Lua directory packages
+
+`kind:'native-lua'` now uses original `.lua` text through the local Wasmoon VM,
+not JavaScript rewrites. `mod.info` supplies exact, case-sensitive native identity,
+name, `modversion`/`version`, `require`, `loadAfter`, `loadBefore` and `versionMin`.
+The loader selects `common/` plus the highest numeric tree no newer than
+`sourceBuild.version`, replacing common files at matching relative paths. Metadata
+may come from an older compatible tree when the selected code tree has no
+`mod.info`. Packages without version/common trees use their root. Unknown builds
+remain discoverable and disabled; enabling them fails explicitly. Provision the
+**observed installed version** with `--source-build`, never an assumed version.
+An incompatible minimum/tree also refuses activation.
+
+SDK ids are `native-` plus the native id lowercased with unsupported characters
+replaced by `-`; duplicate exact identities and canonical-id collisions are
+refused, including collisions with JavaScript/stored package owners. Native ids
+remain unchanged in VM attribution and metadata. Ordinary three-component numeric
+native versions stay unchanged. Versions outside that SDK grammar use a
+**lossless identity encoding**, not invented semantic compatibility:
+`00.0.<decimal integer of hex 1 followed by the original version's UTF-8 bytes>`.
+The `00.0.*` namespace is reserved, so original versions in that namespace are
+also encoded and cannot alias a different original string. An absent version is
+`00.0.0` and displayed as unspecified. The UI displays the original string; saves
+retain its exact identity. There is no upgrade/version shim.
+Required native ids map to the installed target's exact SDK version and use the
+existing dependency resolver; missing/disabled dependencies and cycles fail before
+any package code runs. Optional ordering edges do not implicitly enable code.
+
+Private IndexedDB packages contain a small SDK adapter and `native.json` with
+selected original Lua text and metadata. Nothing is added to the tracked asset-free
+delivery. Original package file-count/byte limits apply; the serialized descriptor
+also obeys the SDK's 16 MiB single-file limit. Selected enabled sources are all
+preloaded before activation so cross-package require ownership is established.
+Engine `media/lua/{shared,client,server}` files are fetched only for the transitive
+**literal require** graph reachable from those selected sources and registered
+`execute:false`; the engine Lua tree is never eagerly executed or fetched in full.
+The lexical scan skips comments and string bodies; it does not infer aliases,
+shadowing or dynamic control-flow reachability. Engine-source API calls inherit
+the actual initiating native package's public API while retaining engine source
+attribution. Engine callbacks capture that initiator for cleanup and namespace
+ownership; require-only engine roots are not extra active/save owners.
+Dynamic engine require names currently fail honestly rather than synthesizing
+engine APIs. Provision the actual required engine files alongside the startup
+assets; `--startup-only` alone does not include those engine Lua classes.
+
+Each game session owns a fresh VM. New/load transitions restore each package's
+public save namespace before its Lua executes. `OnCreatePlayer` and `OnGameStart`
+dispatch once per transition; `OnLoad` dispatches only for a load (including
+recovery/import). Tick/player movement and focused gameplay keyboard events use
+the existing host. Save and live export flush mutable Lua tables before capture.
+Each transition stages a separate host bound directly to its target engine and
+namespace backing while the committed host/VM stays alive. Only after target
+activation, exact-version checks and bootstrap succeed is the prior VM flushed,
+closed and its host disposed. Failure discards only the uncommitted target and
+retains the prior engine, namespaces, callbacks and initialized Lua closure locals.
+No previous mod is re-executed or bootstrapped on rollback. Package consent writes
+and session operations are mutually excluded during staging and initial boot.
+Saved-mod exact-version checks remain in force: disabling a mod does not make its
+old save silently compatible. Stored native identities participate in dependency
+and ordering resolution even when their source root is no longer in the current
+directory index. All enabled descriptors are checked against the current observed
+build; unknown or changed builds refuse cached-source activation until matching
+original sources are rediscovered.
+
+This proves a native execution/save boundary, **not full Workshop feature support
+or Kahlua equivalence**. Barefoot Moodle still needs genuine footwear/item
+condition state and MoodleFramework texture/UI/Java option facilities. Hide in Car
+needs actual vehicles, ghost-mode state and sandbox options. P4HasBeenRead needs
+inventory/read-state/context menus, textures, translations and options. These
+facilities still raise attributed unsupported-capability errors; no fake
+item/UI/Java results are supplied to make packages appear compatible.
+
+#### Runnable native proof
+
+After the parent build, `node --test tests/native-mod-loader.test.js` exercises
+independently authored common/numeric overlays (including a code tree with no
+`mod.info`), root-only packages, transitive require-only engine sources, actual
+WASM speed/action changes, dependency/cycle refusal, exact identity collisions,
+unknown/minimum/current-build refusal, stored dependency ownership, inert pseudo-
+requires, engine getter/callback API attribution, namespace restore, callback
+cleanup and retained initialized closures after a failed staged load.
+
+For the actual application path, use an **owned disposable browser profile/origin**
+with working provisioned original startup content and a known observed
+`sourceBuild.version`. On an already-open Puppeteer page:
+
+```js
+const { checkNativePackageReload } = await import('./scripts/check-browser-native.mjs');
+const evidence = await checkNativePackageReload({ page, assert });
+```
+
+The helper appends only independently authored Lua/metadata through request
+interception using the real directory range protocol. It checks default-disabled
+discovery, the existing enable checkbox, reload activation, a native tick changing
+the real WASM walk action, actual app Save, namespace reload and once-only
+bootstrap, failed-load rollback preserving initialized closure state without
+bootstrap replay, racing consent rejection during a delayed engine-source read,
+safe-mode zero execution, and disabling/cleanup with truthful saved-mod mismatch
+refusal. It returns synthetic namespace/provenance metadata only, never
+original cells, source, assets or screenshots. It intentionally leaves the owned
+fixture disabled with its backup retained; use a disposable profile, not a user's
+valuable play session.
 
 **Reload in safe mode** adds `?safe-mods=1` and imports no local packages. Installed
 bytes and configuration remain available, so a broken package can be disabled or

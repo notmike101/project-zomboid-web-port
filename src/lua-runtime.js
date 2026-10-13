@@ -15,7 +15,7 @@
  */
 
 /** @typedef {{path:string, source:string, execute?:boolean}} LuaSource */
-/** @typedef {{id:string, nativeId?:string, api?:object, sources:LuaSource[], registerCleanup?:(cleanup:()=>void)=>void}} LuaPackage */
+/** @typedef {{id:string, nativeId?:string, engineSource?:boolean, api?:object, sources:LuaSource[], registerCleanup?:(cleanup:()=>void)=>void}} LuaPackage */
 /** @typedef {string|number|boolean|null|JSONValue[]|{[key: string]: JSONValue}} JSONValue */
 
 const EVENTS = new Set(['OnTick', 'OnPlayerUpdate', 'OnPlayerMove', 'OnGameStart', 'OnLoad', 'OnCreatePlayer', 'OnKeyPressed', 'OnKeyReleased', 'OnKeyKeepPressed']);
@@ -83,7 +83,7 @@ function load(source, name, mode, env)
 end
 
 local function guarded(owner, fn, ...)
-    enter(owner.id, owner.path)
+    enter(owner.id, owner.path, owner.apiId)
     local args = table.pack(...)
     local result = table.pack(xpcall(function() return fn(table.unpack(args, 1, args.n)) end,
         function(err) return fault(traceback(tostring(err), 2)) end))
@@ -133,7 +133,7 @@ local function addEvent(name)
         assert(type(fn) == 'function', 'Events.' .. name .. '.Add expects a Lua function')
         for _, item in ipairs(handlers[name]) do if item.fn == fn then return end end
         local owner = context()
-        handlers[name][#handlers[name] + 1] = {fn = fn, id = owner.id, path = owner.path}
+        handlers[name][#handlers[name] + 1] = {fn = fn, id = owner.id, path = owner.path, apiId = owner.apiId}
     end
     function event.Remove(a, b)
         local fn = a == event and b or a
@@ -218,7 +218,7 @@ function __pz_tick(seconds, number)
     __pz_dispatch('OnPlayerUpdate')
 end
 function __pz_cleanup(id)
-    for _, list in pairs(handlers) do for i = #list, 1, -1 do if list[i].id == id then table.remove(list, i) end end end
+    for _, list in pairs(handlers) do for i = #list, 1, -1 do if list[i].id == id or list[i].apiId == id then table.remove(list, i) end end end
     for name, record in pairs(modules) do if record.id == id then modules[name], loaded[name], package.preload[name] = nil, nil, nil end end
     for key, record in pairs(records) do if record.id == id then records[key], executed[key] = nil, nil end end
 end
@@ -447,7 +447,7 @@ export async function createLuaSession(options = {}) {
     /**
      * Get the currently running chunk owner.
      *
-     * @returns {{id:string,path:string}} Current owner.
+     * @returns {{id:string,path:string,apiId?:string}} Current source and public API owner.
      */
     function current() {
         return contexts.at(-1) ?? { id: 'runtime', path: '<host>' };
@@ -464,9 +464,10 @@ export async function createLuaSession(options = {}) {
         const entry = packages.get(owner.id);
         const nativeModId = entry?.nativeId ?? owner.id;
         const message = `[native ${nativeModId}/${owner.path}] ${cause instanceof Error ? cause.message : String(cause)}`;
-        const error = Object.assign(new Error(message, { cause }), { name: 'NativeLuaError', modId: owner.id, nativeModId, path: owner.path });
+        const apiModId = owner.apiId ?? owner.id;
+        const error = Object.assign(new Error(message, { cause }), { name: 'NativeLuaError', modId: owner.id, nativeModId, apiModId, path: owner.path });
 
-        errors.push({ modId: owner.id, nativeModId, path: owner.path, message });
+        errors.push({ modId: owner.id, nativeModId, apiModId, path: owner.path, message });
 
         if (/timeout/i.test(message)) {
             timeouts += 1;
@@ -508,7 +509,8 @@ export async function createLuaSession(options = {}) {
      * @returns {object} Bound owner API.
      */
     function api() {
-        const entry = packages.get(current().id);
+        const owner = current();
+        const entry = packages.get(owner.apiId ?? owner.id);
 
         if (!entry?.active || !entry.api) {
             throw new Error('native package API is not active');
@@ -517,8 +519,11 @@ export async function createLuaSession(options = {}) {
         return entry.api;
     }
 
-    lua.global.set('__pz_enter', (id, path) => {
-        contexts.push({ id, path });
+    lua.global.set('__pz_enter', (id, path, apiId) => {
+        const caller = current();
+        const publicOwner = packages.get(id)?.engineSource ? apiId ?? caller.apiId ?? caller.id : id;
+
+        contexts.push({ id, path, apiId: publicOwner });
     });
     lua.global.set('__pz_leave', () => {
         contexts.pop();
@@ -537,7 +542,9 @@ export async function createLuaSession(options = {}) {
         }
 
         if (!owners.has(key)) {
-            owners.set(key, current().id);
+            const owner = current();
+
+            owners.set(key, owner.apiId ?? owner.id);
         }
     });
     lua.global.set('__pz_call', (operation, ...args) => {
@@ -590,7 +597,7 @@ export async function createLuaSession(options = {}) {
             throw new Error('Lua session is closed');
         }
 
-        const { id, sources, nativeId } = descriptor;
+        const { id, sources, nativeId, engineSource } = descriptor;
 
         if (typeof id !== 'string' || !id || !Array.isArray(sources)) {
             throw new TypeError('native package requires id and sources');
@@ -599,7 +606,7 @@ export async function createLuaSession(options = {}) {
         let entry = packages.get(id);
 
         if (!entry) {
-            entry = { id, nativeId: nativeId ?? id, sources: new Map(), active: false, api: undefined };
+            entry = { id, nativeId: nativeId ?? id, engineSource: engineSource === true, sources: new Map(), active: false, api: undefined };
             packages.set(id, entry);
         }
 
@@ -966,16 +973,20 @@ export async function createLuaSession(options = {}) {
     }
 
     /**
-     * Flush before freeing the VM; failure leaves the VM open to recover state.
+     * Flush before freeing the VM; failure leaves it open unless discarding an uncommitted failed activation.
      *
+     * @param {{discardSaveData?:boolean}} [options] - Explicit rollback/unload discard only.
      * @returns {void}
      */
-    function close() {
+    function close(options = {}) {
         if (closed) {
             return;
         }
 
-        flushSaveData();
+        if (!options.discardSaveData) {
+            flushSaveData();
+        }
+
         unsubscribe?.();
         unsubscribe = undefined;
         lua.global.close();

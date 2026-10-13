@@ -49,11 +49,17 @@ The bundled **Accessible walking** JavaScript mod uses the browser mod API. Sepa
 
 Provisioned JavaScript package activation state survives menu Save/Load, reboot and New session initialization. Mod namespace schema migration from 1 to 2 is browser-proven only with the same exact package version (`1.0.0`); a package-version mismatch intentionally blocks automatic restoration. This is not general cross-version mod compatibility or unmodified Workshop gameplay acceptance.
 
+Native Lua packages now use that same manager: discovered disabled, enabled only with explicit consent, executed without JavaScript rewrites, and skipped in safe mode. Supply an **observed numeric game version** with `-SourceBuild` / `--source-build` before enabling native code; for the recorded installation this is `42.21.0`, not a version label with a Steam suffix. Unknown builds block native execution without preventing ordinary directory startup. The interpreter provides bounded source `require`, mapped movement/state/events and persistent namespaces—not the complete original engine.
+
+Owned Lua browser checks exercise real WASM movement, save/reboot, failed-load rollback preserving committed closure state, and exclusion of consent changes during activation. They do **not** establish that an existing Workshop mod's gameplay or UI works; original inventory, health and UI APIs remain prerequisites.
+
 ## Release and hosting
 
 After committing verified source: `./scripts/Windows.ps1 Release`. Creates an allowlisted asset-free application directory with version, source revision and SHA-256 file manifest under `release/`. No original assets, native binaries or saves are part of source/application releases. Keep private content in ignored `content/` or outside the checkout; never copy it into `dist/`, application release artifacts or Git. Application CI uses synthetic tests only and does not claim GPU proof.
 
 Release requires a clean tracked and untracked source tree and creates a new version/revision directory; an existing destination is rejected, never merged or overwritten. Keep private inputs outside the checkout. `Check` runs `eslint . --max-warnings 0`, Rust formatting, clippy with warnings denied, native/WASM integration contracts and documentation links. Vendored lint rules are not disabled.
+
+The release audit accepts only the exact `applicationFiles` targets from `scripts/build.mjs` plus `build.json`, including `licenses/wasmoon.txt` and `licenses/lua.txt`. An otherwise familiar extension does not authorize an extra file: unknown `.txt`, `.json`, `.js` or `.wasm` content is rejected. Keep both dependency license texts with the application.
 
 Deploy release application files to an HTTPS static host, then separately copy/transfer your privately provisioned directory into a `content/` folder beside the hosted application (`/content/manifest.json`, `/content/media/...`, `/content/mods/...`). The receiving device needs only the browser, not Node, Rust, a running native game or a companion service. Application files alone supply neither game content nor saves. Keep game files on authorized private hosting; do not publish them in public Git, application releases or public asset servers.
 
