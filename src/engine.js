@@ -111,6 +111,7 @@
  * @property {function(): void} freezeItemDefinitions Internally seals definition registration.
  * @property {function(): object[]} items Reads detached stable-ID item records.
  * @property {function(object[]): void} importItems Atomically replaces item records with explicit IDs.
+ * @property {function(): {capacityWeight: number, capacity: number, maxWeight: number}} inventoryState Reads detached native flat-player carry state.
  * @property {function(string): object|null} wornItem Reads the item worn at an exact body location.
  * @property {function(): number} getHealth Reads the project scalar, not native survival state.
  * @property {function(): boolean} isDead Reports whether that scalar is zero.
@@ -253,6 +254,23 @@ function requireInteger(value, name, min, max) {
 
     if (value < min || value > max) {
         throw new RangeError(`${name} must be inside [${min}, ${max}].`);
+    }
+
+    return value;
+}
+
+/**
+ * Rejects invalid Java-float weights at full host precision before staging.
+ *
+ * @param {unknown} value - Candidate weight.
+ * @param {string} name - Field label.
+ * @returns {number} Validated value, converted to f32 only by the native boundary.
+ */
+function requireItemWeight(value, name) {
+    requireCoordinate(value, name);
+
+    if (value < 0 || value > 3.402_823_466_385_288_6e38) {
+        throw new RangeError(`${name} must be a nonnegative finite f32 weight.`);
     }
 
     return value;
@@ -574,6 +592,17 @@ async function createEngine(source) {
                 requireAccepted(api.item_set_condition(requireInteger(action.id, 'item id', 1, 0xFF_FF_FF_FF),
                     requireInteger(action.condition, 'condition', 0, 0x7F_FF_FF_FF)), 'setCondition');
                 break;
+            case 'setWeight':
+            case 'setActualWeight': {
+                const actual = action.type === 'setActualWeight';
+                const name = actual ? 'item_set_actual_weight' : 'item_set_weight';
+                const field = actual ? 'actualWeight' : 'weight';
+
+                requireOptional(action.type, [name]);
+                requireAccepted(api[name](requireInteger(action.id, 'item id', 1, 0xFF_FF_FF_FF),
+                    requireItemWeight(action[field], field)), action.type);
+                break;
+            }
             case 'setHealth':
                 requireOptional('setHealth', ['set_health']);
                 requireAccepted(api.set_health(requireCoordinate(action.health, 'health')), 'setHealth');
@@ -1103,6 +1132,7 @@ async function createEngine(source) {
             stackLimit: view.getFloat64(24, true),
             removeOnBroken: view.getFloat64(32, true) !== 0,
             conditionLowerChanceOneIn: view.getFloat64(40, true),
+            weight: view.getFloat64(48, true),
         };
     }
 
@@ -1116,7 +1146,7 @@ async function createEngine(source) {
      * @returns {object} Detached resolved definition read back from WASM.
      */
     function registerItemDefinition(definition, { owner, override = false } = {}) {
-        requireOptional('registerItemDefinition', ['item_definition_register', 'item_definition_read']);
+        requireOptional('registerItemDefinition', ['item_definition_register', 'item_definition_read', 'inventory_state_read']);
         scratch('registerItemDefinition');
 
         if (definition === null || typeof definition !== 'object' || Array.isArray(definition)) {
@@ -1140,12 +1170,13 @@ async function createEngine(source) {
         const stackLimit = requireInteger(definition.stackLimit, 'stackLimit', 1, 0xFF_FF_FF_FF);
         const chance = requireInteger(definition.conditionLowerChanceOneIn,
             'conditionLowerChanceOneIn', 0, 0xFF_FF_FF_FF);
+        const weight = requireItemWeight(Object.hasOwn(definition, 'weight') ? definition.weight : 1, 'weight');
         const previous = definitionOrdinals.get(definition.fullType);
         const ordinal = previous ?? definitionMetadata.length;
         // Clone before dispatch: an uncloneable source field cannot strand a numeric row.
         const metadata = structuredClone(definition);
 
-        for (const key of ['owner', 'conditionMax', 'stackLimit', 'removeOnBroken', 'conditionLowerChanceOneIn']) {
+        for (const key of ['owner', 'conditionMax', 'stackLimit', 'removeOnBroken', 'conditionLowerChanceOneIn', 'weight']) {
             delete metadata[key];
         }
 
@@ -1153,7 +1184,7 @@ async function createEngine(source) {
         const slot = bodyLocation === null ? 0 : intern(bodyLocation, slotIds, slotNames);
 
         requireAccepted(api.item_definition_register(ordinal, ownerId, conditionMax, slot,
-            stackLimit, Number(definition.removeOnBroken), chance, Number(override)), 'registerItemDefinition');
+            stackLimit, Number(definition.removeOnBroken), chance, Number(override), weight), 'registerItemDefinition');
 
         if (definitionTransaction && ordinal < definitionTransaction.start
             && !definitionTransaction.journal.has(ordinal)) {
@@ -1238,7 +1269,7 @@ async function createEngine(source) {
      * @returns {object[]} Detached ground/inventory/equipment records.
      */
     function items() {
-        requireOptional('items', ['item_count', 'item_read']);
+        requireOptional('items', ['item_count', 'item_read', 'inventory_state_read']);
 
         return Array.from({ length: api.item_count() >>> 0 }, (_, index) => {
             requireAccepted(api.item_read(index), 'items');
@@ -1256,8 +1287,26 @@ async function createEngine(source) {
                 x: view.getFloat64(24, true), y: view.getFloat64(32, true),
                 condition: view.getFloat64(40, true), count: view.getFloat64(48, true),
                 bodyLocation: slotNames[view.getFloat64(56, true)],
+                weight: view.getFloat64(64, true), actualWeight: view.getFloat64(72, true),
             };
         });
+    }
+
+    /**
+     * Reads native inventory insertion-order f32 mass, not synthetic moodle input.
+     *
+     * @returns {{capacityWeight: number, capacity: number, maxWeight: number}} Detached flat-player carry state.
+     */
+    function inventoryState() {
+        requireOptional('inventoryState', ['inventory_state_read']);
+        api.inventory_state_read();
+        const view = scratch('inventoryState');
+
+        return {
+            capacityWeight: view.getFloat64(0, true),
+            capacity: view.getFloat64(8, true),
+            maxWeight: view.getFloat64(16, true),
+        };
     }
 
     /**
@@ -1266,7 +1315,7 @@ async function createEngine(source) {
      * @param {object[]} records - Detached records using public fullType identities.
      */
     function importItems(records) {
-        requireOptional('importItems', ['item_import_begin', 'item_import_stage', 'item_import_commit', 'item_import_abort']);
+        requireOptional('importItems', ['item_import_begin', 'item_import_stage', 'item_import_commit', 'item_import_abort', 'inventory_state_read']);
 
         if (!Array.isArray(records)) {
             throw new TypeError('importItems requires an array.');
@@ -1299,12 +1348,18 @@ async function createEngine(source) {
                 }
             }
 
+            const defaultWeight = !Object.hasOwn(record, 'weight') || !Object.hasOwn(record, 'actualWeight')
+                ? resolvedDefinition(ordinal).weight
+                : undefined;
+
             return [
                 requireInteger(record.id, 'item id', 1, 0xFF_FF_FF_FF), ordinal,
                 record.location === 'ground' ? 0 : 1,
                 requireCoordinate(record.x, 'item x'), requireCoordinate(record.y, 'item y'),
                 requireInteger(record.condition, 'condition', 0, 0x7F_FF_FF_FF),
                 requireInteger(record.count, 'count', 1, 0xFF_FF_FF_FF), slot,
+                requireItemWeight(Object.hasOwn(record, 'weight') ? record.weight : defaultWeight, 'weight'),
+                requireItemWeight(Object.hasOwn(record, 'actualWeight') ? record.actualWeight : defaultWeight, 'actualWeight'),
             ];
         });
 
@@ -1505,7 +1560,7 @@ async function createEngine(source) {
         worldImportCell, navFlags, worldBounds, saveState, loadState, worldReset,
         registerItemDefinition, itemDefinitions, beginItemDefinitionRegistration,
         commitItemDefinitionRegistration, rollbackItemDefinitionRegistration, freezeItemDefinitions,
-        items, importItems, wornItem, getHealth, isDead,
+        items, inventoryState, importItems, wornItem, getHealth, isDead,
         moodles, moodleInputLimits, saveMoodleState, loadMoodleState, resetMoodleState,
         importDoors, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,
     });

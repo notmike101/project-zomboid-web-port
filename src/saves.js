@@ -391,7 +391,7 @@ function createSaveStore({ engineSource, appVersion }) {
             updatedAt: new Date().toISOString(), application: { version: appVersion },
             engine: { abiVersion: 1, state: engine.saveState() },
             itemDefs: engine.itemDefinitions(),
-            items: engine.items().sort((left, right) => left.id - right.id),
+            items: engine.items(),
             moodleState: engine.saveMoodleState(),
             ...(typeof engine.saveDoorState === 'function' ? { doorState: engine.saveDoorState() } : {}),
             world: {

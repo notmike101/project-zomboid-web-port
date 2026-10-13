@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createEngine } from '../src/engine.js';
+import { parseItemDefinitions } from '../src/item-definitions.js';
 import { createLuaSession } from '../src/lua-runtime.js';
 import { createModHost } from '../src/mods.js';
 
@@ -187,6 +188,78 @@ test('synchronous Lua ticks move the compiled actor and cleanup stops callbacks'
         engine.setSpeed(2);
         host.step(1 / 60);
         assert.equal(engine.snapshot().speed, 2);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('Lua item weights stay live and independent while inventory carry uses native worn load', async () => {
+    const { engine, host, session, saved } = await fixture();
+
+    const [definition] = parseItemDefinitions(`module Fixture { item WeightedShoes {
+        ItemType = base:clothing, BodyLocation = base:shoes, ConditionMax = 10, Weight = 0.2,
+    } }`, 'fixture-weighted-shoes');
+
+    engine.registerItemDefinition({
+        ...definition, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 1,
+    }, { owner: 'original-fixture' });
+    const id = host.api.items.spawn({ fullType: 'Fixture.WeightedShoes', x: 5, y: 5 }).snapshot.id;
+
+    host.api.items.pickup(id);
+    host.api.items.wear(id);
+    try {
+        activate(session, host, `
+            local player = getPlayer()
+            local shoes = player:getClothingItem_Feet()
+            local inventory = player:getInventory()
+            assert(inventory == player:getInventory())
+            assert(inventory:getMaxWeight() == 8)
+            assert(shoes == player:getWornItem('base:shoes'))
+            assert(shoes:getUnequippedWeight() == 0.20000000298023224)
+            assert(inventory:getCapacityWeight() == 0.06000000238418579)
+            shoes:setWeight(9)
+            assert(shoes:getWeight() == 9 and shoes:getActualWeight() == 0.20000000298023224)
+            shoes:setActualWeight(12)
+            assert(shoes:getWeight() == 9 and shoes:getActualWeight() == 12)
+            assert(shoes:getUnequippedWeight() == 12 and shoes:getContentsWeight() == 0)
+            assert(math.abs(inventory:getCapacityWeight() - 3.6) < 0.000001)
+            Events.OnTick.Add(function()
+                getModData().weights = {
+                    base = shoes:getWeight(), actual = shoes:getActualWeight(),
+                    unequipped = shoes:getUnequippedWeight(), carry = inventory:getCapacityWeight()
+                }
+            end)
+        `, 'weights');
+        assert.deepEqual([engine.items()[0].weight, engine.items()[0].actualWeight], [9, 12]);
+        host.api.items.setActualWeight(id, 0.375);
+        host.api.items.unequip(id);
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.deepEqual(saved.get('host').data.nativePlayerData.weights, {
+            base: 9, actual: 0.375, unequipped: 0.375, carry: 0.375,
+        });
+
+        for (const [itemType, contents] of [
+            ['base:clothing', 'AmmoType = Base.Bullets,'],
+            ['base:clothing', 'component FluidContainer { Capacity = 1, }'],
+            ['Custom.Clothing', ''],
+        ]) {
+            const [unsupported] = parseItemDefinitions(`module Fixture { item WeightedShoes {
+                ItemType = ${itemType}, BodyLocation = base:shoes, ConditionMax = 10, Weight = 0.2,
+                ${contents}
+            } }`, 'fixture-unsupported-contents');
+
+            engine.registerItemDefinition({
+                ...unsupported, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 1,
+            }, { owner: 'original-fixture', override: true });
+            const previousErrors = session.diagnostics().errors.length;
+
+            host.step(1 / 60);
+            assert.ok(session.diagnostics().errors.slice(previousErrors).some((error) => error.nativeModId === 'weights' && /unsupported item contents weight/.test(error.message)));
+            assert.equal(host.diagnostics().errors.at(-1).stage, 'onTick');
+            assert.deepEqual([engine.items()[0].weight, engine.items()[0].actualWeight], [9, 0.375]);
+        }
     } finally {
         session.close();
         host.dispose();

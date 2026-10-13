@@ -107,6 +107,15 @@ The normal surface is only the edge-to-edge game canvas. There is no header, sid
 - Intrusive Chromium WebAudio/heap-object inspection was interrupted and the subsequent renderer was reported crashed/reloaded by the browser harness. This is not evidence of an application exception or a diagnosed audio defect; fresh non-intrusive integrated gesture/pause and dynamic GPU-door proofs remain required.
 - Accessible original-style context actions, native timed-action queues, weight/capacity progression and the remaining full-game acceptance gates are still open. No original game was launched and no original assets, bytecode, pixels or sample bytes belong in Git/releases.
 
+## Native flat-item weight integration
+
+- WASM definitions and live instances now retain native float32 weight. Live base and actual weight are independent; later definition overrides do not rewrite existing instances. Shared SDK actions and live Lua item/container bindings retain veto, attribution, stable identity and input validation.
+- Ordinary flat-player pickup uses source carry capacity 50, distinct from initial encumbrance maxWeight 8. Native float32 inventory sums follow pickup order, count is not multiplied, worn rows use ×0.3, and the current total receives nearest-hundredth correction. Nested containers, ammo/fluid contents, hotbar, Moveable and dynamic trait/weight progression remain unsupported.
+- A portable-save regression failed before removing capture's obsolete item-ID sort: restoration changed 49.9949951171875 into 49.994998931884766 and changed the next pickup's capacity decision. The same real-WASM export/restore case now passes without changing actor words or engine ABI.
+- Consolidated `npm run check` passed zero-warning lint, Rust formatting/clippy, 28 Rust tests, 318 Node passes with one Linux-only skip, and six maintained documentation-link checks. The eight focused native/SDK/Lua weight checks failed before implementation and passed afterward; the additional save-order regression also passed after its fix.
+- A fresh Node scenario used already-parsed actual Build 42 RagWrap/ArmyBoots definitions through the public mod SDK: explicit weight 0.20000000298023224 versus constructor default 1, carry 1.2000000476837158, worn carry 1.059999942779541, capacity 50/maxWeight 8. Independent live base 9/actual 0.375 and carry 1.1124999523162842 survived a genuine 4458-byte portable export/restore with 12 actor words. No original game was executed and no source bytes were staged.
+- This is a numeric flat-item slice, not complete inventory, timed pickup, visible ground-item/gear presentation or survival progression. Browser-only scene fixture work remains pending after automation-worker failures; no dynamic door/scene-audio completion is claimed.
+
 ## Blockers and outstanding acceptance
 
 - Remote access resolved: private repository and app-authenticated source push verified through implementation checkpoint `ae37f0b17641e7eafc7983d84a000fb53c737bb0`. That checkpoint has a successful pinned Windows CI run and actual audited asset-free source release; full gameplay and device acceptance remain separate gates.

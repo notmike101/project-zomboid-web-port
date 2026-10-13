@@ -127,6 +127,40 @@ test('legacy migration preserves world and namespace history without mutating th
     await assert.rejects(store.restore(tampered), /integrity/u);
 });
 
+test('portable inventory preserves f32 pickup eligibility when pickup order differs from spawn IDs', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.command({ type: 'cancel' });
+    const actor = engine.snapshot();
+    const weights = [0.000_001, 0.000_001, 49.994_995, 0.009];
+    const ids = weights.map((weight, index) => {
+        const fullType = `Synthetic.OrderWeight${index}`;
+
+        engine.registerItemDefinition({
+            fullType, weight, bodyLocation: 'base:shoes', conditionMax: 1, stackLimit: 1,
+            removeOnBroken: false, conditionLowerChanceOneIn: 1,
+        }, { owner: 'test' });
+
+        return engine.command({ type: 'spawnItem', fullType, x: actor.x, y: actor.y }).id;
+    });
+
+    for (const id of [ids[2], ids[0], ids[1]]) {
+        engine.command({ type: 'pickup', id });
+    }
+
+    const before = engine.inventoryState().capacityWeight;
+    const cells = record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: new Uint8Array(Buffer.from(cell.bytes, 'base64')),
+    }));
+    const exported = await store.exportLive(engine, { cells });
+    const restored = await store.restore(JSON.parse(await exported.text()));
+
+    assert.equal(restored.engine.inventoryState().capacityWeight, before);
+    engine.command({ type: 'pickup', id: ids[3] });
+    restored.engine.command({ type: 'pickup', id: ids[3] });
+    assert.equal(restored.engine.inventoryState().capacityWeight, engine.inventoryState().capacityWeight);
+});
+
 test('portable inventory restores stable worn IDs and damaged condition without cancelling travel', async () => {
     const { engine, record, store } = await fixture();
 

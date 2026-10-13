@@ -71,6 +71,8 @@ method on that handle throws (`stage: 'api'`).
 | `api.items.definitions.register(input, { override = false })` | `ModItemDefinition` | Owner-bound, synchronous activation only; explicit duplicate override; failed activation rolls back touched rows/owners/metadata. No SDK freeze method. |
 | `api.items.list()` / `.get(id)` / `.worn(bodyLocation)` | detached `ModItem[]` / item or `null` | Stable positive u32 IDs; exact body-location identity; valid unknown identities return `null`. |
 | `api.items.spawn(input)` / `.pickup(id)` / `.wear(id)` / `.unequip(id)` / `.drop(id, x, y)` / `.setCondition(id, condition)` | `ModCommandResult` | Same shared synchronous action/hook path; successful spawn returns authoritative `snapshot.id`. |
+| `api.items.inventoryState()` | detached `ModInventoryState` | Native flat-player `capacityWeight`, carry `capacity` and independently stored `maxWeight`; ordinary initial limits are 50 versus 8, not one threshold. |
+| `api.items.setWeight(id, weight)` / `.setActualWeight(id, actualWeight)` | `ModCommandResult` | Independent live native f32 fields through shared precommit hooks; finite/nonnegative/full-precision f32 range required before conversion. |
 | `api.character.getHealth()` / `.isDead()` / `.setHealth(health)` | number / boolean / `ModCommandResult` | WASM health `[0,100]`; health zero is current port death policy, not native survival fidelity. |
 | `api.character.moodles()` | detached `ModMoodle[]` | Ordered original opaque IDs/levels `0..4`, statically derived rules over explicit inputs; no invented neutral fallback. |
 | `api.character.moodleInputs()` / `.inputLimits()` | detached named inputs / validation metadata | WASM-owned values/limits; numeric `{min,max,default,integer}` or boolean `{type:'boolean',default}`. |
@@ -102,6 +104,8 @@ extents; WASM additionally refuses unloaded tiles, solid destinations and blocke
 { type: 'unequip', id }
 { type: 'drop', id, x, y }
 { type: 'setCondition', id, condition }
+{ type: 'setWeight', id, weight }
+{ type: 'setActualWeight', id, actualWeight }
 { type: 'setHealth', health }
 { type: 'setCharacterStat', name, value }
 { type: 'setMoodleInputs', inputs }
@@ -120,8 +124,9 @@ before conversion to F32 state, avoiding boundary-rounding escapes. The page own
 [`ModItemDefinitionInput`, `ModItemDefinition`, `ModItemSpawn`, `ModItem` and
 `ModAction`](../../types/mod-api.d.ts) are the public records, not internal
 ordinals/pointers. Definitions contain `fullType`, nullable `bodyLocation`,
-`conditionMax`, `stackLimit`, `removeOnBroken`, `conditionLowerChanceOneIn` and
-detached source/appearance metadata; returned definitions add the real owner.
+`conditionMax`, `stackLimit`, `removeOnBroken`, `conditionLowerChanceOneIn`, native
+f32 `weight` and detached source/appearance metadata; returned definitions add
+the real owner. Omitted weight uses the original script-item constructor value 1.
 Registration is legal only inside synchronous `activate`, bound to that mod id.
 Duplicates require `{override:true}`. Failed activation restores first-touch
 numeric rows/owners and appended metadata. The application seeds missing original
@@ -129,8 +134,9 @@ footwear on New/restore without replacing saved definitions, then freezes
 registration before play; freezing is not a mod API.
 
 Items contain stable never-reused positive u32 `id`, `fullType`,
-`location:'ground'|'inventory'`, `x`, `y`, `condition`, `count` and currently worn
-`bodyLocation` (otherwise `null`). IDs/counts must be positive u32; condition must
+`location:'ground'|'inventory'`, `x`, `y`, `condition`, `count`, independent live
+`weight`/`actualWeight` and currently worn `bodyLocation` (otherwise `null`).
+IDs/counts must be positive u32; condition must
 be an integer in `[0, conditionMax]`; positions must be finite and pass WASM
 world membership validation. Omitted spawn count/condition are resolved by WASM
 from the real definition. Wear/unequip modify equipment state, not apparel meshes.
@@ -138,11 +144,29 @@ All mutations and hook replacements use the shared action pipeline and final
 WASM validation. Queries return detached records; unsupported engine capabilities
 throw attributed errors, never fake items or health.
 
+Ordinary flat-player pickup checks native carry capacity 50, not the initial
+encumbrance `maxWeight` 8. Existing inventory contributions are summed in pickup
+order using native float32 arithmetic; count does not multiply actual weight,
+and worn/equipped rows contribute actual weight ×0.3. The incoming item uses its
+full unequipped weight after nearest-hundredth correction of the current total.
+Definition overrides affect future instances, not already-created live fields.
+Base-weight changes do not change actual weight, and vice versa.
+
+Portable saves preserve that order: sorting by item ID can change float32 sums
+and turn an otherwise valid pickup into a refusal after reboot. Legacy items
+without the new live fields derive them from the validated saved definition.
+Actor words and engine ABI remain unchanged. Individual nonfinite, negative or
+out-of-f32-range inputs refuse atomically; pathological sums of individually
+legal values can overflow to positive Infinity, as native float arithmetic does.
+That aggregate is not stored as a new save field or written into bounded moodle
+inputs. This is not nested-container, ammo/fluid-content, hotbar, Moveable or
+trait/dynamic-weight parity. Lua unknown-content cases refuse explicitly.
+
 The current game path is a bounded original-footwear subset, not full inventory,
 loot or containers. One wearable per stack is explicit port policy. Equipped
 clothing is not connected to skinned rendering, and static FBX ground parsing is
-not ground-item visual acceptance. Automatic native weight/run-speed/tear and
-survival dynamics remain unsupported.
+not ground-item visual acceptance. Native flat-item carry now exists; automatic
+encumbrance/run-speed/tear, broader item use and survival dynamics remain unsupported.
 
 Health accepts finite `[0,100]`; `isDead()` currently means health zero.
 `onCharacterDeath` receives detached `{type:'CharacterDeath', submittedBy,

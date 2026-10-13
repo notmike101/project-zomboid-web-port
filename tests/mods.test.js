@@ -1006,6 +1006,7 @@ export function activate(api) {
     assert.deepEqual(api.items.get(id), {
         id, fullType: 'Fixture.Shoes', location: 'ground', x: 6, y: 5,
         condition: 0, count: 1, bodyLocation: null,
+        weight: 1, actualWeight: 1,
     });
     assert.equal(api.items.get(4_294_967_295), null);
     const record = api.items.list()[0];
@@ -1014,6 +1015,91 @@ export function activate(api) {
     assert.equal(engine.items()[0].condition, 0);
     assert.ok(Object.isFrozen(api.items) && Object.isFrozen(api.items.definitions));
     assert.throws(() => api.items.definitions.register(footwear), { modId: 'fx-items', stage: 'items' });
+});
+
+test('item weight veto preserves native carry load and independent live fields', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    await host.load(moduleUrl(`${manifestSource('fx-weights')}
+export function activate(api) {
+  fx.api = api;
+  api.items.definitions.register({...${JSON.stringify(footwear)}, weight: 2.5});
+}`));
+    const api = fx.api;
+    const id = api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 }).snapshot.id;
+
+    api.items.pickup(id);
+    const unveto = host.api.hooks.beforeAction((action) => action.type === 'setWeight' || action.type === 'setActualWeight' ? false : undefined);
+
+    assert.equal(api.items.setWeight(id, 9).cancelled, true);
+    const veto = api.items.setActualWeight(id, 12);
+
+    assert.equal(veto.submittedBy, 'fx-weights');
+    assert.equal(veto.cancelledBy, 'host');
+    assert.deepEqual([engine.items()[0].weight, engine.items()[0].actualWeight], [2.5, 2.5]);
+    assert.equal(api.items.inventoryState().capacityWeight, 2.5);
+    unveto();
+    api.items.setWeight(id, 9);
+    assert.deepEqual([engine.items()[0].weight, engine.items()[0].actualWeight], [9, 2.5]);
+    assert.equal(api.items.inventoryState().capacityWeight, 2.5);
+    api.items.setActualWeight(id, 12);
+    api.items.wear(id);
+    assert.deepEqual([engine.items()[0].weight, engine.items()[0].actualWeight], [9, 12]);
+    assert.ok(Math.abs(api.items.inventoryState().capacityWeight - 3.6) < 0.000_001);
+    api.items.drop(id, 5, 5);
+    assert.equal(api.items.inventoryState().capacityWeight, 0);
+    const second = api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 }).snapshot.id;
+
+    api.items.pickup(id);
+    api.items.pickup(second);
+    api.items.setActualWeight(id, 3.402_823_466_385_288_6e38);
+    api.items.setActualWeight(second, 3.402_823_466_385_288_6e38);
+    assert.equal(api.items.inventoryState().capacityWeight, Infinity, 'native aggregate overflow is observable, not an invented per-inventory ceiling');
+    host.dispose();
+});
+
+test('item weight boundaries reject full precision invalid values and captured owners become inert', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    await host.load(moduleUrl(`${manifestSource('fx-weight-boundaries')}
+export function activate(api) {
+  fx.api = api;
+  api.items.definitions.register(${JSON.stringify(footwear)});
+}`));
+    const api = fx.api;
+    const id = api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 }).snapshot.id;
+
+    api.items.pickup(id);
+    let calls = 0;
+
+    host.api.hooks.beforeAction(() => {
+        calls += 1;
+    });
+
+    for (const value of [-Number.MIN_VALUE, -1, Number.NaN, Infinity, Number.MAX_VALUE, 3.402_823_466_385_289e38]) {
+        assert.throws(() => api.items.setWeight(id, value), { modId: 'fx-weight-boundaries', stage: 'action' });
+        assert.throws(() => api.items.setActualWeight(id, value), { modId: 'fx-weight-boundaries', stage: 'action' });
+    }
+
+    assert.equal(calls, 0, 'invalid weights cannot reach hooks or native mutation');
+    assert.deepEqual([engine.items()[0].weight, engine.items()[0].actualWeight], [1, 1]);
+    assert.equal(api.items.inventoryState().capacityWeight, 1);
+    api.items.setWeight(id, 0.125);
+    api.items.setActualWeight(id, 0.375);
+    assert.deepEqual([engine.items()[0].weight, engine.items()[0].actualWeight], [0.125, 0.375]);
+    assert.equal(api.items.inventoryState().capacityWeight, 0.375);
+    const setWeight = api.items.setWeight;
+    const setActualWeight = api.items.setActualWeight;
+    const inventoryState = api.items.inventoryState;
+
+    host.dispose();
+    assert.throws(() => setWeight(id, 4), { modId: 'fx-weight-boundaries', stage: 'api' });
+    assert.throws(() => setActualWeight(id, 5), { modId: 'fx-weight-boundaries', stage: 'api' });
+    assert.throws(inventoryState, { modId: 'fx-weight-boundaries', stage: 'api' });
+    assert.deepEqual([engine.items()[0].weight, engine.items()[0].actualWeight], [0.125, 0.375]);
+    assert.equal(engine.inventoryState().capacityWeight, 0.375);
 });
 
 test('item command validation and detached replacements prevent invalid hook mutations', async () => {
@@ -1232,6 +1318,8 @@ test('core-only engines refuse item and health capabilities while movement mods 
         () => host.api.items.pickup(1), () => host.api.character.getHealth(),
         () => host.api.items.wear(1), () => host.api.items.unequip(1),
         () => host.api.items.drop(1, 5, 5), () => host.api.items.setCondition(1, 0),
+        () => host.api.items.inventoryState(), () => host.api.items.setWeight(1, 1),
+        () => host.api.items.setActualWeight(1, 1),
         () => host.api.character.isDead(), () => host.api.character.setHealth(0),
         () => host.api.character.moodles(),
     ]) {

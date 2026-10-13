@@ -1451,9 +1451,11 @@ pub extern "C" fn state_load(values: *const f64) -> i32 {
     })
 }
 
-// Bounded project item policy. No original tear timing/weight/speed rules are inferred.
+// Flat source item weights/carry capacity; tear timing and containers remain unmodeled.
 const MAX_ITEMS: usize = 4096;
 const MAX_DEFS: usize = 4096;
+const INVENTORY_CAPACITY: f32 = 50.0;
+const MOODLE_MAX_WEIGHT: usize = 25;
 
 #[derive(Clone, Copy)]
 struct ItemDefinition {
@@ -1463,6 +1465,7 @@ struct ItemDefinition {
     stack_limit: u32,
     remove_on_broken: bool,
     condition_lower_chance_one_in: u32,
+    weight: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -1475,6 +1478,8 @@ struct Item {
     condition: i32,
     count: u32,
     slot: u32,
+    weight: f32,
+    actual_weight: f32,
 }
 
 struct Items {
@@ -1528,8 +1533,26 @@ impl Items {
             && item.condition <= definition.condition_max
             && item.count > 0
             && item.count <= definition.stack_limit
+            && item.weight.is_finite()
+            && item.weight >= 0.0
+            && item.actual_weight.is_finite()
+            && item.actual_weight >= 0.0
             && (item.slot == 0 || (item.location == 1 && item.slot == definition.slot))
             && (item.location == 1 || item_position_valid(item.x, item.y))
+    }
+
+    fn capacity_weight(&self) -> f32 {
+        // Live row order preserves native inventory insertion order on pickup.
+        self.live
+            .iter()
+            .filter(|item| item.location == 1)
+            .fold(0.0, |sum, item| {
+                sum + if item.slot == 0 {
+                    item.actual_weight
+                } else {
+                    item.actual_weight * 0.3
+                }
+            })
     }
 }
 
@@ -1550,6 +1573,38 @@ fn item_position_valid(x: f64, y: f64) -> bool {
     }
 }
 
+fn item_weight(value: f64) -> Result<f32, i32> {
+    if !value.is_finite() {
+        return Err(NONFINITE);
+    }
+    if !(0.0..=F32_MAX).contains(&value) {
+        return Err(OUT_OF_RANGE);
+    }
+    Ok(value as f32)
+}
+
+fn floating_point_correction(weight: f32) -> f32 {
+    let mut scaled = weight * 100.0;
+    if scaled.fract() >= 0.5 {
+        scaled += 1.0;
+    }
+    (scaled as i32) as f32 / 100.0
+}
+
+/// Scratch: source inventory capacityWeight, hard capacity, stored MaxWeight.
+#[unsafe(no_mangle)]
+pub extern "C" fn inventory_state_read() {
+    let weight = ITEMS.with(|items| items.borrow().capacity_weight());
+    let max_weight = MOODLES.with(|state| state.borrow().inputs[MOODLE_MAX_WEIGHT]);
+    SCRATCH.with(|scratch| {
+        scratch.borrow_mut()[..3].copy_from_slice(&[
+            weight as f64,
+            INVENTORY_CAPACITY as f64,
+            max_weight,
+        ]);
+    });
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn item_definition_count() -> u32 {
     ITEMS.with(|items| items.borrow().definitions.len() as u32)
@@ -1566,7 +1621,12 @@ pub extern "C" fn item_definition_register(
     remove_on_broken: u32,
     chance: u32,
     override_existing: u32,
+    weight: f64,
 ) -> i32 {
+    let weight = match item_weight(weight) {
+        Ok(weight) => weight,
+        Err(code) => return code,
+    };
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
         let index = id as usize;
@@ -1596,6 +1656,7 @@ pub extern "C" fn item_definition_register(
             stack_limit,
             remove_on_broken: remove_on_broken != 0,
             condition_lower_chance_one_in: chance,
+            weight,
         };
         if index == items.definitions.len() {
             items.definitions.push(row);
@@ -1616,7 +1677,7 @@ pub extern "C" fn item_definition_register(
     })
 }
 
-/// Scratch: owner, conditionMax, slot, stackLimit, removeOnBroken, chance.
+/// Scratch: owner, conditionMax, slot, stackLimit, removeOnBroken, chance, weight.
 #[unsafe(no_mangle)]
 pub extern "C" fn item_definition_read(id: u32) -> i32 {
     ITEMS.with(|items| {
@@ -1626,13 +1687,14 @@ pub extern "C" fn item_definition_read(id: u32) -> i32 {
         };
         SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
-            scratch[..6].copy_from_slice(&[
+            scratch[..7].copy_from_slice(&[
                 row.owner as f64,
                 row.condition_max as f64,
                 row.slot as f64,
                 row.stack_limit as f64,
                 u32::from(row.remove_on_broken) as f64,
                 row.condition_lower_chance_one_in as f64,
+                row.weight as f64,
             ]);
         });
         OK
@@ -1700,7 +1762,7 @@ pub extern "C" fn item_count() -> u32 {
     ITEMS.with(|items| items.borrow().live.len() as u32)
 }
 
-/// Scratch: id, definition ordinal, location, x, y, condition, count, worn slot.
+/// Scratch: id, definition ordinal, location, x, y, condition, count, worn slot, weight, actualWeight.
 #[unsafe(no_mangle)]
 pub extern "C" fn item_read(index: u32) -> i32 {
     ITEMS.with(|items| {
@@ -1710,7 +1772,7 @@ pub extern "C" fn item_read(index: u32) -> i32 {
         };
         SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
-            scratch[..8].copy_from_slice(&[
+            scratch[..10].copy_from_slice(&[
                 item.id as f64,
                 item.definition as f64,
                 item.location as f64,
@@ -1719,6 +1781,8 @@ pub extern "C" fn item_read(index: u32) -> i32 {
                 item.condition as f64,
                 item.count as f64,
                 item.slot as f64,
+                item.weight as f64,
+                item.actual_weight as f64,
             ]);
         });
         OK
@@ -1738,6 +1802,10 @@ pub extern "C" fn item_spawn(definition: u32, x: f64, y: f64, count: u32, condit
     let next = ENGINE.with(|engine| engine.borrow().next_item_id);
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
+        let Some(row) = items.definitions.get(definition as usize) else {
+            return OUT_OF_RANGE;
+        };
+        let weight = row.weight;
         let item = Item {
             id: next as u32,
             definition,
@@ -1747,6 +1815,8 @@ pub extern "C" fn item_spawn(definition: u32, x: f64, y: f64, count: u32, condit
             condition,
             count,
             slot: 0,
+            weight,
+            actual_weight: weight,
         };
         if next > u32::MAX as u64
             || items.live.len() >= MAX_ITEMS
@@ -1767,12 +1837,18 @@ pub extern "C" fn item_spawn(definition: u32, x: f64, y: f64, count: u32, condit
 pub extern "C" fn item_pickup(id: u32) -> i32 {
     let actor = ENGINE.with(|engine| *engine.borrow());
     change_item(id, |items, index| {
-        let item = &mut items.live[index];
+        let item = items.live[index];
         // Project adjacency radius 1.5 tiles; not a native interaction claim.
-        if item.location != 0 || (item.x - actor.x as f64).hypot(item.y - actor.y as f64) > 1.5 {
+        if item.location != 0
+            || (item.x - actor.x as f64).hypot(item.y - actor.y as f64) > 1.5
+            || floating_point_correction(items.capacity_weight()) + item.actual_weight
+                > INVENTORY_CAPACITY
+        {
             return OUT_OF_RANGE;
         }
+        let mut item = items.live.remove(index);
         item.location = 1;
+        items.live.push(item);
         OK
     })
 }
@@ -1857,6 +1933,30 @@ pub extern "C" fn item_set_condition(id: u32, condition: i32) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn item_set_weight(id: u32, weight: f64) -> i32 {
+    let weight = match item_weight(weight) {
+        Ok(weight) => weight,
+        Err(code) => return code,
+    };
+    change_item(id, |items, index| {
+        items.live[index].weight = weight;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_set_actual_weight(id: u32, actual_weight: f64) -> i32 {
+    let actual_weight = match item_weight(actual_weight) {
+        Ok(weight) => weight,
+        Err(code) => return code,
+    };
+    change_item(id, |items, index| {
+        items.live[index].actual_weight = actual_weight;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn item_import_begin() -> i32 {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
@@ -1888,9 +1988,17 @@ pub extern "C" fn item_import_stage(
     condition: i32,
     count: u32,
     slot: u32,
+    weight: f64,
+    actual_weight: f64,
 ) -> i32 {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
+        let (Ok(weight), Ok(actual_weight)) = (item_weight(weight), item_weight(actual_weight))
+        else {
+            items.staged.clear();
+            items.importing = false;
+            return BAD_FORMAT;
+        };
         let item = Item {
             id,
             definition,
@@ -1900,6 +2008,8 @@ pub extern "C" fn item_import_stage(
             condition,
             count,
             slot,
+            weight,
+            actual_weight,
         };
         if !items.importing
             || items.staged.len() >= MAX_ITEMS

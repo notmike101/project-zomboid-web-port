@@ -568,6 +568,7 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.freezeItemDefinitions(),
         () => subject.items(),
         () => subject.importItems([]),
+        () => subject.inventoryState(),
         () => subject.wornItem('base:shoes'),
         () => subject.getHealth(),
         () => subject.isDead(),
@@ -578,6 +579,8 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.command({ type: 'unequip', id: 1 }),
         () => subject.command({ type: 'drop', id: 1, x: 5, y: 5 }),
         () => subject.command({ type: 'setCondition', id: 1, condition: 0 }),
+        () => subject.command({ type: 'setWeight', id: 1, weight: 1 }),
+        () => subject.command({ type: 'setActualWeight', id: 1, actualWeight: 1 }),
         () => subject.importDoors([], { squares: [] }),
         () => subject.doors(),
         () => subject.toggleDoor('door:10:10:0:0'),
@@ -832,10 +835,222 @@ test('invalid state envelopes and semantic refusals leave every state word untou
 function shoe(fullType = 'Base.Shoe', extra = {}) {
     return {
         fullType, bodyLocation: 'base:shoes', conditionMax: 30, stackLimit: 1,
-        removeOnBroken: false, conditionLowerChanceOneIn: 20,
+        removeOnBroken: false, conditionLowerChanceOneIn: 20, weight: 1,
         source: { file: 'clothing.txt', model: 'Boots_Ground' }, ...extra,
     };
 }
+
+test('native item pickup refuses source weight51 without treating maxWeight8 as capacity', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.Heavy', { weight: 51 }), { owner: 'base' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.Heavy', x: 5, y: 5 }).id;
+    const before = subject.items();
+    const actor = subject.saveState();
+
+    assert.throws(() => subject.command({ type: 'pickup', id }), RangeError);
+    assert.deepEqual(subject.items(), before);
+    assert.deepEqual(subject.saveState(), actor);
+    assert.deepEqual(subject.inventoryState(), { capacityWeight: 0, capacity: 50, maxWeight: 8 });
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+    const api = instance.exports;
+
+    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 51), 0);
+    assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
+    assert.notEqual(api.item_pickup(1), 0, 'the native shared pickup must enforce capacity');
+});
+
+test('native inventory capacity ignores count and applies worn reduction before pickup', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.Load', { weight: 49, stackLimit: 100 }), { owner: 'base' });
+    subject.registerItemDefinition(shoe('Base.One', { weight: 1 }), { owner: 'base' });
+    const load = subject.command({ type: 'spawnItem', fullType: 'Base.Load', x: 5, y: 5, count: 100 }).id;
+    const first = subject.command({ type: 'spawnItem', fullType: 'Base.One', x: 5, y: 5 }).id;
+    const second = subject.command({ type: 'spawnItem', fullType: 'Base.One', x: 5, y: 5 }).id;
+
+    subject.command({ type: 'pickup', id: load });
+    assert.equal(subject.inventoryState().capacityWeight, 49);
+    subject.command({ type: 'pickup', id: first });
+    assert.equal(subject.inventoryState().capacityWeight, 50);
+    assert.throws(() => subject.command({ type: 'pickup', id: second }), RangeError);
+    subject.command({ type: 'wear', id: load });
+    assert.ok(near(subject.inventoryState().capacityWeight, 15.7));
+    subject.command({ type: 'pickup', id: second });
+    assert.ok(near(subject.inventoryState().capacityWeight, 16.7));
+    subject.command({ type: 'unequip', id: load });
+    assert.equal(subject.inventoryState().capacityWeight, 51, 'unequip is not a pickup capacity check');
+    subject.command({ type: 'drop', id: load, x: 5, y: 5 });
+    assert.equal(subject.inventoryState().capacityWeight, 2);
+    const detached = subject.inventoryState();
+
+    detached.capacityWeight = 999;
+    assert.equal(subject.inventoryState().capacityWeight, 2);
+    subject.command({ type: 'setMoodleInputs', inputs: { maxWeight: 3 } });
+    assert.deepEqual(subject.inventoryState(), { capacityWeight: 2, capacity: 50, maxWeight: 3 });
+});
+
+test('native pickup rounds current f32 weight to nearest hundredth rather than ceiling', async () => {
+    await Promise.all([[49.994, 0.01, true], [49.996, 0.001, false]].map(async ([weight, incoming, accepted]) => {
+        const subject = await engine();
+
+        subject.registerItemDefinition(shoe('Base.Load', { weight }), { owner: 'base' });
+        subject.registerItemDefinition(shoe('Base.Small', { weight: incoming }), { owner: 'base' });
+        const load = subject.command({ type: 'spawnItem', fullType: 'Base.Load', x: 5, y: 5 }).id;
+        const small = subject.command({ type: 'spawnItem', fullType: 'Base.Small', x: 5, y: 5 }).id;
+
+        subject.command({ type: 'pickup', id: load });
+
+        if (accepted) {
+            subject.command({ type: 'pickup', id: small });
+            assert.equal(subject.items()[1].location, 'inventory');
+        } else {
+            const before = subject.items();
+
+            assert.throws(() => subject.command({ type: 'pickup', id: small }), RangeError);
+            assert.deepEqual(subject.items(), before);
+        }
+    }));
+});
+
+test('native live base and actual weights remain independent across definition overrides', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 1.25 }), { owner: 'base' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
+
+    subject.command({ type: 'pickup', id });
+    subject.command({ type: 'setWeight', id, weight: 80.5 });
+    assert.equal(subject.items()[0].weight, 80.5);
+    assert.equal(subject.items()[0].actualWeight, 1.25);
+    assert.equal(subject.inventoryState().capacityWeight, 1.25);
+    subject.command({ type: 'setActualWeight', id, actualWeight: 2.125 });
+    assert.equal(subject.items()[0].weight, 80.5);
+    assert.equal(subject.inventoryState().capacityWeight, 2.125);
+    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 4.5 }), { owner: 'mod', override: true });
+    subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 });
+    assert.deepEqual(subject.items().map(({ weight, actualWeight }) => [weight, actualWeight]),
+        [[80.5, 2.125], [4.5, 4.5]]);
+    const detached = subject.items();
+
+    detached[0].actualWeight = 999;
+    assert.equal(subject.items()[0].actualWeight, 2.125);
+    const ordered = await engine();
+
+    ordered.registerItemDefinition(shoe('Base.Ordered', { weight: 0 }), { owner: 'base' });
+    const ids = [0, 1, 2].map(() => ordered.command({
+        type: 'spawnItem', fullType: 'Base.Ordered', x: 5, y: 5,
+    }).id);
+
+    for (const orderedId of ids.toReversed()) {
+        ordered.command({ type: 'pickup', id: orderedId });
+    }
+
+    for (const [orderedId, actualWeight] of [[ids[0], 16_777_216], [ids[1], 1], [ids[2], 1]]) {
+        ordered.command({ type: 'setActualWeight', id: orderedId, actualWeight });
+    }
+
+    assert.deepEqual(ordered.items().map((item) => item.id), ids.toReversed());
+    assert.equal(ordered.inventoryState().capacityWeight, 16_777_218,
+        'f32 summation must follow pickup order, not spawn order');
+    const orderedRestore = await engine();
+
+    orderedRestore.registerItemDefinition(shoe('Base.Ordered', { weight: 0 }), { owner: 'base' });
+    orderedRestore.importItems(ordered.items());
+    orderedRestore.loadState(ordered.saveState());
+    assert.equal(orderedRestore.inventoryState().capacityWeight, 16_777_218,
+        'save item order must preserve the source float summation order');
+    ordered.command({ type: 'drop', id: ids[2], x: 5, y: 5 });
+    const orderBeforeRefusal = ordered.items();
+
+    assert.throws(() => ordered.command({ type: 'pickup', id: ids[2] }), RangeError);
+    assert.deepEqual(ordered.items(), orderBeforeRefusal);
+});
+
+test('native item weight restore and definition rollback refuse malformed overflow atomically', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 1.25 }), { owner: 'base' });
+    subject.beginItemDefinitionRegistration('mod');
+    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 3 }), { owner: 'mod', override: true });
+    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 4 }), { owner: 'mod', override: true });
+    subject.rollbackItemDefinitionRegistration('mod');
+    assert.equal(subject.itemDefinitions()[0].weight, 1.25);
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
+
+    subject.command({ type: 'setWeight', id, weight: 9.75 });
+    subject.command({ type: 'setActualWeight', id, actualWeight: 0.125 });
+    const records = subject.items();
+    const restored = await engine();
+
+    restored.registerItemDefinition(subject.itemDefinitions()[0], { owner: 'base' });
+    restored.importItems(records);
+    restored.loadState(subject.saveState());
+    assert.deepEqual(restored.items(), records);
+    const actor = restored.saveState();
+    const definitions = restored.itemDefinitions();
+
+    for (const value of [-Number.MIN_VALUE, Number.NaN, Infinity, Number.MAX_VALUE,
+        3.402_823_466_385_288_6e38 + 2 ** 102, undefined, null]) {
+        assert.throws(() => restored.registerItemDefinition(shoe('Bad.Weight', { weight: value }), { owner: 'base' }));
+        assert.deepEqual(restored.itemDefinitions(), definitions);
+
+        for (const field of ['weight', 'actualWeight']) {
+            assert.throws(() => restored.command({ type: field === 'weight' ? 'setWeight' : 'setActualWeight', id, [field]: value }));
+            assert.throws(() => restored.importItems([records[0], { ...records[0], id: 2, [field]: value }]));
+            assert.deepEqual(restored.items(), records);
+            assert.deepEqual(restored.saveState(), actor);
+        }
+    }
+
+    const legacy = { ...records[0] };
+
+    delete legacy.weight;
+    delete legacy.actualWeight;
+    restored.importItems([legacy]);
+    assert.equal(restored.items()[0].weight, 1.25);
+    assert.equal(restored.items()[0].actualWeight, 1.25);
+    const defaultDefinition = shoe('Base.Default');
+
+    delete defaultDefinition.weight;
+    restored.registerItemDefinition(defaultDefinition, { owner: 'base' });
+    restored.command({ type: 'spawnItem', fullType: 'Base.Default', x: 5, y: 5 });
+    assert.equal(restored.items()[1].weight, 1);
+    assert.equal(restored.items()[1].actualWeight, 1);
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+    const api = instance.exports;
+
+    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1.25), 0);
+    assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
+    assert.equal(api.item_import_begin(), 0);
+    assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 30, 1, 0, 2.5, 0.5), 0);
+    assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 30, 1, 0, 1, Number.MAX_VALUE), 0);
+    assert.notEqual(api.item_import_commit(), 0);
+    assert.equal(api.item_count(), 1);
+    assert.equal(api.item_read(0), 0);
+    assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr(), true), 1);
+
+    for (const value of [-Number.MIN_VALUE, 3.402_823_466_385_288_6e38 + 2 ** 102, Number.NaN, Infinity]) {
+        assert.notEqual(api.item_definition_register(1, 1, 30, 1, 1, 0, 20, 0, value), 0);
+        assert.equal(api.item_definition_count(), 1);
+        assert.notEqual(api.item_set_weight(1, value), 0);
+        assert.notEqual(api.item_set_actual_weight(1, value), 0);
+        assert.equal(api.item_read(0), 0);
+        const live = new DataView(api.memory.buffer, api.scratch_ptr());
+
+        assert.equal(live.getFloat64(64, true), 1.25);
+        assert.equal(live.getFloat64(72, true), 1.25);
+        assert.equal(api.item_import_begin(), 0);
+        assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 30, 1, 0, 2.5, 0.5), 0);
+        assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 30, 1, 0, 1, value), 0);
+        assert.notEqual(api.item_import_commit(), 0);
+        assert.equal(api.item_count(), 1);
+        assert.equal(api.item_read(0), 0);
+        assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr(), true), 1);
+        api.state_save(api.scratch_ptr());
+        assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr() + 88, true), 2);
+    }
+});
 
 test('definition transactions restore first-touched numeric rows, owners and source metadata', async () => {
     const subject = await engine();
@@ -966,7 +1181,7 @@ test('saved counters continue stable IDs and scalar health without a legacy acto
     assert.equal(restored.getHealth(), 100);
 });
 
-test('item boundaries refuse malformed values and enforce only world membership and project pickup radius', async () => {
+test('item boundaries refuse malformed values and enforce capacity, world membership and project pickup radius', async () => {
     const subject = await engine();
 
     for (const extra of [{ conditionMax: 0 }, { stackLimit: 0 }, { removeOnBroken: 1 },
@@ -1002,26 +1217,26 @@ test('numeric WASM staging cannot publish a valid prefix after a later invalid r
     const { instance } = await WebAssembly.instantiate(moduleBytes, {});
     const api = instance.exports;
 
-    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0), 0);
+    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1), 0);
     assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
     assert.equal(api.item_import_begin(), 0);
-    assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 20, 1, 1), 0);
-    assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 31, 1, 0), 0);
+    assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 20, 1, 1, 1, 1), 0);
+    assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 31, 1, 0, 1, 1), 0);
     assert.notEqual(api.item_import_commit(), 0);
     assert.equal(api.item_count(), 1);
     assert.equal(api.item_read(0), 0);
     assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr(), true), 1);
     assert.equal(api.item_definition_begin(2), 0);
-    assert.equal(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1), 0);
-    assert.equal(api.item_definition_register(0, 2, 50, 1, 1, 0, 5, 1), 0);
+    assert.equal(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1, 2), 0);
+    assert.equal(api.item_definition_register(0, 2, 50, 1, 1, 0, 5, 1, 3), 0);
     assert.equal(api.item_definition_rollback(2), 0);
     assert.equal(api.item_definition_read(0), 0);
     const row = new DataView(api.memory.buffer, api.scratch_ptr());
 
-    assert.deepEqual(Array.from({ length: 6 }, (_, index) => row.getFloat64(index * 8, true)),
-        [1, 30, 1, 1, 0, 20]);
+    assert.deepEqual(Array.from({ length: 7 }, (_, index) => row.getFloat64(index * 8, true)),
+        [1, 30, 1, 1, 0, 20, 1]);
     assert.equal(api.item_definition_freeze(), 0);
-    assert.notEqual(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1), 0);
+    assert.notEqual(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1, 2), 0);
 });
 
 test('live references refuse incompatible overrides and unloaded world holes refuse drops', async () => {
@@ -1085,11 +1300,11 @@ test('bounded numeric tables refuse overflow without changing live rows or the n
     const api = instance.exports;
 
     for (let index = 0; index < 4_096; index += 1) {
-        assert.equal(api.item_definition_register(index, 1, 30, 0, 1, 0, 20, 0), 0);
+        assert.equal(api.item_definition_register(index, 1, 30, 0, 1, 0, 20, 0, 1), 0);
         assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
     }
 
-    assert.notEqual(api.item_definition_register(4_096, 1, 30, 0, 1, 0, 20, 0), 0);
+    assert.notEqual(api.item_definition_register(4_096, 1, 30, 0, 1, 0, 20, 0, 1), 0);
     assert.notEqual(api.item_spawn(0, 5, 5, 1, 30), 0);
     assert.equal(api.item_definition_count(), 4_096);
     assert.equal(api.item_count(), 4_096);

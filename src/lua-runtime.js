@@ -150,23 +150,36 @@ PZAPI = {ModOptions = {create = function(_, id, title)
     optionRegistry[#optionRegistry + 1] = {owner = context(), options = options}
     return options
 end}}
+local itemCache = {}
 local function item(id)
     if id == nil then return nil end
+    if itemCache[id] then return itemCache[id] end
     local value=nativeObject('InventoryItem')
     local function record() return hostCall('item',id) end
     function value:getFullType() return record().fullType end
     function value:getCondition() return record().condition end
     function value:getConditionMax() return hostCall('itemDefinition',record().fullType).conditionMax end
+    function value:getWeight() return hostCall('itemWeight',id,'weight') end
+    function value:getActualWeight() return hostCall('itemWeight',id,'actualWeight') end
+    function value:getContentsWeight() return hostCall('itemContentsWeight',id) end
+    function value:getUnequippedWeight() return self:getActualWeight() + self:getContentsWeight() end
     function value:getCurrentCondition()
         local maximum=self:getConditionMax()
         assert(type(maximum)=='number' and maximum>0, 'unsupported item condition percentage without positive original ConditionMax')
         return self:getCondition()/maximum*100
     end
     function value:setCondition(condition) hostCall('setCondition',id,condition) end
+    function value:setWeight(weight) hostCall('setWeight',id,weight) end
+    function value:setActualWeight(actualWeight) hostCall('setActualWeight',id,actualWeight) end
+    itemCache[id] = value
     return value
 end
 function player:getClothingItem_Feet() return item(hostCall('worn','base:shoes')) end
 function player:getWornItem(location) return item(hostCall('worn',location)) end
+local inventory = nativeObject('ItemContainer')
+function inventory:getCapacityWeight() return hostCall('inventoryState').capacityWeight end
+function inventory:getMaxWeight() return hostCall('inventoryState').maxWeight end
+function player:getInventory() hostCall('inventoryState'); return inventory end
 function player:getHealth() return hostCall('health') end
 function player:isDead() return hostCall('isDead') end
 local moodles = nativeObject('Moodles')
@@ -799,6 +812,31 @@ export async function createLuaSession(options = {}) {
             case 'item': return capability('items', 'get', args[0]);
             case 'itemDefinition': return capability('items.definitions', 'get', args[0]);
             case 'setCondition': return capability('items', 'setCondition', ...args);
+            case 'setWeight': return capability('items', 'setWeight', ...args);
+            case 'setActualWeight': return capability('items', 'setActualWeight', ...args);
+            case 'inventoryState': return capability('items', 'inventoryState');
+            case 'itemWeight': {
+                const record = capability('items', 'get', args[0]);
+                const value = record?.[args[1]];
+
+                if (!Number.isFinite(value) || value < 0) {
+                    throw new Error(`unsupported authoritative item ${args[1]}`);
+                }
+
+                return value;
+            }
+            case 'itemContentsWeight': {
+                const record = capability('items', 'get', args[0]);
+                const definition = record && capability('items.definitions', 'get', record.fullType);
+
+                if ((definition?.type !== 'Clothing' && definition?.type !== 'base:clothing')
+                    || Object.keys(definition).some((name) => /ammo|fluid|component/i.test(name))
+                    || (Array.isArray(definition.rawFields) && definition.rawFields.some((field) => field.children || /ammo|fluid|component/i.test(field.name)))) {
+                    throw new Error('unsupported item contents weight outside source-proven flat Clothing without ammo or fluid components');
+                }
+
+                return 0;
+            }
             case 'worn': {
                 const worn = capability('items', 'worn', args[0]);
 

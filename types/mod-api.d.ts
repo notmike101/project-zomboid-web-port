@@ -42,6 +42,8 @@ export type ModAction =
   | { type: 'pickup' | 'wear' | 'unequip'; id: number }
   | { type: 'drop'; id: number; x: number; y: number }
   | { type: 'setCondition'; id: number; condition: number }
+  | { type: 'setWeight'; id: number; weight: number }
+  | { type: 'setActualWeight'; id: number; actualWeight: number }
   | { type: 'setHealth'; health: number }
   | { type: 'setCharacterStat'; name: string; value: number }
   | { type: 'setMoodleInputs'; inputs: Record<string, number | boolean> };
@@ -63,12 +65,15 @@ export interface ModItemDefinitionInput {
   stackLimit: number;
   removeOnBroken: boolean;
   conditionLowerChanceOneIn: number;
+  /** Omitted weight uses native ScriptItem's constructor default 1; resolved values are f32. */
+  weight?: number;
   [metadata: string]: unknown;
 }
 
 /** Resolved numeric fields and actual owner, read back from the authoritative engine. */
 export interface ModItemDefinition extends ModItemDefinitionInput {
   owner: string;
+  weight: number;
 }
 
 /** Stable positive uint32 identity; null bodyLocation means not currently worn. */
@@ -81,6 +86,18 @@ export interface ModItem {
   condition: number;
   count: number;
   bodyLocation: string | null;
+  /** Live base field copied from the definition at creation; independent of actualWeight. */
+  weight: number;
+  /** Live effective actual field used by native inventory carry accounting. */
+  actualWeight: number;
+}
+
+/** Current flat player inventory; pickup capacity is separate from stored encumbrance maxWeight. */
+export interface ModInventoryState {
+  /** Native f32 accumulation; valid individual weights can overflow the aggregate to +Infinity. */
+  capacityWeight: number;
+  capacity: number;
+  maxWeight: number;
 }
 
 /** Opaque original source IDs in real engine order; no guessed neutral registry. */
@@ -303,6 +320,8 @@ export interface ModApi {
     /** Valid unknown ids return null. */
     get(id: number): ModItem | null;
     worn(bodyLocation: string): ModItem | null;
+    /** Detached authoritative current-player carry state; unavailable engines throw. */
+    inventoryState(): ModInventoryState;
     /** All mutations use actions.submit's shared synchronous hook path. */
     spawn(input: ModItemSpawn): ModCommandResult;
     pickup(id: number): ModCommandResult;
@@ -310,6 +329,10 @@ export interface ModApi {
     unequip(id: number): ModCommandResult;
     drop(id: number, x: number, y: number): ModCommandResult;
     setCondition(id: number, condition: number): ModCommandResult;
+    /** Changes only the base weight; finite nonnegative values must fit native f32. */
+    setWeight(id: number, weight: number): ModCommandResult;
+    /** Changes only actual weight used for carry load, through shared precommit hooks. */
+    setActualWeight(id: number, actualWeight: number): ModCommandResult;
   };
   /** Actual engine health; no authoritative SDK shadow or invented moodle rules. */
   character: {
@@ -490,6 +513,7 @@ export interface ModEngine {
   items?(): ModItem[];
   importItems?(records: ModItem[]): void;
   wornItem?(bodyLocation: string): ModItem | null;
+  inventoryState?(): ModInventoryState;
   getHealth?(): number;
   isDead?(): boolean;
   moodles?(): ModMoodle[];

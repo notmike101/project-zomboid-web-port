@@ -29,7 +29,7 @@ const WORLD_MAX = 10;
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 10;
 const MAX_SAVE_BYTES = 256 * 1_024;
-const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel', 'toggleDoor', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setHealth', 'setCharacterStat', 'setMoodleInputs']);
+const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel', 'toggleDoor', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setWeight', 'setActualWeight', 'setHealth', 'setCharacterStat', 'setMoodleInputs']);
 /** Reserved internal attribution id for page input; a mod cannot claim it. */
 const RESERVED_ID = 'host';
 
@@ -750,6 +750,18 @@ export function createModHost(engine, options = {}) {
             return { type, id, condition: integer(candidate.condition, 'condition', 0, 0x7F_FF_FF_FF) };
         }
 
+        if (type === 'setWeight' || type === 'setActualWeight') {
+            capability('inventoryState');
+            const field = type === 'setWeight' ? 'weight' : 'actualWeight';
+            const value = candidate[field];
+
+            if (!Number.isFinite(value) || value < 0 || value > 3.402_823_466_385_288_6e38) {
+                throw modError(modId, 'action', `${field} must be a finite nonnegative native f32 weight`);
+            }
+
+            return type === 'setWeight' ? { type, id, weight: value } : { type, id, actualWeight: value };
+        }
+
         return { type, id };
     }
 
@@ -997,6 +1009,21 @@ export function createModHost(engine, options = {}) {
                  */
                 worn: (bodyLocation) => access('items', () => capability('wornItem')(identity(bodyLocation, 'bodyLocation'))),
                 /**
+                 * Read detached numeric current-player carry state from the engine.
+                 *
+                 * @returns {import('../types/mod-api').ModInventoryState} Native carry load, effective capacity and stored maxWeight.
+                 */
+                inventoryState: () => access('items', () => {
+                    const state = capability('inventoryState')();
+
+                    if (!state || typeof state.capacityWeight !== 'number' || Number.isNaN(state.capacityWeight) || state.capacityWeight < 0
+                        || !Number.isFinite(state.capacity) || state.capacity < 0 || !Number.isFinite(state.maxWeight) || state.maxWeight < 0) {
+                        throw new TypeError('authoritative numeric inventory state is unsupported by this engine');
+                    }
+
+                    return { ...state };
+                }),
+                /**
                  * Omitted count/condition remain omitted until the authoritative engine defaults them.
                  *
                  * @param {import('../types/mod-api').ModItemSpawn} input - Qualified definition and finite spawn position, with optional count and condition.
@@ -1041,6 +1068,22 @@ export function createModHost(engine, options = {}) {
                  * @returns {ModCommandResult} Attributed condition-update outcome.
                  */
                 setCondition: (id, condition) => mutate({ type: 'setCondition', id, condition }),
+                /**
+                 * Update only the live base weight through precommit hooks.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @param {number} weight - Finite nonnegative weight representable by native f32.
+                 * @returns {ModCommandResult} Attributed base-weight update.
+                 */
+                setWeight: (id, weight) => mutate({ type: 'setWeight', id, weight }),
+                /**
+                 * Update only the live actual weight used by native carry accounting.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @param {number} actualWeight - Finite nonnegative weight representable by native f32.
+                 * @returns {ModCommandResult} Attributed actual-weight update.
+                 */
+                setActualWeight: (id, actualWeight) => mutate({ type: 'setActualWeight', id, actualWeight }),
             },
             character: {
                 /**
