@@ -1,6 +1,8 @@
 /** @file Synthetic original-format map/tile projection regressions; no installed bytes. */
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createEngine } from '../src/engine.js';
 import { openMapCell } from '../src/map-tiles.js';
 import { createTileRegistry } from '../src/tile-definitions.js';
 
@@ -139,6 +141,500 @@ test('projects independent walls and canonical opposite rooms from LOTH without 
     ]);
     assert.deepEqual([...tiles].map(([name, sprite]) => [name, sprite.tileType, [...sprite.properties]]), before);
     assert.deepEqual(await projectWorldObjects([map], tiles), projected);
+});
+
+// Inventing a west frame edge from both uppercase flags makes the real native square west of that object standable.
+test('native standability uses constructor window orientation and generic N-first frames from source bytes', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const fixtures = await Promise.all([
+        { properties: [['WindowN', 'false'], ['WindowW', 'false']], expected: false, label: 'N then W uppercase frame' },
+        { properties: [['WindowW', 'false'], ['WindowN', 'false']], expected: false, label: 'W then N uppercase frame' },
+        { properties: [['windowW', 'false'], ['WindowN', 'false']], expected: true, label: 'actual west window plus generic north frame' },
+    ].map(async ({ properties, expected, label }) => {
+        const tiles = registry([[['solidtrans', 'false']], properties]);
+        const map = await cell({ names: ['synthetic_0', 'synthetic_1'], records: [2, -1, 0, -1, 7, 2, -1, 1, -1, 55] });
+        const projection = await projectWorldObjects([map], tiles);
+
+        return { projection, expected, label };
+    }));
+
+    for (const { projection, expected, label } of fixtures) {
+        subject.importDoors(projection.doors, { squares: projection.squares });
+        assert.equal(subject.getSquare(0, 0, 0).canStand, expected, label);
+    }
+});
+
+// A constructor selected before actual windows still exposes generic N-first frame flags, not a lowercase west window.
+test('native window edges follow source light and curtain constructor priority while windows precede trees', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const navigation = new Uint8Array(1_026);
+
+    navigation[1] = 1;
+    subject.worldImportCell(0, 0, navigation);
+    const fixtures = await Promise.all([
+        { type: 'lightswitch', value: 'false', expected: false },
+        { type: 'curtainN', value: 'false', expected: false },
+        { type: 'tree', value: '1', expected: true },
+    ].map(async ({ type, value, expected }) => {
+        const tiles = registry([
+            [['solidtrans', 'false']],
+            [['windowW', 'false'], ['WindowN', 'false'], [type, value]],
+        ]);
+        const map = await cell({ names: ['synthetic_0', 'synthetic_1'], records: [2, -1, 0, -1, 7, 2, -1, 1, -1, 55] });
+        const projection = await projectWorldObjects([map], tiles);
+
+        return { projection, expected, type };
+    }));
+
+    for (const { projection, expected, type } of fixtures) {
+        subject.importDoors(projection.doors, { squares: projection.squares });
+        assert.equal(subject.getSquare(0, 0, 0).canStand, expected, type);
+        assert.equal(subject.navFlags(1, 0) & 6, 6, `${type}: raw collision windows remain north and west`);
+        subject.loadState({ version: 2, values: [0.5, 0.5, 1.5, 0.5, 0.5, 0, 0, 0, 0, 1, 100, 1] });
+        assert.throws(() => subject.command({ type: 'walk', x: 1, y: 0 }), /blocked/iu, `${type}: west collision stays blocked`);
+    }
+});
+
+// An uppercase frame attached to an earlier matching wall is visual-only, unlike a lowercase actual window.
+test('native square facts exclude source frame overlays attached to earlier matching walls', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const fixtures = await Promise.all([
+        { flag: 'WindowW', order: [1, 2], expected: false, label: 'uppercase frame overlays an earlier wall' },
+        { flag: 'windowW', order: [1, 2], expected: true, label: 'lowercase window creates an actual object' },
+        { flag: 'WindowW', order: [2, 1], expected: true, label: 'a later wall cannot consume an earlier frame' },
+    ].map(async ({ flag, order, expected, label }) => {
+        const tiles = registry([
+            [['solidtrans', 'false']],
+            [['wall', 'false'], ['cutW', 'false']],
+            [[flag, 'false'], ['solidfloor', 'false']],
+        ]);
+        const map = await cell({
+            names: ['synthetic_0', 'synthetic_1', 'synthetic_2'],
+            records: [2, -1, 0, -1, 7, 3, -1, ...order, -1, 55],
+        });
+        const projection = await projectWorldObjects([map], tiles);
+
+        return { projection, expected, label };
+    }));
+
+    for (const { projection, expected, label } of fixtures) {
+        subject.importDoors(projection.doors, { squares: projection.squares });
+        assert.equal(subject.getSquare(0, 0, 0).canStand, expected, label);
+        assert.equal(subject.getSquare(1, 0, 0).solidFloor, expected, `${label}: source floor facts`);
+    }
+});
+
+// Raw placement aggregation invents floors on attachments and keeps facts from replaced actual trees.
+test('native facts replay source attachment and actual tree membership without changing collision masks', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const fixtures = await Promise.all([
+        {
+            tiles: [[['CountertopAttach', 'false']], [['Countertop', 'false'], ['SlopedSurfaceDirection', 'N']]],
+            floor: false, solid: false, walls: 0, label: 'countertop attachment adds no slope',
+        },
+        {
+            tiles: [[['Countertop', 'false'], ['SlopedSurfaceDirection', 'N']]],
+            floor: true, solid: false, walls: 0, label: 'countertop without a target creates an object',
+        },
+        {
+            tiles: [[['wall', 'false'], ['cutW', 'false']], [['WallOverlay', 'false'], ['attachedW', 'false'], ['solidfloor', 'false']]],
+            floor: false, solid: false, walls: 0, label: 'wall attachment adds no floor',
+        },
+        {
+            tiles: [[['FloorOverlay', 'false'], ['SlopedSurfaceDirection', 'N']]],
+            floor: false, solid: false, walls: 0, label: 'floor overlay without a floor creates no object',
+        },
+        {
+            tiles: [[['container', 'fireplace'], ['FloorOverlay', 'false'], ['solidfloor', 'false']]],
+            floor: true, solid: false, walls: 0, label: 'earlier furniture constructor wins over overlays',
+        },
+        {
+            tiles: [[['tree', '1'], ['solid', 'false'], ['solidfloor', 'false'], ['HoppableN', 'false']], [['tree', '1']]],
+            floor: false, solid: false, walls: 2, label: 'new actual tree replaces the first actual tree',
+        },
+        {
+            tiles: [[['tree', '1'], ['solid', 'false'], ['solidfloor', 'false']], [['tree', '1'], ['CustomName', 'Mannequin']]],
+            floor: true, solid: true, walls: 0, label: 'mannequin tree-type sprite does not replace actual trees',
+        },
+    ].map(async ({ tiles, ...expected }) => {
+        const map = await cell({
+            names: tiles.map((_, index) => `synthetic_${index}`),
+            records: [tiles.length + 1, -1, ...tiles.map((_, index) => index), -1, 63],
+        });
+        const projection = await projectWorldObjects([map], registry(tiles));
+
+        return { projection, ...expected };
+    }));
+
+    for (const { projection, floor, solid, walls, label } of fixtures) {
+        subject.importDoors(projection.doors, { squares: projection.squares });
+        const square = subject.getSquare(0, 0, 0);
+
+        assert.deepEqual({ solid: square.solid, solidFloor: square.solidFloor }, { solid, solidFloor: floor }, label);
+        assert.equal(projection.squares[0].independentWalls, walls, `${label}: raw collision mask is unchanged`);
+    }
+});
+
+// AddSpecialObject inserts cut-field windows before the last door without adding them to specialObjects.
+test('native standability distinguishes actual windows inserted before doors from special windows', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const tiles = registry([
+        [['solidtrans', 'false']],
+        [['doorN', 'false']],
+        [['windowW', 'false'], ['WindowN', 'false']],
+        [],
+    ]);
+    const map = await cell({
+        names: ['synthetic_0', 'synthetic_1', 'synthetic_2'],
+        records: [-1, 1, 2, -1, 0, -1, 7, 3, -1, 1, 2, -1, 54],
+    });
+    const projection = await projectWorldObjects([map], tiles);
+
+    subject.importDoors(projection.doors, { squares: projection.squares });
+    assert.equal(subject.getSquare(0, 1, 0).canStand, false);
+    assert.equal(projection.squares[9].windowEdges, 2, 'generic north frame still participates outside specialObjects');
+});
+
+// Conditional diamond-floor replacement preserves the first object's class but replaces its contributing sprite.
+test('native facts replace component-free diamond floors and reject unresolved component-bearing floor replacement', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const first = [['solidfloor', 'false'], ['diamondFloor', 'false'], ['solid', 'false']];
+    const second = [['solidfloor', 'false'], ['diamondFloor', 'false']];
+    const map = await cell({ names: ['synthetic_0', 'synthetic_1'], records: [3, -1, 0, 1, -1, 63] });
+    const replaced = await projectWorldObjects([map], registry([first, second]));
+
+    subject.importDoors(replaced.doors, { squares: replaced.squares });
+    assert.equal(subject.getSquare(0, 0, 0).solid, false);
+    assert.equal(subject.getSquare(0, 0, 0).solidFloor, true);
+    const transparent = await projectWorldObjects([map], registry([first, [...second, ['transparentFloor', 'false']]]));
+
+    subject.importDoors(transparent.doors, { squares: transparent.squares });
+    assert.equal(subject.getSquare(0, 0, 0).solid, true, 'transparent floors do not replace the prior floor');
+    await assert.rejects(projectWorldObjects([map], registry([[...first, ['EntityScript', 'false']], second])),
+        /unsupported.*component.*floor.*0,0,0/iu);
+});
+
+// Broken variants use the actual current partner after shared closed-property merges, without mutating the caller registry.
+test('native broken-window facts use merged current sprites and current-property floor selection', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const tiles = registry([
+        [['windowW', 'false'], ['solidfloor', 'false'], ['diamondFloor', 'false'], ['SmashedTileOffset', '1'], ['GlassRemovedOffset', '2']],
+        [['solid', 'false']],
+        [['solidtrans', 'false']],
+        [['solidfloor', 'false'], ['diamondFloor', 'false']],
+    ]);
+    const before = [...tiles].map(([name, sprite]) => [name, sprite.tileType, [...sprite.properties]]);
+    const map = await cell({ names: ['synthetic_1', 'synthetic_2'], records: [2, -1, 0, 2, -1, 1, -1, 62] });
+    const projection = await projectWorldObjects([map], tiles);
+
+    subject.importDoors(projection.doors, { squares: projection.squares });
+    const smashed = subject.getSquare(0, 0, 0);
+    const glass = subject.getSquare(0, 1, 0);
+
+    assert.deepEqual({ solid: smashed.solid, solidTrans: smashed.solidTrans, solidFloor: smashed.solidFloor },
+        { solid: true, solidTrans: false, solidFloor: true });
+    assert.deepEqual({ solid: glass.solid, solidTrans: glass.solidTrans, solidFloor: glass.solidFloor },
+        { solid: false, solidTrans: true, solidFloor: true });
+    const floorAfterVariant = await cell({ names: ['synthetic_1', 'synthetic_3'], records: [3, -1, 0, 1, -1, 63] });
+    const retained = await projectWorldObjects([floorAfterVariant], tiles);
+
+    subject.importDoors(retained.doors, { squares: retained.squares });
+    assert.equal(subject.getSquare(0, 0, 0).solid, false,
+        'copied solidfloor property makes the current broken window eligible as the existing floor target');
+    assert.deepEqual([...tiles].map(([name, sprite]) => [name, sprite.tileType, [...sprite.properties]]), before);
+});
+
+// Source constructors mutate shared definition identities, including objects replayed in earlier chunks.
+test('native facts include later window constructor mutations of earlier created objects across source cells', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const tiles = registry([[['windowW', 'false'], ['solidfloor', 'false'], ['OpenTileOffset', '1']], []]);
+    const earlier = await cell({ names: ['synthetic_1'], records: [2, -1, 0, -1, 63] });
+    const later = await cell({ cellX: 1, records: [2, -1, 0, -1, 63] });
+    const projection = await projectWorldObjects([later, earlier], tiles);
+
+    subject.importDoors(projection.doors, { squares: projection.squares });
+    assert.equal(subject.getSquare(0, 0, 0).solidFloor, true, 'earlier generic object observes its shared partner mutation');
+    assert.equal(subject.getSquare(256, 0, 0).solidFloor, true);
+    assert.deepEqual(await projectWorldObjects([later, earlier], tiles), projection, 'constructor mutations stay projection-private');
+});
+
+// Copied floor flags change properties but cannot change a new sprite's cached diamond-floor gate.
+test('native replacement keeps cached new-floor fields separate from copied window properties', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const tiles = registry([
+        [['windowW', 'false'], ['solidfloor', 'false'], ['diamondFloor', 'false'], ['OpenTileOffset', '1']],
+        [],
+        [['solidfloor', 'false'], ['diamondFloor', 'false'], ['solid', 'false']],
+    ]);
+    const map = await cell({
+        names: ['synthetic_0', 'synthetic_1', 'synthetic_2'],
+        records: [2, -1, 0, 3, -1, 2, 1, -1, 62],
+    });
+    const projection = await projectWorldObjects([map], tiles);
+
+    subject.importDoors(projection.doors, { squares: projection.squares });
+    assert.equal(subject.getSquare(0, 1, 0).solid, true,
+        'the copied-property window does not replace the earlier solid floor through a false cached-field gate');
+});
+
+// TreatAsWallOrder changes which actual floor is first, rather than changing raw visual placement order.
+test('native first-floor selection observes exact TreatAsWallOrder insertion before doors', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const tiles = registry([
+        [['doorN', 'false'], ['solidfloor', 'false'], ['diamondFloor', 'false'], ['solid', 'false']],
+        [['solidfloor', 'false'], ['TreatAsWallOrder', 'false']],
+        [['solidfloor', 'false'], ['diamondFloor', 'false']],
+    ]);
+    const map = await cell({ names: ['synthetic_0', 'synthetic_1', 'synthetic_2'], records: [-1, 1, 4, -1, 0, 1, 2, -1, 62] });
+    const projection = await projectWorldObjects([map], tiles);
+
+    subject.importDoors(projection.doors, { squares: projection.squares });
+    assert.equal(subject.getSquare(0, 1, 0).solid, true,
+        'the inserted non-diamond floor is selected before the earlier diamond door floor');
+});
+
+// Garage attachment selection reads current shared sprite properties, not constructor group metadata.
+test('native wall overlays use current garage properties added to an existing actual door', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const tiles = registry([
+        [['doorN', 'false']],
+        [['WallOverlay', 'false'], ['attachedN', 'false'], ['solidfloor', 'false']],
+        [],
+        [['windowW', 'false'], ['GarageDoor', '1'], ['OpenTileOffset', '-3']],
+    ]);
+    const map = await cell({ names: ['synthetic_0', 'synthetic_1', 'synthetic_3'], records: [-1, 1, 4, -1, 0, 2, 1, -1, 62] });
+    const projection = await projectWorldObjects([map], tiles);
+
+    subject.importDoors(projection.doors, { squares: projection.squares });
+    assert.equal(subject.getSquare(0, 1, 0).solidFloor, false, 'the garage-targeted overlay contributes no floor');
+});
+
+// Blueprint membership still supplies object edges, but RecalcProperties excludes its floor and solid flags.
+test('native standability keeps blueprint object edges without inventing blueprint square facts', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const tiles = registry([
+        [['solidtrans', 'false']],
+        [['blueprint', 'false'], ['HoppableW', 'false'], ['solidfloor', 'false'], ['solid', 'false']],
+    ]);
+    const map = await cell({ names: ['synthetic_0', 'synthetic_1'], records: [2, -1, 0, -1, 7, 2, -1, 1, -1, 55] });
+    const projection = await projectWorldObjects([map], tiles);
+
+    subject.importDoors(projection.doors, { squares: projection.squares });
+    assert.equal(subject.getSquare(0, 0, 0).canStand, true);
+    const blueprint = subject.getSquare(1, 0, 0);
+
+    assert.deepEqual({ solid: blueprint.solid, solidFloor: blueprint.solidFloor }, { solid: false, solidFloor: false });
+});
+
+// Omitting door sprite properties or freezing them at import gives incorrect native square facts after replacement.
+test('native square facts follow actual closed and open source door sprites', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(new Uint8Array(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    ))));
+    const navigation = new Uint8Array(1_026);
+
+    navigation[1] = 1;
+    subject.worldImportCell(0, 0, navigation);
+    const tiles = registry([[['doorN', 'false'], ['solid', 'false'], ['solidfloor', 'false']], [], []]);
+    const map = await cell({ records: [-1, 1, 2, -1, 0, -1, 62] });
+    const projection = await projectWorldObjects([map], tiles);
+    const door = projection.doors[0];
+
+    subject.importDoors(projection.doors, { squares: projection.squares });
+    const closed = subject.getSquare(0, 1, 0);
+
+    assert.deepEqual({ solid: closed.solid, solidFloor: closed.solidFloor, canStand: closed.canStand },
+        { solid: true, solidFloor: true, canStand: false });
+    subject.loadState({ version: 2, values: [0.5, 0.5, 1.5, 0.5, 0.5, 0, 0, 0, 0, 1, 100, 1] });
+    subject.toggleDoor(door.id);
+    const open = subject.getSquare(0, 1, 0);
+
+    assert.deepEqual({ solid: open.solid, solidFloor: open.solidFloor, canStand: open.canStand },
+        { solid: false, solidFloor: false, canStand: false });
+    subject.toggleDoor(door.id);
+    const toggledClosed = subject.getSquare(0, 1, 0);
+
+    assert.deepEqual({ solid: toggledClosed.solid, solidFloor: toggledClosed.solidFloor, canStand: toggledClosed.canStand },
+        { solid: true, solidFloor: true, canStand: false });
+});
+
+// Treating textual flags as booleans, OR-ing both hoppable directions, or freezing door edges fails these source-format fixtures.
+test('projects property-presence floors and N-first static hoppable edges from actual placements', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([
+        [['HoppableN', 'false'], ['HoppableW', 'false'], ['solidfloor', 'false'], ['solidtrans', 'false']],
+        [['HoppableW', '']],
+        [['solidfloor', '']],
+        [['doorN', 'false'], ['solidfloor', 'false'], ['HoppableN', 'false']],
+        [],
+        [['HoppableW', 'false']],
+    ]);
+    const map = await cell({
+        names: ['synthetic_0', 'synthetic_1', 'synthetic_2', 'synthetic_3', 'synthetic_5'],
+        records: [2, -1, 0, 3, -1, 0, 1, 2, -1, 1, 2, -1, 2, 2, -1, 3, 2, -1, 4, -1, 58],
+        rooms: [{ rects: [[0, 0, 1, 6]] }],
+    });
+    const result = await projectWorldObjects([map], tiles);
+
+    assert.deepEqual(result.squares.slice(0, 7).map(({ solidFloor, hoppableEdges, independentWalls, windows, roomId }) => (
+        { solidFloor, hoppableEdges, independentWalls, windows, roomId }
+    )), [
+        { solidFloor: true, hoppableEdges: 2, independentWalls: 6, windows: 0, roomId: 0 },
+        { solidFloor: true, hoppableEdges: 6, independentWalls: 6, windows: 0, roomId: 0 },
+        { solidFloor: false, hoppableEdges: 4, independentWalls: 4, windows: 0, roomId: 0 },
+        { solidFloor: true, hoppableEdges: 0, independentWalls: 0, windows: 0, roomId: 0 },
+        { solidFloor: false, hoppableEdges: 0, independentWalls: 0, windows: 0, roomId: 0 },
+        { solidFloor: false, hoppableEdges: 0, independentWalls: 0, windows: 0, roomId: 0 },
+        { solidFloor: false, hoppableEdges: 0, independentWalls: 0, windows: 0, roomId: -1 },
+    ]);
+    assert.equal(result.squares[0].solidTrans, true);
+    assert.deepEqual(result.doors.map(({ open, standEdges, squareFlags }) => ({ open, standEdges, squareFlags })), [
+        { open: false, standEdges: [2, 4, 2, 4], squareFlags: [32, 0, 32, 0] },
+        { open: true, standEdges: [2, 4, 2, 4], squareFlags: [32, 0, 32, 0] },
+    ]);
+});
+
+// Freezing initial facts or folding door properties into static squares breaks source sprite replacement metadata.
+test('projects independent solid, transparent, tree and slope floor facts for every door partner', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = Array.from({ length: 6 }, () => []);
+
+    tiles[0] = [['doorN', 'false'], ['DoubleDoor', '1'], ['solid', 'false'], ['solidfloor', 'false']];
+    tiles[4] = [['doorW', 'false'], ['DoubleDoor', '6'], ['solidtrans', 'false'], ['SlopedSurfaceDirection', ' ne ']];
+    tiles[5] = [['tree', '1'], ['doorW', 'false'], ['DoubleDoor', '5']];
+    const map = await cell({ records: [-1, 1, 2, -1, 0, -1, 62] });
+    const result = await projectWorldObjects([map], registry(tiles));
+    const square = result.squares[1];
+
+    assert.deepEqual(result.doors[0].squareFlags, [34, 36, 34, 8]);
+    assert.deepEqual({ solid: square.solid, solidTrans: square.solidTrans, tree: square.tree, solidFloor: square.solidFloor },
+        { solid: false, solidTrans: false, tree: false, solidFloor: false });
+    tiles[4] = [['doorW', 'false'], ['DoubleDoor', '6'], ['SlopedSurfaceDirection', 'invalid']];
+    await assert.rejects(projectWorldObjects([map], registry(tiles)), /slope.*0,1,0/iu,
+        'a needed future partner slope fails at the import boundary, not after toggling');
+});
+
+// Dropping a stair family member or inferring floors from arbitrary stair-like properties fails this parser-path check.
+test('treats all six actual source stair types as solid floors without the raw floor flag', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const types = ['stairsTN', 'stairsMN', 'stairsBN', 'stairsTW', 'stairsMW', 'stairsBW'];
+    const tiles = registry([...types.map((type) => [[type, 'false'], ['solidtrans', 'false']]), [['stairs', 'false']]]);
+    const map = await cell({
+        names: [...types.map((_, index) => `synthetic_${index}`), 'synthetic_6'],
+        records: [2, -1, 0, 2, -1, 1, 2, -1, 2, 2, -1, 3, 2, -1, 4, 2, -1, 5, 2, -1, 6, -1, 57],
+    });
+    const result = await projectWorldObjects([map], tiles);
+
+    assert.deepEqual(result.squares.slice(0, 8).map(({ solidFloor }) => solidFloor), [true, true, true, true, true, true, false, false]);
+    assert.deepEqual(result.squares.slice(0, 6).map(({ solidTrans, hoppableEdges, windows }) => (
+        { solidTrans, hoppableEdges, windows }
+    )), Array.from({ length: 6 }, () => ({ solidTrans: true, hoppableEdges: 0, windows: 0 })));
+});
+
+// Accepting only cardinal directions or using slope height instead of the nonnull direction fails this fixture.
+test('treats every source slope direction as a floor after ASCII trimming and uppercasing', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const directions = ['N', 'NW', 'W', 'SW', 'S', 'SE', 'E', 'NE'];
+    const tiles = registry(directions.map((direction) => [['SlopedSurfaceDirection', ` \t${direction.toLowerCase()} \u001F`], ['solidtrans', 'false']]));
+    const map = await cell({
+        names: directions.map((_, index) => `synthetic_${index}`),
+        records: [...directions.flatMap((_, index) => [2, -1, index]), -1, 56],
+    });
+    const result = await projectWorldObjects([map], tiles);
+
+    assert.deepEqual(result.squares.slice(0, 9).map(({ solidFloor }) => solidFloor), [true, true, true, true, true, true, true, true, false]);
+    assert.equal(result.squares[0].solidTrans, true);
+});
+
+// OR-ing per-placement slopes, broad Unicode trimming, or validating a short-circuited slope fails this parser-path check.
+test('decodes only the last square slope property and skips slopes when raw floors or stairs already suffice', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([
+        [['SlopedSurfaceDirection', 'invalid']],
+        [['SlopedSurfaceDirection', ' sw ']],
+        [['solidfloor', 'false'], ['SlopedSurfaceDirection', 'invalid']],
+        [['stairsBN', 'false'], ['SlopedSurfaceDirection', 'invalid']],
+        [['SlopedSurfaceDirection', '\u00A0N\u00A0']],
+        [['SlopedSurfaceDirection', '']],
+    ]);
+    const names = [...tiles.keys()];
+    const accepted = await cell({ names, records: [3, -1, 0, 1, 2, -1, 2, 2, -1, 3, -1, 61] });
+    const result = await projectWorldObjects([accepted], tiles);
+
+    assert.deepEqual(result.squares.slice(0, 4).map(({ solidFloor }) => solidFloor), [true, true, true, false]);
+    const invalid = await cell({ names, records: [2, -1, 0, -1, 63] });
+    const overwritten = await cell({ names, records: [3, -1, 1, 0, -1, 63] });
+    const unicodeTrim = await cell({ names, records: [2, -1, 4, -1, 63] });
+    const empty = await cell({ names, records: [2, -1, 5, -1, 63] });
+
+    await assert.rejects(projectWorldObjects([invalid], tiles), /slope.*0,0,0/iu);
+    await assert.rejects(projectWorldObjects([overwritten], tiles), /slope.*0,0,0/iu);
+    await assert.rejects(projectWorldObjects([unicodeTrim], tiles), /slope.*0,0,0/iu);
+    await assert.rejects(projectWorldObjects([empty], tiles), /slope.*0,0,0/iu);
+});
+
+test('projects stand edges separately for all resolved constructor and toggled door sprites', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = Array.from({ length: 11 }, () => []);
+
+    tiles[0] = [['WindowN', 'false'], ['WindowW', 'false'], ['HoppableW', 'false'], ['doorN', 'false'], ['DoubleDoor', '1']];
+    tiles[4] = [['WindowN', 'false'], ['WindowW', 'false'], ['HoppableN', 'false'], ['HoppableW', 'false'], ['doorW', 'false'], ['DoubleDoor', '6']];
+    tiles[5] = [['doorW', 'false'], ['DoubleDoor', '5']];
+    tiles[6] = [['HoppableW', 'false'], ['doorN', 'false'], ['DoubleDoor', '2']];
+    tiles[7] = [['WindowN', 'false'], ['HoppableW', 'false'], ['doorN', 'false'], ['DoubleDoor', '2']];
+    tiles[10] = [['doorN', 'false'], ['DoubleDoor', '6']];
+    const map = await cell({ names: ['synthetic_0', 'synthetic_10'], records: [2, -1, 0, 2, -1, 1, -1, 62] });
+    const result = await projectWorldObjects([map], registry(tiles));
+
+    assert.deepEqual(result.doors.map(({ x, y, open, hoppable, standEdges }) => ({ x, y, open, hoppable, standEdges })), [
+        { x: 0, y: 0, open: false, hoppable: true, standEdges: [6, 2, 6, 0] },
+        { x: 1, y: 0, open: true, hoppable: true, standEdges: [4, 0, 6, 0] },
+    ]);
+    assert.deepEqual(result.doorVisuals.map(({ closedSpriteName, openSpriteName, toggledClosedSpriteName, toggledOpenSpriteName }) => (
+        [closedSpriteName, openSpriteName, toggledClosedSpriteName, toggledOpenSpriteName]
+    )), [
+        ['synthetic_0', 'synthetic_4', 'synthetic_0', 'synthetic_5'],
+        ['synthetic_6', 'synthetic_10', 'synthetic_7', 'synthetic_10'],
+    ]);
+    assert.equal(result.squares[0].windows, 0);
+    assert.equal(result.squares[0].hoppableEdges, 0);
 });
 
 // A missing partner must reject the complete projection, not expose partially imported doors.

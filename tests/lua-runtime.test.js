@@ -194,6 +194,72 @@ test('synchronous Lua ticks move the compiled actor and cleanup stops callbacks'
     }
 });
 
+test('Lua cell and square userdata retain identity while native replacement changes standability', async () => {
+    const { engine, host, session, saved } = await fixture();
+    const square = {
+        x: 5, y: 5, z: 0, roomId: 7, outside: false, solid: false,
+        solidTrans: false, tree: false, vehicleObstructed: false, solidFloor: true,
+        independentWalls: 0,
+    };
+
+    try {
+        engine.importDoors([], { squares: [square, { ...square, x: -1, y: -2 }, { ...square, x: 0, y: 0 }] });
+        const cleanup = activate(session, host, `
+            local cell, player = getCell(), getPlayer()
+            local square = cell:getGridSquare(5.9, 5.1, 0.9)
+            assert(type(cell) == 'userdata' and type(square) == 'userdata')
+            assert(cell == getCell() and square == player:getCurrentSquare())
+            assert(square:getX() == 5 and square:getY() == 5 and square:getZ() == 0)
+            assert(square:canStand() == true)
+            local negative = cell:getGridSquare(-0.25, -1.25, 0)
+            assert(negative:getX() == -1 and negative:getY() == -2)
+            assert(cell:getGridSquare(5, 5, 1) == nil)
+            assert(cell:getGridSquare(5, 5, 32) == nil)
+            assert(cell:getGridSquare(100, 100, 0) == nil)
+            assert(cell:getGridSquare(0/0, 0/0, 0/0) == cell:getGridSquare(0, 0, 0))
+            assert(cell:getGridSquare(math.huge, -math.huge, 0) == nil)
+            assert(cell:getGridSquare(-2147483648.5, 0, 0) == nil)
+            assert(not pcall(function() return cell:getGridSquare('5', 5, 0) end))
+            assert(not pcall(function() return square:getRoom() end))
+            assert(not pcall(function() return square:getBuilding() end))
+            assert(not pcall(function() return square:getRoomID() end))
+            getModData().squareState = {}
+            Events.OnTick.Add(function()
+                assert(cell == getCell())
+                local current = cell:getGridSquare(5, 5, 0)
+                local result = getModData().squareState
+                if current ~= nil then
+                    assert(current == square and current == player:getCurrentSquare())
+                    result.canStand = square:canStand()
+                else
+                    assert(player:getCurrentSquare() == nil)
+                    local ok, message = pcall(function() return square:canStand() end)
+                    assert(not ok and tostring(message):find('square disappeared', 1, true))
+                    assert(not pcall(function() return square:getX() end))
+                    result.disappeared = true
+                end
+            end)
+        `, 'square-state');
+
+        engine.importDoors([], { squares: [{ ...square, solid: true }] });
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.equal(saved.get('host').data.nativePlayerData.squareState.canStand, false);
+        engine.importDoors([], { squares: [{ ...square, solidTrans: true, windows: 2, solidFloor: false }] });
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.equal(saved.get('host').data.nativePlayerData.squareState.canStand, true);
+        engine.importDoors([], { squares: [] });
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.equal(saved.get('host').data.nativePlayerData.squareState.disappeared, true);
+        cleanup();
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
 test('Lua body userdata retain identity while real ticks observe native pain and cold-hand timing', async () => {
     const { engine, host, session, saved } = await fixture();
 

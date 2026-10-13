@@ -20,6 +20,7 @@ const CUSTOM_LOCK: u32 = 1024;
 const SELECTED: u32 = 2048;
 const TOGGLED: u32 = 4096;
 const WALLS: u8 = NAV_WALL_NORTH | NAV_WALL_WEST;
+const SPRITE_FACTS_MASK: u32 = 126 | (126 << 7) | (126 << 14) | (126 << 21);
 const LIMIT: usize = 65_536;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -33,10 +34,16 @@ struct Door {
     walls: u8,
     double: u32,
     garage: u32,
+    sprite_facts: u32,
 }
 impl Door {
     fn open(self) -> bool {
         self.flags & OPEN != 0
+    }
+    fn sprite_facts(self) -> u8 {
+        let shift =
+            if self.flags & TOGGLED != 0 { 14 } else { 0 } + if self.open() { 7 } else { 0 };
+        ((self.sprite_facts >> shift) & 126) as u8
     }
     fn blocked(self) -> bool {
         !self.open() || self.flags & BARRICADED != 0
@@ -112,6 +119,8 @@ struct Square {
     walls: u8,
     windows: u8,
     door_walls: u8,
+    hoppable_edges: u8,
+    window_edges: u8,
 }
 impl Square {
     fn solid(self) -> bool {
@@ -126,6 +135,7 @@ struct Doors {
     squares: HashMap<SquareKey, Square>,
     removed: HashMap<SquareKey, u8>,
     edges: HashMap<SquareKey, u8>,
+    sprite_facts: HashMap<SquareKey, u8>,
     revision: u32,
     seed: u32,
     rng: u64,
@@ -138,6 +148,7 @@ impl Doors {
             squares: HashMap::new(),
             removed: HashMap::new(),
             edges: HashMap::new(),
+            sprite_facts: HashMap::new(),
             revision: 0,
             seed,
             rng: seed as u64,
@@ -146,7 +157,12 @@ impl Doors {
     }
     fn rebuild(&mut self) {
         self.edges.clear();
+        self.sprite_facts.clear();
         for door in &self.rows {
+            let sprite_facts = door.sprite_facts();
+            if sprite_facts != 0 {
+                *self.sprite_facts.entry(door.position()).or_default() |= sprite_facts;
+            }
             if !door.blocked() {
                 continue;
             }
@@ -242,6 +258,34 @@ impl Doors {
     }
     fn square(&self, key: SquareKey) -> Option<Square> {
         self.squares.get(&key).copied()
+    }
+    // Query facts include current door sprites; obstruction keeps stored base facts.
+    fn query_square(&self, key: SquareKey) -> Option<Square> {
+        self.square(key).map(|mut square| {
+            let facts = self.sprite_facts.get(&key).copied().unwrap_or(0);
+            square.flags |= (((facts & 24) >> 2) | (facts & 32) | ((facts & 64) >> 3)) as u32;
+            square
+        })
+    }
+    fn stand_edges(&self, key: SquareKey) -> u8 {
+        self.square(key).map_or(0, |square| {
+            square.window_edges
+                | square.hoppable_edges
+                | (self.sprite_facts.get(&key).copied().unwrap_or(0) & WALLS)
+        })
+    }
+    fn can_stand(&self, (x, y, z): SquareKey, square: Square) -> bool {
+        if square.flags & 2 != 0 {
+            return false;
+        }
+        if square.flags & 4 != 0 {
+            return self.stand_edges((x, y, z)) != 0
+                || y.checked_add(1)
+                    .is_some_and(|sy| self.stand_edges((x, sy, z)) & NAV_WALL_NORTH != 0)
+                || x.checked_add(1)
+                    .is_some_and(|sx| self.stand_edges((sx, y, z)) & NAV_WALL_WEST != 0);
+        }
+        square.flags & 32 != 0
     }
     fn something_to(&self, from: SquareKey, to: SquareKey) -> bool {
         let Some(a) = self.square(from) else {
@@ -403,7 +447,8 @@ pub extern "C" fn door_import_stage() -> i32 {
         || w[8] as u8 & !WALLS != 0
         || !integer(w[9], 0.0, 4.0)
         || !integer(w[10], 0.0, 3.0)
-        || w[11] != 0.0
+        || !integer(w[11], 0.0, SPRITE_FACTS_MASK as f64)
+        || w[11] as u32 & !SPRITE_FACTS_MASK != 0
         || (w[9] != 0.0 && w[10] != 0.0)
     {
         return BAD_FORMAT;
@@ -418,6 +463,7 @@ pub extern "C" fn door_import_stage() -> i32 {
         walls: w[8] as u8,
         double: w[9] as u32,
         garage: w[10] as u32,
+        sprite_facts: w[11] as u32,
     };
     STAGING.with(|state| {
         let mut state = state.borrow_mut();
@@ -438,11 +484,11 @@ pub extern "C" fn door_square_stage() -> i32 {
         || !integer(w[1], -25_600.0, 25_855.0)
         || !integer(w[2], -32.0, 31.0)
         || !integer(w[3], -1.0, 9_007_199_254_740_991.0)
-        || !integer(w[4], 0.0, 31.0)
-        || w[5..8]
+        || !integer(w[4], 0.0, 63.0)
+        || w[5..10]
             .iter()
             .any(|v| !integer(*v, 0.0, WALLS as f64) || *v as u8 & !WALLS != 0)
-        || w[8..].iter().any(|v| *v != 0.0)
+        || w[10..].iter().any(|v| *v != 0.0)
     {
         return BAD_FORMAT;
     }
@@ -463,6 +509,8 @@ pub extern "C" fn door_square_stage() -> i32 {
                 walls: w[5] as u8,
                 windows: w[6] as u8,
                 door_walls: w[7] as u8,
+                hoppable_edges: w[8] as u8,
+                window_edges: w[9] as u8,
             },
         );
         OK
@@ -510,6 +558,29 @@ pub extern "C" fn door_import_commit() -> i32 {
         }
         state.rebuild();
         DOORS.with(|live| *live.borrow_mut() = state);
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn square_read(x: i32, y: i32, z: i32) -> i32 {
+    DOORS.with(|state| {
+        let state = state.borrow();
+        let key = (x, y, z);
+        let Some(square) = state.query_square(key) else {
+            return OUT_OF_RANGE;
+        };
+        put(&[
+            x as f64,
+            y as f64,
+            z as f64,
+            square.room as f64,
+            square.flags as f64,
+            if state.can_stand(key, square) {
+                1.0
+            } else {
+                0.0
+            },
+        ]);
         OK
     })
 }

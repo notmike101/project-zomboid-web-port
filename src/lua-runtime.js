@@ -445,6 +445,31 @@ function player:walk(x, y) hostCall('action', 'walk', x, y) end
 function player:cancelAction() hostCall('action', 'cancel') end
 function player:getModData() return playerData end
 function player:transmitModData() hostCall('flush') end
+local cell = nativeObject('IsoCell')
+local squares = setmetatable({}, {__mode = 'v'})
+function cell:getGridSquare(x, y, z)
+    local record = hostCall('square', x, y, z)
+    if record == nil then return nil end
+    local key = record.x .. ':' .. record.y .. ':' .. record.z
+    if squares[key] then return squares[key] end
+    local square = nativeObject('IsoGridSquare')
+    local function current()
+        local value = hostCall('square', record.x, record.y, record.z)
+        if value == nil then rawError(fault('source square disappeared: ' .. key), 2) end
+        return value
+    end
+    function square:getX() return current().x end
+    function square:getY() return current().y end
+    function square:getZ() return current().z end
+    function square:canStand() return current().canStand end
+    squares[key] = square
+    return square
+end
+function getCell() return cell end
+function player:getCurrentSquare()
+    local state = hostCall('state')
+    return cell:getGridSquare(state.x, state.y, 0)
+end
 function getPlayer() hostCall('state'); return player end
 function getSpecificPlayer(index)
     assert(type(index) == 'number' and index >= 0 and index % 1 == 0, 'invalid player index')
@@ -648,6 +673,22 @@ function jsonCopy(value) {
     visit(value);
 
     return JSON.parse(JSON.stringify(value));
+}
+
+/**
+ * Match source PZMath.fastfloor(double): Java d2i, comparison, then int32 subtraction.
+ *
+ * @param {number} value - Lua numeric coordinate.
+ * @returns {number} Source integer lookup coordinate, including saturation and wrap.
+ */
+function squareCoordinate(value) {
+    const integer = Number.isNaN(value) ? 0 : Math.min(2_147_483_647, Math.max(-2_147_483_648, Math.trunc(value)));
+
+    if (value < integer) {
+        return integer === -2_147_483_648 ? 2_147_483_647 : integer - 1;
+    }
+
+    return integer;
 }
 
 /**
@@ -880,6 +921,13 @@ export async function createLuaSession(options = {}) {
     lua.global.set('__pz_call', (operation, ...args) => {
         switch (operation) {
             case 'state': return api().movement.getState();
+            case 'square': {
+                if (args.length !== 3 || args.some((value) => typeof value !== 'number')) {
+                    throw new TypeError('getGridSquare requires three numeric coordinates');
+                }
+
+                return capability('world', 'getSquare', ...args.map(squareCoordinate));
+            }
             case 'speed': return api().movement.setSpeed(args[0]);
             case 'action': return api().actions.submit(args[0] === 'cancel' ? { type: 'cancel' } : { type: args[0], x: args[1], y: args[2] });
             case 'flush': return flushSaveData();
@@ -987,7 +1035,7 @@ export async function createLuaSession(options = {}) {
         }
     });
     lua.global.set('__pz_events', [...EVENTS]);
-    lua.global.set('__pz_unsupported', ['getCore', 'getTexture', 'getText', 'getTextOrNull', 'getModInfo', 'getActivatedMods', 'instanceof', 'getCell', 'getWorld', 'getZomboidRadio', 'getCurrentCoroutine', 'getCoroutineCallframeStack', 'getFilenameOfCallframe', 'getLuaDebuggerErrors', 'DoLuaChecksum', 'getSoundManager', 'getScriptManager', 'getAllItems', 'sendClientCommand', 'sendServerCommand']);
+    lua.global.set('__pz_unsupported', ['getCore', 'getTexture', 'getText', 'getTextOrNull', 'getModInfo', 'getActivatedMods', 'instanceof', 'getWorld', 'getZomboidRadio', 'getCurrentCoroutine', 'getCoroutineCallframeStack', 'getFilenameOfCallframe', 'getLuaDebuggerErrors', 'DoLuaChecksum', 'getSoundManager', 'getScriptManager', 'getAllItems', 'sendClientCommand', 'sendServerCommand']);
     try {
         lua.doStringSync(PRELUDE);
     } catch (cause) {

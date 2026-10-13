@@ -64,6 +64,7 @@ method on that handle throws (`stage: 'api'`).
 | `api.hooks.beforeAction(callback, { priority = 0 })` | `() => boolean` | Registers a hook; returns unsubscribe (`false` if already withdrawn by unload). |
 | `api.world.getBounds()` | detached `ModWorldBounds` | Reads committed navigation cell extents, not a proposed import. Optional engine capability. |
 | `api.world.getNavFlags(tileX, tileY)` | unsigned number | Reads committed navigation bits at an absolute integer tile. Optional engine capability. |
+| `api.world.getSquare(x, y, z)` | detached `ModWorldSquare` or `null` | Reads actual source-square metadata and current native `canStand`; absent metadata is `null`, unsupported capability throws. Coordinates are signed int32 integers. |
 | `api.world.importNavigationCell(cx, cy, bytes)` | `ModWorldImportResult` | Validates complete navigation bytes, resolves precommit hooks, then imports once. Cancels movement on success; no automatic undo. |
 | `api.world.getDoors()` / `.toggleDoor(id)` | detached `ModDoor[]` / `ModCommandResult` | Original stable identities and native state; toggle uses shared precommit hooks and WASM reach/collision/lock rules. Mutation is forbidden during activation. |
 | `api.hooks.beforeWorldImport(callback, { priority = 0 })` | `() => boolean` | Synchronous precommit veto with detached coordinates and bytes; unsubscribe/ordering match `beforeAction`. |
@@ -257,6 +258,57 @@ forced locks, coupled double/garage panels and obstruction refusal. An open
 ordinary door does not turn its decorative render wing into a collision wall.
 Queries do not mutate state. This is not yet the original approach-and-timed-action
 context-menu pipeline or general keys, vehicles and door damage.
+
+### Source squares and standability
+
+`world.getSquare(x, y, z)` reads native source-square metadata, not navigation
+bits or a synthesized tile. Its detached result contains `x`, `y`, `z`,
+`roomId`, `outside`, `solid`, `solidTrans`, `tree`, `vehicleObstructed`,
+`solidFloor` and current `canStand`. A missing source square returns `null`;
+a missing native capability throws an attributed `ModError/world`. Reads are
+allowed during activation and use the host's own session engine. Imported
+source elevations are currently `-32..31`; a valid integer query at an absent
+elevation still returns `null`.
+`solidFloor` is the source cached `TreatAsSolidFloor()` result: raw
+`solidfloor` **or** stairs **or** a nonnull slope direction, not only the raw
+sprite property.
+
+The importer replays initial object membership, constructor priority, attached
+overlays, floor/tree replacement and shared sprite-property mutations before
+aggregating these facts. Actual window/frame stand edges are separate from the
+legacy raw window collision mask; querying standability does not change movement
+or door-reach rules. Door facts follow the actual current sprite, including
+constructor, replacement and toggled-partner history.
+This is metadata-only replay, not entity-component execution or texture-load
+parity. A conditional diamond-floor replacement whose existing floor may have
+unresolved source components refuses import rather than inventing its state.
+
+Native `canStand` follows the source predicate: `solid` refuses first;
+`solidTrans` requires an actual adjacent window or hoppable edge; otherwise
+`solidFloor` decides. North/west edges belong to the current square, south uses
+the southern neighbor's north edge and east uses the eastern neighbor's west
+edge. Missing neighbor metadata cannot supply a static edge. Door participation
+uses the current panel position and current source sprite, including constructor
+versus toggled sprite history. Tree and vehicle fields are exposed facts, not
+substitutes for this predicate's `solid` flag.
+
+Lua `getCell()` returns a stable `IsoCell` facade with
+`getGridSquare(x, y, z)`. Numeric lookup follows the source
+`PZMath.fastfloor(double)` conversion: fractional coordinates floor, Java
+double-to-int saturation precedes the comparison and subtraction wraps as an
+int32. Nonnumeric coordinates refuse. Lookup returns `nil` only when native
+metadata is absent. `player:getCurrentSquare()` uses the actual actor position
+and the current port's actor elevation **0**, not invented multi-floor state.
+`IsoGridSquare` userdata retain identity by integer coordinates and expose only
+`getX()`, `getY()`, `getZ()` and `canStand()`, each reading current native facts.
+Retained userdata whose square disappears throw an honest error.
+
+`roomId` is the existing dense canonical source-room identity (`-1` outside
+rooms), not the original packed numeric `RoomID`. Lua `getRoom()`,
+`getBuilding()` and `getRoomID()` remain unsupported. This standability subset
+does not establish player-built thumpable state, the native timed-action queue,
+the original interaction context menu or full interaction-gate completion.
+
 
 ### Owned positional audio
 

@@ -583,6 +583,7 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.command({ type: 'setWeight', id: 1, weight: 1 }),
         () => subject.command({ type: 'setActualWeight', id: 1, actualWeight: 1 }),
         () => subject.importDoors([], { squares: [] }),
+        () => subject.getSquare(0, 0, 0),
         () => subject.doors(),
         () => subject.toggleDoor('door:10:10:0:0'),
         () => subject.saveDoorState(),
@@ -1796,6 +1797,207 @@ function doorSquares(extra = {}) {
 function doorSpawn(subject, x, y) {
     subject.loadState({ version: 2, values: [x, y, 1.5, x, y, 0, 0, 0, 0, 1, 100, 1] });
 }
+
+test('native source-square standability keeps floor and adjacent-edge precedence', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+
+    subject.importDoors([], {
+        squares: doorSquares({
+            '8:8': { solidFloor: true },
+            '10:8': { solid: true, solidFloor: true, windows: 2 },
+            '11:8': { solidTrans: true, hoppableEdges: 2 },
+            '12:8': { solidTrans: true, solidFloor: true },
+            '8:11': { solidTrans: true },
+            '8:12': { windows: 2 },
+            '10:11': { solidTrans: true },
+            '11:11': { hoppableEdges: 4 },
+            '13:12': { solidTrans: true, windows: 2 },
+            '14:14': { tree: true, vehicleObstructed: true, solidFloor: true },
+            '12:10': { windows: 6, windowEdges: 2 },
+            '12:9': { solidTrans: true },
+            '11:10': { solidTrans: true },
+        }),
+    });
+
+    for (const [x, y, expected] of [
+        [8, 8, true], [10, 8, false], [11, 8, true], [12, 8, false], [7, 7, false],
+        [8, 11, true], [10, 11, true], [13, 12, true], [14, 14, true],
+        [12, 9, true], [11, 10, false],
+    ]) {
+        assert.equal(subject.getSquare?.(x, y, 0)?.canStand, expected,
+            `source standability at ${x},${y}`);
+    }
+
+    assert.equal(subject.navFlags(12, 10) & 6, 6,
+        'raw north/west collision stays intact while actual created windows supply only north stand edges');
+
+    assert.equal(subject.getSquare(8, 8, 1), null, 'another elevation is not a loaded square');
+    assert.equal(subject.getSquare(8, 8, 100), null, 'query elevation is not limited to import bounds');
+    assert.equal(subject.getSquare(100, 100, 0), null, 'unloaded metadata is not invented');
+    const before = subject.getSquare(8, 8, 0);
+
+    assert.deepEqual(before, {
+        x: 8, y: 8, z: 0, roomId: -1, outside: true, solid: false, solidTrans: false,
+        tree: false, vehicleObstructed: false, solidFloor: true, canStand: true,
+    });
+    before.solidFloor = false;
+    assert.equal(subject.getSquare(8, 8, 0).solidFloor, true, 'query results do not alias scratch or source');
+    before.solidFloor = true;
+
+    for (const coordinates of [[0.5, 0, 0], [0, 2 ** 31, 0], [0, 0, 2 ** 31], [0, 0, -(2 ** 31) - 1]]) {
+        assert.throws(() => subject.getSquare(...coordinates), /integer|inside/u);
+    }
+
+    assert.equal(subject.getSquare(-(2 ** 31), 2 ** 31 - 1, 0), null, 'signed int32 queries never wrap');
+
+    assert.throws(() => subject.importDoors([], {
+        squares: doorSquares({ '8:8': { solidFloor: 'true' } }),
+    }), TypeError);
+    assert.deepEqual(subject.getSquare(8, 8, 0), before, 'invalid replacement preserves live metadata');
+
+    for (const hoppableEdges of [1, 8, 2.5, null]) {
+        assert.throws(() => subject.importDoors([], {
+            squares: doorSquares({ '8:8': { hoppableEdges } }),
+        }), /hoppableEdges/u);
+        assert.deepEqual(subject.getSquare(8, 8, 0), before);
+    }
+
+    for (const windowEdges of [1, 8, 2.5, null]) {
+        assert.throws(() => subject.importDoors([], {
+            squares: doorSquares({ '8:8': { windowEdges } }),
+        }), /windowEdges/u);
+        assert.deepEqual(subject.getSquare(8, 8, 0), before);
+    }
+
+    for (const standEdges of [[2], [2, 0, 2, 1], [2, 0, 2, 0, 0], null]) {
+        assert.throws(() => subject.importDoors([nativeDoor({ standEdges })], {
+            squares: doorSquares(),
+        }), /standEdges/u);
+        assert.deepEqual(subject.getSquare(8, 8, 0), before);
+    }
+
+    for (const squareFlags of [[2], [2, 0, 0, 1], [0, 0, 16, 0], [2, 0, 0, 0, 0], null]) {
+        assert.throws(() => subject.importDoors([nativeDoor({ squareFlags })], {
+            squares: doorSquares(),
+        }), /squareFlags/u);
+        assert.deepEqual(subject.getSquare(8, 8, 0), before);
+    }
+
+    const door = nativeDoor({ standEdges: [2, 4, 4, 0] });
+    const squares = doorSquares({ '10:9': { solidTrans: true }, '9:10': { solidTrans: true } });
+
+    subject.importDoors([door], { squares });
+    doorSpawn(subject, 10.5, 10.5);
+    assert.equal(subject.getSquare(10, 9, 0).canStand, true, 'current closed-door sprite supplies its edge');
+    subject.toggleDoor(door.id);
+    assert.equal(subject.getSquare(10, 9, 0).canStand, false, 'opening uses the actual replacement sprite edge');
+    subject.toggleDoor(door.id);
+    assert.equal(subject.getSquare(10, 9, 0).canStand, false, 'toggled closed art is not initial closed art');
+    assert.equal(subject.getSquare(9, 10, 0).canStand, true, 'toggled closed art supplies its west edge');
+    const saved = subject.saveDoorState();
+
+    subject.toggleDoor(door.id);
+    subject.loadDoorState(saved);
+    assert.deepEqual(subject.saveDoorState(), saved, 'stand metadata does not enter mutable portable state');
+    assert.equal(subject.getSquare(9, 10, 0).canStand, true, 'restore rebuilds the current edge union');
+
+    subject.importDoors([nativeDoor({ open: true, standEdges: [0, 4, 0, 2] })], { squares });
+    assert.equal(subject.getSquare(9, 10, 0).canStand, true, 'initial open art selects the second mask');
+    subject.toggleDoor(door.id);
+    assert.equal(subject.getSquare(9, 10, 0).canStand, false);
+    subject.toggleDoor(door.id);
+    assert.equal(subject.getSquare(10, 9, 0).canStand, true, 'toggled open art selects the fourth mask');
+
+    subject.importDoors([nativeDoor({ doubleDoor: 2, standEdges: [0, 0, 0, 4], squareFlags: [2, 0, 0, 32] })], {
+        squares: doorSquares({ '8:11': { solidTrans: true }, '9:10': { solidTrans: true } }),
+    });
+    subject.toggleDoor(door.id);
+    assert.equal(subject.getSquare(8, 11, 0).canStand, true, 'moved panel owns edges at its actual position');
+    assert.equal(subject.getSquare(9, 10, 0).canStand, false, 'closed origin does not keep a moved edge');
+    assert.equal(subject.getSquare(9, 11, 0).solidFloor, true, 'current source facts move with the panel');
+    assert.equal(subject.getSquare(10, 10, 0).solid, false, 'closed sprite facts do not remain at its origin');
+
+    const sourceDoor = nativeDoor({ squareFlags: [34, 8, 4, 32], standEdges: [0, 0, 2, 0] });
+
+    subject.importDoors([sourceDoor], { squares: doorSquares() });
+    assert.deepEqual(subject.getSquare(10, 10, 0), {
+        x: 10, y: 10, z: 0, roomId: -1, outside: true, solid: true, solidTrans: false,
+        tree: false, vehicleObstructed: false, solidFloor: true, canStand: false,
+    }, 'initial closed source solid wins over its floor');
+    subject.toggleDoor(door.id);
+    assert.deepEqual(subject.getSquare(10, 10, 0), {
+        x: 10, y: 10, z: 0, roomId: -1, outside: true, solid: false, solidTrans: false,
+        tree: false, vehicleObstructed: false, solidFloor: true, canStand: true,
+    }, 'toggle changes source query facts without self-obstructing on its old solid flag');
+    const sourceSave = subject.saveDoorState();
+
+    subject.toggleDoor(door.id);
+    assert.equal(subject.getSquare(10, 10, 0).solidTrans, true);
+    assert.equal(subject.getSquare(10, 10, 0).solidFloor, false);
+    assert.equal(subject.getSquare(10, 10, 0).canStand, true, 'merged solidtrans facts use the current edge');
+    subject.loadDoorState(sourceSave);
+    assert.deepEqual(subject.saveDoorState(), sourceSave);
+    assert.equal(subject.getSquare(10, 10, 0).solidTrans, false, 'restored sprite facts replace the old union');
+
+    subject.importDoors([nativeDoor({ ...sourceDoor, open: true })], { squares: doorSquares() });
+    assert.equal(subject.getSquare(10, 10, 0).tree, true, 'initial open source tree is not frozen');
+    assert.equal(subject.getSquare(10, 10, 0).solidFloor, false);
+    assert.equal(subject.getSquare(10, 10, 0).canStand, false, 'tree alone does not supply a floor or edge');
+});
+
+test('direct WASM square staging rejects reserved flags, edges and scratch words without changing live metadata', async () => {
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+    const api = instance.exports;
+    const square = [8, 8, 0, 7, 33, 0, 0, 0, 0, 0, 0, 0];
+
+    /**
+     * Writes one complete native import record into private scratch.
+     *
+     * @param {number[]} values - Twelve numeric scratch words.
+     */
+    const writeWords = (values) => {
+        const view = new DataView(api.memory.buffer, api.scratch_ptr(), api.scratch_size());
+
+        for (const [index, value] of values.entries()) {
+            view.setFloat64(index * 8, value, true);
+        }
+    };
+
+    assert.equal(api.door_import_begin(1, 4, 0), 0);
+    writeWords(square);
+    assert.equal(api.door_square_stage(), 0);
+    assert.equal(api.door_import_commit(), 0);
+    assert.equal(api.square_read(8, 8, 0), 0);
+    assert.deepEqual(Array.from({ length: 6 }, (_, index) =>
+        new DataView(api.memory.buffer, api.scratch_ptr()).getFloat64(index * 8, true)), [8, 8, 0, 7, 33, 1]);
+    assert.equal(api.square_read(8, 8, 100), -2);
+
+    for (const [index, value] of [
+        [4, 64], [8, 1], [8, 8], [8, 2.5], [8, Number.NaN],
+        [9, 1], [9, 8], [9, 2.5], [9, Number.NaN], [10, 4], [11, 1],
+    ]) {
+        const invalid = [...square];
+
+        invalid[index] = value;
+        assert.equal(api.door_import_begin(1, 4, 0), 0);
+        writeWords(invalid);
+        assert.equal(api.door_square_stage(), -4);
+        api.door_import_abort();
+        assert.equal(api.square_read(8, 8, 0), 0);
+        assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr() + 40, true), 1);
+    }
+
+    for (const spriteFacts of [1, 128, 16_384, 2_097_152, 268_435_456, 2.5, Number.NaN]) {
+        assert.equal(api.door_import_begin(1, 4, 0), 0);
+        writeWords([1, 10, 10, 0, 1, -1, -1, -1, 0, 0, 0, spriteFacts]);
+        assert.equal(api.door_import_stage(), -4);
+        api.door_import_abort();
+        assert.equal(api.square_read(8, 8, 0), 0);
+        assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr() + 40, true), 1);
+    }
+});
 
 test('native doors close the original portal in both directions without corner cutting', async () => {
     const subject = await engine();

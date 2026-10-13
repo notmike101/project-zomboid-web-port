@@ -1452,6 +1452,54 @@ for (const ending of ['return', 'throw']) {
     });
 }
 
+test('SDK square queries expose detached live native standability with owner lifecycle errors', async (t) => {
+    const engine = await newEngine();
+    const square = {
+        x: 5, y: 5, z: 0, roomId: 7, outside: false, solid: false,
+        solidTrans: false, tree: false, vehicleObstructed: false, solidFloor: true,
+        independentWalls: 0,
+    };
+
+    engine.importDoors([], { squares: [square] });
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-square-owner')}
+export function activate(api) {
+    fx.api = api;
+    assert.equal(api.world.getSquare(5, 5, 0).canStand, true);
+}`));
+    const api = fx.api;
+    const getSquare = api.world.getSquare;
+    const detached = getSquare(5, 5, 0);
+
+    assert.deepEqual(detached, {
+        x: 5, y: 5, z: 0, roomId: 7, outside: false, solid: false,
+        solidTrans: false, tree: false, vehicleObstructed: false, solidFloor: true,
+        canStand: true,
+    });
+    detached.canStand = false;
+    detached.roomId = 99;
+    assert.equal(getSquare(5, 5, 0).canStand, true);
+    assert.equal(getSquare(5, 5, 0).roomId, 7);
+    engine.importDoors([], { squares: [{ ...square, solid: true }] });
+    assert.equal(getSquare(5, 5, 0).canStand, false, 'replacement is read from WASM, not a cached SDK row');
+    assert.equal(getSquare(5, 5, 1), null);
+    assert.equal(getSquare(5, 5, 32), null);
+    assert.equal(getSquare(100, 100, 0), null);
+
+    for (const coordinates of [[5.1, 5, 0], [2_147_483_648, 5, 0], [5, 5, Number.NaN]]) {
+        assert.throws(() => getSquare(...coordinates), { name: 'ModError', modId: 'fx-square-owner', stage: 'world' });
+    }
+
+    const core = createModHost({ snapshot: engine.snapshot, command: engine.command, setSpeed: engine.setSpeed });
+
+    t.after(() => core.dispose());
+    assert.throws(() => core.api.world.getSquare(5, 5, 0), { name: 'ModError', modId: 'host', stage: 'world', message: /unsupported/ });
+    host.dispose();
+    assert.throws(() => getSquare(5, 5, 0), { name: 'ModError', modId: 'fx-square-owner', stage: 'api' });
+});
+
 test('door capabilities refuse core-only engines with caller attribution and preserve movement', async () => {
     const engine = await newEngine();
     const host = createModHost({ snapshot: engine.snapshot, command: engine.command, setSpeed: engine.setSpeed });

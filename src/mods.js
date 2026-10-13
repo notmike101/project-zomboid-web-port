@@ -1364,6 +1364,19 @@ export function createModHost(engine, options = {}) {
                  */
                 getDoors: () => access('world', () => capability('doors')().map((door) => ({ ...door }))),
                 /**
+                 * Reads current source-square metadata, not navigation approximations.
+                 *
+                 * @param {number} x - Signed int32 tile x.
+                 * @param {number} y - Signed int32 tile y.
+                 * @param {number} z - Signed int32 elevation.
+                 * @returns {import('../types/mod-api').ModWorldSquare|null} Detached facts, or null for absent metadata.
+                 */
+                getSquare: (x, y, z) => access('world', () => {
+                    const square = capability('getSquare')(x, y, z);
+
+                    return square === null ? null : { ...square };
+                }),
+                /**
                  * Toggles through the shared synchronous precommit command path.
                  *
                  * @param {string} id - Exact nonempty stable identity, at most 256 characters.

@@ -1134,6 +1134,15 @@ function createSessionModHost(binding) {
          */
         doors: () => binding.engine.doors(),
         /**
+         * Query this session's authoritative source square.
+         *
+         * @param {number} x - Signed int32 tile x.
+         * @param {number} y - Signed int32 tile y.
+         * @param {number} z - Signed int32 elevation.
+         * @returns {import('../types/mod-api').ModWorldSquare|null} Detached current facts or absent metadata.
+         */
+        getSquare: (x, y, z) => binding.engine.getSquare(x, y, z),
+        /**
          * Submit a door toggle through this session's shared command path.
          *
          * @param {string} id - Stable imported native door identity.

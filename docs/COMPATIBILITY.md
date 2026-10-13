@@ -82,6 +82,28 @@ query. This is not visible glove-art, source pickup-duration or timed-queue proo
 All 13 full-game gates remain open, including traits/survival, equipped-clothing
 rendering, original accessible context actions and roof visibility.
 
+### Source-square interaction prerequisite
+
+SDK `world.getSquare(x, y, z)` reads detached native source-square facts and
+current standability; absent squares return `null`, unsupported capability
+throws. Stable Lua cell/square userdata expose genuine coordinate lookup,
+current-player square at port elevation 0 and `canStand()`. Room identities are
+the existing dense canonical projection, not original packed `RoomID` values.
+
+Initial metadata replay accounts for actual constructor priority, attached
+overlays, shared window-property mutations, insertion order, floor/tree
+replacement and current door sprite history. Actual stand edges remain separate
+from legacy raw window collision, preserving existing movement and door reach.
+Unresolved component-bearing conditional floor replacement refuses import;
+entity-component execution, texture failures and full object lifecycle are not
+implemented by this subset.
+
+Fresh original-content Chromium/NVIDIA reload retained Save revision 6, actor
+191.5/199.5 at tick 864, 18 doors and square 191/199 with room 6,
+inside/solid-floor/standability facts. Absent elevation 100 returned `null`;
+no nonempty alert was present. This does not verify roof cutaways, visible
+interactions, the timed-action queue or full interaction-gate completion.
+
 
 
 

@@ -83,6 +83,23 @@
  */
 
 /**
+ * Detached authoritative source-square metadata, not navigation heuristics.
+ *
+ * @typedef {object} EngineSquare
+ * @property {number} x Signed int32 tile coordinate.
+ * @property {number} y Signed int32 tile coordinate.
+ * @property {number} z Signed int32 query elevation.
+ * @property {number} roomId Canonical dense room identity, or -1.
+ * @property {boolean} outside Source exterior flag.
+ * @property {boolean} solid Source solid flag.
+ * @property {boolean} solidTrans Source solidtrans flag.
+ * @property {boolean} tree Source tree flag.
+ * @property {boolean} vehicleObstructed Source vehicle-obstruction flag.
+ * @property {boolean} solidFloor Source solidfloor flag.
+ * @property {boolean} canStand Native source floor/adjacent-edge predicate.
+ */
+
+/**
  * Host-facing engine handle. State lives inside the WASM instance.
  * All world/state methods are optional ABI1 extensions: calling a method whose
  * exports are absent throws a clear unsupported error, without disabling the
@@ -128,6 +145,7 @@
  * @property {function(): object} saveBodyState Mutable-only portable version1 body state.
  * @property {function(object): void} loadBodyState Atomic complete native body restore.
  * @property {function(object[], object): void} importDoors Atomically imports native placements and source squares.
+ * @property {function(number, number, number): EngineSquare|null} getSquare Reads detached source metadata; null only when absent.
  * @property {function(): object[]} doors Reads detached stable-ID native door state.
  * @property {function(): number} doorRevision Reads the native door revision without allocating door records.
  * @property {function(string): object} toggleDoor Executes a native door interaction.
@@ -306,7 +324,11 @@ function doorFlags(row, names) {
     let flags = 0;
 
     for (const [index, name] of names.entries()) {
-        const value = (name === 'hoppable' || name === 'customLock') ? row[name] ?? false : row[name];
+        let value = (name === 'hoppable' || name === 'customLock') ? row[name] ?? false : row[name];
+
+        if (name === 'solidFloor' && value === undefined) {
+            value = false;
+        }
 
         if (typeof value !== 'boolean') {
             throw new TypeError(`${name} must be a boolean.`);
@@ -874,7 +896,8 @@ async function createEngine(source) {
     let doorOrdinals = new Map();
     const doorBooleanNames = ['north', 'open', 'locked', 'lockedByKey', 'forceLocked',
         'attachedE', 'attachedS', 'barricaded', 'interiorSide', 'hoppable', 'customLock'];
-    const squareBooleanNames = ['outside', 'solid', 'solidTrans', 'tree', 'vehicleObstructed'];
+    const squareBooleanNames = ['outside', 'solid', 'solidTrans', 'tree', 'vehicleObstructed', 'solidFloor'];
+    // Source square flags: exterior1, solid2, solidtrans4, tree8, vehicle16, solidfloor32.
 
     /**
      * Transfers one validated numeric record into bounded private scratch.
@@ -895,6 +918,13 @@ async function createEngine(source) {
      * may initialize new-world locks with a saved port-owned seed; restores never
      * generate locks. Vehicle flags are valid only for the explicit zero-vehicle
      * world until an authoritative native vehicle geometry producer exists.
+     * Optional standEdges contains initialClosed/initialOpen/toggledClosed/
+     * toggledOpen north2/west4 masks. Optional squareFlags contains four masks of
+     * source solid2/solidtrans4/tree8/solidfloor32 in the same state order. Both
+     * default to all zero and remain immutable source metadata, not saved state.
+     * Base squares may supply solidFloor (default false) and hoppableEdges (default zero).
+     * Square windows retains raw collision bits; windowEdges supplies actual
+     * created-window/frame stand edges, defaulting to windows when omitted.
      *
      * @param {object[]} rows - Stable CLOSED-placement identities and source flags.
      * @param {object} options - Native geometry and generation configuration.
@@ -943,11 +973,40 @@ async function createEngine(source) {
                 throw new TypeError('Door cannot be both double and garage.');
             }
 
+            if (row.standEdges !== undefined
+                && (!Array.isArray(row.standEdges) || row.standEdges.length !== 4)) {
+                throw new TypeError('standEdges requires four source north2/west4 masks.');
+            }
+
+            if (row.squareFlags !== undefined
+                && (!Array.isArray(row.squareFlags) || row.squareFlags.length !== 4)) {
+                throw new TypeError('squareFlags requires four source solid2/solidtrans4/tree8/solidfloor32 masks.');
+            }
+
+            let spriteFacts = 0;
+
+            for (let state = 0; state < 4; state += 1) {
+                const edges = row.standEdges === undefined
+                    ? 0
+                    : doorMask(row.standEdges[state], `standEdges[${state}]`);
+                const flags = row.squareFlags === undefined
+                    ? 0
+                    : requireInteger(row.squareFlags[state], `squareFlags[${state}]`, 0, 46);
+
+                if ((flags & ~46) !== 0) {
+                    throw new RangeError(`squareFlags[${state}] must contain only solid2/solidtrans4/tree8/solidfloor32.`);
+                }
+
+                const group = edges | ((flags & 6) << 2) | ((flags & 8) << 3) | (flags & 32);
+
+                spriteFacts |= group << (state * 7);
+            }
+
             return [index + 1, x, y, z, doorFlags(row, doorBooleanNames),
                 requireInteger(row.keyId ?? -1, 'keyId', -1, 0x7F_FF_FF_FF),
                 requireInteger(row.roomId, 'roomId', -1, Number.MAX_SAFE_INTEGER),
                 requireInteger(row.oppositeRoomId, 'oppositeRoomId', -1, Number.MAX_SAFE_INTEGER),
-                doorMask(row.independentWalls, 'independentWalls'), doubleDoor, garageDoor];
+                doorMask(row.independentWalls, 'independentWalls'), doubleDoor, garageDoor, spriteFacts];
         });
         const squareIds = new Set();
         const squareRows = squares.map((row) => {
@@ -965,7 +1024,9 @@ async function createEngine(source) {
 
             return [x, y, z, requireInteger(row.roomId, 'square roomId', -1, Number.MAX_SAFE_INTEGER),
                 doorFlags(row, squareBooleanNames), doorMask(row.independentWalls, 'square independentWalls'),
-                doorMask(row.windows ?? 0, 'square windows'), doorMask(row.doorWalls ?? 0, 'square doorWalls')];
+                doorMask(row.windows ?? 0, 'square windows'), doorMask(row.doorWalls ?? 0, 'square doorWalls'),
+                doorMask(row.hoppableEdges === undefined ? 0 : row.hoppableEdges, 'square hoppableEdges'),
+                doorMask(row.windowEdges === undefined ? row.windows ?? 0 : row.windowEdges, 'square windowEdges')];
         });
 
         scratch('importDoors');
@@ -987,6 +1048,41 @@ async function createEngine(source) {
         } finally {
             api.door_import_abort();
         }
+    }
+
+    /**
+     * Reads source square fields and the native current-object stand predicate.
+     *
+     * @param {number} x - Signed int32 tile x.
+     * @param {number} y - Signed int32 tile y.
+     * @param {number} z - Signed int32 query elevation.
+     * @returns {EngineSquare|null} Detached record, or null for genuinely absent metadata.
+     */
+    function getSquare(x, y, z) {
+        requireOptional('getSquare', ['square_read']);
+        requireInteger(x, 'square x', -0x80_00_00_00, 0x7F_FF_FF_FF);
+        requireInteger(y, 'square y', -0x80_00_00_00, 0x7F_FF_FF_FF);
+        requireInteger(z, 'square z', -0x80_00_00_00, 0x7F_FF_FF_FF);
+        scratch('getSquare');
+        const code = api.square_read(x, y, z);
+
+        if (code === -2) {
+            return null;
+        }
+
+        requireAccepted(code, 'getSquare');
+        const view = scratch('getSquare');
+        const flags = view.getFloat64(32, true);
+        const row = {
+            x: view.getFloat64(0, true), y: view.getFloat64(8, true), z: view.getFloat64(16, true),
+            roomId: view.getFloat64(24, true), canStand: view.getFloat64(40, true) !== 0,
+        };
+
+        for (const [bit, name] of squareBooleanNames.entries()) {
+            row[name] = (flags & (1 << bit)) !== 0;
+        }
+
+        return row;
     }
 
     /**
@@ -1835,7 +1931,7 @@ async function createEngine(source) {
         commitItemDefinitionRegistration, rollbackItemDefinitionRegistration, freezeItemDefinitions,
         items, inventoryState, importItems, wornItem, isWearingAwkwardGloves, getHealth, isDead,
         moodles, moodleInputLimits, saveMoodleState, loadMoodleState, resetMoodleState,
-        importDoors, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,
+        importDoors, getSquare, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,
         bodyParts, bodyPartInputLimits, thermalActionModifier, canSaveBodyState, saveBodyState, loadBodyState,
     });
 }

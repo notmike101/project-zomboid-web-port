@@ -104,6 +104,24 @@ export interface ModInventoryState {
   maxWeight: number;
 }
 
+/** Detached authoritative source-square facts; absent metadata returns null, not a guessed tile. */
+export interface ModWorldSquare {
+  x: number;
+  y: number;
+  z: number;
+  /** Dense canonical source room identity, or -1 outside rooms; not original packed RoomID. */
+  roomId: number;
+  outside: boolean;
+  solid: boolean;
+  solidTrans: boolean;
+  tree: boolean;
+  vehicleObstructed: boolean;
+  /** Source cached TreatAsSolidFloor result: raw solidfloor, stairs, or a nonnull slope direction. */
+  solidFloor: boolean;
+  /** Native source predicate using current square flags and actual adjacent window/hoppable edges. */
+  canStand: boolean;
+}
+
 /** Opaque original source IDs in real engine order; no guessed neutral registry. */
 export interface ModMoodle {
   id: string;
@@ -423,6 +441,8 @@ export interface ModApi {
     getBounds(): ModWorldBounds;
     /** Read-only during activation too. Unsupported engine throws ModError/world. */
     getDoors(): ModDoor[];
+    /** Signed int32 coordinates. Returns null only for absent source metadata; unsupported engines throw. */
+    getSquare(x: number, y: number, z: number): ModWorldSquare | null;
     /** Exact nonempty stable id, at most 256 characters; no namespace normalization.
      * Uses actions.submit hooks before WASM mutation and returns cancelled on veto.
      * Forbidden during synchronous activate; malformed/unsupported/reentrant calls throw ModError/action. */
@@ -560,6 +580,7 @@ export interface ModEngine {
   step?(seconds: number): void;
   worldBounds?(): ModWorldBounds;
   navFlags?(x: number, y: number): number;
+  getSquare?(x: number, y: number, z: number): ModWorldSquare | null;
   worldImportCell?(cx: number, cy: number, bytes: Uint8Array | DataView): void;
   /** Optional actual native-door wrapper. Validation checks availability without toggling. */
   doors?(): ModDoor[];
