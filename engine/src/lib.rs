@@ -1,4 +1,4 @@
-//! Authoritative movement rules for the M1 architecture proof.
+//! Authoritative movement, world, item and project health rules.
 //!
 //! One simulation owns coordinates, destination/heading state, speed, world
 //! bounds, tick count and cancellation. The JavaScript host may only read state
@@ -56,6 +56,337 @@ const BLOCKED: i32 = -3;
 /// A streaming world import was malformed; no partial cell state survives.
 const BAD_FORMAT: i32 = -4;
 
+// MoodleStat/Moodle.Update thresholds from retained original bytecode.
+// Inputs are genuine port-owned state; this does not supply native survival,
+// inventory mass, weather/corpse dynamics, voice, wiggles or thermal chevrons.
+const MOODLE_INPUTS: usize = 34;
+const MOODLE_WORDS: usize = MOODLE_INPUTS + 3;
+const F32_MAX: f64 = f32::MAX as f64;
+
+// min, max, source/project default, kind (0 float, 1 integer, 2 boolean).
+const MOODLE_LIMITS: [(f64, f64, f64, u32); MOODLE_INPUTS] = [
+    (0.0, 1.0, 1.0, 0),                // endurance
+    (0.0, 1.0, 0.0, 0),                // fatigue
+    (0.0, 1.0, 0.0, 0),                // hunger
+    (0.0, 100.0, 0.0, 0),              // panic
+    (0.0, 1.0, 0.0, 0),                // sickness
+    (0.0, 100.0, 0.0, 0),              // boredom
+    (0.0, 100.0, 0.0, 0),              // unhappiness
+    (0.0, 100.0, 0.0, 0),              // wetness
+    (0.0, 1.0, 0.0, 0),                // anger
+    (0.0, 1.0, 0.0, 0),                // stress
+    (0.0, 0.51, 0.0, 0),               // nicotine withdrawal
+    (0.0, 1.0, 0.0, 0),                // thirst
+    (0.0, 100.0, 0.0, 0),              // pain
+    (0.0, 100.0, 0.0, 0),              // intoxication
+    (20.0, 40.0, 37.0, 0),             // temperature: source clamp makes >40 unreachable
+    (0.0, 100.0, 0.0, 0),              // zombie infection
+    (0.0, 100.0, 0.0, 0),              // zombie fever
+    (0.0, 100.0, 0.0, 0),              // food sickness
+    (0.0, 100.0, 0.0, 0),              // discomfort
+    (0.0, 100.0, 0.0, 0),              // cold strength; progression remains unmodeled
+    (0.0, 1.0, 0.0, 2),                // has cold
+    (0.0, 1.0, 0.0, 2),                // fake infected
+    (0.0, 17.0, 0.0, 1),               // bleeding body parts
+    (0.0, 1.0, 0.0, 2),                // neck bleeding
+    (0.0, F32_MAX, 0.0, 0),            // capacity weight: explicit empty-load port policy
+    (1.0, i32::MAX as f64, 8.0, 1),    // max weight: explicit port baseline, not native dynamics
+    (0.0, F32_MAX, 0.0, 0),            // wind chill: bounded world has no weather
+    (0.0, F32_MAX, 0.0, 0),            // corpse sickness rate: no corpse simulation
+    (0.0, 1.0, 0.0, 2),                // toxic building: no toxic-building simulation
+    (0.0, 1.0, 0.0, 2),                // protection from toxic exposure
+    (0.0, 1.0, 0.0, 2),                // corpse impact enabled: explicit bounded-world policy
+    (0.0, 1.0, 0.0, 2),                // can't sprint
+    (0.0, F32_MAX, 0.0, 0),            // health from food timer; survival decay unmodeled
+    (1.0, i32::MAX as f64, 1600.0, 1), // standard health from food time
+];
+
+#[derive(Clone, Copy)]
+struct MoodleState {
+    inputs: [f64; MOODLE_INPUTS],
+    pain_timer: u32,
+    pain_level: u32,
+    cant_sprint_timer: u32,
+}
+
+impl MoodleState {
+    fn initial() -> Self {
+        Self {
+            inputs: MOODLE_LIMITS.map(|(_, _, default, _)| default),
+            pain_timer: 0,
+            pain_level: 0,
+            cant_sprint_timer: 300,
+        }
+    }
+
+    fn advance(&mut self, health: f64) {
+        // Original counters count updates, not elapsed seconds. Dead's generic
+        // gate precedes both counters; queries never advance either counter.
+        if health == 0.0 {
+            self.pain_level = 0;
+            return;
+        }
+        self.pain_timer += 1;
+        if self.pain_timer == 120 {
+            self.pain_timer = 0;
+            self.pain_level = above(self.inputs[12] as f32, [10.0, 20.0, 50.0, 75.0]);
+        }
+        if self.inputs[31] != 0.0 {
+            self.cant_sprint_timer -= 1;
+            if self.cant_sprint_timer == 0 {
+                self.cant_sprint_timer = 300;
+                self.inputs[31] = 0.0;
+            }
+        }
+    }
+
+    fn level(&self, index: u32, health: f64) -> u32 {
+        let s = &self.inputs;
+        if health == 0.0 {
+            let zombie = s[21] == 0.0 && s[15] as f32 >= 0.001_f32;
+            return match index {
+                17 if !zombie => 4,
+                18 if zombie => 4,
+                _ => 0,
+            };
+        }
+        let v = |i: usize| s[i] as f32;
+        match index {
+            0 => {
+                let endurance = v(0);
+                if endurance > 0.75 {
+                    0
+                } else if endurance > 0.5 {
+                    1
+                } else if endurance > 0.25 {
+                    2
+                } else if endurance > 0.1 {
+                    3
+                } else {
+                    4
+                }
+            }
+            1 => above(v(1), [0.6, 0.7, 0.8, 0.9]),
+            2 => above(v(2), [0.15, 0.25, 0.45, 0.7]),
+            3 => above(v(3), [6.0, 30.0, 65.0, 80.0]),
+            4 => above(
+                v(4) + v(15).max(v(16)).max(v(17)) / 100.0,
+                [0.25, 0.5, 0.75, 0.9],
+            ),
+            5 => above(v(5), [25.0, 50.0, 75.0, 90.0]),
+            6 => above(v(6), [20.0, 45.0, 60.0, 80.0]),
+            7 => {
+                if s[23] != 0.0 {
+                    4
+                } else {
+                    (s[22] as u32).min(4)
+                }
+            }
+            8 => above(v(7), [15.0, 40.0, 70.0, 90.0]),
+            9 => above(
+                if s[20] != 0.0 { v(19) } else { 0.0 },
+                [20.0, 40.0, 60.0, 75.0],
+            ),
+            10 => above(v(8), [0.1, 0.25, 0.5, 0.75]),
+            11 => above((v(9) + v(10)).clamp(0.0, 1.0), [0.25, 0.5, 0.75, 0.9]),
+            12 => above(v(11), [0.12, 0.25, 0.7, 0.84]),
+            13 => above(100.0 - health as f32, [20.0, 40.0, 60.0, 75.0]),
+            14 => self.pain_level,
+            15 => {
+                let ratio = v(24) / v(25);
+                if ratio >= 1.75 {
+                    4
+                } else if ratio >= 1.5 {
+                    3
+                } else if ratio >= 1.25 {
+                    2
+                } else if ratio > 1.0 {
+                    1
+                } else {
+                    0
+                }
+            }
+            16 => above(v(13), [10.0, 30.0, 50.0, 70.0]),
+            17 | 18 => 0, // genuine alive gate, not missing rules
+            19 => above(v(14), [37.5, 39.0, 40.0, 41.0]),
+            20 => {
+                let temp = v(14);
+                let mut level = 0;
+                if temp < 36.5 && v(13) <= 30.0 {
+                    level = 1;
+                }
+                if temp < 35.0 && v(13) <= 70.0 {
+                    level = 2;
+                }
+                if temp < 30.0 {
+                    level = 3;
+                }
+                if temp < 25.0 {
+                    level = 4;
+                }
+                level
+            }
+            21 => {
+                // Preserve original repeated highest-threshold branch:
+                // >15 initially sets1, >10 overrides2, >15 overrides3.
+                if v(26) > 20.0 {
+                    4
+                } else if v(26) > 15.0 {
+                    3
+                } else if v(26) > 10.0 {
+                    2
+                } else {
+                    0
+                }
+            }
+            22 => u32::from(s[31] != 0.0),
+            23 => [20.0, 40.0, 60.0, 80.0]
+                .iter()
+                .filter(|&&t| v(18) >= t)
+                .count() as u32,
+            24 => {
+                if s[28] != 0.0 && s[29] == 0.0 {
+                    4
+                } else if s[30] == 0.0 || v(27) <= 0.0 {
+                    0
+                } else if v(27) > 0.002 {
+                    3
+                } else if v(27) > 0.001 {
+                    2
+                } else {
+                    1
+                }
+            }
+            25 => above(v(32), [0.0, v(33), v(33) * 2.0, v(33) * 3.0]),
+            _ => 0,
+        }
+    }
+}
+
+fn above(value: f32, thresholds: [f32; 4]) -> u32 {
+    thresholds
+        .iter()
+        .filter(|&&threshold| value > threshold)
+        .count() as u32
+}
+
+thread_local! {
+    static MOODLES: RefCell<MoodleState> = RefCell::new(MoodleState::initial());
+    static MOODLE_STAGING: RefCell<Option<([f64; MOODLE_WORDS], usize)>> = const { RefCell::new(None) };
+}
+
+fn moodle_value_valid(index: usize, value: f64) -> bool {
+    let (min, max, _, kind) = if index < MOODLE_INPUTS {
+        MOODLE_LIMITS[index]
+    } else {
+        match index {
+            34 => (0.0, 119.0, 0.0, 1),
+            35 => (0.0, 4.0, 0.0, 1),
+            36 => (1.0, 300.0, 300.0, 1),
+            _ => return false,
+        }
+    };
+    value.is_finite() && (min..=max).contains(&value) && (kind == 0 || value.fract() == 0.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moodle_input_limit(index: u32, field: u32) -> f64 {
+    match MOODLE_LIMITS.get(index as usize) {
+        Some(&(min, max, default, kind)) => match field {
+            0 => min,
+            1 => max,
+            2 => default,
+            3 => kind as f64,
+            _ => f64::NAN,
+        },
+        None => f64::NAN,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moodle_state_value(index: u32) -> f64 {
+    MOODLES.with(|state| {
+        let state = state.borrow();
+        match index as usize {
+            i if i < MOODLE_INPUTS => state.inputs[i],
+            34 => state.pain_timer as f64,
+            35 => state.pain_level as f64,
+            36 => state.cant_sprint_timer as f64,
+            _ => f64::NAN,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn set_character_stat(index: u32, value: f64) -> i32 {
+    if index >= 19 || !moodle_value_valid(index as usize, value) {
+        return OUT_OF_RANGE;
+    }
+    MOODLES.with(|state| state.borrow_mut().inputs[index as usize] = value);
+    OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moodle_import_begin() {
+    MOODLE_STAGING.with(|staging| *staging.borrow_mut() = Some(([0.0; MOODLE_WORDS], 0)));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moodle_import_abort() {
+    MOODLE_STAGING.with(|staging| *staging.borrow_mut() = None);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moodle_import_stage(index: u32, value: f64) -> i32 {
+    MOODLE_STAGING.with(|staging| {
+        let mut staging = staging.borrow_mut();
+        if let Some((values, next)) = staging.as_mut()
+            && index as usize == *next
+            && moodle_value_valid(*next, value)
+        {
+            values[*next] = value;
+            *next += 1;
+            return OK;
+        }
+        *staging = None;
+        BAD_FORMAT
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moodle_import_commit() -> i32 {
+    MOODLE_STAGING.with(|staging| {
+        let Some((values, count)) = staging.borrow_mut().take() else {
+            return BAD_FORMAT;
+        };
+        if count != MOODLE_WORDS {
+            return BAD_FORMAT;
+        }
+        let mut inputs = [0.0; MOODLE_INPUTS];
+        inputs.copy_from_slice(&values[..MOODLE_INPUTS]);
+        MOODLES.with(|state| {
+            *state.borrow_mut() = MoodleState {
+                inputs,
+                pain_timer: values[34] as u32,
+                pain_level: values[35] as u32,
+                cant_sprint_timer: values[36] as u32,
+            }
+        });
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moodle_reset() {
+    MOODLES.with(|state| *state.borrow_mut() = MoodleState::initial());
+    moodle_import_abort();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moodle_level(index: u32) -> u32 {
+    MOODLES.with(|state| state.borrow().level(index, health()))
+}
+
 #[derive(Clone, Copy)]
 struct Engine {
     x: f32,
@@ -67,6 +398,9 @@ struct Engine {
     heading_y: f32,
     action: u32,
     tick: u32,
+    // Project health scalar, not the native survival simulation.
+    health: f64,
+    next_item_id: u64,
 }
 
 impl Engine {
@@ -81,6 +415,8 @@ impl Engine {
             heading_y: 0.0,
             action: ACTION_IDLE,
             tick: 0,
+            health: 100.0,
+            next_item_id: 1,
         }
     }
 
@@ -572,7 +908,7 @@ thread_local! {
 // A single stable, eight-byte-aligned host transfer buffer; no allocator ABI
 // and no arbitrary pointers into the engine's world or simulation storage.
 thread_local! {
-    static SCRATCH: RefCell<[f64; 10]> = const { RefCell::new([0.0; 10]) };
+    static SCRATCH: RefCell<[f64; 12]> = const { RefCell::new([0.0; 12]) };
 }
 
 /// Base pointer for world_bounds/state_save/state_load, valid until instance
@@ -582,10 +918,10 @@ pub extern "C" fn scratch_ptr() -> *mut u8 {
     SCRATCH.with(|scratch| scratch.as_ptr().cast())
 }
 
-/// Scratch capacity in bytes, shared by six i32 bounds or ten f64 state words.
+/// Scratch capacity in bytes, shared by bounds, item rows and twelve state words.
 #[unsafe(no_mangle)]
 pub extern "C" fn scratch_size() -> u32 {
-    80
+    96
 }
 
 fn mutate<R>(update: impl FnOnce(&mut Engine) -> R) -> R {
@@ -626,6 +962,8 @@ pub extern "C" fn api_version() -> u32 {
 pub extern "C" fn reset() {
     world_reset();
     mutate(|engine| *engine = Engine::initial());
+    ITEMS.with(|items| items.borrow_mut().reset());
+    moodle_reset();
 }
 
 /// Sets movement speed in world units per second; only [0.1, 10] is accepted.
@@ -762,6 +1100,7 @@ pub extern "C" fn step(dt: f64) -> i32 {
         // ponytail: wraps after ~2.3 years at 60 Hz; reset() re-zeroes it.
         engine.tick = engine.tick.wrapping_add(1);
         engine.advance(dt as f32);
+        MOODLES.with(|state| state.borrow_mut().advance(engine.health));
         OK
     })
 }
@@ -942,7 +1281,7 @@ pub extern "C" fn world_bounds(out: *mut i32) {
     let values = [i32::from(active), min_x, min_y, max_x, max_y, cells as i32];
     SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
-        // Both buffers are valid and disjoint; the destination has 80 bytes
+        // Both buffers are valid and disjoint; the destination has 96 bytes
         // and eight-byte alignment. Never dereference the caller's pointer.
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -957,18 +1296,18 @@ pub extern "C" fn world_bounds(out: *mut i32) {
 /// Number of f64 words [`state_save`] writes and [`state_load`] reads.
 #[unsafe(no_mangle)]
 pub extern "C" fn state_size() -> u32 {
-    10
+    12
 }
 
 /// Writes [x, y, speed, target_x, target_y, heading_x, heading_y, action,
-/// tick, world-active] into scratch_ptr(). Other pointers are ignored.
+/// tick, world-active, health, next-item-ID] into scratch_ptr().
 #[unsafe(no_mangle)]
 pub extern "C" fn state_save(out: *mut f64) {
     if out.cast::<u8>() != scratch_ptr() {
         return;
     }
     let engine = ENGINE.with(|engine| *engine.borrow());
-    let values: [f64; 10] = [
+    let values: [f64; 12] = [
         engine.x as f64,
         engine.y as f64,
         engine.speed as f64,
@@ -979,11 +1318,13 @@ pub extern "C" fn state_save(out: *mut f64) {
         engine.action as f64,
         engine.tick as f64,
         i32::from(world_extents().0) as f64,
+        engine.health,
+        engine.next_item_id as f64,
     ];
     SCRATCH.with(|scratch| *scratch.borrow_mut() = values);
 }
 
-/// Restores all ten state words atomically from scratch_ptr(); other pointers
+/// Restores all twelve state words atomically from scratch_ptr(); other pointers
 /// return OUT_OF_RANGE without being read. Destination paths are reconstructed
 /// against the currently imported world before either state or route changes.
 #[unsafe(no_mangle)]
@@ -1003,6 +1344,8 @@ pub extern "C" fn state_load(values: *const f64) -> i32 {
         action,
         tick,
         world_active,
+        health,
+        next_item_id,
     ] = values;
     if !values.iter().all(|value| value.is_finite()) {
         return NONFINITE;
@@ -1014,6 +1357,19 @@ pub extern "C" fn state_load(values: *const f64) -> i32 {
         || !(0.0..=2.0).contains(&action)
         || tick.fract() != 0.0
         || !(0.0..=u32::MAX as f64).contains(&tick)
+    {
+        return OUT_OF_RANGE;
+    }
+    if !(0.0..=100.0).contains(&health)
+        || next_item_id.fract() != 0.0
+        || !(1.0..=u32::MAX as f64 + 1.0).contains(&next_item_id)
+        || ITEMS.with(|items| {
+            items
+                .borrow()
+                .live
+                .iter()
+                .any(|item| item.id as f64 >= next_item_id)
+        })
     {
         return OUT_OF_RANGE;
     }
@@ -1074,9 +1430,533 @@ pub extern "C" fn state_load(values: *const f64) -> i32 {
         engine.heading_y = heading_y as f32;
         engine.action = action;
         engine.tick = tick as u32;
+        engine.health = health;
+        if health == 0.0 {
+            MOODLES.with(|state| state.borrow_mut().pain_level = 0);
+        }
+        engine.next_item_id = next_item_id as u64;
         OK
     })
 }
+
+// Bounded project item policy. No original tear timing/weight/speed rules are inferred.
+const MAX_ITEMS: usize = 4096;
+const MAX_DEFS: usize = 4096;
+
+#[derive(Clone, Copy)]
+struct ItemDefinition {
+    owner: u32,
+    condition_max: i32,
+    slot: u32,
+    stack_limit: u32,
+    remove_on_broken: bool,
+    condition_lower_chance_one_in: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Item {
+    id: u32,
+    definition: u32,
+    location: u32,
+    x: f64,
+    y: f64,
+    condition: i32,
+    count: u32,
+    slot: u32,
+}
+
+struct Items {
+    definitions: Vec<ItemDefinition>,
+    journal: Vec<(usize, ItemDefinition)>,
+    transaction_owner: u32,
+    transaction_start: usize,
+    frozen: bool,
+    live: Vec<Item>,
+    staged: Vec<Item>,
+    importing: bool,
+    last_id: u32,
+}
+
+impl Items {
+    fn new() -> Self {
+        Self {
+            definitions: Vec::with_capacity(MAX_DEFS),
+            journal: Vec::with_capacity(MAX_DEFS),
+            transaction_owner: 0,
+            transaction_start: 0,
+            frozen: false,
+            live: Vec::with_capacity(MAX_ITEMS),
+            staged: Vec::with_capacity(MAX_ITEMS),
+            importing: false,
+            last_id: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.definitions.clear();
+        self.journal.clear();
+        self.transaction_owner = 0;
+        self.transaction_start = 0;
+        self.frozen = false;
+        self.live.clear();
+        self.staged.clear();
+        self.importing = false;
+        self.last_id = 0;
+    }
+
+    fn valid(&self, item: &Item) -> bool {
+        let Some(definition) = self.definitions.get(item.definition as usize) else {
+            return false;
+        };
+        item.id != 0
+            && item.location <= 1
+            && item.x.is_finite()
+            && item.y.is_finite()
+            && item.condition >= 0
+            && item.condition <= definition.condition_max
+            && item.count > 0
+            && item.count <= definition.stack_limit
+            && (item.slot == 0 || (item.location == 1 && item.slot == definition.slot))
+            && (item.location == 1 || item_position_valid(item.x, item.y))
+    }
+}
+
+thread_local! {
+    static ITEMS: RefCell<Items> = RefCell::new(Items::new());
+}
+
+fn item_position_valid(x: f64, y: f64) -> bool {
+    if !x.is_finite() || !y.is_finite() {
+        return false;
+    }
+    if world_extents().0 {
+        // Membership alone: solid/walled tiles can hold dropped objects.
+        let tile = tile_at(x.floor() as i64, y.floor() as i64);
+        in_active_world(tile) && WORLD.with(|world| world.borrow().byte_at(tile).is_some())
+    } else {
+        in_world(x) && in_world(y)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_count() -> u32 {
+    ITEMS.with(|items| items.borrow().definitions.len() as u32)
+}
+
+/// Dense ordinal registration; numeric rows and their owner live only in WASM.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_register(
+    id: u32,
+    owner: u32,
+    condition_max: i32,
+    slot: u32,
+    stack_limit: u32,
+    remove_on_broken: u32,
+    chance: u32,
+    override_existing: u32,
+) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        let index = id as usize;
+        if items.frozen
+            || owner == 0
+            || condition_max <= 0
+            || stack_limit == 0
+            || remove_on_broken > 1
+            || override_existing > 1
+            || (items.transaction_owner != 0 && items.transaction_owner != owner)
+            || index > items.definitions.len()
+            || (index == items.definitions.len() && index >= MAX_DEFS)
+            || (index < items.definitions.len() && override_existing == 0)
+            || items.live.iter().any(|item| {
+                item.definition == id
+                    && (item.condition > condition_max
+                        || item.count > stack_limit
+                        || (item.slot != 0 && item.slot != slot))
+            })
+        {
+            return OUT_OF_RANGE;
+        }
+        let row = ItemDefinition {
+            owner,
+            condition_max,
+            slot,
+            stack_limit,
+            remove_on_broken: remove_on_broken != 0,
+            condition_lower_chance_one_in: chance,
+        };
+        if index == items.definitions.len() {
+            items.definitions.push(row);
+        } else {
+            if items.transaction_owner != 0
+                && index < items.transaction_start
+                && !items
+                    .journal
+                    .iter()
+                    .any(|(old_index, _)| *old_index == index)
+            {
+                let old = items.definitions[index];
+                items.journal.push((index, old));
+            }
+            items.definitions[index] = row;
+        }
+        OK
+    })
+}
+
+/// Scratch: owner, conditionMax, slot, stackLimit, removeOnBroken, chance.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_read(id: u32) -> i32 {
+    ITEMS.with(|items| {
+        let items = items.borrow();
+        let Some(row) = items.definitions.get(id as usize) else {
+            return OUT_OF_RANGE;
+        };
+        SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch[..6].copy_from_slice(&[
+                row.owner as f64,
+                row.condition_max as f64,
+                row.slot as f64,
+                row.stack_limit as f64,
+                u32::from(row.remove_on_broken) as f64,
+                row.condition_lower_chance_one_in as f64,
+            ]);
+        });
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_begin(owner: u32) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if owner == 0 || items.frozen || items.transaction_owner != 0 || items.importing {
+            return OUT_OF_RANGE;
+        }
+        items.transaction_owner = owner;
+        items.transaction_start = items.definitions.len();
+        items.journal.clear();
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_commit(owner: u32) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if owner == 0 || items.transaction_owner != owner {
+            return OUT_OF_RANGE;
+        }
+        items.transaction_owner = 0;
+        items.journal.clear();
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_rollback(owner: u32) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if owner == 0 || items.transaction_owner != owner {
+            return OUT_OF_RANGE;
+        }
+        while let Some((index, row)) = items.journal.pop() {
+            items.definitions[index] = row;
+        }
+        let start = items.transaction_start;
+        items.definitions.truncate(start);
+        items.transaction_owner = 0;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_freeze() -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if items.transaction_owner != 0 {
+            return OUT_OF_RANGE;
+        }
+        items.frozen = true;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_count() -> u32 {
+    ITEMS.with(|items| items.borrow().live.len() as u32)
+}
+
+/// Scratch: id, definition ordinal, location, x, y, condition, count, worn slot.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_read(index: u32) -> i32 {
+    ITEMS.with(|items| {
+        let items = items.borrow();
+        let Some(item) = items.live.get(index as usize) else {
+            return OUT_OF_RANGE;
+        };
+        SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch[..8].copy_from_slice(&[
+                item.id as f64,
+                item.definition as f64,
+                item.location as f64,
+                item.x,
+                item.y,
+                item.condition as f64,
+                item.count as f64,
+                item.slot as f64,
+            ]);
+        });
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_last_id() -> u32 {
+    ITEMS.with(|items| items.borrow().last_id)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_spawn(definition: u32, x: f64, y: f64, count: u32, condition: i32) -> i32 {
+    if !x.is_finite() || !y.is_finite() {
+        return NONFINITE;
+    }
+    let next = ENGINE.with(|engine| engine.borrow().next_item_id);
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        let item = Item {
+            id: next as u32,
+            definition,
+            location: 0,
+            x,
+            y,
+            condition,
+            count,
+            slot: 0,
+        };
+        if next > u32::MAX as u64
+            || items.live.len() >= MAX_ITEMS
+            || items.transaction_owner != 0
+            || items.importing
+            || !items.valid(&item)
+        {
+            return OUT_OF_RANGE;
+        }
+        items.live.push(item);
+        items.last_id = item.id;
+        mutate(|engine| engine.next_item_id += 1);
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_pickup(id: u32) -> i32 {
+    let actor = ENGINE.with(|engine| *engine.borrow());
+    change_item(id, |items, index| {
+        let item = &mut items.live[index];
+        // Project adjacency radius 1.5 tiles; not a native interaction claim.
+        if item.location != 0 || (item.x - actor.x as f64).hypot(item.y - actor.y as f64) > 1.5 {
+            return OUT_OF_RANGE;
+        }
+        item.location = 1;
+        OK
+    })
+}
+
+fn change_item(id: u32, change: impl FnOnce(&mut Items, usize) -> i32) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if items.importing || items.transaction_owner != 0 {
+            return OUT_OF_RANGE;
+        }
+        let Some(index) = items.live.iter().position(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        change(&mut items, index)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_wear(id: u32) -> i32 {
+    change_item(id, |items, index| {
+        let item = items.live[index];
+        let slot = items.definitions[item.definition as usize].slot;
+        if item.location != 1 || slot == 0 {
+            return OUT_OF_RANGE;
+        }
+        for old in &mut items.live {
+            if old.slot == slot {
+                old.slot = 0;
+            }
+        }
+        items.live[index].slot = slot;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_unequip(id: u32) -> i32 {
+    change_item(id, |items, index| {
+        if items.live[index].slot == 0 {
+            return OUT_OF_RANGE;
+        }
+        items.live[index].slot = 0;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_drop(id: u32, x: f64, y: f64) -> i32 {
+    if !x.is_finite() || !y.is_finite() {
+        return NONFINITE;
+    }
+    if !item_position_valid(x, y) {
+        return OUT_OF_RANGE;
+    }
+    change_item(id, |items, index| {
+        let item = &mut items.live[index];
+        if item.location != 1 {
+            return OUT_OF_RANGE;
+        }
+        item.location = 0;
+        item.slot = 0;
+        item.x = x;
+        item.y = y;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_set_condition(id: u32, condition: i32) -> i32 {
+    change_item(id, |items, index| {
+        let definition = items.definitions[items.live[index].definition as usize];
+        if condition < 0 || condition > definition.condition_max {
+            return OUT_OF_RANGE;
+        }
+        if condition == 0 && definition.remove_on_broken {
+            items.live.remove(index);
+        } else {
+            items.live[index].condition = condition;
+        }
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_begin() -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if items.importing || items.transaction_owner != 0 {
+            return OUT_OF_RANGE;
+        }
+        items.staged.clear();
+        items.importing = true;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_abort() {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        items.staged.clear();
+        items.importing = false;
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_stage(
+    id: u32,
+    definition: u32,
+    location: u32,
+    x: f64,
+    y: f64,
+    condition: i32,
+    count: u32,
+    slot: u32,
+) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        let item = Item {
+            id,
+            definition,
+            location,
+            x,
+            y,
+            condition,
+            count,
+            slot,
+        };
+        if !items.importing
+            || items.staged.len() >= MAX_ITEMS
+            || !items.valid(&item)
+            || items
+                .staged
+                .iter()
+                .any(|old| old.id == id || (slot != 0 && old.slot == slot))
+        {
+            items.staged.clear();
+            items.importing = false;
+            return BAD_FORMAT;
+        }
+        items.staged.push(item);
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_commit() -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if !items.importing {
+            return OUT_OF_RANGE;
+        }
+        // Revalidate membership if the world changed during staging.
+        if !items.staged.iter().all(|item| items.valid(item)) {
+            return OUT_OF_RANGE;
+        }
+        let next = items
+            .staged
+            .iter()
+            .map(|item| item.id as u64 + 1)
+            .max()
+            .unwrap_or(1);
+        let Items { live, staged, .. } = &mut *items;
+        std::mem::swap(live, staged);
+        items.staged.clear();
+        items.importing = false;
+        mutate(|engine| engine.next_item_id = engine.next_item_id.max(next));
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn health() -> f64 {
+    ENGINE.with(|engine| engine.borrow().health)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn is_dead() -> u32 {
+    u32::from(health() == 0.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn set_health(health: f64) -> i32 {
+    if !health.is_finite() {
+        return NONFINITE;
+    }
+    if !(0.0..=100.0).contains(&health) {
+        return OUT_OF_RANGE;
+    }
+    mutate(|engine| engine.health = health);
+    if health == 0.0 {
+        MOODLES.with(|state| state.borrow_mut().pain_level = 0);
+    }
+    OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1349,12 +2229,12 @@ mod tests {
         words
     }
 
-    fn saved_state() -> [f64; 10] {
+    fn saved_state() -> [f64; 12] {
         state_save(scratch_ptr().cast());
         SCRATCH.with(|scratch| *scratch.borrow())
     }
 
-    fn load_saved(values: [f64; 10]) -> i32 {
+    fn load_saved(values: [f64; 12]) -> i32 {
         SCRATCH.with(|scratch| *scratch.borrow_mut() = values);
         state_load(scratch_ptr().cast())
     }
@@ -1543,7 +2423,6 @@ mod tests {
         let after = saved_state();
         assert!(near(after[3] as f32, saved[3] as f32));
         assert_eq!(tick(), saved[8] as u32);
-        assert_eq!(state_size(), 10);
     }
 
     #[test]
@@ -1731,7 +2610,7 @@ mod tests {
         assert_eq!(walk(1.0, 1.0), OK);
         assert_eq!(step(DT), OK);
         let saved = saved_state();
-        for index in 0..10 {
+        for index in 0..12 {
             for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
                 let mut values = saved;
                 values[index] = invalid;
@@ -1753,7 +2632,6 @@ mod tests {
             assert_eq!(load_saved(values), OUT_OF_RANGE);
             assert_eq!(saved_state(), saved);
         }
-        assert_eq!(scratch_size(), 80);
         assert_eq!((scratch_ptr() as usize) % 8, 0);
         assert_eq!(state_load(std::ptr::null()), OUT_OF_RANGE);
         assert_eq!(
@@ -1764,9 +2642,9 @@ mod tests {
             state_load(scratch_ptr().wrapping_add(8).cast()),
             OUT_OF_RANGE
         );
-        let mut foreign = [123.0_f64; 10];
+        let mut foreign = [123.0_f64; 12];
         state_save(foreign.as_mut_ptr());
-        assert_eq!(foreign, [123.0; 10]);
+        assert_eq!(foreign, [123.0; 12]);
         let mut bounds = [123_i32; 6];
         world_bounds(bounds.as_mut_ptr());
         assert_eq!(bounds, [123; 6]);

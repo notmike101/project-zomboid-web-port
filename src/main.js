@@ -3,6 +3,7 @@ import { createEngine } from './engine.js';
 import { openMapCell } from './map-tiles.js';
 import { createModManager, parseModPackage, readPackageFile, resolveModOrder } from './mod-manager.js';
 import { createModHost } from './mods.js';
+import { loadNativeGameResources, seedOriginalFootwear } from './native-game-resources.js';
 import { bindNativeSession, closeNativeSession, discoverNativePackages, nativePackageFiles, prepareNativeSession } from './native-mod-loader.js';
 import { openPack } from './packs.js';
 import { createRenderer, worldFromCanvas } from './renderer.js';
@@ -26,6 +27,7 @@ const packageStatus = document.querySelector('#package-status');
 const packageError = document.querySelector('#package-error');
 const packageActivation = document.querySelector('#package-activation');
 const safeMods = new URL(globalThis.location.href).searchParams.has('safe-mods');
+const FIXED_STEP_SECONDS = 1 / 60;
 const held = new Set();
 const keys = new Map([
     ['w', [0, -1]], ['arrowup', [0, -1]], ['s', [0, 1]], ['arrowdown', [0, 1]],
@@ -52,6 +54,7 @@ let geometryCells = [];
 let nativePackages = [];
 let luaSession;
 let activeNativeDescriptors = [];
+let gameUI;
 let liveModContext;
 let packageBusy = false;
 let packagesActivated = false;
@@ -250,16 +253,23 @@ function frame(time) {
 
     if (sessionReady && !sessionBusy && !paused && !document.hidden) {
         accumulator += elapsed;
-        while (accumulator >= 1 / 60) {
-            mods.step(1 / 60);
-            accumulator -= 1 / 60;
+        while (accumulator >= FIXED_STEP_SECONDS) {
+            mods.step(FIXED_STEP_SECONDS);
+            accumulator -= FIXED_STEP_SECONDS;
         }
     } else {
         accumulator = 0;
     }
 
     if (sessionReady && !sessionBusy) {
-        renderer.render(engine.snapshot());
+        try {
+            renderer.render(engine.snapshot());
+            canvas.style.cursor = gameUI?.cursorVisible() ? 'default' : '';
+        } catch (cause) {
+            report(cause);
+
+            return;
+        }
     }
 
     if (Math.floor(time / 500) !== Math.floor((time - elapsed * 1_000) / 500)) {
@@ -386,6 +396,44 @@ async function changePackage(change, message) {
 }
 
 /**
+ * Give original gameplay UI first refusal using canvas CSS coordinates.
+ *
+ * @param {MouseEvent|PointerEvent|WheelEvent} event - Native canvas input.
+ * @param {string} name - Original UI callback name.
+ * @param {...number} args - Movement delta or wheel amount.
+ * @returns {boolean} Whether UI consumed the input.
+ */
+function gameUIPointer(event, name, ...args) {
+    if (!gameUI || !sessionReady || sessionBusy || failed || pauseMenu.open) {
+        return false;
+    }
+
+    const bounds = canvas.getBoundingClientRect();
+    const width = canvas.clientWidth || canvas.width;
+    const height = canvas.clientHeight || canvas.height;
+    const x = (event.clientX - bounds.left) * width / bounds.width;
+    const y = (event.clientY - bounds.top) * height / bounds.height;
+
+    try {
+        gameUI.setViewport(width, height);
+        gameUI.setMouse(x, y);
+        const consumed = gameUI.input(name, x, y, ...args);
+
+        canvas.style.cursor = gameUI.cursorVisible() ? 'default' : '';
+
+        if (consumed) {
+            event.preventDefault();
+        }
+
+        return consumed;
+    } catch (cause) {
+        reportPackageError(cause);
+
+        return true;
+    }
+}
+
+/**
  * Translate mouse/touch coordinates into an engine destination.
  *
  * @param {PointerEvent} event - Primary pointer action.
@@ -397,6 +445,11 @@ function pointDestination(event) {
     }
 
     canvas.focus();
+
+    if (gameUIPointer(event, 'onMouseDown')) {
+        return;
+    }
+
     const point = worldFromCanvas(canvas, event.clientX, event.clientY);
 
     takeover({ type: 'moveTo', x: point.x, y: point.y });
@@ -487,9 +540,17 @@ function keyDown(event) {
 
     if (sessionReady && !paused && !failed && document.activeElement === canvas) {
         try {
+            if (gameUI?.keyInput(event.repeat ? 'onKeyRepeat' : 'onKeyPress', event.keyCode)) {
+                event.preventDefault();
+
+                return;
+            }
+
             luaSession?.dispatch(event.repeat ? 'OnKeyKeepPressed' : 'OnKeyPressed', event.keyCode);
         } catch (cause) {
             reportPackageError(cause);
+
+            return;
         }
     }
 
@@ -537,9 +598,25 @@ function keyUp(event) {
 
     if (sessionReady && !paused && !failed && document.activeElement === canvas) {
         try {
+            if (gameUI?.keyInput('onKeyRelease', event.keyCode)) {
+                event.preventDefault();
+
+                if (held.delete(key)) {
+                    manual();
+                }
+
+                return;
+            }
+
             luaSession?.dispatch('OnKeyReleased', event.keyCode);
         } catch (cause) {
             reportPackageError(cause);
+
+            if (held.delete(key)) {
+                manual();
+            }
+
+            return;
         }
     }
 
@@ -725,6 +802,103 @@ function createSessionModHost(binding) {
          */
         command: (action) => binding.engine.command(action),
         /**
+         * Register source metadata and numeric fields in this session's engine.
+         *
+         * @param {import('../types/mod-api').ModItemDefinitionInput} definition - Complete definition to register.
+         * @param {{owner: string, override?: boolean}} options - Exact owner and explicit replacement policy.
+         * @returns {import('../types/mod-api').ModItemDefinition} Resolved authoritative definition.
+         */
+        registerItemDefinition: (definition, options) => binding.engine.registerItemDefinition(definition, options),
+        /**
+         * Read this session's detached definitions with authoritative numeric fields.
+         *
+         * @returns {import('../types/mod-api').ModItemDefinition[]} Registered definitions in engine order.
+         */
+        itemDefinitions: () => binding.engine.itemDefinitions(),
+        /**
+         * Begin an owner-bound registration transaction in this session.
+         *
+         * @param {string} owner - Exact registering owner.
+         * @returns {void} Starts transactional definition staging.
+         */
+        beginItemDefinitionRegistration: (owner) => binding.engine.beginItemDefinitionRegistration(owner),
+        /**
+         * Commit this session's successful owner-bound registration.
+         *
+         * @param {string} owner - Exact transaction owner.
+         * @returns {void} Retains the registered definitions.
+         */
+        commitItemDefinitionRegistration: (owner) => binding.engine.commitItemDefinitionRegistration(owner),
+        /**
+         * Roll back numeric rows, owners and metadata after failed activation.
+         *
+         * @param {string} owner - Exact transaction owner.
+         * @returns {void} Restores the prior definitions.
+         */
+        rollbackItemDefinitionRegistration: (owner) => binding.engine.rollbackItemDefinitionRegistration(owner),
+        /**
+         * Seal this session's definitions after activation.
+         *
+         * @returns {void} Refuses subsequent definition registration.
+         */
+        freezeItemDefinitions: () => binding.engine.freezeItemDefinitions(),
+        /**
+         * Read detached stable item records from this session's engine.
+         *
+         * @returns {import('../types/mod-api').ModItem[]} Authoritative item records.
+         */
+        items: () => binding.engine.items(),
+        /**
+         * Atomically restore explicit item identities in this session.
+         *
+         * @param {import('../types/mod-api').ModItem[]} records - Complete detached replacement records.
+         * @returns {void} Replaces items after authoritative validation.
+         */
+        importItems: (records) => binding.engine.importItems(records),
+        /**
+         * Read equipment at an exact body-location identity.
+         *
+         * @param {string} bodyLocation - Exact equipment slot.
+         * @returns {import('../types/mod-api').ModItem|null} Worn item or an empty slot.
+         */
+        wornItem: (bodyLocation) => binding.engine.wornItem(bodyLocation),
+        /**
+         * Read this session's authoritative health scalar.
+         *
+         * @returns {number} Engine health within [0, 100].
+         */
+        getHealth: () => binding.engine.getHealth(),
+        /**
+         * Read this session's authoritative death state.
+         *
+         * @returns {boolean} Whether the actor is dead.
+         */
+        isDead: () => binding.engine.isDead(),
+        /**
+         * Require the original registry and read this session's ordered moodle levels.
+         *
+         * @returns {import('../types/mod-api').ModMoodle[]} Detached authoritative levels.
+         */
+        moodles: () => {
+            if (typeof binding.engine.moodles !== 'function') {
+                throw new TypeError('Unsupported engine capability: original moodle registry and WASM rules are not available.');
+            }
+
+            return binding.engine.moodles();
+        },
+        /**
+         * Read numeric and boolean input validation metadata from this session's WASM.
+         *
+         * @returns {ReturnType<import('../types/mod-api').ModApi['character']['inputLimits']>} Detached authoritative limits.
+         */
+        moodleInputLimits: () => binding.engine.moodleInputLimits(),
+        /**
+         * Capture this session's exact character inputs and timed moodle state.
+         *
+         * @returns {{version: 1, inputs: Record<string, number|boolean>, painTimer: number, painLevel: number, cantSprintTimer: number}} Detached persistence state.
+         */
+        saveMoodleState: () => binding.engine.saveMoodleState(),
+        /**
          * Apply mod speed changes to the current engine.
          *
          * @param {number} speed - Tiles per second.
@@ -813,16 +987,17 @@ async function activateSession(staged, namespaces, required) {
 
     // Capture mutable Lua tables while the old bound save APIs still own their namespaces.
     luaSession?.flushSaveData();
-    const previous = { mods, lua: luaSession, native: activeNativeDescriptors };
+    const previous = { mods, lua: luaSession, native: activeNativeDescriptors, ui: gameUI };
     const installed = await packages.list();
     let selectedNative = previous.native;
+    let activationOrder = running.map(({ id }) => id);
 
     if (!packagesActivated) {
         if (safeMods) {
             selectedNative = [];
         } else {
             // Missing dependencies and cycles fail before either JavaScript or Lua code runs.
-            resolveModOrder(installed, mods.api.version);
+            activationOrder = resolveModOrder(installed, mods.api.version);
             selectedNative = [];
 
             for (const entry of installed.filter((item) => item.enabled && item.settings?.nativeLua)) {
@@ -844,14 +1019,34 @@ async function activateSession(staged, namespaces, required) {
         }
     }
 
+    const nativeById = new Map(selectedNative.map((descriptor) => [descriptor.id, descriptor]));
+
+    selectedNative = activationOrder.filter((id) => nativeById.has(id)).map((id) => nativeById.get(id));
+
     const targetContext = { engine: staged.engine, cells: staged.cells, namespaces: Object.assign(Object.create(null), namespaces) };
     const targetMods = createSessionModHost(targetContext);
     // After boot the committed manager is configuration/reporting only; later transitions load targetMods directly.
     const targetPackages = packagesActivated ? packages : createModManager(targetMods);
     let targetLua;
+    let targetUI;
 
     try {
-        targetLua = await prepareNativeSession(selectedNative, content, { staged: true });
+        await seedOriginalFootwear(staged.engine, content);
+
+        const resources = await loadNativeGameResources(content, selectedNative, 1 / FIXED_STEP_SECONDS);
+
+        if (resources) {
+            targetUI = renderer.createGameUI();
+            await renderer.initializeGameUI({ ui: targetUI, ...resources });
+        }
+
+        targetLua = await prepareNativeSession(selectedNative, content, {
+            staged: true,
+            ui: targetUI,
+            engineSources: resources?.engineSources,
+            // Proven ResourceLocation normalization in the installed registry constructor.
+            moodleTypes: { FOOD_EATEN: 'base:foodeaten' },
+        });
 
         if (!packagesActivated) {
             const activation = await targetPackages.activateEnabled({ safeMode: safeMods });
@@ -879,6 +1074,14 @@ async function activateSession(staged, namespaces, required) {
             throw new Error('Renderer is no longer active.');
         }
 
+        // Reapply genuine restored option callbacks in every candidate; no synthetic menu transition.
+        targetLua?.applyOptions();
+
+        if (!packagesActivated) {
+            // Initial native menu bootstrap precedes gameplay, not pause or subsequent session reloads.
+            targetLua?.dispatch('OnMainMenuEnter');
+        }
+
         if (required) {
             targetLua?.dispatch('OnLoad');
         }
@@ -886,11 +1089,20 @@ async function activateSession(staged, namespaces, required) {
         targetLua?.dispatch('OnCreatePlayer', 0);
         targetLua?.dispatch('OnGameStart');
 
-        // Ordinary close can refuse a failed flush; until it succeeds the committed VM stays intact.
-        previous.lua?.close();
+        staged.engine.freezeItemDefinitions();
+        // Flush can refuse; retain the committed VM/UI until every candidate operation succeeds.
+        previous.lua?.flushSaveData();
+
+        if (failed) {
+            throw new Error('Renderer is no longer active.');
+        }
+
+        // Last fallible commit operation; global bindings change synchronously immediately afterward.
+        renderer.setGameUI(targetUI ?? null);
     } catch (cause) {
         targetLua?.close({ discardSaveData: true });
         targetMods.dispose();
+        targetUI?.dispose();
         bindNativeSession(previous.lua, previous.native);
 
         if (!failed) {
@@ -900,8 +1112,7 @@ async function activateSession(staged, namespaces, required) {
         throw cause;
     }
 
-    // Commit is synchronous after successful bootstrap/retirement; no prior callbacks are reconstructed.
-    previous.mods.dispose();
+    // No callbacks run between UI publication and these synchronous session-owned bindings.
     liveModContext = targetContext;
     engine = targetContext.engine;
     worldCells = targetContext.cells;
@@ -911,6 +1122,10 @@ async function activateSession(staged, namespaces, required) {
     luaSession = targetLua;
     activeNativeDescriptors = selectedNative;
     packagesActivated = true;
+    gameUI = targetUI;
+    previous.lua?.close({ discardSaveData: true });
+    previous.mods.dispose();
+    previous.ui?.dispose();
     packageStatus.textContent = safeMods ? 'Safe mode: no local JavaScript or Lua packages executed. Discovered new packages remain disabled.' : 'Directory packages discovered. New packages are disabled; only your enabled packages activate on reload.';
 }
 
@@ -1210,7 +1425,7 @@ async function newSession() {
 
     const sessionState = staged.engine.saveState();
 
-    sessionState.values = [spawn.x, spawn.y, sessionState.values[2], spawn.x, spawn.y, 0, 0, 0, 0, 1];
+    sessionState.values = [spawn.x, spawn.y, sessionState.values[2], spawn.x, spawn.y, 0, 0, 0, 0, 1, ...sessionState.values.slice(10)];
     staged.engine.loadState(sessionState);
     const geometry = await loadGeometry(staged.cells, staged.engine.snapshot());
 
@@ -1460,6 +1675,22 @@ normalUrl.searchParams.delete('safe-mods');
 document.querySelector('#package-safe-mode').href = safeUrl.href;
 document.querySelector('#package-normal-mode').href = normalUrl.href;
 canvas.addEventListener('pointerdown', pointDestination);
+canvas.addEventListener('pointerup', (event) => {
+    if (event.button === 0) {
+        gameUIPointer(event, 'onMouseUp');
+    }
+});
+canvas.addEventListener('pointermove', (event) => {
+    gameUIPointer(event, 'onMouseMove', event.movementX, event.movementY);
+});
+canvas.addEventListener('dblclick', (event) => {
+    if (event.button === 0) {
+        gameUIPointer(event, 'onMouseDoubleClick');
+    }
+});
+canvas.addEventListener('wheel', (event) => {
+    gameUIPointer(event, 'onMouseWheel', Math.sign(event.deltaY));
+}, { passive: false });
 
 for (const button of directionButtons) {
     button.addEventListener('click', toggleWalking);

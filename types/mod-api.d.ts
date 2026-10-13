@@ -9,7 +9,7 @@
 /** Engine action state: 0 idle, 1 travelling to a destination, 2 walking a heading. */
 export type ModActionState = 0 | 1 | 2;
 
-/** Detached F32-backed engine state. Values are copies; writing to them changes nothing. */
+/** Detached engine state. Values are copies; writing to them changes nothing. */
 export interface ModSnapshot {
   /** Engine ABI version; the host requires 1. */
   apiVersion: number;
@@ -23,15 +23,73 @@ export interface ModSnapshot {
   speed: number;
   /** Current action state. */
   action: ModActionState;
+  /** Optional real extended-engine scalar; absent on movement-only engines. */
+  health?: number;
+  /** Optional authoritative death state, never synthesized by the SDK. */
+  dead?: boolean;
 }
 
-/** Movement command: destinations use [0,10] before navigation import, then loaded
- * cell extents (WASM refuses unloaded or blocked tiles); directions are any finite
- * signed vector, normalised in WASM. `cancel` carries no coordinates and bypasses veto. */
+/** Destinations use authoritative world bounds; walking uses any finite vector.
+ * Item positions are finite and WASM validates membership. IDs/counts are positive
+ * uint32, condition is nonnegative int32, health is finite [0,100].
+ * `cancel` carries no coordinates and bypasses veto. */
 export type ModAction =
   | { type: 'moveTo'; x: number; y: number }
   | { type: 'walk'; x: number; y: number }
-  | { type: 'cancel' };
+  | { type: 'cancel' }
+  | ({ type: 'spawnItem' } & ModItemSpawn)
+  | { type: 'pickup' | 'wear' | 'unequip'; id: number }
+  | { type: 'drop'; id: number; x: number; y: number }
+  | { type: 'setCondition'; id: number; condition: number }
+  | { type: 'setHealth'; health: number }
+  | { type: 'setCharacterStat'; name: string; value: number }
+  | { type: 'setMoodleInputs'; inputs: Record<string, number | boolean> };
+
+/** Omitted count/condition are resolved by WASM's real definition, not the SDK. */
+export interface ModItemSpawn {
+  fullType: string;
+  x: number;
+  y: number;
+  count?: number;
+  condition?: number;
+}
+
+/** Numeric definition fields live in WASM; additional fields are detached source/appearance metadata. */
+export interface ModItemDefinitionInput {
+  fullType: string;
+  bodyLocation: string | null;
+  conditionMax: number;
+  stackLimit: number;
+  removeOnBroken: boolean;
+  conditionLowerChanceOneIn: number;
+  [metadata: string]: unknown;
+}
+
+/** Resolved numeric fields and actual owner, read back from the authoritative engine. */
+export interface ModItemDefinition extends ModItemDefinitionInput {
+  owner: string;
+}
+
+/** Stable positive uint32 identity; null bodyLocation means not currently worn. */
+export interface ModItem {
+  id: number;
+  fullType: string;
+  location: 'ground' | 'inventory';
+  x: number;
+  y: number;
+  condition: number;
+  count: number;
+  bodyLocation: string | null;
+}
+
+/** Opaque original source IDs in real engine order; no guessed neutral registry. */
+export interface ModMoodle {
+  id: string;
+  level: 0 | 1 | 2 | 3 | 4;
+}
+
+/** Spawn commands additionally expose the stable item id, not an SDK-generated id. */
+export type ModCommandSnapshot = ModSnapshot & { id?: number };
 
 /** Mod identity exported by every mod module. */
 export interface ModManifest {
@@ -100,6 +158,23 @@ export interface ModTickEvent {
 /** Must return nothing synchronously; callback failures never undo a step. */
 export type ModTickListener = (event: ModTickEvent) => void | null | Promise<unknown>;
 
+/** One true alive-to-dead transition, emitted only after a successful command commit. */
+export interface ModCharacterDeathEvent {
+  type: 'CharacterDeath';
+  submittedBy: string;
+  action: ModAction;
+  snapshot: ModCommandSnapshot;
+}
+
+/** Explicit callback payload mapping; arbitrary event names are not accepted. */
+export interface ModEventMap {
+  Tick: ModTickEvent;
+  CharacterDeath: ModCharacterDeathEvent;
+}
+
+/** Synchronous postcommit callback; failures never undo the death transition. */
+export type ModCharacterDeathListener = (event: ModEventMap['CharacterDeath']) => void | null | Promise<unknown>;
+
 /** Automatically namespaced backing record; data is never exposed by reference. */
 export interface ModSaveRecord {
   schemaVersion: number;
@@ -140,6 +215,51 @@ export interface ModApi {
      */
     submit(action: ModAction): ModCommandResult;
   };
+  /** Real optional engine capabilities; unsupported queries throw ModError/items. */
+  items: {
+    definitions: {
+      list(): ModItemDefinition[];
+      /** Valid unknown identities return null. */
+      get(fullType: string): ModItemDefinition | null;
+      /** Owner is bound to this mod id. Only legal inside synchronous activate.
+       * Duplicate identities require explicit override; failed activation rolls
+       * back numeric rows, owners and appended metadata. No SDK freeze method. */
+      register(input: ModItemDefinitionInput, options?: { override?: boolean }): ModItemDefinition;
+    };
+    list(): ModItem[];
+    /** Valid unknown ids return null. */
+    get(id: number): ModItem | null;
+    worn(bodyLocation: string): ModItem | null;
+    /** All mutations use actions.submit's shared synchronous hook path. */
+    spawn(input: ModItemSpawn): ModCommandResult;
+    pickup(id: number): ModCommandResult;
+    wear(id: number): ModCommandResult;
+    unequip(id: number): ModCommandResult;
+    drop(id: number, x: number, y: number): ModCommandResult;
+    setCondition(id: number, condition: number): ModCommandResult;
+  };
+  /** Actual engine health; no authoritative SDK shadow or invented moodle rules. */
+  character: {
+    getHealth(): number;
+    isDead(): boolean;
+    setHealth(health: number): ModCommandResult;
+    /** Requires real optional engine capability; throws unsupported otherwise. */
+    moodles(): ModMoodle[];
+    /** Source-backed stats and explicitly modeled environmental inputs, detached. */
+    moodleInputs(): Record<string, number | boolean>;
+    inputLimits(): Record<string, { min: number; max: number; default: number; integer: boolean } | { type: 'boolean'; default: boolean }>;
+    /** Both mutations pass through synchronous beforeAction hooks before WASM commit. */
+    setStat(name: string, value: number): ModCommandResult;
+    setMoodleInputs(inputs: Record<string, number | boolean>): ModCommandResult;
+  };
+  /** Persist original UI options inside this mod's saveData.nativeUIOptions map.
+   * Exact nonempty IDs of at most 128 characters; strict cloned JSON under the
+   * existing complete-namespace 256 KiB cap and schema guard. Other fields,
+   * including nativePlayerData, are preserved; no UI panels are created. */
+  ui: {
+    readOptions(modOptionsID: string): ModJsonValue | undefined;
+    writeOptions(modOptionsID: string, values: ModJsonValue): void;
+  };
   /** Optional extended-engine navigation capabilities; unsupported calls throw ModError/world. */
   world: {
     getBounds(): ModWorldBounds;
@@ -160,6 +280,7 @@ export interface ModApi {
   /** Post-commit callbacks in priority/registration order, withdrawn on unload. */
   events: {
     onTick(callback: ModTickListener, options?: { priority?: number }): () => boolean;
+    onCharacterDeath(callback: ModCharacterDeathListener, options?: { priority?: number }): () => boolean;
   };
   /** Hook registration. */
   hooks: {
@@ -188,7 +309,7 @@ export interface ModCommandResult {
   /** Id of the first hook that cancelled, when `cancelled` is true. */
   cancelledBy?: string;
   /** Engine state after the commit, or unchanged state after a veto. */
-  snapshot: ModSnapshot;
+  snapshot: ModCommandSnapshot;
 }
 
 /** Mod identity returned by `load`. */
@@ -247,13 +368,35 @@ export interface ModDiagnostics {
 /** The engine surface the host needs; `src/engine.js` supplies it. */
 export interface ModEngine {
   snapshot(): ModSnapshot;
-  command(action: ModAction): ModSnapshot;
+  command(action: ModAction): ModCommandSnapshot;
   setSpeed(speed: number): void;
   /** Optional: older engine handles still support original movement calls. */
   step?(seconds: number): void;
   worldBounds?(): ModWorldBounds;
   navFlags?(x: number, y: number): number;
   worldImportCell?(cx: number, cy: number, bytes: Uint8Array | DataView): void;
+  /** Optional authoritative item/character extensions; never required for movement activation. */
+  itemDefinitions?(): ModItemDefinition[];
+  registerItemDefinition?(input: ModItemDefinitionInput, options: { owner: string; override?: boolean }): ModItemDefinition;
+  beginItemDefinitionRegistration?(owner: string): void;
+  commitItemDefinitionRegistration?(owner: string): void;
+  rollbackItemDefinitionRegistration?(owner: string): void;
+  /** Host-only registration seal, intentionally absent from ModApi. */
+  freezeItemDefinitions?(): void;
+  items?(): ModItem[];
+  importItems?(records: ModItem[]): void;
+  wornItem?(bodyLocation: string): ModItem | null;
+  getHealth?(): number;
+  isDead?(): boolean;
+  moodles?(): ModMoodle[];
+  saveMoodleState?(): {
+    version: 1;
+    inputs: Record<string, number | boolean>;
+    painTimer: number;
+    painLevel: 0 | 1 | 2 | 3 | 4;
+    cantSprintTimer: number;
+  };
+  moodleInputLimits?(): Record<string, { min: number; max: number; default: number; integer: boolean } | { type: 'boolean'; default: boolean }>;
 }
 
 /** Host surface returned by `createModHost`. */

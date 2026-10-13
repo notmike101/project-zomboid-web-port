@@ -507,7 +507,7 @@ test('Lua movement keeps absolute imported world coordinates rather than the syn
 
         cells[1] = 1;
         engine.worldImportCell(2, 1, cells);
-        engine.loadState({ version: 1, values: [530.5, 278.5, 3, 530.5, 278.5, 0, 0, 0, 0, 1] });
+        engine.loadState({ version: 2, values: [530.5, 278.5, 3, 530.5, 278.5, 0, 0, 0, 0, 1, ...engine.saveState().values.slice(10)] });
         activate(session, host, `
             local player = getPlayer()
             assert(player:getX() == 530.5 and player:getY() == 278.5)
@@ -544,6 +544,45 @@ test('real input event dispatch changes engine actions and rejects unimplemented
         assert.throws(() => session.dispatch('OnEnterVehicle'), /unsupported/);
         assert.throws(() => session.dispatch('OnKeyPressed', -1), /key code/);
     } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('genuine death caused by a busy native movement command is delivered once after its outer tick', async () => {
+    const { engine, host, session, saved } = await fixture();
+    const removeHook = host.api.hooks.beforeAction((action) => action.type === 'walk' ? { type: 'setHealth', health: 0 } : undefined);
+
+    try {
+        await loadPackage(session, host, {
+            id: 'nested-death', sources: [{
+                path: 'media/lua/client/NestedDeath.lua',
+                source: `
+                    local data=getModData()
+                    data.Death={ticks=0,deaths=0,finished=false}
+                    Events.OnTick.Add(function()
+                        data.Death.finished=false
+                        getPlayer():walk(1,0)
+                        data.Death.finished=true
+                        data.Death.ticks=data.Death.ticks+1
+                    end)
+                    Events.OnPlayerDeath.Add(function(player)
+                        assert(player==getPlayer() and player:isDead())
+                        assert(data.Death.finished, 'death must wait until outer tick finishes')
+                        data.Death.deaths=data.Death.deaths+1
+                    end)
+                `,
+            }],
+        });
+        host.step(1 / 60);
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.equal(engine.snapshot().dead, true);
+        assert.deepEqual(saved.get('nested-death').data.nativePlayerData.Death, { ticks: 2, deaths: 1, finished: true });
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+    } finally {
+        removeHook();
         session.close();
         host.dispose();
     }

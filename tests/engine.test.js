@@ -87,6 +87,8 @@ test('initial state matches the integration contract', async () => {
         y: 5,
         speed: 1.5,
         action: IDLE,
+        health: 100,
+        dead: false,
     });
 });
 
@@ -325,6 +327,8 @@ test('reset clears movement, speed and counters', async () => {
         y: 5,
         speed: 1.5,
         action: IDLE,
+        health: 100,
+        dead: false,
     });
     subject.step(STEP);
     assert.ok(near(subject.snapshot().x, 5));
@@ -556,6 +560,24 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.saveState(),
         () => subject.loadState({ version: 1, values: [5, 5, 1.5, 5, 5, 0, 0, 0, 0, 0] }),
         () => subject.worldReset(),
+        () => subject.registerItemDefinition(shoe(), { owner: 'base' }),
+        () => subject.itemDefinitions(),
+        () => subject.beginItemDefinitionRegistration('base'),
+        () => subject.commitItemDefinitionRegistration('base'),
+        () => subject.rollbackItemDefinitionRegistration('base'),
+        () => subject.freezeItemDefinitions(),
+        () => subject.items(),
+        () => subject.importItems([]),
+        () => subject.wornItem('base:shoes'),
+        () => subject.getHealth(),
+        () => subject.isDead(),
+        () => subject.command({ type: 'setHealth', health: 0 }),
+        () => subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }),
+        () => subject.command({ type: 'pickup', id: 1 }),
+        () => subject.command({ type: 'wear', id: 1 }),
+        () => subject.command({ type: 'unequip', id: 1 }),
+        () => subject.command({ type: 'drop', id: 1, x: 5, y: 5 }),
+        () => subject.command({ type: 'setCondition', id: 1, condition: 0 }),
     ]) {
         assert.throws(attempt, /unsupported/u);
     }
@@ -669,7 +691,7 @@ test('loaded solid tiles and shared walls stop movement without changing refused
 
         return 0;
     }));
-    subject.loadState({ version: 1, values: [10.5, 5.5, 1.5, 10.5, 5.5, 0, 0, 0, 0, 1] });
+    subject.loadState({ version: 2, values: [10.5, 5.5, 1.5, 10.5, 5.5, 0, 0, 0, 0, 1, 100, 1] });
     const before = subject.saveState();
 
     assert.throws(() => subject.command({ type: 'moveTo', x: 10.5, y: 10.5 }), RangeError);
@@ -686,7 +708,7 @@ test('an imported nonzero cell supports an explicit idle spawn and world reset',
 
     subject.worldImportCell(2, 1, cellBytes());
     assert.equal(subject.snapshot().x, 5, 'import must not invent an actor spawn');
-    subject.loadState({ version: 1, values: [530.5, 278.5, 1.5, 530.5, 278.5, 0, 0, 0, 0, 1] });
+    subject.loadState({ version: 2, values: [530.5, 278.5, 1.5, 530.5, 278.5, 0, 0, 0, 0, 1, 100, 1] });
     subject.command({ type: 'moveTo', x: 534.5, y: 278.5 });
     const arrived = runUntilIdle(subject);
 
@@ -710,7 +732,7 @@ test('an in-flight save resumes a detour on a freshly imported engine', async ()
     const original = await engine();
 
     original.worldImportCell(2, 1, bytes);
-    original.loadState({ version: 1, values: [530.5, 278.5, 3, 530.5, 278.5, 0, 0, 0, 0, 1] });
+    original.loadState({ version: 2, values: [530.5, 278.5, 3, 530.5, 278.5, 0, 0, 0, 0, 1, 100, 1] });
     original.command({ type: 'moveTo', x: 534.5, y: 278.5 });
 
     for (let index = 0; index < 8; index += 1) {
@@ -719,8 +741,8 @@ test('an in-flight save resumes a detour on a freshly imported engine', async ()
 
     const saved = original.saveState();
 
-    assert.equal(saved.version, 1);
-    assert.equal(saved.values.length, 10);
+    assert.equal(saved.version, 2);
+    assert.deepEqual(saved.values.slice(10), [100, 1]);
     assert.equal(saved.values[7], MOVING);
     const restored = await engine();
 
@@ -760,28 +782,29 @@ test('invalid state envelopes and semantic refusals leave every state word untou
     subject.step(STEP);
     const before = subject.saveState();
 
-    for (const state of [null, {}, { version: 2, values: before.values },
-        { version: 1, values: before.values.slice(1) },
-        { version: 1, values: new Float64Array(before.values) },
-        { version: 1, values: Array.from({ length: 10 }) }]) {
+    for (const state of [null, {}, { version: 1, values: before.values.slice(0, 10) },
+        { version: 2, values: before.values.slice(1) },
+        { version: 2, values: new Float64Array(before.values) },
+        { version: 2, values: Array.from({ length: 12 }) }]) {
         assert.throws(() => subject.loadState(state), TypeError);
         assert.deepEqual(subject.saveState(), before);
     }
 
-    for (let index = 0; index < 10; index += 1) {
+    for (let index = 0; index < 12; index += 1) {
         const values = [...before.values];
 
         values[index] = Infinity;
-        assert.throws(() => subject.loadState({ version: 1, values }), TypeError);
+        assert.throws(() => subject.loadState({ version: 2, values }), TypeError);
         assert.deepEqual(subject.saveState(), before);
     }
 
     for (const [index, value] of [[0, -1], [2, 0], [3, 300], [7, 3], [7, 0.5],
-        [8, -1], [8, 0.5], [8, 4_294_967_296], [9, 0], [9, 0.5]]) {
+        [8, -1], [8, 0.5], [8, 4_294_967_296], [9, 0], [9, 0.5],
+        [10, -1], [10, 100.01], [11, 0], [11, 0.5], [11, 4_294_967_297]]) {
         const values = [...before.values];
 
         values[index] = value;
-        assert.throws(() => subject.loadState({ version: 1, values }), RangeError);
+        assert.throws(() => subject.loadState({ version: 2, values }), RangeError);
         assert.deepEqual(subject.saveState(), before);
     }
 
@@ -789,6 +812,615 @@ test('invalid state envelopes and semantic refusals leave every state word untou
 
     blocked[0] = 7.5;
     blocked[1] = 7.5;
-    assert.throws(() => subject.loadState({ version: 1, values: blocked }), RangeError);
+    assert.throws(() => subject.loadState({ version: 2, values: blocked }), RangeError);
     assert.deepEqual(subject.saveState(), before);
+});
+
+/**
+ * Supplies one source-shaped footwear definition for real-WASM checks.
+ *
+ * @param {string} [fullType='Base.Shoe'] - Exact public item identity.
+ * @param {object} [extra={}] - Numeric/source changes for the behavior under test.
+ * @returns {object} Definition input, not a host gameplay implementation.
+ */
+function shoe(fullType = 'Base.Shoe', extra = {}) {
+    return {
+        fullType, bodyLocation: 'base:shoes', conditionMax: 30, stackLimit: 1,
+        removeOnBroken: false, conditionLowerChanceOneIn: 20,
+        source: { file: 'clothing.txt', model: 'Boots_Ground' }, ...extra,
+    };
+}
+
+test('definition transactions restore first-touched numeric rows, owners and source metadata', async () => {
+    const subject = await engine();
+    const original = subject.registerItemDefinition(shoe(), { owner: 'base' });
+
+    original.source.model = 'tampered';
+    subject.beginItemDefinitionRegistration('mod');
+    assert.throws(() => subject.beginItemDefinitionRegistration('mod'), /transaction|registration/u);
+    assert.throws(() => subject.registerItemDefinition(shoe(), { owner: 'other', override: true }));
+    subject.registerItemDefinition(shoe('Base.Shoe', { conditionMax: 6 }), { owner: 'mod', override: true });
+    subject.registerItemDefinition(shoe('Base.Shoe', { conditionMax: 8 }), { owner: 'mod', override: true });
+    subject.registerItemDefinition(shoe('Mod.Shoe'), { owner: 'mod' });
+    assert.throws(() => subject.freezeItemDefinitions());
+    assert.throws(() => subject.commitItemDefinitionRegistration('other'));
+    subject.rollbackItemDefinitionRegistration('mod');
+    assert.deepEqual(subject.itemDefinitions(), [{ ...shoe(), owner: 'base' }]);
+    assert.throws(() => subject.registerItemDefinition(shoe(), { owner: 'base' }));
+    subject.beginItemDefinitionRegistration('mod');
+    subject.registerItemDefinition(shoe('Mod.Shoe'), { owner: 'mod' });
+    subject.commitItemDefinitionRegistration('mod');
+    assert.deepEqual(subject.itemDefinitions().map((row) => row.fullType), ['Base.Shoe', 'Mod.Shoe']);
+    subject.freezeItemDefinitions();
+    assert.throws(() => subject.registerItemDefinition(shoe('Late.Shoe'), { owner: 'late' }));
+    assert.throws(() => subject.beginItemDefinitionRegistration('late'));
+});
+
+test('equipment replacement and broken-item policy preserve stable IDs and movement', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe(), { owner: 'base' });
+    subject.registerItemDefinition(shoe('Base.Disposable', { removeOnBroken: true }), { owner: 'base' });
+    subject.freezeItemDefinitions();
+    subject.command({ type: 'moveTo', x: 9, y: 7 });
+    const before = subject.saveState().values.slice(0, 10);
+    const first = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
+    const second = subject.command({ type: 'spawnItem', fullType: 'Base.Disposable', x: 5, y: 5 }).id;
+
+    for (const id of [first, second]) {
+        subject.command({ type: 'pickup', id });
+        subject.command({ type: 'wear', id });
+    }
+
+    assert.equal(subject.wornItem('base:shoes').id, second);
+    assert.equal(subject.items().find((item) => item.id === first).bodyLocation, null);
+    subject.command({ type: 'setCondition', id: second, condition: 0 });
+    assert.equal(subject.wornItem('base:shoes'), null);
+    subject.command({ type: 'wear', id: first });
+    subject.command({ type: 'setCondition', id: first, condition: 0 });
+    assert.equal(subject.wornItem('base:shoes').condition, 0);
+    assert.deepEqual(subject.saveState().values.slice(0, 10), before);
+    subject.command({ type: 'unequip', id: first });
+    subject.command({ type: 'drop', id: first, x: 6, y: 5 });
+    assert.equal(subject.items()[0].location, 'ground');
+    assert.equal(subject.items()[0].x, 6);
+    assert.equal(subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id, second + 1);
+    subject.step(STEP);
+    assert.equal(subject.snapshot().action, MOVING);
+});
+
+test('explicit-ID import is atomic, detached and advances the exhausted sentinel without wrapping', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe(), { owner: 'base' });
+    const record = {
+        id: 40, fullType: 'Base.Shoe', location: 'inventory',
+        x: 5, y: 5, count: 1, condition: 12, bodyLocation: 'base:shoes',
+    };
+
+    subject.importItems([record]);
+    const before = subject.items();
+    const state = subject.saveState();
+
+    for (const bad of [
+        { ...record, id: 41, condition: 31 },
+        { ...record, id: 41, fullType: 'Missing.Shoe' },
+        { ...record, id: 41, bodyLocation: 'other:slot' },
+        { ...record, id: 41, x: Infinity },
+        { ...record, id: 41, count: 2 },
+        { ...record, id: 40 },
+    ]) {
+        assert.throws(() => subject.importItems([record, bad]));
+        assert.deepEqual(subject.items(), before);
+        assert.deepEqual(subject.saveState(), state);
+    }
+
+    const detached = subject.items();
+
+    detached[0].condition = 0;
+    assert.equal(subject.wornItem('base:shoes').condition, 12);
+    const invalidCounter = structuredClone(state);
+
+    invalidCounter.values[11] = 40;
+    assert.throws(() => subject.loadState(invalidCounter), RangeError);
+    assert.deepEqual(subject.saveState(), state);
+    subject.importItems([{ ...record, id: 4_294_967_295 }]);
+    assert.equal(subject.saveState().values[11], 4_294_967_296);
+    assert.throws(() => subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }));
+    subject.importItems([]);
+    assert.throws(() => subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }));
+    assert.equal(subject.saveState().values[11], 4_294_967_296);
+});
+
+test('saved counters continue stable IDs and scalar health without a legacy actor representation', async () => {
+    const original = await engine();
+
+    original.registerItemDefinition(shoe(), { owner: 'base' });
+    original.command({ type: 'walk', x: 1, y: 0 });
+    const prefix = original.saveState().values.slice(0, 10);
+    const id = original.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
+
+    original.command({ type: 'setHealth', health: 0 });
+    assert.equal(original.getHealth(), 0);
+    assert.equal(original.isDead(), true);
+    assert.equal(original.snapshot().dead, true);
+    assert.deepEqual(original.saveState().values.slice(0, 10), prefix);
+    const restored = await engine();
+
+    restored.registerItemDefinition(shoe(), { owner: 'base' });
+    restored.importItems(original.items());
+    restored.loadState(original.saveState());
+    assert.equal(restored.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id, id + 1);
+    restored.worldReset();
+    assert.equal(restored.items().length, 2);
+    assert.equal(restored.getHealth(), 0);
+    restored.reset();
+    assert.deepEqual(restored.items(), []);
+    assert.deepEqual(restored.itemDefinitions(), []);
+    assert.equal(restored.getHealth(), 100);
+});
+
+test('item boundaries refuse malformed values and enforce only world membership and project pickup radius', async () => {
+    const subject = await engine();
+
+    for (const extra of [{ conditionMax: 0 }, { stackLimit: 0 }, { removeOnBroken: 1 },
+        { conditionLowerChanceOneIn: -1 }, { conditionMax: 2_147_483_648 },
+        { stackLimit: 4_294_967_296 }, { bodyLocation: '' }]) {
+        assert.throws(() => subject.registerItemDefinition(shoe('Bad.Shoe', extra), { owner: 'base' }));
+        assert.deepEqual(subject.itemDefinitions(), []);
+    }
+
+    subject.registerItemDefinition(shoe(), { owner: 'base' });
+    subject.worldImportCell(0, 0, cellBytes((x, y) => (x === 6 && y === 5 ? 1 : 0)));
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
+
+    subject.command({ type: 'pickup', id });
+    subject.command({ type: 'drop', id, x: 6, y: 5 });
+    subject.command({ type: 'pickup', id });
+    subject.command({ type: 'drop', id, x: 8, y: 5 });
+    const before = subject.items();
+    const state = subject.saveState();
+
+    for (const action of [{ type: 'pickup', id }, { type: 'wear', id },
+        { type: 'drop', id, x: 256, y: 5 }, { type: 'setCondition', id, condition: 31 },
+        { type: 'setCondition', id: 4_294_967_296, condition: 1 },
+        { type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5, count: 2 },
+        { type: 'setHealth', health: -1 }, { type: 'setHealth', health: 100.01 }]) {
+        assert.throws(() => subject.command(action));
+        assert.deepEqual(subject.items(), before);
+        assert.deepEqual(subject.saveState(), state);
+    }
+});
+
+test('numeric WASM staging cannot publish a valid prefix after a later invalid record', async () => {
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+    const api = instance.exports;
+
+    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0), 0);
+    assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
+    assert.equal(api.item_import_begin(), 0);
+    assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 20, 1, 1), 0);
+    assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 31, 1, 0), 0);
+    assert.notEqual(api.item_import_commit(), 0);
+    assert.equal(api.item_count(), 1);
+    assert.equal(api.item_read(0), 0);
+    assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr(), true), 1);
+    assert.equal(api.item_definition_begin(2), 0);
+    assert.equal(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1), 0);
+    assert.equal(api.item_definition_register(0, 2, 50, 1, 1, 0, 5, 1), 0);
+    assert.equal(api.item_definition_rollback(2), 0);
+    assert.equal(api.item_definition_read(0), 0);
+    const row = new DataView(api.memory.buffer, api.scratch_ptr());
+
+    assert.deepEqual(Array.from({ length: 6 }, (_, index) => row.getFloat64(index * 8, true)),
+        [1, 30, 1, 1, 0, 20]);
+    assert.equal(api.item_definition_freeze(), 0);
+    assert.notEqual(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1), 0);
+});
+
+test('live references refuse incompatible overrides and unloaded world holes refuse drops', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe(), { owner: 'base' });
+    subject.importItems([{
+        id: 7, fullType: 'Base.Shoe', location: 'inventory',
+        x: 5, y: 5, condition: 30, count: 1, bodyLocation: 'base:shoes',
+    }]);
+    const before = subject.itemDefinitions();
+
+    subject.beginItemDefinitionRegistration('mod');
+
+    for (const extra of [{ conditionMax: 6 }, { bodyLocation: 'base:hat' }]) {
+        assert.throws(() => subject.registerItemDefinition(shoe('Base.Shoe', extra),
+            { owner: 'mod', override: true }));
+        assert.deepEqual(subject.itemDefinitions(), before);
+    }
+
+    subject.rollbackItemDefinitionRegistration('mod');
+    subject.worldImportCell(0, 0, cellBytes());
+    subject.worldImportCell(2, 0, cellBytes());
+    const itemsBefore = subject.items();
+
+    assert.throws(() => subject.command({ type: 'drop', id: 7, x: 300, y: 5 }));
+    assert.deepEqual(subject.items(), itemsBefore);
+    subject.command({ type: 'drop', id: 7, x: 530, y: 5 });
+    assert.equal(subject.items()[0].x, 530);
+});
+
+test('the final uint32 ID is usable once and equipment commands leave a live heading intact', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.Shoe', { removeOnBroken: true }), { owner: 'base' });
+    subject.command({ type: 'walk', x: 1, y: 1 });
+    const state = subject.saveState();
+
+    state.values[11] = 4_294_967_295;
+    subject.loadState(state);
+    const prefix = subject.saveState().values.slice(0, 10);
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
+
+    assert.equal(id, 4_294_967_295);
+    subject.command({ type: 'pickup', id });
+    subject.command({ type: 'wear', id });
+    subject.command({ type: 'unequip', id });
+    subject.command({ type: 'drop', id, x: 5, y: 5 });
+    subject.command({ type: 'pickup', id });
+    subject.command({ type: 'wear', id });
+    subject.command({ type: 'setCondition', id, condition: 0 });
+    assert.deepEqual(subject.items(), []);
+    assert.deepEqual(subject.saveState().values.slice(0, 10), prefix);
+    assert.throws(() => subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }));
+    subject.step(STEP);
+    assert.equal(subject.snapshot().action, WALKING);
+});
+
+test('bounded numeric tables refuse overflow without changing live rows or the next ID', async () => {
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+    const api = instance.exports;
+
+    for (let index = 0; index < 4_096; index += 1) {
+        assert.equal(api.item_definition_register(index, 1, 30, 0, 1, 0, 20, 0), 0);
+        assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
+    }
+
+    assert.notEqual(api.item_definition_register(4_096, 1, 30, 0, 1, 0, 20, 0), 0);
+    assert.notEqual(api.item_spawn(0, 5, 5, 1, 30), 0);
+    assert.equal(api.item_definition_count(), 4_096);
+    assert.equal(api.item_count(), 4_096);
+    assert.equal(api.item_last_id(), 4_096);
+    api.state_save(api.scratch_ptr());
+    assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr() + 88, true), 4_097);
+});
+
+/**
+ * Read one original moodle's authoritative level from a detached engine query.
+ *
+ * @param {import('../src/engine.js').Engine} subject - Engine instance under test.
+ * @param {string} name - Original moodle name without the base namespace prefix.
+ * @returns {number} Current derived level for that moodle.
+ */
+function moodleLevel(subject, name) {
+    return subject.moodles().find(({ id }) => id === `base:${name}`).level;
+}
+
+test('all original moodles derive from owned inputs, including environment and body flags', async () => {
+    const subject = await engine();
+
+    assert.deepEqual(subject.moodles().map(({ id }) => id), [
+        'base:endurance', 'base:tired', 'base:hungry', 'base:panic', 'base:sick',
+        'base:bored', 'base:unhappy', 'base:bleeding', 'base:wet', 'base:hasacold',
+        'base:angry', 'base:stress', 'base:thirst', 'base:injured', 'base:pain',
+        'base:heavyload', 'base:drunk', 'base:dead', 'base:zombie', 'base:hyperthermia',
+        'base:hypothermia', 'base:windchill', 'base:cantsprint', 'base:uncomfortable',
+        'base:noxioussmell', 'base:foodeaten',
+    ]);
+    subject.command({
+        type: 'setMoodleInputs', inputs: {
+            endurance: 0, fatigue: 1, hunger: 1, panic: 100, sickness: 1,
+            boredom: 100, unhappiness: 100, bleedingParts: 1, neckBleeding: true,
+            wetness: 100, hasCold: true, coldStrength: 100, anger: 1,
+            stress: 0.5, nicotineWithdrawal: 0.51, thirst: 1, pain: 100,
+            capacityWeight: 14, maxWeight: 8, intoxication: 100, temperature: 40,
+            windChill: 21, cantSprint: true, discomfort: 100, toxicBuilding: true,
+            healthFromFoodTimer: 4_801,
+        },
+    });
+    subject.command({ type: 'setHealth', health: 24 });
+
+    for (let frame = 0; frame < 120; frame += 1) {
+        subject.step(STEP);
+    }
+
+    assert.deepEqual(subject.moodles().map(({ level }) => level),
+        [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 0, 0, 2, 0, 4, 1, 4, 4, 4]);
+    subject.command({ type: 'setCharacterStat', name: 'temperature', value: 24 });
+    assert.equal(moodleLevel(subject, 'hypothermia'), 4);
+    const detached = subject.moodles();
+
+    detached[0].level = 0;
+    assert.equal(moodleLevel(subject, 'endurance'), 4);
+});
+
+test('injury strict boundaries and dead/zombie fake-infection gate follow original rules', async () => {
+    const subject = await engine();
+
+    for (const [health, level] of [[100, 0], [80, 0], [79.9, 1], [60, 1],
+        [59.9, 2], [40, 2], [39.9, 3], [25, 3], [24.9, 4], [0, 0]]) {
+        subject.command({ type: 'setHealth', health });
+        assert.equal(moodleLevel(subject, 'injured'), level, `health=${health}`);
+    }
+
+    assert.equal(moodleLevel(subject, 'dead'), 4);
+    subject.command({ type: 'setCharacterStat', name: 'zombieInfection', value: 0.001 });
+    assert.equal(moodleLevel(subject, 'dead'), 0);
+    assert.equal(moodleLevel(subject, 'zombie'), 4);
+    assert.ok(subject.moodles().every(({ id, level }) => id === 'base:zombie' || level === 0));
+    subject.command({ type: 'setMoodleInputs', inputs: { fakeInfected: true } });
+    assert.equal(moodleLevel(subject, 'dead'), 4);
+    assert.equal(moodleLevel(subject, 'zombie'), 0);
+    subject.command({ type: 'setHealth', health: 100 });
+    assert.equal(moodleLevel(subject, 'dead'), 0);
+});
+
+test('source stat, thermal, cold, load and environmental equality boundaries are retained', async () => {
+    const subject = await engine();
+
+    for (const [name, value, id, want] of [
+        ['endurance', 0.75, 'endurance', 1], ['endurance', 0.5, 'endurance', 2],
+        ['endurance', 0.25, 'endurance', 3], ['endurance', 0.1, 'endurance', 4],
+        ['hunger', 0.15, 'hungry', 0], ['hunger', 0.25, 'hungry', 1],
+        ['hunger', 0.45, 'hungry', 2], ['hunger', 0.7, 'hungry', 3],
+        ['temperature', 37.5, 'hyperthermia', 0], ['temperature', 39, 'hyperthermia', 1],
+        ['temperature', 40, 'hyperthermia', 2], ['temperature', 36.5, 'hypothermia', 0],
+        ['temperature', 35, 'hypothermia', 1], ['temperature', 30, 'hypothermia', 2],
+        ['temperature', 25, 'hypothermia', 3], ['discomfort', 20, 'uncomfortable', 1],
+        ['discomfort', 40, 'uncomfortable', 2], ['discomfort', 60, 'uncomfortable', 3],
+        ['discomfort', 80, 'uncomfortable', 4],
+    ]) {
+        subject.command({ type: 'setCharacterStat', name, value });
+        assert.equal(moodleLevel(subject, id), want, `${name}=${value}`);
+    }
+
+    subject.command({ type: 'setMoodleInputs', inputs: { temperature: 34, intoxication: 71 } });
+    assert.equal(moodleLevel(subject, 'hypothermia'), 0);
+    subject.command({ type: 'setMoodleInputs', inputs: { intoxication: 70 } });
+    assert.equal(moodleLevel(subject, 'hypothermia'), 2);
+
+    for (const [capacityWeight, want] of [[8, 0], [8.1, 1], [10, 2], [12, 3], [14, 4]]) {
+        subject.command({ type: 'setMoodleInputs', inputs: { capacityWeight } });
+        assert.equal(moodleLevel(subject, 'heavyload'), want);
+    }
+
+    for (const [windChill, want] of [[10, 0], [10.1, 2], [15, 2], [15.1, 3], [20, 3], [20.1, 4]]) {
+        subject.command({ type: 'setMoodleInputs', inputs: { windChill } });
+        assert.equal(moodleLevel(subject, 'windchill'), want);
+    }
+
+    subject.command({ type: 'setMoodleInputs', inputs: { coldStrength: 100 } });
+    assert.equal(moodleLevel(subject, 'hasacold'), 0);
+    subject.command({ type: 'setMoodleInputs', inputs: { hasCold: true } });
+    assert.equal(moodleLevel(subject, 'hasacold'), 4);
+    subject.command({ type: 'setMoodleInputs', inputs: { corpseImpactEnabled: true } });
+
+    for (const [corpseSicknessRate, want] of [[0, 0], [0.001, 1], [0.002, 2], [0.003, 3]]) {
+        subject.command({ type: 'setMoodleInputs', inputs: { corpseSicknessRate } });
+        assert.equal(moodleLevel(subject, 'noxioussmell'), want);
+    }
+
+    subject.command({ type: 'setMoodleInputs', inputs: { toxicBuilding: true, protectedFromToxic: true } });
+    assert.equal(moodleLevel(subject, 'noxioussmell'), 3);
+    subject.command({ type: 'setMoodleInputs', inputs: { protectedFromToxic: false } });
+    assert.equal(moodleLevel(subject, 'noxioussmell'), 4);
+
+    for (const [healthFromFoodTimer, want] of [[0, 0], [1_600, 1], [1_601, 2], [3_200, 2], [3_201, 3], [4_800, 3]]) {
+        subject.command({ type: 'setMoodleInputs', inputs: { healthFromFoodTimer } });
+        assert.equal(moodleLevel(subject, 'foodeaten'), want);
+    }
+});
+
+test('moodle timers advance only on accepted steps and continue through detached save/load', async () => {
+    const subject = await engine();
+
+    subject.command({ type: 'walk', x: 1, y: 0 });
+    subject.command({ type: 'setMoodleInputs', inputs: { pain: 76, cantSprint: true } });
+
+    for (let frame = 0; frame < 119; frame += 1) {
+        subject.step(STEP);
+    }
+
+    assert.equal(moodleLevel(subject, 'pain'), 0);
+    const saved = subject.saveMoodleState();
+
+    for (let query = 0; query < 150; query += 1) {
+        subject.moodles();
+    }
+
+    assert.deepEqual(subject.saveMoodleState(), saved);
+    assert.throws(() => subject.step(0));
+    assert.deepEqual(subject.saveMoodleState(), saved);
+    const restored = await engine();
+
+    restored.loadMoodleState(saved);
+    restored.step(STEP);
+    assert.equal(moodleLevel(restored, 'pain'), 4);
+    assert.equal(restored.saveMoodleState().painTimer, 0);
+    restored.command({ type: 'setCharacterStat', name: 'pain', value: 0 });
+
+    for (let frame = 0; frame < 119; frame += 1) {
+        restored.step(STEP);
+    }
+
+    assert.equal(moodleLevel(restored, 'pain'), 4);
+    restored.step(STEP);
+    assert.equal(moodleLevel(restored, 'pain'), 0);
+
+    for (let frame = 0; frame < 59; frame += 1) {
+        restored.step(STEP);
+    }
+
+    assert.equal(moodleLevel(restored, 'cantsprint'), 1);
+    restored.step(STEP);
+    assert.equal(moodleLevel(restored, 'cantsprint'), 0);
+    assert.equal(restored.saveMoodleState().cantSprintTimer, 300);
+    subject.worldReset();
+    assert.deepEqual(subject.saveMoodleState(), saved);
+    saved.inputs.endurance = 0;
+    assert.equal(subject.saveMoodleState().inputs.endurance, 1);
+    subject.reset();
+    assert.equal(subject.saveMoodleState().painTimer, 0);
+    assert.equal(subject.saveMoodleState().inputs.cantSprint, false);
+});
+
+test('full and partial moodle imports refuse invalid fields atomically at full precision', async () => {
+    const subject = await engine();
+
+    subject.command({ type: 'setCharacterStat', name: 'hunger', value: 0.8 });
+    const before = subject.saveMoodleState();
+
+    for (const change of [
+        { version: 2 }, { painTimer: 120 }, { painTimer: 0.1 }, { painLevel: 5 },
+        { cantSprintTimer: 0 }, { extra: true },
+        { inputs: { ...before.inputs, temperature: 40.000_000_001 } },
+        { inputs: { ...before.inputs, hunger: Number.NaN } },
+        { inputs: { ...before.inputs, hasCold: 1 } },
+        { inputs: { ...before.inputs, maxWeight: 0 } },
+    ]) {
+        assert.throws(() => subject.loadMoodleState({ ...before, ...change }));
+        assert.deepEqual(subject.saveMoodleState(), before);
+    }
+
+    const missing = structuredClone(before);
+
+    delete missing.inputs.pain;
+    assert.throws(() => subject.loadMoodleState(missing));
+
+    for (const inputs of [{ hunger: 0.2, nonexistent: 0 }, { hunger: 0.2, endurance: -0.000_000_001 }]) {
+        assert.throws(() => subject.command({ type: 'setMoodleInputs', inputs }));
+        assert.deepEqual(subject.saveMoodleState(), before);
+    }
+
+    assert.throws(() => subject.command({ type: 'setCharacterStat', name: 'windChill', value: 1 }));
+    const limits = subject.moodleInputLimits();
+
+    assert.deepEqual(limits.hasCold, { type: 'boolean', default: false });
+    assert.deepEqual(limits.temperature, { min: 20, max: 40, default: 37, integer: false });
+    limits.temperature.max = 100;
+    assert.equal(subject.moodleInputLimits().temperature.max, 40);
+    subject.resetMoodleState();
+    assert.equal(moodleLevel(subject, 'hungry'), 0);
+    assert.equal(subject.saveState().values.length, 12);
+});
+
+test('remaining source thresholds, infection maximum and nicotine sum use real owned stats', async () => {
+    const subject = await engine();
+
+    for (const [name, id, cases] of [
+        ['fatigue', 'tired', [[0.6, 0], [0.7, 1], [0.8, 2], [0.9, 3], [0.91, 4]]],
+        ['panic', 'panic', [[6, 0], [30, 1], [65, 2], [80, 3], [81, 4]]],
+        ['sickness', 'sick', [[0.25, 0], [0.5, 1], [0.75, 2], [0.9, 3], [0.91, 4]]],
+        ['boredom', 'bored', [[25, 0], [50, 1], [75, 2], [90, 3], [91, 4]]],
+        ['unhappiness', 'unhappy', [[20, 0], [45, 1], [60, 2], [80, 3], [81, 4]]],
+        ['wetness', 'wet', [[15, 0], [40, 1], [70, 2], [90, 3], [91, 4]]],
+        ['anger', 'angry', [[0.1, 0], [0.25, 1], [0.5, 2], [0.75, 3], [0.76, 4]]],
+        ['stress', 'stress', [[0.25, 0], [0.5, 1], [0.75, 2], [0.9, 3], [0.91, 4]]],
+        ['thirst', 'thirst', [[0.12, 0], [0.25, 1], [0.7, 2], [0.84, 3], [0.85, 4]]],
+        ['intoxication', 'drunk', [[10, 0], [30, 1], [50, 2], [70, 3], [71, 4]]],
+    ]) {
+        for (const [value, want] of cases) {
+            subject.command({ type: 'setCharacterStat', name, value });
+            assert.equal(moodleLevel(subject, id), want, `${name}=${value}`);
+        }
+    }
+
+    subject.command({
+        type: 'setMoodleInputs', inputs: {
+            sickness: 0, zombieInfection: 25, zombieFever: 25, foodSickness: 25,
+        },
+    });
+    // max25/100, not summed75/100
+    assert.equal(moodleLevel(subject, 'sick'), 0);
+    subject.command({ type: 'setCharacterStat', name: 'foodSickness', value: 51 });
+    assert.equal(moodleLevel(subject, 'sick'), 2);
+    subject.command({ type: 'setMoodleInputs', inputs: { stress: 0.5, nicotineWithdrawal: 0.25 } });
+    assert.equal(moodleLevel(subject, 'stress'), 2);
+    subject.command({ type: 'setCharacterStat', name: 'nicotineWithdrawal', value: 0.51 });
+    assert.equal(moodleLevel(subject, 'stress'), 4);
+    subject.command({ type: 'setMoodleInputs', inputs: { neckBleeding: false } });
+
+    for (const [bleedingParts, want] of [[0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [17, 4]]) {
+        subject.command({ type: 'setMoodleInputs', inputs: { bleedingParts } });
+        assert.equal(moodleLevel(subject, 'bleeding'), want);
+    }
+
+    subject.command({ type: 'setMoodleInputs', inputs: { hasCold: true } });
+
+    for (const [coldStrength, want] of [[20, 0], [40, 1], [60, 2], [75, 3], [76, 4]]) {
+        subject.command({ type: 'setMoodleInputs', inputs: { coldStrength } });
+        assert.equal(moodleLevel(subject, 'hasacold'), want);
+    }
+
+    for (const [pain, want] of [[10, 0], [20, 1], [50, 2], [75, 3], [76, 4]]) {
+        subject.command({ type: 'setCharacterStat', name: 'pain', value: pain });
+
+        for (let frame = 0; frame < 120; frame += 1) {
+            subject.step(STEP);
+        }
+
+        assert.equal(moodleLevel(subject, 'pain'), want);
+    }
+
+    subject.command({ type: 'setHealth', health: 0 });
+    const deadTimers = subject.saveMoodleState();
+
+    for (let frame = 0; frame < 120; frame += 1) {
+        subject.step(STEP);
+    }
+
+    assert.deepEqual(subject.saveMoodleState(), deadTimers);
+    subject.command({ type: 'setHealth', health: 100 });
+    assert.equal(moodleLevel(subject, 'pain'), 0);
+});
+
+test('moodle state and death do not change the existing movement model or actor ABI', async () => {
+    const normal = await engine();
+    const affected = await engine();
+
+    affected.command({ type: 'setMoodleInputs', inputs: { endurance: 0, pain: 100, cantSprint: true } });
+    affected.command({ type: 'setHealth', health: 0 });
+
+    for (const subject of [normal, affected]) {
+        subject.command({ type: 'walk', x: 1, y: 1 });
+
+        for (let frame = 0; frame < 60; frame += 1) {
+            subject.step(STEP);
+        }
+    }
+
+    assert.deepEqual(affected.saveState().values.slice(0, 10), normal.saveState().values.slice(0, 10));
+    assert.equal(affected.snapshot().apiVersion, 1);
+});
+
+test('direct WASM moodle staging refuses malformed order, range and incomplete imports atomically', async () => {
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+    const api = instance.exports;
+
+    assert.equal(api.set_character_stat(2, 0.8), 0);
+    const before = Array.from({ length: 37 }, (_, index) => api.moodle_state_value(index));
+
+    for (const [index, value] of [[0, 1.000_000_001], [0, Number.NaN], [1, 0], [34, 120]]) {
+        api.moodle_import_begin();
+        assert.notEqual(api.moodle_import_stage(index, value), 0);
+        assert.notEqual(api.moodle_import_commit(), 0);
+        assert.deepEqual(Array.from({ length: 37 }, (_, i) => api.moodle_state_value(i)), before);
+    }
+
+    api.moodle_import_begin();
+    assert.equal(api.moodle_import_stage(0, 0), 0);
+    assert.notEqual(api.moodle_import_commit(), 0);
+    assert.deepEqual(Array.from({ length: 37 }, (_, index) => api.moodle_state_value(index)), before);
+
+    for (const [index, value] of [[0, -0.000_000_001], [14, 40.000_000_001], [10, 0.510_000_001], [19, 0]]) {
+        assert.notEqual(api.set_character_stat(index, value), 0);
+        assert.deepEqual(Array.from({ length: 37 }, (_, i) => api.moodle_state_value(i)), before);
+    }
 });

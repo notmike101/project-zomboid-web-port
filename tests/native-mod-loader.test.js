@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createEngine } from '../src/engine.js';
+import { createGameUI } from '../src/game-ui.js';
 import { parseModPackage, resolveModOrder } from '../src/mod-manager.js';
 import { createModHost } from '../src/mods.js';
-import { activateNativePackage, bindNativeSession, closeNativeSession, discoverNativePackages, nativePackageFiles, prepareNativeSession } from '../src/native-mod-loader.js';
+import { activateNativePackage, bindNativeSession, closeNativeSession, discoverNativePackages, engineSources, nativePackageFiles, prepareNativeSession } from '../src/native-mod-loader.js';
 
 /**
  * Build a private synthetic directory.
@@ -455,5 +456,186 @@ test('failed staged load retains committed Lua closure initialization and callba
         closeNativeSession();
         host.dispose();
         targetHost.dispose();
+    }
+});
+
+test('bootstrap require closure merges identical records without fetching or installing modules twice', async () => {
+    const content = directory({
+        'mods/A/mod.info': 'id=A',
+        'mods/A/media/lua/client/a.lua': 'require "Startup"',
+        'media/lua/shared/Startup.lua': 'error("supplied startup must not be refetched")',
+        'media/lua/shared/Leaf.lua': 'return require "Tail"',
+        'media/lua/shared/Tail.lua': 'return 7',
+        'media/lua/client/Unused.lua': 'error("unreachable")',
+    });
+    const descriptors = await discoverNativePackages(content);
+    const startup = { path: 'media/lua/shared/Startup.lua', source: 'require "Leaf"', execute: true };
+    const sources = await engineSources(descriptors, content, [startup, { ...startup }]);
+
+    assert.deepEqual(sources.map(({ path, execute }) => ({ path, execute })), [
+        { path: startup.path, execute: true },
+        { path: 'media/lua/shared/Leaf.lua', execute: false },
+        { path: 'media/lua/shared/Tail.lua', execute: false },
+    ]);
+    assert.deepEqual(await engineSources(descriptors, content, sources), sources);
+    await assert.rejects(() => engineSources(descriptors, content, [startup, { ...startup, source: 'return 8' }]), /changed|conflict/u);
+    await assert.rejects(() => engineSources(descriptors, content, [startup, { ...startup, path: 'media/lua/client/Startup.lua' }]), /ambiguous/ui);
+});
+
+test('ordered engine startup runs once through the initiating real package API before native globals are consumed', async () => {
+    const content = directory({
+        'mods/A/mod.info': 'id=A',
+        'mods/A/media/lua/client/a.lua': 'assert(StartupValue == 7); assert(require("Startup") == true); getPlayer():setSpeed(4)',
+        'mods/B/mod.info': 'id=B\nrequire=A',
+        'mods/B/media/lua/client/b.lua': 'assert(StartupValue == 7); assert(getModData().Boot.starts == 1); getPlayer():setSpeed(5)',
+        'media/lua/shared/Leaf.lua': 'return 7',
+    });
+    const descriptors = await discoverNativePackages(content);
+    const engine = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
+    const initialSpeed = engine.snapshot().speed;
+    const saved = new Map();
+    const host = createModHost(engine, {
+        /**
+         * Read a package's last detached save document.
+         *
+         * @param {string} id - Host package identity.
+         * @returns {object|undefined} Previously persisted document, if any.
+         */
+        readModState: (id) => saved.get(id),
+        /**
+         * Persist a detached save document for the owning package.
+         *
+         * @param {string} id - Host package identity.
+         * @param {object} value - Package save document, including native player data.
+         */
+        writeModState: (id, value) => {
+            saved.set(id, structuredClone(value));
+        },
+    });
+    const ui = createGameUI();
+
+    ui.setViewport(100, 80);
+    ui.initialize({
+        textures: [{ path: 'authored-atlas', width: 16, height: 16 }],
+        font: { atlasPath: 'authored-atlas', descriptor: 'info face="Authored" size=10\ncommon lineHeight=12 base=9 scaleW=16 scaleH=16 pages=1 packed=0\npage id=0 file="authored.png"\nchars count=1\nchar id=65 x=0 y=0 width=6 height=8 xoffset=0 yoffset=0 xadvance=7 page=0 chnl=15' },
+        translations: {},
+        settings: { moodleSize: 1, fontSizeReal: 1, lockFPS: 60, gray: { r: 0.5, g: 0.5, b: 0.5, a: 1 }, goodHighlight: { r: 0, g: 1, b: 0, a: 1 }, badHighlight: { r: 1, g: 0, b: 0, a: 1 } },
+    });
+    try {
+        const session = await prepareNativeSession(descriptors, content, {
+            ui,
+            engineSources: [
+                {
+                    path: 'media/lua/shared/Startup.lua', source: `
+                    StartupValue = require "Leaf"
+                    getModData().Boot = {starts=1, ticks=0, speed=getPlayer():getCurrentSpeed()}
+                    Events.OnTick.Add(function() getModData().Boot.ticks=getModData().Boot.ticks+1 end)
+                `,
+                },
+                {
+                    path: 'media/lua/client/StartupUI.lua', source: `
+                    assert(StartupValue == 7)
+                    local target={render=function(self) self.javaObject:DrawTextureScaledColor(nil,0,0,7,3,1,1,1,1) end}
+                    target.javaObject=UIElement.new(target)
+                    UIManager.AddUI(target.javaObject)
+                `,
+                },
+            ],
+        });
+
+        assert.equal(engine.snapshot().speed, initialSpeed);
+
+        for (const descriptor of descriptors) {
+            // eslint-disable-next-line no-await-in-loop -- Parse and activate each dependency before preparing its dependent package.
+            const parsed = await parseModPackage(nativePackageFiles(descriptor));
+            const source = new TextDecoder().decode(parsed.entries.find((entry) => entry.path === 'entry.js').bytes);
+
+            // eslint-disable-next-line no-await-in-loop -- Package B requires A's completed activation and genuine startup API.
+            await host.load(`data:text/javascript,${encodeURIComponent(source)}`);
+        }
+
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.equal(engine.snapshot().speed, 5);
+        assert.deepEqual(saved.get('native-a').data.nativePlayerData.Boot, { starts: 1, ticks: 1, speed: initialSpeed });
+        assert.deepEqual(saved.get('native-b').data.nativePlayerData, {});
+        assert.equal(ui.render()[0].width, 7);
+        host.dispose();
+        assert.deepEqual(ui.render(), []);
+    } finally {
+        closeNativeSession({ discardSaveData: true });
+        host.dispose();
+        ui.dispose();
+    }
+});
+
+test('failed engine startup discards only staged VM and retains initiating API/source attribution', async () => {
+    const content = directory({
+        'mods/A/mod.info': 'id=A',
+        'mods/A/media/lua/client/a.lua': 'Events.OnTick.Add(function() getPlayer():walk(1,0) end)',
+    });
+    const descriptors = await discoverNativePackages(content);
+    const bytes = await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url));
+    const engine = await createEngine(bytes);
+    const targetEngine = await createEngine(bytes);
+    const host = createModHost(engine);
+    const targetHost = createModHost(targetEngine);
+    let committed;
+    let candidate;
+
+    try {
+        committed = await prepareNativeSession(descriptors, content);
+        activateNativePackage(descriptors[0].id, host.api);
+        candidate = await prepareNativeSession(descriptors, content, {
+            staged: true,
+            engineSources: [{ path: 'media/lua/shared/Startup.lua', source: 'getModData().CandidateOnly = {}; error("startup failed")' }],
+        });
+        assert.throws(() => activateNativePackage(descriptors[0].id, targetHost.api), (error) => {
+            assert.equal(error.modId, 'engine-lua');
+            assert.equal(error.apiModId, descriptors[0].id);
+            assert.equal(error.path, 'media/lua/shared/Startup.lua');
+
+            return /startup failed/u.test(error.message);
+        });
+        assert.throws(() => candidate.activatePackage({ ...descriptors[0], api: targetHost.api }), /closed/u);
+        bindNativeSession(committed, descriptors);
+        host.step(1 / 60);
+        assert.equal(engine.snapshot().action, 2);
+        assert.equal(committed.diagnostics().errors.length, 0);
+    } finally {
+        candidate?.close({ discardSaveData: true });
+        bindNativeSession(committed, descriptors);
+        closeNativeSession({ discardSaveData: true });
+        host.dispose();
+        targetHost.dispose();
+    }
+});
+
+test('native session forwards independently authored registry constant mappings without guessing IDs', async () => {
+    const content = directory({
+        'mods/A/mod.info': 'id=A',
+        'mods/A/media/lua/client/a.lua': 'assert(MoodleType.FOOD_EATEN == "authored-food"); assert(getPlayer():getMoodles():getMoodleLevel(MoodleType.FOOD_EATEN) == 2)',
+    });
+    const descriptors = await discoverNativePackages(content);
+    const engine = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
+    const host = createModHost(engine);
+
+    try {
+        await prepareNativeSession(descriptors, content, { moodleTypes: { FOOD_EATEN: 'authored-food' } });
+        activateNativePackage(descriptors[0].id, {
+            ...host.api,
+            character: {
+                ...host.api.character,
+                /**
+                 * Supply the authored registry entry queried through the native bridge.
+                 *
+                 * @returns {{id:string,level:number}[]} Detached authoritative registry levels.
+                 */
+                moodles: () => [{ id: 'authored-food', level: 2 }],
+            },
+        });
+    } finally {
+        closeNativeSession({ discardSaveData: true });
+        host.dispose();
     }
 });

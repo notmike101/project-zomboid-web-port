@@ -86,7 +86,7 @@ async function stageCells({ engineSource, engine, cells, files }) {
         y = nearest.y;
     }
 
-    state.values = [x, y, state.values[2], x, y, 0, 0, 0, state.values[8], 1];
+    state.values = [x, y, state.values[2], x, y, 0, 0, 0, state.values[8], 1, ...state.values.slice(10)];
     staged.loadState(state);
 
     return { engine: staged, cells: imported };

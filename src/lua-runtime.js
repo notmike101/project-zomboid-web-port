@@ -11,15 +11,179 @@
  * unrelated field and every other package namespace. Ownership survives deletes
  * until package cleanup; restored key collisions fail rather than overwrite.
  * Flush before save export, restore after save import, close before API disposal.
- * No Java/UI objects, JS eval, native filesystem or dummy native globals exposed.
+ * Optional game UI uses supplied original BMFont/texture/translation resources;
+ * unsupported native facilities fail attributably, never through dummy globals.
  */
 
 /** @typedef {{path:string, source:string, execute?:boolean}} LuaSource */
 /** @typedef {{id:string, nativeId?:string, engineSource?:boolean, api?:object, sources:LuaSource[], registerCleanup?:(cleanup:()=>void)=>void}} LuaPackage */
 /** @typedef {string|number|boolean|null|JSONValue[]|{[key: string]: JSONValue}} JSONValue */
 
-const EVENTS = new Set(['OnTick', 'OnPlayerUpdate', 'OnPlayerMove', 'OnGameStart', 'OnLoad', 'OnCreatePlayer', 'OnKeyPressed', 'OnKeyReleased', 'OnKeyKeepPressed']);
-const EXTERNAL_EVENTS = new Set(['OnGameStart', 'OnLoad', 'OnCreatePlayer', 'OnKeyPressed', 'OnKeyReleased', 'OnKeyKeepPressed']);
+const EVENTS = new Set(['OnTick', 'OnPlayerUpdate', 'OnPlayerMove', 'OnGameStart', 'OnLoad', 'OnCreatePlayer', 'OnPlayerDeath', 'OnMainMenuEnter', 'OnKeyPressed', 'OnKeyReleased', 'OnKeyKeepPressed']);
+const EXTERNAL_EVENTS = new Set(['OnGameStart', 'OnLoad', 'OnCreatePlayer', 'OnPlayerDeath', 'OnMainMenuEnter', 'OnKeyPressed', 'OnKeyReleased', 'OnKeyKeepPressed']);
+
+const UI_PRELUDE = String.raw`
+local function ui(operation, ...) return hostCall('ui', operation, ...) end
+function getISUIStackTrace(level)
+    assert(type(level)=='number' and level>=0 and level%1==0, 'invalid UI stack depth')
+    return traceback('', 2)
+end
+local textureCache = {}
+function getTexture(path)
+    local value = ui('texture', path)
+    if not value then return nil end
+    if not textureCache[path] then
+        local texture = nativeObject('Texture')
+        texture.__texture = path
+        function texture:getWidth() return ui('texture', path).width end
+        function texture:getHeight() return ui('texture', path).height end
+        textureCache[path] = texture
+    end
+    return textureCache[path]
+end
+function instanceof(value, class)
+    if class == 'Texture' or class == 'UIElement' then return rawType(value) == 'table' and nativeTypes[value] == class end
+    rawError(fault('unsupported native class: ' .. tostring(class)), 2)
+end
+UIElement = {new = function(target)
+    local owner = context()
+    local function callback(name, ...)
+        local args = table.pack(...)
+        return guarded(owner, function()
+            if target[name] then return target[name](target, table.unpack(args, 1, args.n)) end
+        end)
+    end
+    local id = ui('new', {update = function() return callback('update') end,
+        prerender = function() return callback('prerender') end,
+        render = function() return callback('render') end,
+        input = function(name, ...) return callback(name, ...) end})
+    local object = nativeObject('UIElement')
+    object.__ui = id
+    for _, name in ipairs({'getX','getY','getWidth','getHeight','getAbsoluteX','getAbsoluteY',
+        'setX','setY','setWidth','setHeight','setAnchorLeft','setAnchorRight','setAnchorTop','setAnchorBottom',
+        'setWantKeyEvents','setConsumeMouseEvents','setWantExtraMouseEvents','setForceCursorVisible',
+        'setVisible','isVisible','setEnabled','isEnabled','setAlwaysOnTop','backMost','isMouseOver','isPointOver',
+        'getXScroll','getYScroll','setXScroll','setYScroll',
+        'setStencilRect','clearStencilRect','suspendStencil','resumeStencil',
+        'DrawTextureScaled','DrawTextureScaledColor','DrawTextureScaledUniform','DrawTexture','DrawTextureColor',
+        'DrawTextRight','DrawTextCentre','DrawText'}) do
+        object[name] = function(_, ...)
+            local args = table.pack(...)
+            if name:sub(1,11) == 'DrawTexture' and args[1] ~= nil then args[1] = args[1].__texture end
+            return ui('element', id, name, table.unpack(args, 1, args.n))
+        end
+    end
+    function object:AddChild(child) return ui('element',id,'AddChild',child.__ui) end
+    function object:RemoveChild(child) return ui('element',id,'RemoveChild',child.__ui) end
+    return object
+end}
+UIManager = {
+    AddUI = function(object) ui('add',object.__ui) end,
+    RemoveElement = function(object) ui('remove',object.__ui) end,
+}
+UIFont = {Small = 'Small'}
+local textManager = nativeObject('TextManager')
+function textManager:MeasureStringX(font, text) return ui('measureX',font,text) end
+function textManager:MeasureStringY(font, text) return ui('measureY',font,text) end
+function textManager:getFontHeight(font) return ui('fontHeight',font) end
+function getTextManager() ui('fontHeight','Small'); return textManager end
+function getText(key) return ui('text',key) end
+function getTextOrNull(key) return ui('textOrNull',key) end
+function getMouseX() return ui('mouse').x end
+function getMouseY() return ui('mouse').y end
+local function singlePlayer(index)
+    assert(index == 0, 'only player viewport zero is supported')
+    return ui('viewport')
+end
+function getPlayerScreenLeft(index) singlePlayer(index); return 0 end
+function getPlayerScreenTop(index) singlePlayer(index); return 0 end
+function getPlayerScreenWidth(index) return singlePlayer(index).width end
+function getPlayerScreenHeight(index) return singlePlayer(index).height end
+local function color(read, write)
+    local value = nativeObject('Color')
+    for _, pair in ipairs({{'getR','r'},{'getG','g'},{'getB','b'},{'getA','a'},
+        {'getRedFloat','r'},{'getGreenFloat','g'},{'getBlueFloat','b'},{'getAlphaFloat','a'}}) do
+        value[pair[1]] = function() return read()[pair[2]] end
+    end
+    if write then function value:set(r,g,b,a) write({r=r,g=g,b=b,a=a}) end end
+    return value
+end
+Color = {gray = color(function() return ui('gray') end, function(value) ui('gray',value) end)}
+local core = nativeObject('Core')
+function core:getScreenWidth() return ui('viewport').width end
+function core:getScreenHeight() return ui('viewport').height end
+function core:getOptionMoodleSize() return ui('settings').moodleSize end
+function core:getOptionFontSizeReal() return ui('settings').fontSizeReal end
+function core:getGoodHighlitedColor() return color(function() return ui('settings').goodHighlight end) end
+function core:getBadHighlitedColor() return color(function() return ui('settings').badHighlight end) end
+function getCore() ui('viewport'); return core end
+PerformanceSettings = {getLockFPS = function() return ui('settings').lockFPS end}
+PZAPI = {ModOptions = {create = function(_, id, title)
+    local saved = hostCall('readOptions',id) or {}
+    local options = {modOptionsID=id,title=title,settings={}}
+    local function add(key,label,kind,default,tooltip)
+        assert(type(key)=='string' and options.settings[key]==nil, 'duplicate/invalid mod option ID')
+        local setting = {id=key,label=label,kind=kind,tooltip=tooltip,default=default,value=saved[key]}
+        if setting.value == nil then setting.value=default end
+        function setting:getValue() return self.kind=='color' and self.color or self.value end
+        function setting:setValue(value)
+            if self.kind=='tickbox' then assert(type(value)=='boolean','tickbox value must be boolean');self.value=value
+            else assert(type(value)=='table','color value required');self.color=value end
+        end
+        if kind=='color' then setting.color=setting.value end
+        options.settings[key]=setting
+        return setting
+    end
+    function options:addTickBox(key,label,value,tooltip) return add(key,label,'tickbox',value,tooltip) end
+    function options:addColorPicker(key,label,r,g,b,a,tooltip) return add(key,label,'color',{r=r,g=g,b=b,a=a},tooltip) end
+    function options:apply()
+        local values={}
+        for key,setting in pairs(self.settings) do
+            local value=setting:getValue()
+            if setting.kind=='color' then
+                for _,component in ipairs({'r','g','b','a'}) do assert(type(value[component])=='number' and value[component]>=0 and value[component]<=1,'color components must be 0..1') end
+            else assert(type(value)=='boolean','tickbox value must be boolean') end
+            values[key]=value
+        end
+        hostCall('writeOptions',self.modOptionsID,values)
+    end
+    optionRegistry[#optionRegistry + 1] = {owner = context(), options = options}
+    return options
+end}}
+local function item(id)
+    if id == nil then return nil end
+    local value=nativeObject('InventoryItem')
+    local function record() return hostCall('item',id) end
+    function value:getFullType() return record().fullType end
+    function value:getCondition() return record().condition end
+    function value:getConditionMax() return hostCall('itemDefinition',record().fullType).conditionMax end
+    function value:getCurrentCondition()
+        local maximum=self:getConditionMax()
+        assert(type(maximum)=='number' and maximum>0, 'unsupported item condition percentage without positive original ConditionMax')
+        return self:getCondition()/maximum*100
+    end
+    function value:setCondition(condition) hostCall('setCondition',id,condition) end
+    return value
+end
+function player:getClothingItem_Feet() return item(hostCall('worn','base:shoes')) end
+function player:getWornItem(location) return item(hostCall('worn',location)) end
+function player:getHealth() return hostCall('health') end
+function player:isDead() return hostCall('isDead') end
+local moodles = nativeObject('Moodles')
+function moodles:getMoodleLevel(id)
+    for _, value in ipairs(hostCall('moodles')) do if value.id == id then return value.level end end
+    rawError(fault('unsupported moodle type: '..tostring(id)),2)
+end
+function player:getMoodles() hostCall('moodles'); return moodles end
+MoodleType = setmetatable({}, {__index=function(_,name) return hostCall('moodleType',name) end})
+Registries = {MOODLE_TYPE = {values=function()
+    local values=hostCall('moodles')
+    return {size=function() return #values end,get=function(_,index)
+        assert(type(index)=='number' and index%1==0 and index>=0 and index<#values,'registry index out of range')
+        return values[index+1].id
+    end}
+end}}
+`;
 
 /* All wrappers are Lua functions: colon arguments and event function identity
    never depend on JS object proxies or roundtripped Lua function wrappers. */
@@ -27,9 +191,17 @@ const PRELUDE = `
 local hostCall, enter, leave, context, fault, own = __pz_call, __pz_enter, __pz_leave, __pz_context, __pz_fault, __pz_own
 local rawLoad, info, upvalue, join = load, debug.getinfo, debug.getupvalue, debug.upvaluejoin
 local rawError, traceback, rawNext = error, debug.traceback, next
+local rawType = type
+local nativeTypes = setmetatable({}, {__mode = 'k'})
+function type(value)
+    local kind = rawType(value)
+    if kind == 'table' and nativeTypes[value] then return 'userdata' end
+    return kind
+end
 local root, threadEnv = _G, _G
 local envs = setmetatable({}, {__mode = 'k'})
 local records, modules, loaded, loading, handlers, executed = {}, {}, {}, {}, {}, {}
+local optionRegistry = {}
 local playerData = setmetatable({}, {__newindex = function(t, k, v) own(k); rawset(t, k, v) end})
 local delta = 0
 unpack = table.unpack
@@ -146,7 +318,12 @@ for _, name in ipairs(__pz_events) do addEvent(name) end
 local function unsupported(name)
     return function() rawError(fault('unsupported native facility: ' .. name), 2) end
 end
-local player = setmetatable({}, {__index = function(_, name) return unsupported('IsoPlayer:' .. tostring(name)) end})
+local function nativeObject(name)
+    local value = setmetatable({}, {__index = function(_, method) return unsupported(name .. ':' .. tostring(method)) end})
+    nativeTypes[value] = name
+    return value
+end
+local player = nativeObject('IsoPlayer')
 function player:getX() return hostCall('state').x end
 function player:getY() return hostCall('state').y end
 function player:getPlayerNum() return 0 end
@@ -166,7 +343,7 @@ function getSpecificPlayer(index)
 end
 function getModData() return playerData end
 function transmitModData() hostCall('flush') end
-local gameTime = setmetatable({}, {__index = function(_, name) return unsupported('GameTime:' .. tostring(name)) end})
+local gameTime = nativeObject('GameTime')
 function gameTime:getRealworldSecondsSinceLastUpdate() return delta end
 function getGameTime() return gameTime end
 function getTimestamp() return math.floor(hostCall('now') / 1000) end
@@ -178,6 +355,7 @@ local function unsupportedObject(name)
         __call = unsupported(name)})
 end
 for _, name in ipairs({'PZAPI', 'Calendar', 'java', 'UIFont', 'ItemBodyLocation', 'SandboxVars'}) do root[name] = unsupportedObject(name) end
+${UI_PRELUDE}
 -- Lua's ordinary optional global lookups remain nil. No blanket _G trap.
 io = nil
 os.execute, os.exit, os.getenv, os.remove, os.rename, os.tmpname = nil, nil, nil, nil, nil, nil
@@ -202,7 +380,7 @@ function __pz_execute(id, path)
 end
 function __pz_dispatch(name, ...)
     local args = table.pack(...)
-    if name == 'OnPlayerUpdate' or name == 'OnPlayerMove' then args = table.pack(player) end
+    if name == 'OnPlayerUpdate' or name == 'OnPlayerMove' or name == 'OnPlayerDeath' then args = table.pack(player) end
     if name == 'OnCreatePlayer' then args = table.pack(0, player) end
     local snapshot = {}
     for _, item in ipairs(handlers[name]) do snapshot[#snapshot + 1] = item end
@@ -217,8 +395,18 @@ function __pz_tick(seconds, number)
     __pz_dispatch('OnTick', number)
     __pz_dispatch('OnPlayerUpdate')
 end
+function __pz_apply_options()
+    local snapshot = {}
+    for _, item in ipairs(optionRegistry) do snapshot[#snapshot + 1] = item end
+    for _, item in ipairs(snapshot) do
+        local present = false
+        for _, live in ipairs(optionRegistry) do if live == item then present = true; break end end
+        if present then guarded(item.owner, function() return item.options:apply() end) end
+    end
+end
 function __pz_cleanup(id)
     for _, list in pairs(handlers) do for i = #list, 1, -1 do if list[i].id == id or list[i].apiId == id then table.remove(list, i) end end end
+    for i = #optionRegistry, 1, -1 do if optionRegistry[i].owner.id == id or optionRegistry[i].owner.apiId == id then table.remove(optionRegistry, i) end end
     for name, record in pairs(modules) do if record.id == id then modules[name], loaded[name], package.preload[name] = nil, nil, nil end end
     for key, record in pairs(records) do if record.id == id then records[key], executed[key] = nil, nil end end
 end
@@ -354,12 +542,17 @@ function jsonCopy(value) {
 /**
  * Create one Lua VM; activation and callbacks after this await are synchronous.
  *
- * @param {{wasmUrl?:string|URL, timeoutMs?:number, memoryLimitBytes?:number, now?:()=>number}} [options] - VM resource limits; not sandbox guarantees.
+ * @param {{wasmUrl?:string|URL, timeoutMs?:number, memoryLimitBytes?:number, now?:()=>number, ui?:object, moodleTypes?:{[name:string]:string}, engineStartup?:{id:string,path:string}[]}} [options] - VM limits, candidate UI, proven constants and ordered preloaded engineSource chunks run once under the first native package's real API.
  * @returns {Promise<object>} Shared native runtime.
  */
 export async function createLuaSession(options = {}) {
     const timeoutMs = options.timeoutMs ?? 100;
     const memoryLimitBytes = options.memoryLimitBytes ?? 32 * 1_024 * 1_024;
+    const engineStartup = options.engineStartup ?? [];
+
+    if (!Array.isArray(engineStartup) || engineStartup.some((item) => !item || typeof item.id !== 'string' || !item.id || typeof item.path !== 'string' || !item.path)) {
+        throw new TypeError('Engine startup requires ordered preloaded engine source references');
+    }
 
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(memoryLimitBytes) || memoryLimitBytes <= 0) {
         throw new TypeError('Lua resource limits must be positive');
@@ -436,6 +629,7 @@ export async function createLuaSession(options = {}) {
     const errors = [];
     let closed = false;
     let unsubscribe;
+    let unsubscribeDeath;
     let tickOwner;
     let lastPosition;
     let lastFault;
@@ -443,6 +637,9 @@ export async function createLuaSession(options = {}) {
     let timeouts = 0;
     let durationMs = 0;
     let busy = false;
+    let pendingDeaths = 0;
+    let drainingDeaths = false;
+    let engineStarted = engineStartup.length === 0;
 
     /**
      * Get the currently running chunk owner.
@@ -519,6 +716,28 @@ export async function createLuaSession(options = {}) {
         return entry.api;
     }
 
+    /**
+     * Call a supported facility on the currently attributed package's public API.
+     *
+     * @param {string} namespace - Dot-separated public API namespace.
+     * @param {string} name - Required synchronous method in that namespace.
+     * @param {...unknown} args - Method-specific arguments supplied by the Lua bridge.
+     * @returns {unknown} The facility's synchronous result, unchanged.
+     */
+    function capability(namespace, name, ...args) {
+        let value = api();
+
+        for (const part of namespace.split('.')) {
+            value = value?.[part];
+        }
+
+        if (typeof value?.[name] !== 'function') {
+            throw new TypeError(`unsupported native facility: ${namespace}.${name}`);
+        }
+
+        return value[name](...args);
+    }
+
     lua.global.set('__pz_enter', (id, path, apiId) => {
         const caller = current();
         const publicOwner = packages.get(id)?.engineSource ? apiId ?? caller.apiId ?? caller.id : id;
@@ -554,6 +773,57 @@ export async function createLuaSession(options = {}) {
             case 'action': return api().actions.submit(args[0] === 'cancel' ? { type: 'cancel' } : { type: args[0], x: args[1], y: args[2] });
             case 'flush': return flushSaveData();
             case 'now': return (options.now ?? Date.now)();
+            case 'ui': {
+                if (!options.ui?.bindings) {
+                    throw new Error('unsupported native facility: UI resources');
+                }
+
+                const [name, ...values] = args;
+
+                if (name === 'element' && values[1]?.startsWith('DrawTexture') && values[2] !== null && values[2] !== undefined) {
+                    const path = values[2];
+
+                    values[2] = options.ui.bindings.call('texture', current().apiId ?? current().id, path);
+
+                    if (!values[2]) {
+                        throw new Error(`UI texture disappeared: ${path}`);
+                    }
+                }
+
+                const result = options.ui.bindings.call(name, current().apiId ?? current().id, ...values);
+
+                return name === 'texture' && result ? { path: result.path, width: result.width, height: result.height } : result;
+            }
+            case 'readOptions': return capability('ui', 'readOptions', args[0]);
+            case 'writeOptions': return capability('ui', 'writeOptions', args[0], jsonCopy(args[1]));
+            case 'item': return capability('items', 'get', args[0]);
+            case 'itemDefinition': return capability('items.definitions', 'get', args[0]);
+            case 'setCondition': return capability('items', 'setCondition', ...args);
+            case 'worn': {
+                const worn = capability('items', 'worn', args[0]);
+
+                return typeof worn === 'object' && worn !== null ? worn.id : worn;
+            }
+            case 'health': return capability('character', 'getHealth');
+            case 'isDead': return capability('character', 'isDead');
+            case 'moodleType': {
+                const id = options.moodleTypes?.[args[0]];
+
+                if (typeof id !== 'string' || !capability('character', 'moodles').some((value) => value.id === id)) {
+                    throw new Error(`unsupported native facility: MoodleType.${args[0]} requires proven registry mapping`);
+                }
+
+                return id;
+            }
+            case 'moodles': {
+                const values = capability('character', 'moodles');
+
+                if (!Array.isArray(values) || !values.length || values.some((value) => typeof value.id !== 'string' || !value.id || !Number.isInteger(value.level) || value.level < 0 || value.level > 4) || new Set(values.map((value) => value.id)).size !== values.length) {
+                    throw new Error('unsupported authoritative moodles registry/levels');
+                }
+
+                return values.map((value) => ({ id: value.id, level: value.level }));
+            }
             case 'dataOwner': {
                 const id = owners.get(args[0]);
 
@@ -585,6 +855,7 @@ export async function createLuaSession(options = {}) {
     const restore = lua.global.get('__pz_restore');
     const data = lua.global.get('__pz_data');
     const drop = lua.global.get('__pz_drop');
+    const applyRegisteredOptions = lua.global.get('__pz_apply_options');
 
     /**
      * Register original native text and paths without activating them.
@@ -786,6 +1057,27 @@ export async function createLuaSession(options = {}) {
     }
 
     /**
+     * Deliver genuine notifications after the current Lua dispatch has unwound.
+     *
+     * @returns {void} Each retained death transition is dispatched once.
+     */
+    function drainDeaths() {
+        if (busy || closed || drainingDeaths) {
+            return;
+        }
+
+        drainingDeaths = true;
+        try {
+            while (pendingDeaths > 0 && !closed) {
+                pendingDeaths -= 1;
+                dispatch('OnPlayerDeath', 0);
+            }
+        } finally {
+            drainingDeaths = false;
+        }
+    }
+
+    /**
      * Transfer the one real host tick registration when its owner unloads.
      *
      * @returns {void}
@@ -796,11 +1088,21 @@ export async function createLuaSession(options = {}) {
             unsubscribe = undefined;
         }
 
+        unsubscribeDeath?.();
+        unsubscribeDeath = undefined;
+
         tickOwner = [...packages.values()].find((entry) => entry.active);
         lastPosition = tickOwner?.api.movement.getState();
 
         if (!tickOwner) {
             return;
+        }
+
+        if (typeof tickOwner.api.events.onCharacterDeath === 'function') {
+            unsubscribeDeath = tickOwner.api.events.onCharacterDeath(() => {
+                pendingDeaths += 1;
+                drainDeaths();
+            });
         }
 
         unsubscribe = tickOwner.api.events.onTick(({ seconds, snapshot }) => {
@@ -817,8 +1119,13 @@ export async function createLuaSession(options = {}) {
                 }
 
                 lastPosition = snapshot;
+
+                if (options.ui) {
+                    run(() => options.ui.update());
+                }
             } finally {
                 busy = false;
+                drainDeaths();
             }
         }, { priority: 0 });
     }
@@ -832,8 +1139,13 @@ export async function createLuaSession(options = {}) {
     function unregister(entry) {
         const keys = [...owners].filter(([, owner]) => owner === entry.id).map(([key]) => key);
 
-        run(() => remove(entry.id));
-        run(() => drop(keys));
+        try {
+            run(() => remove(entry.id));
+            run(() => drop(keys));
+        } finally {
+            options.ui?.bindings.cleanup(entry.id);
+        }
+
         entry.active = false;
         packages.delete(entry.id);
 
@@ -842,6 +1154,31 @@ export async function createLuaSession(options = {}) {
         }
 
         bindTicks();
+    }
+
+    /**
+     * Execute original startup chunks under the initiating native package's API.
+     *
+     * @param {string} apiId - Active native package providing the genuine public API.
+     * @returns {void} Throws with the source context retained by run on failure.
+     */
+    function runEngineStartup(apiId) {
+        for (const item of engineStartup) {
+            contexts.push({ id: item.id, path: item.path, apiId });
+            try {
+                run(() => {
+                    const engine = packages.get(item.id);
+
+                    if (!engine?.engineSource || !engine.sources.has(item.path)) {
+                        throw new Error('Engine startup must reference a preloaded engineSource chunk');
+                    }
+
+                    execute(item.id, item.path);
+                });
+            } finally {
+                contexts.pop();
+            }
+        }
     }
 
     /**
@@ -866,8 +1203,22 @@ export async function createLuaSession(options = {}) {
         flushSaveData();
         entry.api = descriptor.api;
         entry.active = true;
+        let startupFailed = false;
+
         try {
             restoreSaveData(entry.id);
+
+            if (!engineStarted) {
+                try {
+                    runEngineStartup(entry.id);
+
+                    engineStarted = true;
+                } catch (cause) {
+                    startupFailed = true;
+                    throw cause;
+                }
+            }
+
             const order = { shared: 0, client: 1, server: 2 };
             const sources = [...entry.sources.values()].sort((left, right) => {
                 const difference = order[left.path.split('/')[2]] - order[right.path.split('/')[2]];
@@ -891,7 +1242,12 @@ export async function createLuaSession(options = {}) {
 
             bindTicks();
         } catch (cause) {
-            unregister(entry);
+            if (startupFailed) {
+                close({ discardSaveData: true });
+            } else {
+                unregister(entry);
+            }
+
             throw cause;
         }
 
@@ -937,11 +1293,11 @@ export async function createLuaSession(options = {}) {
             throw new TypeError('key event requires one nonnegative integer key code');
         }
 
-        if ((name === 'OnLoad' || name === 'OnGameStart') && args.length) {
+        if (['OnLoad', 'OnGameStart', 'OnMainMenuEnter'].includes(name) && args.length) {
             throw new TypeError(`${name} takes no arguments`);
         }
 
-        if (name === 'OnCreatePlayer' && (args.length > 1 || (args.length === 1 && args[0] !== 0))) {
+        if (['OnCreatePlayer', 'OnPlayerDeath'].includes(name) && (args.length > 1 || (args.length === 1 && args[0] !== 0))) {
             throw new TypeError('only real player index zero is supported');
         }
 
@@ -954,6 +1310,26 @@ export async function createLuaSession(options = {}) {
             run(() => emit(name, ...args));
         } finally {
             busy = false;
+            drainDeaths();
+        }
+    }
+
+    /**
+     * Apply restored configuration through the original registered callbacks.
+     *
+     * @returns {void} Synchronous owner-attributed application; no lifecycle event.
+     */
+    function applyOptions() {
+        if (busy) {
+            throw failure('recursive Lua dispatch');
+        }
+
+        busy = true;
+        try {
+            run(() => applyRegisteredOptions());
+        } finally {
+            busy = false;
+            drainDeaths();
         }
     }
 
@@ -968,32 +1344,39 @@ export async function createLuaSession(options = {}) {
             executions, timeouts, durationMs, memoryBytes: closed ? null : lua.global.getMemoryUsed(), memoryLimitBytes,
             packages: [...packages.values()].map((entry) => ({ id: entry.id, nativeId: entry.nativeId, active: entry.active, paths: [...entry.sources.keys()] })),
             supportedEvents: [...EVENTS], errors: errors.map((error) => ({ ...error })),
-            gaps: ['Lua 5.4 is not full Lua 5.1/Kahlua equivalence', 'Kahlua/Lua bytecode', 'Java classes and shipped Java mods', 'UI/inventory/radio/vehicle/texture/translation systems', 'Kahlua debugger/coroutine call frames', 'Sandbox options and multiplayer', 'Native engine Lua classes must be supplied as real sources'],
+            gaps: ['Lua 5.4 is not full Lua 5.1/Kahlua equivalence', 'Kahlua/Lua bytecode', 'Java classes and shipped Java mods', ...(options.ui ? ['UI support scoped to supplied single-page BMFont/texture primitives; native shaping and scale-tier semantics unresolved'] : ['UI resources not supplied']), 'Authoritative vanilla moodle registry/levels require character.moodles capability', 'Radio/vehicles', 'Kahlua debugger/coroutine call frames', 'Sandbox options and multiplayer', 'Native engine Lua classes must be supplied as real sources'],
         };
     }
 
     /**
      * Flush before freeing the VM; failure leaves it open unless discarding an uncommitted failed activation.
      *
-     * @param {{discardSaveData?:boolean}} [options] - Explicit rollback/unload discard only.
+     * @param {{discardSaveData?:boolean}} [shutdown] - Explicit rollback/unload discard only.
      * @returns {void}
      */
-    function close(options = {}) {
+    function close(shutdown = {}) {
         if (closed) {
             return;
         }
 
-        if (!options.discardSaveData) {
+        if (!shutdown.discardSaveData) {
             flushSaveData();
         }
 
         unsubscribe?.();
         unsubscribe = undefined;
+        unsubscribeDeath?.();
+        unsubscribeDeath = undefined;
+
+        for (const entry of packages.values()) {
+            options.ui?.bindings.cleanup(entry.id);
+        }
+
         lua.global.close();
         closed = true;
         packages.clear();
         contexts.length = 0;
     }
 
-    return Object.freeze({ preload, activatePackage, dispatch, flushSaveData, restoreSaveData, diagnostics, close });
+    return Object.freeze({ preload, activatePackage, dispatch, applyOptions, flushSaveData, restoreSaveData, diagnostics, close });
 }

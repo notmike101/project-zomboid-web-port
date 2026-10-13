@@ -1,3 +1,4 @@
+import { createGameUI, createUIRenderer } from './game-ui.js';
 import { parseX, createSkin, sampleSkin, MAX_X_BYTES } from './models.js';
 
 const canvasCameras = new WeakMap();
@@ -482,6 +483,106 @@ export async function createRenderer(canvas, onError) {
     const characterProjection = new Float32Array(16);
     const objectMatrix = new Float32Array(16);
     let camera = { x: 5, y: 5 };
+    const uiSessions = new Set();
+    let gameUI = null;
+    const uiRenderer = await createUIRenderer(device, format, sampler);
+
+    /**
+     * Create isolated candidate roots and IDs without changing the committed VM's UI.
+     *
+     * @returns {object} Candidate UI owned by this renderer.
+     */
+    function newGameUI() {
+        if (stopped || destroyed) {
+            throw new Error('Renderer is no longer active.');
+        }
+
+        const ui = createGameUI({
+            /**
+             * Unregister the disposed session and withdraw it if currently presented.
+             */
+            onDispose: () => {
+                uiSessions.delete(ui);
+
+                if (gameUI === ui) {
+                    gameUI = null;
+                }
+            },
+        });
+
+        ui.setViewport(Math.max(1, canvas.clientWidth || canvas.width), Math.max(1, canvas.clientHeight || canvas.height));
+        uiSessions.add(ui);
+
+        return ui;
+    }
+
+    /**
+     * Publish a successfully activated candidate; caller retains/releases old session explicitly.
+     *
+     * @param {object|null} ui - Candidate, or null to withdraw presentation.
+     * @returns {void}
+     */
+    function setGameUI(ui) {
+        if (stopped || destroyed) {
+            throw new Error('Renderer is no longer active.');
+        }
+
+        if (ui !== null && !uiSessions.has(ui)) {
+            throw new Error('UI must belong to this renderer.');
+        }
+
+        gameUI = ui;
+    }
+
+    /**
+     * Preload genuine PNG resources into an explicit, uncommitted candidate.
+     * Failed decode/metrics validation destroys only candidate uploads.
+     *
+     * @param {{ui:object,textures:{path:string,file:File}[],font:{descriptor:string,atlasPath:string},translations:object,settings:object,indexedTextures?:string[]|Set<string>}} resources - Selected originals and explicit port settings.
+     * @returns {Promise<void>} Completed candidate resource initialization.
+     */
+    async function initializeGameUI({ ui, textures, font, translations, settings, indexedTextures }) {
+        if (!uiSessions.has(ui)) {
+            throw new Error('Explicit candidate UI belonging to this renderer is required.');
+        }
+
+        if (ui === gameUI) {
+            throw new Error('Cannot mutate the committed game UI; initialize an independent candidate.');
+        }
+
+        const loaded = [];
+
+        try {
+            for (const entry of textures) {
+                // Decode/upload sequentially to bound transient bitmap and staging memory to one image.
+                // eslint-disable-next-line no-await-in-loop
+                const uploaded = await importImage(entry.file, true);
+
+                loaded.push({
+                    path: entry.path, width: uploaded.metadata.width, height: uploaded.metadata.height,
+                    texture: uploaded.texture,
+                    /**
+                     * Release this candidate's uploaded texture.
+                     *
+                     * @returns {void}
+                     */
+                    destroy: () => uploaded.texture.destroy(),
+                });
+            }
+
+            if (stopped || destroyed) {
+                throw new Error('Renderer stopped during UI preload.');
+            }
+
+            ui.initialize({ textures: loaded, font, translations, settings, indexedTextures });
+        } catch (cause) {
+            for (const entry of loaded) {
+                entry.destroy();
+            }
+
+            throw cause;
+        }
+    }
 
     /**
      * Enables or disables unbounded isometric camera following for direct engine coordinates.
@@ -639,6 +740,8 @@ export async function createRenderer(canvas, onError) {
             canvas.width = width;
             canvas.height = height;
         }
+
+        gameUI?.setViewport(cssWidth, cssHeight);
     }
 
     /**
@@ -1159,6 +1262,19 @@ export async function createRenderer(canvas, onError) {
             worldPass.end();
         }
 
+        if (gameUI) {
+            const commands = gameUI.render();
+
+            if (commands.length) {
+                const uiPass = encoder.beginRenderPass({
+                    colorAttachments: [{ view: colourView, loadOp: 'load', storeOp: 'store' }],
+                });
+
+                uiRenderer.render(uiPass, commands, canvas.width, canvas.height, drawScale);
+                uiPass.end();
+            }
+        }
+
         device.queue.submit([encoder.finish()]);
         frames += 1;
     }
@@ -1230,6 +1346,14 @@ export async function createRenderer(canvas, onError) {
 
         destroyed = true;
         device.onuncapturederror = null;
+
+        for (const ui of uiSessions) {
+            ui.dispose();
+        }
+
+        uiSessions.clear();
+        gameUI = null;
+        uiRenderer.destroy();
         releaseCharacter(character);
         character = null;
         worldLayer?.destroy();
@@ -1253,6 +1377,15 @@ export async function createRenderer(canvas, onError) {
 
     return Object.freeze({
         importImage, importCharacter, render, diagnostics, destroy, setWorldMode, setWorldLayer,
+        createGameUI: newGameUI, initializeGameUI, setGameUI,
+        /**
+         * Return the committed UI session currently presented by this renderer.
+         *
+         * @returns {ReturnType<typeof createGameUI>|null} Active session, or null when withdrawn.
+         */
+        get gameUI() {
+            return gameUI;
+        },
         /**
          * Maps a pointer through the live camera or plane fit of this renderer.
          *

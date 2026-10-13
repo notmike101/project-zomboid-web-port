@@ -5,7 +5,7 @@ import { dirname, extname, join, parse, relative, resolve, sep } from 'node:path
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const extensions = new Set(['.pack', '.png', '.jpg', '.jpeg', '.dds', '.x', '.fbx', '.ogg', '.wav', '.bank', '.bin', '.lotheader', '.lotpack', '.tiles', '.txt', '.lua', '.xml', '.json', '.info', '.js', '.mjs', '.vert', '.frag', '.glsl', '.tmx', '.tga', '.bmp', '.gif', '.ini', '.cfg', '.properties', '.mesh', '.anim', '.ttf', '.otf', '.woff', '.woff2', '.csv', '.css', '.svg', '.html', '.webp', '.mp3', '.flac']);
+const extensions = new Set(['.pack', '.png', '.jpg', '.jpeg', '.dds', '.x', '.fbx', '.ogg', '.wav', '.bank', '.bin', '.lotheader', '.lotpack', '.tiles', '.txt', '.fnt', '.lua', '.xml', '.json', '.info', '.js', '.mjs', '.vert', '.frag', '.glsl', '.tmx', '.tga', '.bmp', '.gif', '.ini', '.cfg', '.properties', '.mesh', '.anim', '.ttf', '.otf', '.woff', '.woff2', '.csv', '.css', '.svg', '.html', '.webp', '.mp3', '.flac']);
 const mapRoot = 'media/maps/challengemaps/Tutorial';
 const startup = {
     packs: ['Tiles2x', 'Tiles2x.floor', 'Overlays2x', 'Overlays2x.floor', 'JumboTreesBigs2x'].map((name) => `media/texturepacks/${name}.pack`),

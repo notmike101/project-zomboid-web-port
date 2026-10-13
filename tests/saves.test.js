@@ -35,7 +35,7 @@ async function fixture() {
     engine.step(0.1);
     const payload = {
         format: 'pz-web-save', formatVersion: 1, id: 'test-save', revision: 1,
-        engine: { abiVersion: 1, state: engine.saveState() },
+        engine: { abiVersion: 1, state: { version: 1, values: engine.saveState().values.slice(0, 10) } },
         world: { cells: [{ x: 0, y: 0, bytes: Buffer.from(cells).toString('base64') }] },
         contentPacks: [], mods: [], modState: { absent: { schemaVersion: 1, data: { retained: true } } },
     };
@@ -82,7 +82,7 @@ test('future save format and duplicate cell coordinates are refused', async () =
 
     delete payload.integrity;
 
-    payload.formatVersion = 2;
+    payload.formatVersion = 3;
     await assert.rejects(validateSave(await signed(payload)), /version/u);
     payload.formatVersion = 1;
     payload.world.cells.push({ ...payload.world.cells[0] });
@@ -99,4 +99,90 @@ test('live backup exports and restores without IndexedDB access', async () => {
 
     assert.deepEqual(restored.engine.saveState(), engine.saveState());
     assert.deepEqual(restored.record.modState, record.modState);
+});
+
+test('legacy migration preserves world and namespace history without mutating the signed backup', async () => {
+    const { record, store } = await fixture();
+    const payload = structuredClone(record);
+
+    delete payload.integrity;
+
+    payload.revision = 19;
+    payload.modState.absent = { schemaVersion: 7, data: { retained: true, nested: { value: 42 } } };
+    const legacy = await signed(payload);
+    const before = structuredClone(legacy);
+    const restored = await store.restore(legacy);
+
+    assert.deepEqual(legacy, before);
+    assert.equal(restored.record.revision, 19);
+    assert.deepEqual(restored.record.world, before.world);
+    assert.deepEqual(restored.record.modState, before.modState);
+    assert.deepEqual(restored.engine.saveState().values.slice(0, 10), before.engine.state.values);
+    assert.deepEqual((await validateSave(restored.record)).modState, before.modState);
+    assert.deepEqual((await store.restore(restored.record)).engine.saveState(), restored.engine.saveState());
+
+    const tampered = structuredClone(legacy);
+
+    tampered.modState.absent.data.nested.value = 43;
+    await assert.rejects(store.restore(tampered), /integrity/u);
+});
+
+test('portable inventory restores stable worn IDs and damaged condition without cancelling travel', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.registerItemDefinition({
+        fullType: 'Synthetic.Sandals', bodyLocation: 'base:shoes', conditionMax: 6,
+        stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 2,
+    }, { owner: 'test' });
+    engine.freezeItemDefinitions();
+    const actor = engine.snapshot();
+    const spawned = engine.command({ type: 'spawnItem', fullType: 'Synthetic.Sandals', x: actor.x, y: actor.y });
+
+    engine.command({ type: 'pickup', id: spawned.id });
+    engine.command({ type: 'wear', id: spawned.id });
+    engine.command({ type: 'setCondition', id: spawned.id, condition: 1 });
+    const cells = record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: new Uint8Array(Buffer.from(cell.bytes, 'base64')),
+    }));
+    const exported = await store.exportLive(engine, { cells, modState: record.modState });
+    const restored = await store.restore(JSON.parse(await exported.text()));
+    const worn = restored.engine.wornItem('base:shoes');
+
+    assert.equal(worn.id, spawned.id);
+    assert.equal(worn.condition, 1);
+    assert.equal(worn.fullType, 'Synthetic.Sandals');
+    assert.deepEqual(restored.engine.items(), engine.items());
+    assert.equal(restored.engine.snapshot().action, 1);
+    engine.step(0.1);
+    restored.engine.step(0.1);
+    assert.deepEqual(restored.engine.snapshot(), engine.snapshot());
+});
+
+test('portable moodle inputs retain pain timing and reject signed invalid state atomically', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.command({ type: 'setMoodleInputs', inputs: { pain: 80, hunger: 0.8, cantSprint: true } });
+
+    for (let index = 0; index < 119; index++) {
+        engine.step(0.01);
+    }
+
+    const cells = record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: new Uint8Array(Buffer.from(cell.bytes, 'base64')),
+    }));
+    const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+    const restored = await store.restore(exported);
+
+    assert.deepEqual(restored.engine.saveMoodleState(), engine.saveMoodleState());
+    engine.step(0.01);
+    restored.engine.step(0.01);
+    assert.deepEqual(restored.engine.moodles(), engine.moodles());
+    assert.equal(restored.engine.moodles().find(({ id }) => id === 'base:pain').level, 4);
+    const before = engine.saveMoodleState();
+    const invalid = structuredClone(exported);
+
+    delete invalid.integrity;
+    invalid.moodleState.inputs.temperature = -1;
+    await assert.rejects(store.restore(await signed(invalid)));
+    assert.deepEqual(engine.saveMoodleState(), before);
 });

@@ -299,13 +299,14 @@ function nativePackageFiles(descriptor) {
 }
 
 /**
- * Fetch only the literal require graph reachable from enabled mods, not the entire engine Lua tree.
+ * Fetch the literal require graph reachable from native packages and ordered engine startup seeds.
  *
  * @param {object[]} descriptors - Selected enabled packages.
  * @param {object} content - Private directory.
- * @returns {Promise<object[]>} Require-only engine sources.
+ * @param {{path:string,source:string,execute?:boolean}[]} [additionalSources] - Original startup text; execute defaults true.
+ * @returns {Promise<object[]>} Startup seeds followed by require-only dependencies, installed once by module name.
  */
-async function engineSources(descriptors, content) {
+async function engineSources(descriptors, content, additionalSources = []) {
     const ownModules = new Set(descriptors.flatMap((entry) => entry.sources.map((item) => item.path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, ''))));
     const available = new Map();
 
@@ -320,7 +321,49 @@ async function engineSources(descriptors, content) {
     const sources = [];
     const visited = new Set(ownModules);
     const queue = descriptors.flatMap((entry) => entry.sources.map((item) => item.source));
+    const supplied = new Map();
     let bytes = 0;
+
+    if (!Array.isArray(additionalSources)) {
+        throw new TypeError('Engine startup sources must be an array');
+    }
+
+    for (const item of additionalSources) {
+        if (!item || typeof item.path !== 'string' || !LUA_PATH.test(item.path) || item.path.includes('\\') || item.path.split('/').some((part) => part === '.' || part === '..') || typeof item.source !== 'string' || item.source.charCodeAt(0) === 27 || item.source.includes('\0') || (item.execute !== undefined && typeof item.execute !== 'boolean')) {
+            throw new TypeError('Engine startup sources require original media/lua paths and Lua text');
+        }
+
+        const name = item.path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, '');
+        const previous = supplied.get(name);
+
+        if (ownModules.has(name) || (previous && previous.path !== item.path)) {
+            throw new Error(`Ambiguous engine Lua startup module name: ${name}`);
+        }
+
+        if (previous) {
+            if (previous.source !== item.source) {
+                throw new Error(`Engine Lua startup source changed within the graph: ${item.path}`);
+            }
+
+            previous.execute ||= item.execute !== false;
+            continue;
+        }
+
+        const size = new TextEncoder().encode(item.source).length;
+
+        bytes += size;
+
+        if (size > MAX_FILE_BYTES || bytes > MAX_PACKAGE_BYTES || sources.length >= MAX_FILES) {
+            throw new Error('Required engine Lua graph exceeds native package resource limits');
+        }
+
+        const source = { path: item.path, source: item.source, execute: item.execute !== false };
+
+        supplied.set(name, source);
+        visited.add(name);
+        sources.push(source);
+        queue.push(item.source);
+    }
 
     for (let index = 0; index < queue.length; index++) {
         // ponytail: literal require graph only; dynamic engine module names fail truthfully until async VM require/resume exists.
@@ -364,7 +407,7 @@ async function engineSources(descriptors, content) {
  *
  * @param {object[]} descriptors - Enabled or previously running native packages.
  * @param {object} content - Private directory.
- * @param {{staged?:boolean}} [options] - Preserve the prior VM while preparing a transition candidate.
+ * @param {{staged?:boolean,ui?:object,moodleTypes?:{[name:string]:string},engineSources?:{path:string,source:string,execute?:boolean}[]}} [options] - Candidate resources and ordered original startup seeds; execute defaults true.
  * @returns {Promise<object|undefined>} New VM, or no VM when no native code is enabled.
  */
 async function prepareNativeSession(descriptors, content, options = {}) {
@@ -410,8 +453,12 @@ async function prepareNativeSession(descriptors, content, options = {}) {
         }
     }
 
-    const sources = await engineSources(descriptors, content);
-    const session = await createLuaSession();
+    const sources = await engineSources(descriptors, content, options.engineSources);
+    const session = await createLuaSession({
+        ui: options.ui,
+        moodleTypes: options.moodleTypes,
+        engineStartup: sources.filter((item) => item.execute !== false).map(({ path }) => ({ id: 'engine-lua', path })),
+    });
 
     try {
         if (sources.length) {
@@ -472,4 +519,4 @@ function closeNativeSession(options = {}) {
     liveDescriptors = new Map();
 }
 
-export { parseModInfo, selectNativeTree, discoverNativePackages, nativePackageFiles, prepareNativeSession, activateNativePackage, closeNativeSession, bindNativeSession };
+export { parseModInfo, selectNativeTree, discoverNativePackages, nativePackageFiles, engineSources, prepareNativeSession, activateNativePackage, closeNativeSession, bindNativeSession };

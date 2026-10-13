@@ -15,6 +15,7 @@ const mime = {
     '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.svg': 'image/svg+xml',
     '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.txt': 'text/plain; charset=utf-8',
     '.lua': 'text/plain; charset=utf-8', '.info': 'text/plain; charset=utf-8',
+    '.fnt': 'text/plain; charset=utf-8',
     '.xml': 'application/xml', '.woff': 'font/woff', '.woff2': 'font/woff2',
     '.webp': 'image/webp', '.mp3': 'audio/mpeg', '.flac': 'audio/flac',
 };

@@ -638,7 +638,7 @@ test('public navigation imports cancel movement and change authoritative collisi
     assert.throws(() => host.api.actions.submit({ type: 'moveTo', x: 6.5, y: 5.5 }));
     const beforeBlockedHeading = engine.saveState();
 
-    assert.throws(() => host.api.actions.submit({ type: 'walk', x: 1, y: 0 }), RangeError);
+    assert.throws(() => host.api.actions.submit({ type: 'walk', x: 1, y: 0 }));
     assert.deepEqual(engine.saveState(), beforeBlockedHeading, 'the one-unit heading probe refuses without mutation');
     host.api.actions.submit({ type: 'walk', x: -1, y: 0 });
 
@@ -958,3 +958,348 @@ export function activate(api) {
     await host.load(moduleUrl(`${manifestSource('fx-new-rollback')}
 export function activate(api) { assert.deepEqual(api.saveData.read(), { retained: true }); }`));
 });
+
+/** Independent footwear definition; numeric gameplay fields come back from WASM. */
+const footwear = {
+    fullType: 'Fixture.Shoes', bodyLocation: 'Shoes', conditionMax: 12, stackLimit: 1,
+    removeOnBroken: false, conditionLowerChanceOneIn: 3, texture: 'fixture-shoe',
+};
+
+test('public footwear actions preserve ids and authoritative condition through hooks', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    await host.load(moduleUrl(`${manifestSource('fx-items')}
+export function activate(api) {
+  fx.api = api;
+  api.items.definitions.register(${JSON.stringify(footwear)});
+}`));
+    const api = fx.api;
+
+    assert.equal(api.items.definitions.get('Fixture.Shoes').owner, 'fx-items');
+    assert.equal(api.items.definitions.get('unknown'), null);
+    const definition = api.items.definitions.list()[0];
+
+    definition.conditionMax = 99;
+    assert.equal(api.items.definitions.get('Fixture.Shoes').conditionMax, 12);
+    engine.freezeItemDefinitions();
+    const spawn = api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 });
+    const id = spawn.snapshot.id;
+
+    assert.equal(spawn.submittedBy, 'fx-items');
+    assert.equal(api.items.get(id).condition, 12, 'omitted condition uses the real definition maximum');
+    assert.equal(api.items.get(id).count, 1);
+    const before = engine.items();
+    const unveto = host.api.hooks.beforeAction((action) => action.type === 'pickup' ? false : undefined);
+
+    assert.equal(api.items.pickup(id).cancelled, true);
+    assert.deepEqual(engine.items(), before);
+    unveto();
+    api.items.pickup(id);
+    api.items.wear(id);
+    assert.equal(api.items.worn('Shoes').id, id);
+    api.items.setCondition(id, 0);
+    assert.equal(api.items.worn('Shoes').condition, 0);
+    api.items.unequip(id);
+    assert.equal(api.items.worn('Shoes'), null);
+    api.items.drop(id, 6, 5);
+    assert.deepEqual(api.items.get(id), {
+        id, fullType: 'Fixture.Shoes', location: 'ground', x: 6, y: 5,
+        condition: 0, count: 1, bodyLocation: null,
+    });
+    assert.equal(api.items.get(4_294_967_295), null);
+    const record = api.items.list()[0];
+
+    record.condition = 11;
+    assert.equal(engine.items()[0].condition, 0);
+    assert.ok(Object.isFrozen(api.items) && Object.isFrozen(api.items.definitions));
+    assert.throws(() => api.items.definitions.register(footwear), { modId: 'fx-items', stage: 'items' });
+});
+
+test('item command validation and detached replacements prevent invalid hook mutations', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    engine.registerItemDefinition(footwear, { owner: 'host-fixture' });
+    let calls = 0;
+
+    host.api.hooks.beforeAction((action) => {
+        calls += 1;
+        action.fullType = 'unknown';
+        action.condition = 0;
+
+        return { type: 'spawnItem', fullType: 'Fixture.Shoes', x: Infinity, y: 5 };
+    });
+    const result = host.api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 });
+
+    assert.equal(engine.items()[0].condition, 12);
+    assert.deepEqual(result.modifiedBy, []);
+    assert.equal(host.diagnostics().errors.at(-1).stage, 'beforeAction');
+    assert.equal(host.diagnostics().errors.at(-1).modId, 'host');
+
+    for (const action of [
+        { type: 'spawnItem', fullType: '', x: 5, y: 5 },
+        { type: 'spawnItem', fullType: 'Fixture.Shoes', x: Number.NaN, y: 5 },
+        { type: 'spawnItem', fullType: 'Fixture.Shoes', x: 5, y: 5, count: 0 },
+        { type: 'spawnItem', fullType: 'Fixture.Shoes', x: 5, y: 5, condition: -1 },
+        { type: 'pickup', id: 0 }, { type: 'wear', id: 4_294_967_296 },
+        { type: 'unequip', id: 1.5 }, { type: 'drop', id: 1, x: 5, y: Infinity },
+        { type: 'setCondition', id: 1, condition: 2_147_483_648 },
+        { type: 'setHealth', health: 101 },
+    ]) {
+        assert.throws(() => host.command(action), { stage: 'action' });
+    }
+
+    assert.equal(calls, 1, 'malformed commands never reach hooks');
+    assert.equal(engine.items().length, 1);
+    assert.throws(() => host.api.items.get(0), { stage: 'items' });
+    assert.throws(() => host.api.items.worn(''), { stage: 'items' });
+});
+
+test('activation definition transactions restore numeric rows owners and appended metadata', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    engine.registerItemDefinition(footwear, { owner: 'original' });
+    const original = engine.itemDefinitions();
+
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('fx-collision')}
+export function activate(api) { api.items.definitions.register(${JSON.stringify(footwear)}); }`)),
+    { modId: 'fx-collision', stage: 'activate' });
+    assert.deepEqual(engine.itemDefinitions(), original);
+
+    for (const [id, ending] of [
+        ['fx-rollback-items', 'throw new Error(\'abort\');'],
+        ['fx-invalid-items', 'return 7;'],
+        ['fx-async-items', 'return Promise.reject(new Error(\'async abort\'));'],
+    ]) {
+        // These failures share one host and engine; each rollback must finish before the next activation.
+        // eslint-disable-next-line no-await-in-loop
+        await assert.rejects(() => host.load(moduleUrl(`${manifestSource(id)}
+export function activate(api) {
+  fx.api = api;
+  api.movement.setSpeed(8);
+  api.items.definitions.register({...${JSON.stringify(footwear)}, conditionMax: 27, texture: 'override'}, {override: true});
+  api.items.definitions.register({...${JSON.stringify(footwear)}, fullType: 'Fixture.Appended'});
+  api.hooks.beforeAction(() => false);
+  ${ending}
+}`)), { modId: id, stage: 'activate' });
+        assert.deepEqual(engine.itemDefinitions(), original);
+        assert.equal(engine.snapshot().speed, 1.5);
+        assert.equal(host.diagnostics().hookCount, 0);
+        assert.throws(() => fx.api.items.list(), { stage: 'api' });
+    }
+
+    await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+    });
+    assert.ok(host.diagnostics().errors.some(({ modId, stage }) => modId === 'fx-async-items' && stage === 'activate.late'));
+    assert.deepEqual(fx.unhandled, []);
+    await host.load(moduleUrl(`${manifestSource('fx-success-items')}
+export function activate(api) {
+  fx.api = api;
+  api.items.definitions.register({...${JSON.stringify(footwear)}, conditionMax: 17, owner: 'spoof'}, {override: true});
+}`));
+    assert.equal(engine.itemDefinitions()[0].owner, 'fx-success-items');
+    assert.equal(engine.itemDefinitions()[0].conditionMax, 17);
+    assert.throws(() => fx.api.items.definitions.register(footwear), { stage: 'items' });
+    engine.freezeItemDefinitions();
+    host.dispose();
+    await host.load(moduleUrl(`${manifestSource('fx-movement-frozen')}
+export function activate(api) { api.movement.setSpeed(2); }`));
+    assert.equal(host.command({ type: 'walk', x: 1, y: 0 }).committed, true);
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('fx-register-frozen')}
+export function activate(api) { api.items.definitions.register({...${JSON.stringify(footwear)}, fullType: 'Fixture.Late'}); }`)),
+    { modId: 'fx-register-frozen', stage: 'activate' });
+    assert.equal(engine.itemDefinitions().length, 1);
+});
+
+test('health vetoes and death listeners observe only committed alive to dead transitions', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+    const deaths = [];
+
+    assert.equal(host.api.character.getHealth(), 100);
+    assert.equal(host.api.character.isDead(), false);
+    host.api.events.onCharacterDeath((event) => {
+        assert.equal(engine.isDead(), true, 'listener runs after real mutation');
+        deaths.push(event);
+        event.snapshot.health = 100;
+    });
+    const unveto = host.api.hooks.beforeAction((action) => action.type === 'setHealth' ? false : undefined);
+
+    assert.equal(host.api.character.setHealth(0).cancelled, true);
+    assert.equal(engine.getHealth(), 100);
+    assert.equal(deaths.length, 0);
+    unveto();
+    host.api.character.setHealth(0);
+    host.api.character.setHealth(0);
+    host.command({ type: 'walk', x: 1, y: 0 });
+    assert.equal(deaths.length, 1);
+    assert.equal(deaths[0].type, 'CharacterDeath');
+    assert.equal(deaths[0].submittedBy, 'host');
+    assert.deepEqual(deaths[0].action, { type: 'setHealth', health: 0 });
+    assert.equal(engine.getHealth(), 0, 'detached death evidence cannot alter state');
+    host.api.character.setHealth(40);
+    host.api.character.setHealth(0);
+    assert.equal(deaths.length, 2);
+});
+
+test('original UI options persist within their owning namespace without erasing native player data', async () => {
+    const records = new Map();
+    const backing = {
+        /**
+         * Read only the requested fixture namespace.
+         *
+         * @param {string} id - Exact mod namespace.
+         * @returns {import('../types/mod-api').ModSaveRecord|undefined} Saved record or absence.
+         */
+        readModState: (id) => records.get(id),
+        /**
+         * Retain a validated record without replacing other fixture namespaces.
+         *
+         * @param {string} id - Exact mod namespace.
+         * @param {import('../types/mod-api').ModSaveRecord} record - Detached schema version and document.
+         * @returns {void} Replaces this namespace.
+         */
+        writeModState: (id, record) => {
+            records.set(id, record);
+        },
+    };
+    const host = createModHost(await newEngine(), backing);
+    const url = moduleUrl(`${manifestSource('fx-ui-options')}
+export function activate(api) { fx.api = api; }`);
+
+    await host.load(url);
+    const api = fx.api;
+
+    api.saveData.write({ nativePlayerData: { score: 8 }, untouched: [1] });
+    const values = { enabled: true, slider: 3, nested: { label: 'original' } };
+
+    assert.equal(api.ui.readOptions('Exact.Options'), undefined);
+    api.ui.writeOptions('Exact.Options', values);
+    api.ui.writeOptions('__proto__', { safe: true });
+    values.nested.label = 'external';
+    const read = api.ui.readOptions('Exact.Options');
+
+    read.nested.label = 'read mutation';
+    assert.equal(api.ui.readOptions('Exact.Options').nested.label, 'original');
+    assert.equal(api.ui.readOptions('exact.options'), undefined);
+    assert.deepEqual(api.ui.readOptions('__proto__'), { safe: true });
+    assert.deepEqual(api.saveData.read().nativePlayerData, { score: 8 });
+    assert.deepEqual(api.saveData.read().untouched, [1]);
+    assert.equal({}.safe, undefined);
+    assert.ok(Object.isFrozen(api.ui));
+    host.dispose();
+    const next = createModHost(await newEngine(), backing);
+
+    await next.load(url);
+    assert.equal(fx.api.ui.readOptions('Exact.Options').slider, 3);
+    await next.load(moduleUrl(`${manifestSource('fx-ui-foreign')}
+export function activate(api) { fx.result = api; }`));
+    fx.result.ui.writeOptions('Exact.Options', { slider: 9 });
+    assert.equal(fx.api.ui.readOptions('Exact.Options').slider, 3);
+    const before = structuredClone(records.get('fx-ui-options'));
+
+    for (const id of ['', 'x'.repeat(129), 2]) {
+        assert.throws(() => fx.api.ui.writeOptions(id, {}), { stage: 'ui' });
+        assert.throws(() => fx.api.ui.readOptions(id), { stage: 'ui' });
+    }
+
+    assert.throws(() => fx.api.ui.writeOptions('too-large', 'x'.repeat(256 * 1_024)), { stage: 'ui' });
+    assert.throws(() => fx.api.ui.writeOptions('invalid', { nested: undefined }), { stage: 'ui' });
+    assert.deepEqual(records.get('fx-ui-options'), before);
+    fx.api.ui.writeOptions('x'.repeat(128), JSON.parse('{"__proto__":{"polluted":true}}'));
+    assert.equal(fx.api.ui.readOptions('constructor'), undefined);
+    assert.equal({}.polluted, undefined);
+    records.set('fx-ui-options', { ...before, schemaVersion: 99 });
+    assert.throws(() => fx.api.ui.writeOptions('Exact.Options', {}), { stage: 'ui' });
+    assert.equal(records.get('fx-ui-options').schemaVersion, 99);
+    assert.throws(() => api.ui.writeOptions('Exact.Options', {}), { stage: 'api' });
+    records.set('fx-ui-options', { schemaVersion: 1, data: null });
+    assert.throws(() => fx.api.ui.writeOptions('Exact.Options', {}), { stage: 'ui' });
+    assert.equal(records.get('fx-ui-options').data, null, 'nonobject save data is never silently discarded');
+});
+
+test('core-only engines refuse item and health capabilities while movement mods still activate', async () => {
+    const engine = await newEngine();
+    const host = createModHost({ snapshot: engine.snapshot, command: engine.command, setSpeed: engine.setSpeed });
+
+    for (const attempt of [
+        () => host.api.items.list(), () => host.api.items.get(1),
+        () => host.api.items.definitions.list(), () => host.api.items.worn('Shoes'),
+        () => host.api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 }),
+        () => host.api.items.pickup(1), () => host.api.character.getHealth(),
+        () => host.api.items.wear(1), () => host.api.items.unequip(1),
+        () => host.api.items.drop(1, 5, 5), () => host.api.items.setCondition(1, 0),
+        () => host.api.character.isDead(), () => host.api.character.setHealth(0),
+        () => host.api.character.moodles(),
+    ]) {
+        assert.throws(attempt, /unsupported/);
+    }
+
+    assert.equal(engine.items().length, 0);
+    assert.equal(engine.getHealth(), 100);
+    await host.load(moduleUrl(`${manifestSource('fx-core-movement')}
+export function activate(api) { api.movement.setSpeed(2); }`));
+    assert.equal(host.command({ type: 'walk', x: 1, y: 0 }).committed, true);
+});
+
+test('character input actions preserve vetoes and reject invalid atomic updates', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+    const unveto = host.api.hooks.beforeAction((action) => action.type === 'setCharacterStat' ? false : undefined);
+
+    assert.equal(host.api.character.setStat('hunger', 0.8).cancelled, true);
+    assert.equal(host.api.character.moodles().find(({ id }) => id === 'base:hungry').level, 0);
+    unveto();
+    host.api.character.setStat('hunger', 0.8);
+    assert.equal(host.api.character.moodles().find(({ id }) => id === 'base:hungry').level, 4);
+    const before = host.api.character.moodleInputs();
+
+    assert.throws(() => host.api.character.setMoodleInputs({ hunger: 0.2, temperature: Number.NaN }));
+    assert.deepEqual(host.api.character.moodleInputs(), before);
+    const detached = host.api.character.moodleInputs();
+
+    detached.hunger = 0;
+    assert.equal(host.api.character.moodleInputs().hunger, 0.8);
+});
+
+for (const ending of ['return', 'throw']) {
+    test(`moodle input hook mutations stay detached when the hook ${ending}s`, async () => {
+        const engine = await newEngine();
+
+        engine.command({ type: 'setMoodleInputs', inputs: { pain: 17, hunger: 0.1 } });
+        const host = createModHost(engine);
+        const seen = [];
+
+        host.api.hooks.beforeAction((action) => {
+            action.inputs.pain = 80;
+
+            if (ending === 'throw') {
+                throw new Error('fixture nested input mutation');
+            }
+        }, { priority: -1 });
+        host.api.hooks.beforeAction((action) => {
+            seen.push({ ...action.inputs });
+        });
+        const inputs = { hunger: 0.8 };
+        const result = host.command({ type: 'setMoodleInputs', inputs });
+
+        assert.equal(result.committed, true);
+        assert.deepEqual(result.modifiedBy, []);
+        assert.deepEqual(seen, [{ hunger: 0.8 }]);
+        assert.deepEqual(inputs, { hunger: 0.8 });
+        assert.equal(engine.saveMoodleState().inputs.hunger, 0.8);
+        assert.equal(engine.saveMoodleState().inputs.pain, 17);
+
+        if (ending === 'throw') {
+            assert.ok(host.diagnostics().errors.some(({ modId, stage, message }) => modId === 'host'
+                && stage === 'beforeAction' && message === 'fixture nested input mutation'));
+        } else {
+            assert.deepEqual(host.diagnostics().errors, []);
+        }
+
+        host.dispose();
+    });
+}

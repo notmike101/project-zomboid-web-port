@@ -12,8 +12,8 @@
  * isolated. A mod can read and write anything a page script can. This API is
  * experimental (0.1.0) and may change between previews.
  *
- * World navigation, save namespaces and post-step tick callbacks expose only
- * implemented engine behaviour. No placeholder subsystem surfaces exist here.
+ * World navigation, item/health actions and postcommit callbacks expose only
+ * implemented engine behavior; original UI options share per-mod save namespaces.
  */
 
 import { validateNavigationCell } from './engine.js';
@@ -29,7 +29,7 @@ const WORLD_MAX = 10;
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 10;
 const MAX_SAVE_BYTES = 256 * 1_024;
-const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel']);
+const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setHealth', 'setCharacterStat', 'setMoodleInputs']);
 /** Reserved internal attribution id for page input; a mod cannot claim it. */
 const RESERVED_ID = 'host';
 
@@ -39,12 +39,12 @@ const RESERVED_ID = 'host';
  * @typedef {0|1|2} ModActionState
  */
 /**
- * @typedef {{ apiVersion: number, tick: number, x: number, y: number, speed: number, action: ModActionState }} ModSnapshot
+ * @typedef {import('../types/mod-api').ModSnapshot} ModSnapshot
  */
 /**
- * One movement command. `moveTo`/`walk` carry a world coordinate pair; `cancel` carries nothing.
+ * One validated command, detached before each synchronous precommit hook.
  *
- * @typedef {{ type: 'moveTo', x: number, y: number }|{ type: 'walk', x: number, y: number }|{ type: 'cancel' }} ModAction
+ * @typedef {import('../types/mod-api').ModAction} ModAction
  */
 /**
  * @typedef {{ id: string, version: string, apiVersion: string, name: string, saveSchemaVersion?: number }} ModManifest
@@ -68,17 +68,17 @@ const RESERVED_ID = 'host';
  * @typedef {import('../types/mod-api').ModApi} ModApi
  */
 /**
- * @typedef {{ committed: boolean, cancelled: boolean, submittedBy: string, modifiedBy: string[], cancelledBy?: string, snapshot: ModSnapshot }} ModCommandResult
+ * @typedef {import('../types/mod-api').ModCommandResult} ModCommandResult
  */
 /**
  * One internal hook registration.
  *
- * @typedef {{ modId: string, entry: ModEntry, kind: string, callback: BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener, priority: number, order: number }} HookRegistration
+ * @typedef {{ modId: string, entry: ModEntry, kind: string, callback: BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener|import('../types/mod-api').ModCharacterDeathListener, priority: number, order: number }} HookRegistration
  */
 /**
  * One loaded mod.
  *
- * @typedef {{ id: string, manifest: ModManifest, url: string, cleanup: (() => void)|undefined, active: boolean }} ModEntry
+ * @typedef {{ id: string, manifest: ModManifest, url: string, cleanup: (() => void)|undefined, active: boolean, activating?: boolean, definitionTransaction?: boolean }} ModEntry
  */
 /**
  * The host surface returned by `createModHost`.
@@ -105,13 +105,15 @@ const RESERVED_ID = 'host';
  */
 
 /**
- * Copies an action so hooks cannot mutate the host's pending command.
+ * Copies an action and its scalar moodle input map so hooks cannot mutate the pending command.
  *
  * @param {ModAction} action - Validated action.
  * @returns {ModAction} Detached copy.
  */
 function detach(action) {
-    return action.type === 'cancel' ? { type: 'cancel' } : { type: action.type, x: action.x, y: action.y };
+    return action.type === 'setMoodleInputs'
+        ? { ...action, inputs: { ...action.inputs } }
+        : { ...action };
 }
 
 /**
@@ -203,6 +205,22 @@ function cloneJson(value) {
     }
 
     return detached;
+}
+
+/**
+ * Validates exact identities, never trimming or normalizing source names.
+ *
+ * @param {unknown} value - Candidate source identity.
+ * @param {string} label - Boundary name used in errors.
+ * @param {number} [max=Infinity] - Maximum permitted string length.
+ * @returns {string} Unchanged nonempty identity.
+ */
+function identity(value, label, max = Infinity) {
+    if (typeof value !== 'string' || value.length === 0 || value.length > max) {
+        throw new TypeError(`${label} must be a nonempty string${max === Infinity ? '' : ` of at most ${max} characters`}`);
+    }
+
+    return value;
 }
 
 /**
@@ -332,10 +350,11 @@ export function createModHost(engine, options = {}) {
     /**
      * Applies common failure attribution to optional engine and save boundaries.
      *
+     * @template Result
      * @param {ModEntry} entry - Caller owning this boundary.
      * @param {string} stage - Attribution stage.
-     * @param {() => unknown} operation - Synchronous operation to execute.
-     * @returns {unknown} The operation's result.
+     * @param {() => Result} operation - Synchronous operation to execute.
+     * @returns {Result} The operation's result.
      */
     function attributed(entry, stage, operation) {
         try {
@@ -348,8 +367,9 @@ export function createModHost(engine, options = {}) {
     /**
      * Optional capabilities fail honestly; old engines keep their movement API.
      *
-     * @param {'step'|'worldBounds'|'navFlags'|'worldImportCell'} name - Engine method to require.
-     * @returns {ModEngine['step']|ModEngine['worldBounds']|ModEngine['navFlags']|ModEngine['worldImportCell']} Engine-bound optional method.
+     * @template {keyof ModEngine} Name
+     * @param {Name} name - Engine method to require.
+     * @returns {NonNullable<ModEngine[Name]>} Engine-bound method retaining its capability signature.
      */
     function capability(name) {
         if (typeof engine[name] !== 'function') {
@@ -408,7 +428,7 @@ export function createModHost(engine, options = {}) {
      *
      * @param {ModEntry} entry - Registration owner.
      * @param {string} kind - Callback phase.
-     * @param {BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener} callback - Synchronous mod callback.
+     * @param {BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener|import('../types/mod-api').ModCharacterDeathListener} callback - Synchronous mod callback.
      * @param {{priority?: number}} [options] - Optional finite priority.
      * @returns {() => boolean} Registration withdrawal.
      */
@@ -599,11 +619,97 @@ export function createModHost(engine, options = {}) {
             return { type: 'cancel' };
         }
 
-        const typed = /** @type {{ type: 'moveTo'|'walk', x: unknown, y: unknown }} */ (candidate);
+        const type = candidate.type;
+        /**
+         * Validate an action's integral field before engine submission.
+         *
+         * @param {unknown} value - Candidate numeric field.
+         * @param {string} label - Field name for attributed errors.
+         * @param {number} min - Inclusive lower bound.
+         * @param {number} max - Inclusive upper bound.
+         * @returns {number} Validated integer.
+         */
+        const integer = (value, label, min, max) => {
+            if (!Number.isInteger(value) || value < min || value > max) {
+                throw modError(modId, 'action', `${label} must be an integer within [${min}, ${max}]`);
+            }
 
-        const bounded = typed.type === 'moveTo';
+            return value;
+        };
 
-        return { type: typed.type, x: coordinate(typed.x, 'x', modId, bounded), y: coordinate(typed.y, 'y', modId, bounded) };
+        if (type === 'setCharacterStat' || type === 'setMoodleInputs') {
+            const limits = capability('moodleInputLimits')();
+            const inputs = type === 'setCharacterStat' ? { [identity(candidate.name, 'stat name')]: candidate.value } : candidate.inputs;
+
+            if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) {
+                throw modError(modId, 'action', 'moodle inputs must be an object');
+            }
+
+            const detached = {};
+
+            for (const [name, value] of Object.entries(inputs)) {
+                const limit = Object.hasOwn(limits, name) ? limits[name] : undefined;
+
+                if (!limit || (limit.type === 'boolean'
+                    ? typeof value !== 'boolean'
+                    : !Number.isFinite(value) || value < limit.min || value > limit.max || (limit.integer && !Number.isInteger(value)))) {
+                    throw modError(modId, 'action', `invalid authoritative moodle input '${name}'`);
+                }
+
+                Object.defineProperty(detached, name, { value, enumerable: true });
+            }
+
+            return type === 'setCharacterStat' ? { type, name: candidate.name, value: candidate.value } : { type, inputs: detached };
+        }
+
+        if (type === 'setHealth') {
+            capability('getHealth');
+            capability('isDead');
+            const health = coordinate(candidate.health, 'health', modId, false);
+
+            if (health < 0 || health > 100) {
+                throw modError(modId, 'action', 'health must be within [0, 100]');
+            }
+
+            return { type, health };
+        }
+
+        if (type === 'moveTo' || type === 'walk') {
+            const bounded = type === 'moveTo';
+
+            return { type, x: coordinate(candidate.x, 'x', modId, bounded), y: coordinate(candidate.y, 'y', modId, bounded) };
+        }
+
+        capability('items');
+
+        if (type === 'spawnItem') {
+            const command = {
+                type, fullType: identity(candidate.fullType, 'fullType'),
+                x: coordinate(candidate.x, 'x', modId, false), y: coordinate(candidate.y, 'y', modId, false),
+            };
+
+            if (candidate.count !== undefined) {
+                command.count = integer(candidate.count, 'count', 1, 0xFF_FF_FF_FF);
+            }
+
+            if (candidate.condition !== undefined) {
+                command.condition = integer(candidate.condition, 'condition', 0, 0x7F_FF_FF_FF);
+            }
+
+            return command;
+        }
+
+        const id = integer(candidate.id, 'item id', 1, 0xFF_FF_FF_FF);
+
+        if (type === 'drop') {
+            return { type, id, x: coordinate(candidate.x, 'x', modId, false), y: coordinate(candidate.y, 'y', modId, false) };
+        }
+
+        if (type === 'setCondition') {
+            return { type, id, condition: integer(candidate.condition, 'condition', 0, 0x7F_FF_FF_FF) };
+        }
+
+        return { type, id };
     }
 
     /**
@@ -677,6 +783,58 @@ export function createModHost(engine, options = {}) {
             }
         };
 
+        /**
+         * Runs one live, attributed item/character/options boundary.
+         *
+         * @template Result
+         * @param {string} stage - Failure attribution stage.
+         * @param {() => Result} operation - Synchronous capability or namespace operation.
+         * @returns {Result} Operation result after liveness and attribution checks.
+         */
+        const access = (stage, operation) => {
+            alive();
+
+            return attributed(entry, stage, operation);
+        };
+
+        /**
+         * Sends every public mutation through the shared precommit action path.
+         *
+         * @param {ModAction} action - Structured mutation to validate and submit.
+         * @returns {ModCommandResult} Attributed precommit outcome and committed state.
+         */
+        const mutate = (action) => {
+            alive();
+
+            return submitAction(action, entry.id);
+        };
+
+        /**
+         * Read a schema-compatible document without losing unrelated fields.
+         *
+         * @returns {{[key: string]: import('../types/mod-api').ModJsonValue}} Detached namespace object.
+         */
+        const optionDocument = () => {
+            const record = readRecord(entry);
+
+            if (record && record.schemaVersion !== (entry.manifest.saveSchemaVersion ?? 1)) {
+                throw new Error('saved schema does not match the active mod');
+            }
+
+            const document = record ? record.data : {};
+
+            if (typeof document !== 'object' || document === null || Array.isArray(document)) {
+                throw new TypeError('UI options require a saved object document');
+            }
+
+            if (Object.hasOwn(document, 'nativeUIOptions')
+                && (typeof document.nativeUIOptions !== 'object' || document.nativeUIOptions === null || Array.isArray(document.nativeUIOptions))) {
+                throw new TypeError('nativeUIOptions must be an object map');
+            }
+
+            return document;
+        };
+
         const api = {
             version: MOD_API_VERSION,
             movement: {
@@ -703,6 +861,213 @@ export function createModHost(engine, options = {}) {
                     alive();
                     engine.setSpeed(validateSpeed(speed, entry.id));
                 },
+            },
+            items: {
+                definitions: {
+                    /**
+                     * Read detached metadata with authoritative numeric WASM fields.
+                     *
+                     * @returns {import('../types/mod-api').ModItemDefinition[]} Registered definitions in engine order.
+                     */
+                    list: () => access('items', () => capability('itemDefinitions')()),
+                    /**
+                     * Unknown qualified identities return null, never fabricated defaults.
+                     *
+                     * @param {string} fullType - Exact qualified definition identity.
+                     * @returns {import('../types/mod-api').ModItemDefinition|null} Registered definition or absence.
+                     */
+                    get: (fullType) => access('items', () => {
+                        identity(fullType, 'fullType');
+
+                        return capability('itemDefinitions')().find((definition) => definition.fullType === fullType) ?? null;
+                    }),
+                    /**
+                     * Registration is owner-bound and only legal inside synchronous activate.
+                     *
+                     * @param {import('../types/mod-api').ModItemDefinitionInput} input - Complete source metadata and numeric definition.
+                     * @param {{override?: boolean}} [options={}] - Explicit replacement policy.
+                     * @returns {import('../types/mod-api').ModItemDefinition} Resolved owner-bound definition.
+                     */
+                    register: (input, options = {}) => access('items', () => {
+                        if (!entry.activating) {
+                            throw new Error('item definitions can only be registered during synchronous activate');
+                        }
+
+                        if (!options || typeof options !== 'object' || Array.isArray(options)
+                            || (options.override !== undefined && typeof options.override !== 'boolean')) {
+                            throw new TypeError('registration options must contain a boolean override');
+                        }
+
+                        const override = options.override ?? false;
+                        const registerDefinition = capability('registerItemDefinition');
+
+                        if (!entry.definitionTransaction) {
+                            capability('commitItemDefinitionRegistration');
+                            capability('rollbackItemDefinitionRegistration');
+                            capability('beginItemDefinitionRegistration')(entry.id);
+                            entry.definitionTransaction = true;
+                        }
+
+                        return registerDefinition(input, { owner: entry.id, override });
+                    }),
+                },
+                /**
+                 * Read detached stable item records from WASM.
+                 *
+                 * @returns {import('../types/mod-api').ModItem[]} Authoritative item records.
+                 */
+                list: () => access('items', () => capability('items')()),
+                /**
+                 * Unknown valid ids return null.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @returns {import('../types/mod-api').ModItem|null} Matching record or absence.
+                 */
+                get: (id) => access('items', () => {
+                    if (!Number.isInteger(id) || id < 1 || id > 0xFF_FF_FF_FF) {
+                        throw new RangeError('item id must be a positive uint32');
+                    }
+
+                    return capability('items')().find((item) => item.id === id) ?? null;
+                }),
+                /**
+                 * Reads authoritative equipment at an exact body-location identity.
+                 *
+                 * @param {string} bodyLocation - Exact nonempty equipment slot.
+                 * @returns {import('../types/mod-api').ModItem|null} Worn item or an empty slot.
+                 */
+                worn: (bodyLocation) => access('items', () => capability('wornItem')(identity(bodyLocation, 'bodyLocation'))),
+                /**
+                 * Omitted count/condition remain omitted until the authoritative engine defaults them.
+                 *
+                 * @param {import('../types/mod-api').ModItemSpawn} input - Qualified definition and finite spawn position, with optional count and condition.
+                 * @returns {ModCommandResult} Attributed spawn outcome.
+                 */
+                spawn: (input) => mutate({ ...input, type: 'spawnItem' }),
+                /**
+                 * Picks up through precommit hooks.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @returns {ModCommandResult} Attributed pickup outcome.
+                 */
+                pickup: (id) => mutate({ type: 'pickup', id }),
+                /**
+                 * Equips through precommit hooks.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @returns {ModCommandResult} Attributed equip outcome.
+                 */
+                wear: (id) => mutate({ type: 'wear', id }),
+                /**
+                 * Unequips without deleting the item.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @returns {ModCommandResult} Attributed unequip outcome.
+                 */
+                unequip: (id) => mutate({ type: 'unequip', id }),
+                /**
+                 * Drops at a finite position validated by the engine.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @param {number} x - Finite world x coordinate.
+                 * @param {number} y - Finite world y coordinate.
+                 * @returns {ModCommandResult} Attributed drop outcome.
+                 */
+                drop: (id, x, y) => mutate({ type: 'drop', id, x, y }),
+                /**
+                 * Updates authoritative condition through precommit hooks.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @param {number} condition - Nonnegative int32 condition, additionally checked against the definition by WASM.
+                 * @returns {ModCommandResult} Attributed condition-update outcome.
+                 */
+                setCondition: (id, condition) => mutate({ type: 'setCondition', id, condition }),
+            },
+            character: {
+                /**
+                 * Read the real project health scalar, never a host shadow.
+                 *
+                 * @returns {number} Authoritative health within [0, 100].
+                 */
+                getHealth: () => access('character', () => capability('getHealth')()),
+                /**
+                 * Read authoritative death state.
+                 *
+                 * @returns {boolean} Whether the actor is dead.
+                 */
+                isDead: () => access('character', () => capability('isDead')()),
+                /**
+                 * Sets health only through the shared action path.
+                 *
+                 * @param {number} health - Finite health within [0, 100].
+                 * @returns {ModCommandResult} Attributed health-update outcome.
+                 */
+                setHealth: (health) => mutate({ type: 'setHealth', health }),
+                /**
+                 * Require real ordered engine moodles without a neutral fallback.
+                 *
+                 * @returns {import('../types/mod-api').ModMoodle[]} Detached authoritative levels.
+                 */
+                moodles: () => access('character', () => structuredClone(capability('moodles')())),
+                /**
+                 * Read authoritative input values, detached from WASM.
+                 *
+                 * @returns {Record<string, number|boolean>} Character and explicitly modeled environmental inputs.
+                 */
+                moodleInputs: () => access('character', () => structuredClone(capability('saveMoodleState')().inputs)),
+                /**
+                 * Read authoritative input validation metadata.
+                 *
+                 * @returns {ReturnType<ModApi['character']['inputLimits']>} Detached numeric and boolean limits.
+                 */
+                inputLimits: () => access('character', () => structuredClone(capability('moodleInputLimits')())),
+                /**
+                 * Changes one source-backed character stat through precommit hooks.
+                 *
+                 * @param {string} name - Exact source-backed stat identity.
+                 * @param {number} value - Finite stat value within authoritative limits.
+                 * @returns {ModCommandResult} Attributed stat-update outcome.
+                 */
+                setStat: (name, value) => mutate({ type: 'setCharacterStat', name, value }),
+                /**
+                 * Atomically changes explicit character/environment inputs through precommit hooks.
+                 *
+                 * @param {Record<string, number|boolean>} inputs - Explicit authoritative input identities and accepted values.
+                 * @returns {ModCommandResult} Attributed atomic input-update outcome.
+                 */
+                setMoodleInputs: (inputs) => mutate({ type: 'setMoodleInputs', inputs }),
+            },
+            ui: {
+                /**
+                 * Reads this mod's exact native options id, detached from backing storage.
+                 *
+                 * @param {string} modOptionsID - Exact nonempty native options id, at most 128 characters.
+                 * @returns {import('../types/mod-api').ModJsonValue|undefined} Detached options or absence.
+                 */
+                readOptions: (modOptionsID) => access('ui', () => {
+                    identity(modOptionsID, 'modOptionsID', 128);
+                    const map = optionDocument().nativeUIOptions;
+
+                    return map && Object.hasOwn(map, modOptionsID) ? map[modOptionsID] : undefined;
+                }),
+                /**
+                 * Preserves the complete namespace, including nativePlayerData.
+                 *
+                 * @param {string} modOptionsID - Exact nonempty native options id, at most 128 characters.
+                 * @param {import('../types/mod-api').ModJsonValue} values - Strict finite JSON options document.
+                 * @returns {void} Replaces only this options entry in the complete saved namespace.
+                 */
+                writeOptions: (modOptionsID, values) => access('ui', () => {
+                    identity(modOptionsID, 'modOptionsID', 128);
+                    const document = optionDocument();
+                    const map = document.nativeUIOptions ?? {};
+
+                    Object.defineProperty(map, modOptionsID, {
+                        value: cloneJson(values), enumerable: true, configurable: true, writable: true,
+                    });
+                    document.nativeUIOptions = map;
+                    writeRecord(entry, document);
+                }),
             },
             actions: {
                 /**
@@ -809,6 +1174,18 @@ export function createModHost(engine, options = {}) {
 
                     return register(entry, 'onTick', callback, options);
                 },
+                /**
+                 * Registers one synchronous, detached postcommit alive-to-dead listener.
+                 *
+                 * @param {import('../types/mod-api').ModCharacterDeathListener} callback - Listener receiving detached committed death evidence.
+                 * @param {{priority?: number}} [options] - Optional finite priority.
+                 * @returns {() => boolean} Registration withdrawal.
+                 */
+                onCharacterDeath(callback, options) {
+                    alive();
+
+                    return register(entry, 'onCharacterDeath', callback, options);
+                },
             },
             hooks: {
                 /**
@@ -846,6 +1223,10 @@ export function createModHost(engine, options = {}) {
         Object.freeze(api.world);
         Object.freeze(api.saveData);
         Object.freeze(api.events);
+        Object.freeze(api.items.definitions);
+        Object.freeze(api.items);
+        Object.freeze(api.character);
+        Object.freeze(api.ui);
 
         return Object.freeze(api);
     }
@@ -872,6 +1253,18 @@ export function createModHost(engine, options = {}) {
      */
     function rollback(entry, speedBefore, cause) {
         entry.active = false;
+        entry.activating = false;
+
+        if (entry.definitionTransaction) {
+            try {
+                capability('rollbackItemDefinitionRegistration')(entry.id);
+            } catch (restoreCause) {
+                record(entry.id, 'activate', restoreCause);
+            }
+
+            entry.definitionTransaction = false;
+        }
+
         mods.delete(entry.id);
         dropHooks(entry);
 
@@ -987,15 +1380,23 @@ export function createModHost(engine, options = {}) {
 
         let cleanup;
 
+        entry.activating = true;
         try {
             cleanup = module.activate(api);
+
+            if (cleanup !== undefined && cleanup !== null && typeof cleanup !== 'function') {
+                observeRejection(entry.id, 'activate.late', cleanup);
+                throw new Error('activate must return a synchronous cleanup function or nothing');
+            }
+
+            if (entry.definitionTransaction) {
+                capability('commitItemDefinitionRegistration')(entry.id);
+                entry.definitionTransaction = false;
+            }
         } catch (cause) {
             rollback(entry, speedBefore, cause);
-        }
-
-        if (cleanup !== undefined && cleanup !== null && typeof cleanup !== 'function') {
-            observeRejection(entry.id, 'activate.late', cleanup);
-            rollback(entry, speedBefore, new Error('activate must return a synchronous cleanup function or nothing'));
+        } finally {
+            entry.activating = false;
         }
 
         entry.cleanup = typeof cleanup === 'function' ? cleanup : undefined;
@@ -1064,7 +1465,17 @@ export function createModHost(engine, options = {}) {
      * exceptions, rejected promises and invalid replacements are recorded, not thrown.
      */
     function submitAction(action, submitterId) {
-        const submitted = validateAction(action, submitterId);
+        let submitted;
+
+        try {
+            submitted = validateAction(action, submitterId);
+        } catch (cause) {
+            if (cause?.name === 'ModError') {
+                throw cause;
+            }
+
+            throw modError(submitterId, 'action', cause instanceof Error ? cause.message : String(cause), cause);
+        }
 
         if (dispatching) {
             throw modError(submitterId, 'action', 'cannot submit an action while beforeAction hooks are resolving; return a replacement action or false from the hook instead');
@@ -1151,12 +1562,32 @@ export function createModHost(engine, options = {}) {
             return { committed: false, cancelled: true, submittedBy: submitterId, modifiedBy, cancelledBy, snapshot: engine.snapshot() };
         }
 
-        const snapshot = engine.command(current);
+        const wasDead = current.type === 'setHealth' ? capability('isDead')() : engine.snapshot().dead;
+        let snapshot;
+
+        try {
+            snapshot = engine.command(current);
+        } catch (cause) {
+            throw fail(submitterId, 'action', cause instanceof Error ? cause.message : String(cause), cause);
+        }
 
         counts.committed += 1;
 
         if (modifiedBy.length > 0) {
             counts.modified += 1;
+        }
+
+        const dead = current.type === 'setHealth' ? capability('isDead')() : snapshot.dead;
+
+        if (wasDead === false && dead === true) {
+            for (const hook of orderedHooks('onCharacterDeath')) {
+                if (hook.entry.active && hooks.includes(hook)) {
+                    notify(hook, {
+                        type: 'CharacterDeath', submittedBy: submitterId,
+                        action: detach(current), snapshot: { ...snapshot },
+                    }, false);
+                }
+            }
         }
 
         return { committed: true, cancelled: false, submittedBy: submitterId, modifiedBy, snapshot };

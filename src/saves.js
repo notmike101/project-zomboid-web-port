@@ -1,7 +1,7 @@
 import { createEngine } from './engine.js';
 
 const SAVE_FORMAT = 'pz-web-save';
-const SAVE_VERSION = 1;
+const SAVE_VERSION = 2;
 const MAX_SAVE_BYTES = 16 * 1_024 * 1_024;
 const DATABASE = 'pz-web-saves';
 
@@ -72,6 +72,82 @@ function decodeCell(encoded) {
 }
 
 /**
+ * Extend an authenticated legacy payload without mutating its world or mod data.
+ *
+ * @param {object} payload - Detached, integrity-verified version-one payload.
+ * @returns {object} Unsigned current-format payload.
+ */
+function migrateLegacySave(payload) {
+    return {
+        ...payload,
+        formatVersion: SAVE_VERSION,
+        engine: {
+            ...payload.engine,
+            state: { ...payload.engine.state, version: 2, values: [...payload.engine.state.values, 100, 1] },
+        },
+        itemDefs: [],
+        items: [],
+        migratedFrom: 1,
+    };
+}
+
+/**
+ * Validate inventory identities and references before creating a restore engine.
+ *
+ * @param {object} record - Authenticated current-format save.
+ * @returns {void} Throws for invalid definitions or item records.
+ */
+function validateInventory(record) {
+    if (!Array.isArray(record.itemDefs) || record.itemDefs.length > 4_096
+        || !Array.isArray(record.items) || record.items.length > 4_096) {
+        throw new TypeError('Invalid saved inventory.');
+    }
+
+    const definitions = new Map();
+
+    for (const definition of record.itemDefs) {
+        if (!definition || typeof definition.fullType !== 'string' || !definition.fullType
+            || definitions.has(definition.fullType)
+            || typeof definition.owner !== 'string' || !definition.owner
+            || !Number.isInteger(definition.conditionMax) || definition.conditionMax < 1
+            || definition.conditionMax > 2_147_483_647
+            || !Number.isInteger(definition.stackLimit) || definition.stackLimit < 1
+            || definition.stackLimit > 4_294_967_295
+            || typeof definition.removeOnBroken !== 'boolean'
+            || !Number.isInteger(definition.conditionLowerChanceOneIn)
+            || definition.conditionLowerChanceOneIn < 0 || definition.conditionLowerChanceOneIn > 4_294_967_295
+            || (definition.bodyLocation !== null && typeof definition.bodyLocation !== 'string')) {
+            throw new TypeError('Invalid or duplicate saved item definition.');
+        }
+
+        definitions.set(definition.fullType, definition);
+    }
+
+    const ids = new Set();
+    const wornSlots = new Set();
+
+    for (const item of record.items) {
+        const definition = definitions.get(item?.fullType);
+
+        if (!item || !definition || !Number.isInteger(item.id) || item.id < 1 || item.id > 4_294_967_295
+            || ids.has(item.id) || !['ground', 'inventory'].includes(item.location)
+            || !Number.isFinite(item.x) || !Number.isFinite(item.y)
+            || !Number.isInteger(item.condition) || item.condition < 0 || item.condition > definition.conditionMax
+            || !Number.isInteger(item.count) || item.count < 1 || item.count > definition.stackLimit
+            || (item.bodyLocation !== null && (item.location !== 'inventory'
+                || item.bodyLocation !== definition.bodyLocation || wornSlots.has(item.bodyLocation)))) {
+            throw new TypeError('Invalid or duplicate saved item.');
+        }
+
+        ids.add(item.id);
+
+        if (item.bodyLocation !== null) {
+            wornSlots.add(item.bodyLocation);
+        }
+    }
+}
+
+/**
  * Validate integrity and versions before executing any restore commands.
  *
  * @param {object} record - Candidate save envelope.
@@ -80,14 +156,14 @@ function decodeCell(encoded) {
 async function validateSave(record) {
     const copy = structuredClone(record);
 
-    if (copy?.format !== SAVE_FORMAT || copy.formatVersion !== SAVE_VERSION) {
+    if (copy?.format !== SAVE_FORMAT || ![1, SAVE_VERSION].includes(copy.formatVersion)) {
         throw new TypeError('Unsupported browser save format/version; native saves are not supported.');
     }
 
     if (typeof copy.id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/u.test(copy.id)
         || !Number.isSafeInteger(copy.revision) || copy.revision < 1
         || !Array.isArray(copy.world?.cells) || copy.world.cells.length > 64
-        || copy.engine?.abiVersion !== 1 || copy.engine.state?.version !== 1
+        || copy.engine?.abiVersion !== 1 || copy.engine.state?.version !== copy.formatVersion
         || !Array.isArray(copy.contentPacks) || !Array.isArray(copy.mods)
         || typeof copy.modState !== 'object' || copy.modState === null
         || typeof copy.integrity !== 'string') {
@@ -98,6 +174,13 @@ async function validateSave(record) {
 
     if (await digest(payload) !== integrity) {
         throw new TypeError('Browser save integrity check failed; current game remains unchanged.');
+    }
+
+    const values = copy.engine.state.values;
+
+    if (!Array.isArray(values) || values.length !== (copy.formatVersion === 1 ? 10 : 12)
+        || values.some((value) => !Number.isFinite(value))) {
+        throw new TypeError('Malformed saved actor state.');
     }
 
     const coordinates = new Set();
@@ -117,6 +200,14 @@ async function validateSave(record) {
         coordinates.add(key);
         decodeCell(cell.bytes);
     }
+
+    if (copy.formatVersion === 1) {
+        const migrated = migrateLegacySave(payload);
+
+        return { ...migrated, integrity: await digest(migrated) };
+    }
+
+    validateInventory(copy);
 
     return copy;
 }
@@ -213,7 +304,17 @@ function createSaveStore({ engineSource, appVersion }) {
             engine.worldImportCell(cell.x, cell.y, decodeCell(cell.bytes));
         }
 
+        for (const definition of validated.itemDefs) {
+            engine.registerItemDefinition(definition, { owner: definition.owner });
+        }
+
+        engine.importItems(validated.items);
+
         engine.loadState(validated.engine.state);
+
+        if (Object.hasOwn(validated, 'moodleState')) {
+            engine.loadMoodleState(validated.moodleState);
+        }
 
         return { engine, record: validated };
     }
@@ -232,6 +333,9 @@ function createSaveStore({ engineSource, appVersion }) {
             format: SAVE_FORMAT, formatVersion: SAVE_VERSION, id: captured.id ?? 'autosave', revision: 1,
             updatedAt: new Date().toISOString(), application: { version: appVersion },
             engine: { abiVersion: 1, state: engine.saveState() },
+            itemDefs: engine.itemDefinitions(),
+            items: engine.items().sort((left, right) => left.id - right.id),
+            moodleState: engine.saveMoodleState(),
             world: {
                 cells: (captured.cells ?? []).map((cell) => ({
                     x: cell.x, y: cell.y, bytes: encodeCell(cell.bytes),

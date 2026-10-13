@@ -7,7 +7,7 @@
  * trust boundary and hands back detached snapshots. It never mirrors
  * coordinates, so the host cannot drift away from the rules. Numbers submitted
  * to the module are validated at full JavaScript precision. Snapshot scalars
- * originate as 32-bit floats; actor saves transfer ten 64-bit float words.
+ * originate as 32-bit floats; actor saves transfer twelve 64-bit float words.
  */
 
 /**
@@ -24,6 +24,8 @@
  * @property {number} y World y coordinate, stored as 32-bit.
  * @property {number} speed Movement speed in world units per second, 32-bit.
  * @property {number} action 0 idle, 1 moving to a destination, 2 walking.
+ * @property {number} [health] Project health scalar [0,100], if supported.
+ * @property {boolean} [dead] Whether the project health scalar is zero.
  */
 
 /**
@@ -56,7 +58,7 @@
 /**
  * Any command the engine accepts.
  *
- * @typedef {MoveToCommand | WalkCommand | CancelCommand} EngineCommand
+ * @typedef {MoveToCommand | WalkCommand | CancelCommand | object} EngineCommand
  */
 
 /**
@@ -75,9 +77,9 @@
  * Detached actor save; restore cell bytes before loading an active-world save.
  *
  * @typedef {object} SavedState
- * @property {1} version Save envelope version.
- * @property {number[]} values Ten finite f64 words: x, y, speed, targetX,
- *   targetY, headingX, headingY, action, tick, worldActive (0 or 1).
+ * @property {2} version Save envelope version.
+ * @property {number[]} values Twelve finite f64 words: x, y, speed, targetX,
+ *   targetY, headingX, headingY, action, tick, worldActive, health, nextItemId.
  */
 
 /**
@@ -101,10 +103,42 @@
  * @property {function(SavedState): void} loadState Restores an actor atomically.
  * @property {function(): void} worldReset Drops imported navigation and cancels
  *   movement, preserving actor position, speed and tick.
+ * @property {function(object, object): object} registerItemDefinition Registers a numeric WASM row with source metadata.
+ * @property {function(): object[]} itemDefinitions Reads ordered detached definitions.
+ * @property {function(string): void} beginItemDefinitionRegistration Begins one owner's activation.
+ * @property {function(string): void} commitItemDefinitionRegistration Publishes that activation.
+ * @property {function(string): void} rollbackItemDefinitionRegistration Restores first-touch rows and metadata.
+ * @property {function(): void} freezeItemDefinitions Internally seals definition registration.
+ * @property {function(): object[]} items Reads detached stable-ID item records.
+ * @property {function(object[]): void} importItems Atomically replaces item records with explicit IDs.
+ * @property {function(string): object|null} wornItem Reads the item worn at an exact body location.
+ * @property {function(): number} getHealth Reads the project scalar, not native survival state.
+ * @property {function(): boolean} isDead Reports whether that scalar is zero.
+ * @property {function(): {id:string,level:number}[]} moodles Original ordered level queries.
+ * @property {function(): object} moodleInputLimits Detached owned-input validation metadata.
+ * @property {function(): object} saveMoodleState Private-host detached version1 state.
+ * @property {function(object): void} loadMoodleState Atomic private-host full restore.
+ * @property {function(): void} resetMoodleState Source defaults plus explicit bounded-world policies.
  */
 
 /** Engine ABI version this host supports; anything else is refused. */
 const ENGINE_API_VERSION = 1;
+
+const MOODLE_IDS = Object.freeze([
+    'endurance', 'tired', 'hungry', 'panic', 'sick', 'bored', 'unhappy', 'bleeding',
+    'wet', 'hasacold', 'angry', 'stress', 'thirst', 'injured', 'pain', 'heavyload',
+    'drunk', 'dead', 'zombie', 'hyperthermia', 'hypothermia', 'windchill', 'cantsprint',
+    'uncomfortable', 'noxioussmell', 'foodeaten',
+].map((name) => `base:${name}`));
+const MOODLE_INPUT_NAMES = Object.freeze([
+    'endurance', 'fatigue', 'hunger', 'panic', 'sickness', 'boredom', 'unhappiness',
+    'wetness', 'anger', 'stress', 'nicotineWithdrawal', 'thirst', 'pain', 'intoxication',
+    'temperature', 'zombieInfection', 'zombieFever', 'foodSickness', 'discomfort',
+    'coldStrength', 'hasCold', 'fakeInfected', 'bleedingParts', 'neckBleeding',
+    'capacityWeight', 'maxWeight', 'windChill', 'corpseSicknessRate', 'toxicBuilding',
+    'protectedFromToxic', 'corpseImpactEnabled', 'cantSprint', 'healthFromFoodTimer',
+    'standardHealthFromFoodTime',
+]);
 
 /** C ABI functions the compiled module must export. */
 const ABI = [
@@ -216,6 +250,50 @@ function requireInteger(value, name, min, max) {
     }
 
     return value;
+}
+
+/**
+ * Validates exact identity strings without normalization.
+ *
+ * @param {unknown} value - Candidate identity.
+ * @param {string} label - Error context.
+ * @returns {string} Exact nonempty identity.
+ */
+function requireName(value, label) {
+    if (typeof value !== 'string' || value.length === 0) {
+        throw new TypeError(`${label} must be a nonempty string.`);
+    }
+
+    return value;
+}
+
+/**
+ * Interns host identities for opaque numeric WASM references.
+ *
+ * @param {string} value - Exact identity.
+ * @param {Map<string, number>} ids - Identity lookup.
+ * @param {Array<string|null>} names - Reverse identity lookup.
+ * @returns {number} Stable internal token.
+ */
+function intern(value, ids, names) {
+    if (!ids.has(value)) {
+        ids.set(value, names.length);
+        names.push(value);
+    }
+
+    return ids.get(value);
+}
+
+/**
+ * Refuses null, arrays and nonobjects before moodle state validation.
+ *
+ * @param {unknown} value - Candidate object.
+ * @param {string} label - Error context.
+ */
+function requireMoodleObject(value, label) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new TypeError(`${label} must be an object.`);
+    }
 }
 
 /**
@@ -346,7 +424,7 @@ async function createEngine(source) {
         const size = api.scratch_size() >>> 0;
         const buffer = api.memory.buffer;
 
-        if (size !== 80 || ptr % 8 !== 0 || ptr + size > buffer.byteLength) {
+        if (size !== 96 || ptr % 8 !== 0 || ptr + size > buffer.byteLength) {
             throw new Error(`${method}: invalid engine scratch buffer.`);
         }
 
@@ -354,7 +432,7 @@ async function createEngine(source) {
     }
 
     /**
-     * Checks an optional state operation and its ten-word ABI.
+     * Checks an optional state operation and its twelve-word ABI.
      *
      * @param {string} method - Host method requesting state access.
      * @param {string} name - Required state operation export.
@@ -362,8 +440,8 @@ async function createEngine(source) {
     function requireState(method, name) {
         requireOptional(method, [name, 'state_size']);
 
-        if (api.state_size() !== 10) {
-            throw new Error(`${method}: engine state must contain ten values.`);
+        if (api.state_size() !== 12) {
+            throw new Error(`${method}: engine state must contain twelve values.`);
         }
     }
 
@@ -380,6 +458,9 @@ async function createEngine(source) {
             y: api.position_y(),
             speed: api.speed(),
             action: api.action(),
+            ...(typeof api.health === 'function' && typeof api.is_dead === 'function'
+                ? { health: api.health(), dead: api.is_dead() !== 0 }
+                : {}),
         };
     }
 
@@ -391,6 +472,8 @@ async function createEngine(source) {
      * @returns {Snapshot} State after the command.
      */
     function command(action) {
+        let spawnedId;
+
         switch (action?.type) {
             case 'moveTo': {
                 const x = requireCoordinate(action.x, 'moveTo x');
@@ -409,11 +492,74 @@ async function createEngine(source) {
             case 'cancel':
                 api.cancel();
                 break;
+            case 'spawnItem': {
+                requireOptional('spawnItem', ['item_spawn', 'item_last_id']);
+                const ordinal = definitionOrdinal(action.fullType);
+                const definition = resolvedDefinition(ordinal);
+                const x = requireCoordinate(action.x, 'spawnItem x');
+                const y = requireCoordinate(action.y, 'spawnItem y');
+                const count = requireInteger(action.count ?? 1, 'count', 1, 0xFF_FF_FF_FF);
+                const condition = requireInteger(action.condition ?? definition.conditionMax,
+                    'condition', 0, 0x7F_FF_FF_FF);
+
+                requireAccepted(api.item_spawn(ordinal, x, y, count, condition), 'spawnItem');
+                spawnedId = api.item_last_id() >>> 0;
+                break;
+            }
+            case 'pickup':
+            case 'wear':
+            case 'unequip': {
+                const name = `item_${action.type}`;
+
+                requireOptional(action.type, [name]);
+                requireAccepted(api[name](requireInteger(action.id, 'item id', 1, 0xFF_FF_FF_FF)), action.type);
+                break;
+            }
+            case 'drop':
+                requireOptional('drop', ['item_drop']);
+                requireAccepted(api.item_drop(requireInteger(action.id, 'item id', 1, 0xFF_FF_FF_FF),
+                    requireCoordinate(action.x, 'drop x'), requireCoordinate(action.y, 'drop y')), 'drop');
+                break;
+            case 'setCondition':
+                requireOptional('setCondition', ['item_set_condition']);
+                requireAccepted(api.item_set_condition(requireInteger(action.id, 'item id', 1, 0xFF_FF_FF_FF),
+                    requireInteger(action.condition, 'condition', 0, 0x7F_FF_FF_FF)), 'setCondition');
+                break;
+            case 'setHealth':
+                requireOptional('setHealth', ['set_health']);
+                requireAccepted(api.set_health(requireCoordinate(action.health, 'health')), 'setHealth');
+                break;
+            case 'setCharacterStat': {
+                requireOptional('setCharacterStat', ['set_character_stat', 'moodle_input_limit']);
+                const index = MOODLE_INPUT_NAMES.indexOf(action.name);
+
+                if (index === -1 || index >= 19) {
+                    throw new RangeError(`Unknown character stat: ${String(action.name)}.`);
+                }
+
+                const value = validateMoodleInput(action.name, action.value);
+
+                requireAccepted(api.set_character_stat(index, value), 'setCharacterStat');
+                break;
+            }
+            case 'setMoodleInputs': {
+                requireMoodleObject(action.inputs, 'Moodle inputs');
+                const state = saveMoodleState();
+
+                for (const name of Object.keys(action.inputs)) {
+                    validateMoodleInput(name, action.inputs[name]);
+                    state.inputs[name] = action.inputs[name];
+                }
+
+                loadMoodleState(state);
+                break;
+            }
+
             default:
                 throw new TypeError(`Unknown engine command: ${String(action?.type)}.`);
         }
 
-        return snapshot();
+        return spawnedId === undefined ? snapshot() : { ...snapshot(), id: spawnedId };
     }
 
     /**
@@ -444,6 +590,13 @@ async function createEngine(source) {
      */
     function reset() {
         api.reset();
+        definitionMetadata.length = 0;
+        definitionOrdinals.clear();
+        ownerIds.clear();
+        ownerNames.length = 1;
+        slotIds.clear();
+        slotNames.length = 1;
+        definitionTransaction = null;
     }
 
     /**
@@ -533,7 +686,7 @@ async function createEngine(source) {
         const view = scratch('saveState');
 
         return {
-            version: 1, values: Array.from({ length: 10 },
+            version: 2, values: Array.from({ length: 12 },
                 (_, index) => view.getFloat64(index * 8, true)),
         };
     }
@@ -544,16 +697,16 @@ async function createEngine(source) {
      * To spawn in a nonzero cell use idle state with position=target, zero
      * heading and worldActive=1.
      *
-     * @param {SavedState} state - Version 1 envelope containing ten finite numbers.
+     * @param {SavedState} state - Version 2 envelope containing twelve finite numbers.
      * @throws {TypeError} On an invalid save envelope.
      * @throws {RangeError} When Rust refuses the state without changing it.
      */
     function loadState(state) {
         requireState('loadState', 'state_load');
 
-        if (state === null || typeof state !== 'object' || state.version !== 1
-            || !Array.isArray(state.values) || state.values.length !== 10) {
-            throw new TypeError('loadState requires version 1 and exactly ten finite values.');
+        if (state === null || typeof state !== 'object' || state.version !== 2
+            || !Array.isArray(state.values) || state.values.length !== 12) {
+            throw new TypeError('loadState requires version 2 and exactly twelve finite values.');
         }
 
         // Validate all words before writing even the private scratch buffer.
@@ -561,7 +714,7 @@ async function createEngine(source) {
             requireCoordinate(value, `state value ${index}`));
         const view = scratch('loadState');
 
-        for (let index = 0; index < 10; index += 1) {
+        for (let index = 0; index < 12; index += 1) {
             view.setFloat64(index * 8, values[index], true);
         }
 
@@ -574,9 +727,460 @@ async function createEngine(source) {
         api.world_reset();
     }
 
+    // Identity/source metadata only. Numeric behavior is always read from WASM.
+    const definitionMetadata = [];
+    const definitionOrdinals = new Map();
+    const ownerIds = new Map();
+    const ownerNames = [null];
+    const slotIds = new Map();
+    const slotNames = [null];
+    let definitionTransaction = null;
+
+    /**
+     * Resolves a public definition identity to its private dense ordinal.
+     *
+     * @param {string} fullType - Exact qualified identity.
+     * @returns {number} Definition ordinal.
+     */
+    function definitionOrdinal(fullType) {
+        requireName(fullType, 'fullType');
+        const ordinal = definitionOrdinals.get(fullType);
+
+        if (ordinal === undefined) {
+            throw new RangeError(`Unknown item definition: ${fullType}.`);
+        }
+
+        return ordinal;
+    }
+
+    /**
+     * Combines detached source metadata with authoritative numeric fields.
+     *
+     * @param {number} ordinal - Private definition ordinal.
+     * @returns {object} Detached resolved definition.
+     */
+    function resolvedDefinition(ordinal) {
+        requireOptional('itemDefinitions', ['item_definition_read']);
+        requireAccepted(api.item_definition_read(ordinal), 'itemDefinitions');
+        const view = scratch('itemDefinitions');
+        const metadata = definitionMetadata[ordinal];
+
+        if (!metadata) {
+            throw new Error('Item definition metadata is unavailable.');
+        }
+
+        return {
+            ...structuredClone(metadata),
+            owner: ownerNames[view.getFloat64(0, true)],
+            conditionMax: view.getFloat64(8, true),
+            bodyLocation: slotNames[view.getFloat64(16, true)],
+            stackLimit: view.getFloat64(24, true),
+            removeOnBroken: view.getFloat64(32, true) !== 0,
+            conditionLowerChanceOneIn: view.getFloat64(40, true),
+        };
+    }
+
+    /**
+     * Registers or explicitly overrides a validated numeric definition.
+     *
+     * @param {object} definition - Numeric fields and original appearance/source metadata.
+     * @param {object} options - Owning package and collision policy.
+     * @param {string} options.owner - Exact package identity.
+     * @param {boolean} [options.override=false] - Explicit permission to replace an existing identity.
+     * @returns {object} Detached resolved definition read back from WASM.
+     */
+    function registerItemDefinition(definition, { owner, override = false } = {}) {
+        requireOptional('registerItemDefinition', ['item_definition_register', 'item_definition_read']);
+        scratch('registerItemDefinition');
+
+        if (definition === null || typeof definition !== 'object' || Array.isArray(definition)) {
+            throw new TypeError('Item definition must be an object.');
+        }
+
+        requireName(owner, 'definition owner');
+        requireName(definition.fullType, 'fullType');
+
+        if (typeof override !== 'boolean' || typeof definition.removeOnBroken !== 'boolean') {
+            throw new TypeError('override and removeOnBroken must be booleans.');
+        }
+
+        const bodyLocation = definition.bodyLocation;
+
+        if (bodyLocation !== null) {
+            requireName(bodyLocation, 'bodyLocation');
+        }
+
+        const conditionMax = requireInteger(definition.conditionMax, 'conditionMax', 1, 0x7F_FF_FF_FF);
+        const stackLimit = requireInteger(definition.stackLimit, 'stackLimit', 1, 0xFF_FF_FF_FF);
+        const chance = requireInteger(definition.conditionLowerChanceOneIn,
+            'conditionLowerChanceOneIn', 0, 0xFF_FF_FF_FF);
+        const previous = definitionOrdinals.get(definition.fullType);
+        const ordinal = previous ?? definitionMetadata.length;
+        // Clone before dispatch: an uncloneable source field cannot strand a numeric row.
+        const metadata = structuredClone(definition);
+
+        for (const key of ['owner', 'conditionMax', 'stackLimit', 'removeOnBroken', 'conditionLowerChanceOneIn']) {
+            delete metadata[key];
+        }
+
+        const ownerId = intern(owner, ownerIds, ownerNames);
+        const slot = bodyLocation === null ? 0 : intern(bodyLocation, slotIds, slotNames);
+
+        requireAccepted(api.item_definition_register(ordinal, ownerId, conditionMax, slot,
+            stackLimit, Number(definition.removeOnBroken), chance, Number(override)), 'registerItemDefinition');
+
+        if (definitionTransaction && ordinal < definitionTransaction.start
+            && !definitionTransaction.journal.has(ordinal)) {
+            definitionTransaction.journal.set(ordinal, definitionMetadata[ordinal]);
+        }
+
+        definitionMetadata[ordinal] = metadata;
+        definitionOrdinals.set(metadata.fullType, ordinal);
+
+        return resolvedDefinition(ordinal);
+    }
+
+    /**
+     * Reads definitions in registration order for ordinal-safe save restore.
+     *
+     * @returns {object[]} Detached metadata and authoritative numeric rows.
+     */
+    function itemDefinitions() {
+        requireOptional('itemDefinitions', ['item_definition_count', 'item_definition_read']);
+
+        return Array.from({ length: api.item_definition_count() >>> 0 },
+            (_, ordinal) => resolvedDefinition(ordinal));
+    }
+
+    /**
+     * Begins one activation with first-touch journals, not table clones.
+     *
+     * @param {string} owner - Exact package identity.
+     */
+    function beginItemDefinitionRegistration(owner) {
+        requireOptional('beginItemDefinitionRegistration', ['item_definition_begin']);
+        requireName(owner, 'definition owner');
+        requireAccepted(api.item_definition_begin(intern(owner, ownerIds, ownerNames)),
+            'beginItemDefinitionRegistration transaction');
+        definitionTransaction = { owner, start: definitionMetadata.length, journal: new Map() };
+    }
+
+    /**
+     * Commits the matching activation without changing ordinal order.
+     *
+     * @param {string} owner - Exact package identity.
+     */
+    function commitItemDefinitionRegistration(owner) {
+        requireOptional('commitItemDefinitionRegistration', ['item_definition_commit']);
+        requireName(owner, 'definition owner');
+        requireAccepted(api.item_definition_commit(ownerIds.get(owner) ?? 0), 'commitItemDefinitionRegistration');
+        definitionTransaction = null;
+    }
+
+    /**
+     * Restores overridden numeric rows/owners and truncates appended metadata.
+     *
+     * @param {string} owner - Exact package identity.
+     */
+    function rollbackItemDefinitionRegistration(owner) {
+        requireOptional('rollbackItemDefinitionRegistration', ['item_definition_rollback']);
+        requireName(owner, 'definition owner');
+        requireAccepted(api.item_definition_rollback(ownerIds.get(owner) ?? 0), 'rollbackItemDefinitionRegistration');
+
+        for (let ordinal = definitionTransaction.start; ordinal < definitionMetadata.length; ordinal += 1) {
+            definitionOrdinals.delete(definitionMetadata[ordinal].fullType);
+        }
+
+        definitionMetadata.length = definitionTransaction.start;
+
+        for (const [ordinal, metadata] of definitionTransaction.journal) {
+            definitionMetadata[ordinal] = metadata;
+        }
+
+        definitionTransaction = null;
+    }
+
+    /** Seals registration after activation; intentionally internal-host only. */
+    function freezeItemDefinitions() {
+        requireOptional('freezeItemDefinitions', ['item_definition_freeze']);
+        requireAccepted(api.item_definition_freeze(), 'freezeItemDefinitions');
+    }
+
+    /**
+     * Reads authoritative records without retaining WASM memory views.
+     *
+     * @returns {object[]} Detached ground/inventory/equipment records.
+     */
+    function items() {
+        requireOptional('items', ['item_count', 'item_read']);
+
+        return Array.from({ length: api.item_count() >>> 0 }, (_, index) => {
+            requireAccepted(api.item_read(index), 'items');
+            const view = scratch('items');
+            const ordinal = view.getFloat64(8, true);
+
+            if (!definitionMetadata[ordinal]) {
+                throw new Error('Item definition metadata is unavailable.');
+            }
+
+            return {
+                id: view.getFloat64(0, true),
+                fullType: definitionMetadata[ordinal].fullType,
+                location: view.getFloat64(16, true) === 0 ? 'ground' : 'inventory',
+                x: view.getFloat64(24, true), y: view.getFloat64(32, true),
+                condition: view.getFloat64(40, true), count: view.getFloat64(48, true),
+                bodyLocation: slotNames[view.getFloat64(56, true)],
+            };
+        });
+    }
+
+    /**
+     * Validates host values before staging an atomic explicit-ID replacement.
+     *
+     * @param {object[]} records - Detached records using public fullType identities.
+     */
+    function importItems(records) {
+        requireOptional('importItems', ['item_import_begin', 'item_import_stage', 'item_import_commit', 'item_import_abort']);
+
+        if (!Array.isArray(records)) {
+            throw new TypeError('importItems requires an array.');
+        }
+
+        if (records.length > 4_096) {
+            throw new RangeError('importItems exceeds the project item capacity of 4096.');
+        }
+
+        // Full host precision validation precedes even the first staging call.
+        const numeric = Array.from(records, (record) => {
+            if (record === null || typeof record !== 'object' || Array.isArray(record)) {
+                throw new TypeError('Imported item must be an object.');
+            }
+
+            const ordinal = definitionOrdinal(record.fullType);
+
+            if (record.location !== 'ground' && record.location !== 'inventory') {
+                throw new TypeError('Item location must be ground or inventory.');
+            }
+
+            let slot = 0;
+
+            if (record.bodyLocation !== null) {
+                requireName(record.bodyLocation, 'bodyLocation');
+                slot = slotIds.get(record.bodyLocation);
+
+                if (slot === undefined) {
+                    throw new RangeError(`Unknown bodyLocation: ${record.bodyLocation}.`);
+                }
+            }
+
+            return [
+                requireInteger(record.id, 'item id', 1, 0xFF_FF_FF_FF), ordinal,
+                record.location === 'ground' ? 0 : 1,
+                requireCoordinate(record.x, 'item x'), requireCoordinate(record.y, 'item y'),
+                requireInteger(record.condition, 'condition', 0, 0x7F_FF_FF_FF),
+                requireInteger(record.count, 'count', 1, 0xFF_FF_FF_FF), slot,
+            ];
+        });
+
+        requireAccepted(api.item_import_begin(), 'importItems');
+        try {
+            for (const row of numeric) {
+                requireAccepted(api.item_import_stage(...row), 'importItems record');
+            }
+
+            requireAccepted(api.item_import_commit(), 'importItems commit');
+        } finally {
+            api.item_import_abort();
+        }
+    }
+
+    /**
+     * Reads equipment at an exact body location.
+     *
+     * @param {string} bodyLocation - Exact original body-location identity.
+     * @returns {object|null} Detached worn record, or no equipment.
+     */
+    function wornItem(bodyLocation) {
+        requireOptional('wornItem', ['item_count', 'item_read']);
+        requireName(bodyLocation, 'bodyLocation');
+
+        return items().find((item) => item.bodyLocation === bodyLocation) ?? null;
+    }
+
+    /**
+     * Reads the project health scalar; no original survival behavior is inferred.
+     *
+     * @returns {number} Health inside [0,100].
+     */
+    function getHealth() {
+        requireOptional('getHealth', ['health']);
+
+        return api.health();
+    }
+
+    /**
+     * Reads scalar death without adding native moodle thresholds or movement rules.
+     *
+     * @returns {boolean} Whether health is zero.
+     */
+    function isDead() {
+        requireOptional('isDead', ['is_dead']);
+
+        return api.is_dead() !== 0;
+    }
+
+    /**
+     * Queries original IDs without retaining pointers or changing counters.
+     * Rules own levels; survival, mass, weather/corpse dynamics and UI effects
+     * remain explicitly unmodeled, not silently supplied by neutral arrays.
+     *
+     * @returns {{id:string,level:number}[]} Detached ordered levels.
+     */
+    function moodles() {
+        requireOptional('moodles', ['moodle_level']);
+
+        return MOODLE_IDS.map((id, index) => ({ id, level: api.moodle_level(index) }));
+    }
+
+    /**
+     * Reads validation metadata from WASM, never a host numeric shadow.
+     *
+     * @returns {object} Numeric {min,max,default,integer} or boolean metadata.
+     */
+    function moodleInputLimits() {
+        requireOptional('moodleInputLimits', ['moodle_input_limit']);
+
+        return Object.fromEntries(MOODLE_INPUT_NAMES.map((name, index) => {
+            const kind = api.moodle_input_limit(index, 3);
+            const defaultValue = api.moodle_input_limit(index, 2);
+
+            return [name, kind === 2
+                ? { type: 'boolean', default: defaultValue !== 0 }
+                : {
+                        min: api.moodle_input_limit(index, 0), max: api.moodle_input_limit(index, 1),
+                        default: defaultValue, integer: kind === 1,
+                    }];
+        }));
+    }
+
+    /**
+     * Validates an owned moodle input against authoritative WASM limits.
+     *
+     * @param {string} name - Exact owned input name.
+     * @param {unknown} value - Input at original JavaScript precision.
+     * @returns {number} Numeric ABI value.
+     */
+    function validateMoodleInput(name, value) {
+        requireOptional('moodle input', ['moodle_input_limit']);
+        const index = MOODLE_INPUT_NAMES.indexOf(name);
+
+        if (index === -1) {
+            throw new RangeError(`Unknown moodle input: ${String(name)}.`);
+        }
+
+        const kind = api.moodle_input_limit(index, 3);
+
+        if (kind === 2) {
+            if (typeof value !== 'boolean') {
+                throw new TypeError(`${name} must be boolean.`);
+            }
+
+            return Number(value);
+        }
+
+        requireCoordinate(value, name);
+        const min = api.moodle_input_limit(index, 0);
+        const max = api.moodle_input_limit(index, 1);
+
+        if (kind === 1) {
+            return requireInteger(value, name, min, max);
+        }
+
+        if (value < min || value > max) {
+            throw new RangeError(`${name} must be inside [${min}, ${max}].`);
+        }
+
+        return value;
+    }
+
+    /**
+     * Private-host persistence; does not change the twelve-word actor format.
+     * Defaults: source stats1/37, source food duration1600; explicit port load
+     * 0/max8, no environmental exposure, corpse impact disabled. These policies
+     * are not claims of original weight, weather or survival dynamics.
+     *
+     * @returns {object} Detached exact version1 inputs and timed state.
+     */
+    function saveMoodleState() {
+        requireOptional('saveMoodleState', ['moodle_state_value', 'moodle_input_limit']);
+
+        return {
+            version: 1,
+            inputs: Object.fromEntries(MOODLE_INPUT_NAMES.map((name, index) => [
+                name, api.moodle_input_limit(index, 3) === 2
+                    ? api.moodle_state_value(index) !== 0
+                    : api.moodle_state_value(index),
+            ])),
+            painTimer: api.moodle_state_value(34),
+            painLevel: api.moodle_state_value(35),
+            cantSprintTimer: api.moodle_state_value(36),
+        };
+    }
+
+    /**
+     * Validates every key and full-precision value before staging any mutation.
+     * Counters count accepted updates, not seconds, matching original rules.
+     *
+     * @param {object} state - Exact saveMoodleState version1 shape.
+     */
+    function loadMoodleState(state) {
+        requireOptional('loadMoodleState', ['moodle_import_begin', 'moodle_import_stage',
+            'moodle_import_commit', 'moodle_import_abort', 'moodle_input_limit']);
+        requireMoodleObject(state, 'Moodle state');
+        const keys = ['version', 'inputs', 'painTimer', 'painLevel', 'cantSprintTimer'];
+
+        if (state.version !== 1 || Object.keys(state).length !== keys.length
+            || keys.some((key) => !Object.hasOwn(state, key))) {
+            throw new TypeError('Moodle state requires the exact version1 shape.');
+        }
+
+        requireMoodleObject(state.inputs, 'Moodle inputs');
+
+        if (Object.keys(state.inputs).length !== MOODLE_INPUT_NAMES.length
+            || MOODLE_INPUT_NAMES.some((name) => !Object.hasOwn(state.inputs, name))) {
+            throw new TypeError('Moodle state requires every named input and no extra keys.');
+        }
+
+        const values = MOODLE_INPUT_NAMES.map((name) => validateMoodleInput(name, state.inputs[name]));
+
+        values.push(requireInteger(state.painTimer, 'painTimer', 0, 119),
+            requireInteger(state.painLevel, 'painLevel', 0, 4),
+            requireInteger(state.cantSprintTimer, 'cantSprintTimer', 1, 300));
+        api.moodle_import_begin();
+        try {
+            for (const [index, value] of values.entries()) {
+                requireAccepted(api.moodle_import_stage(index, value), 'loadMoodleState');
+            }
+
+            requireAccepted(api.moodle_import_commit(), 'loadMoodleState commit');
+        } finally {
+            api.moodle_import_abort();
+        }
+    }
+
+    /** Restores only moodle inputs/counters, for pre-moodle save migration. */
+    function resetMoodleState() {
+        requireOptional('resetMoodleState', ['moodle_reset']);
+        api.moodle_reset();
+    }
+
     return Object.freeze({
         snapshot, command, setSpeed, step, reset,
         worldImportCell, navFlags, worldBounds, saveState, loadState, worldReset,
+        registerItemDefinition, itemDefinitions, beginItemDefinitionRegistration,
+        commitItemDefinitionRegistration, rollbackItemDefinitionRegistration, freezeItemDefinitions,
+        items, importItems, wornItem, getHealth, isDead,
+        moodles, moodleInputLimits, saveMoodleState, loadMoodleState, resetMoodleState,
     });
 }
 
