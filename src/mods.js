@@ -1132,6 +1132,12 @@ export function createModHost(engine, options = {}) {
             },
             character: {
                 /**
+                 * Query actual native handwear, never detached metadata or a player shadow flag.
+                 *
+                 * @returns {boolean} Whether the live hands item has the native awkward-gloves tag.
+                 */
+                isWearingAwkwardGloves: () => access('character', () => capability('isWearingAwkwardGloves')()),
+                /**
                  * Read the real project health scalar, never a host shadow.
                  *
                  * @returns {number} Authoritative health within [0, 100].

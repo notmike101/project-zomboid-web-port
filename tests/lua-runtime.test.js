@@ -262,6 +262,52 @@ test('Lua body userdata retain identity while real ticks observe native pain and
     }
 });
 
+test('Lua awkward-glove query observes real native handwear replacement and unequip', async () => {
+    const { engine, host, session, saved } = await fixture();
+    const gloves = {
+        fullType: 'Fixture.Gloves', bodyLocation: 'base:hands', conditionMax: 10, stackLimit: 1,
+        removeOnBroken: false, conditionLowerChanceOneIn: 1, tags: ['base:awkwardgloves'],
+    };
+
+    engine.registerItemDefinition(gloves, { owner: 'fixture' });
+    engine.registerItemDefinition({
+        ...gloves, fullType: 'Fixture.LightGloves', tags: [],
+    }, { owner: 'fixture' });
+    const ids = ['Fixture.Gloves', 'Fixture.LightGloves'].map((fullType) => {
+        const id = host.api.items.spawn({ fullType, x: 5, y: 5 }).snapshot.id;
+
+        host.api.items.pickup(id);
+
+        return id;
+    });
+
+    try {
+        activate(session, host, `
+            local player = getPlayer()
+            assert(player:isWearingAwkwardGloves() == false)
+            getModData().gloves = {states = {}}
+            Events.OnTick.Add(function()
+                table.insert(getModData().gloves.states, player:isWearingAwkwardGloves())
+            end)
+        `, 'gloves');
+
+        for (const id of [ids[0], ids[1], ids[0]]) {
+            host.api.items.wear(id);
+            host.step(1 / 60);
+        }
+
+        host.api.items.unequip(ids[0]);
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.deepEqual(saved.get('host').data.nativePlayerData.gloves.states, [true, false, true, false]);
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
 test('Lua item weights stay live and independent while inventory carry uses native worn load', async () => {
     const { engine, host, session, saved } = await fixture();
 

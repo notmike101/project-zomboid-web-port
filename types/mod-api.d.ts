@@ -69,6 +69,8 @@ export interface ModItemDefinitionInput {
   conditionLowerChanceOneIn: number;
   /** Omitted weight uses native ScriptItem's constructor default 1; resolved values are f32. */
   weight?: number;
+  /** Detached canonical ResourceLocation identities; omitted tags register as an empty list. */
+  tags?: readonly string[];
   [metadata: string]: unknown;
 }
 
@@ -389,6 +391,8 @@ export interface ModApi {
   character: {
     getHealth(): number;
     isDead(): boolean;
+    /** Derives from the actual item worn on base:hands and its native definition tag. */
+    isWearingAwkwardGloves(): boolean;
     setHealth(health: number): ModCommandResult;
     /** Requires real optional engine capability; throws unsupported otherwise. */
     moodles(): ModMoodle[];
@@ -572,6 +576,7 @@ export interface ModEngine {
   importItems?(records: ModItem[]): void;
   wornItem?(bodyLocation: string): ModItem | null;
   inventoryState?(): ModInventoryState;
+  isWearingAwkwardGloves?(): boolean;
   getHealth?(): number;
   isDead?(): boolean;
   moodles?(): ModMoodle[];

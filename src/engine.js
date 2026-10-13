@@ -113,6 +113,7 @@
  * @property {function(object[]): void} importItems Atomically replaces item records with explicit IDs.
  * @property {function(): {capacityWeight: number, capacity: number, maxWeight: number}} inventoryState Reads detached native flat-player carry state.
  * @property {function(string): object|null} wornItem Reads the item worn at an exact body location.
+ * @property {function(): boolean} isWearingAwkwardGloves Reads native tagged hands equipment.
  * @property {function(): number} getHealth Reads the project scalar, not native survival state.
  * @property {function(): boolean} isDead Reports whether that scalar is zero.
  * @property {function(): {id:string,level:number}[]} moodles Original ordered level queries.
@@ -347,6 +348,24 @@ function requireName(value, label) {
     }
 
     return value;
+}
+
+/**
+ * Canonicalizes source ResourceLocation identities, splitting the first colon.
+ *
+ * @param {unknown} value - Source tag identity.
+ * @returns {string} Lowercase full resource ID, with base as the absent namespace.
+ */
+function itemTagResourceLocation(value) {
+    const name = requireName(value, 'item tag').trim();
+    const colon = name.indexOf(':');
+    const namespace = colon === -1 ? 'base' : name.slice(0, colon);
+    const path = colon === -1 ? name : name.slice(colon + 1);
+
+    requireName(namespace, 'item tag namespace');
+    requireName(path, 'item tag path');
+
+    return `${namespace.toLowerCase()}:${path.toLowerCase()}`;
 }
 
 /**
@@ -1216,6 +1235,13 @@ async function createEngine(source) {
         const ordinal = previous ?? definitionMetadata.length;
         // Clone before dispatch: an uncloneable source field cannot strand a numeric row.
         const metadata = structuredClone(definition);
+        const tags = Object.hasOwn(metadata, 'tags') ? metadata.tags : [];
+
+        if (!Array.isArray(tags)) {
+            throw new TypeError('Item definition tags must be an array of strings.');
+        }
+
+        metadata.tags = Array.from(tags, itemTagResourceLocation);
 
         for (const key of ['owner', 'conditionMax', 'stackLimit', 'removeOnBroken', 'conditionLowerChanceOneIn', 'weight']) {
             delete metadata[key];
@@ -1225,7 +1251,8 @@ async function createEngine(source) {
         const slot = bodyLocation === null ? 0 : intern(bodyLocation, slotIds, slotNames);
 
         requireAccepted(api.item_definition_register(ordinal, ownerId, conditionMax, slot,
-            stackLimit, Number(definition.removeOnBroken), chance, Number(override), weight), 'registerItemDefinition');
+            stackLimit, Number(definition.removeOnBroken), chance, Number(override), weight,
+            Number(metadata.tags.includes('base:awkwardgloves'))), 'registerItemDefinition');
 
         if (definitionTransaction && ordinal < definitionTransaction.start
             && !definitionTransaction.journal.has(ordinal)) {
@@ -1427,6 +1454,19 @@ async function createEngine(source) {
         requireName(bodyLocation, 'bodyLocation');
 
         return items().find((item) => item.bodyLocation === bodyLocation) ?? null;
+    }
+
+    /**
+     * Queries the live native item at the canonical hands slot, without host classification.
+     *
+     * @returns {boolean} Whether tagged awkward gloves are currently worn.
+     */
+    function isWearingAwkwardGloves() {
+        if (typeof api.item_wearing_awkward_gloves !== 'function') {
+            throw new TypeError('isWearingAwkwardGloves is unsupported by this engine module.');
+        }
+
+        return api.item_wearing_awkward_gloves(slotIds.get('base:hands') ?? 0) !== 0;
     }
 
     /**
@@ -1793,7 +1833,7 @@ async function createEngine(source) {
         worldImportCell, navFlags, worldBounds, saveState, loadState, worldReset,
         registerItemDefinition, itemDefinitions, beginItemDefinitionRegistration,
         commitItemDefinitionRegistration, rollbackItemDefinitionRegistration, freezeItemDefinitions,
-        items, inventoryState, importItems, wornItem, getHealth, isDead,
+        items, inventoryState, importItems, wornItem, isWearingAwkwardGloves, getHealth, isDead,
         moodles, moodleInputLimits, saveMoodleState, loadMoodleState, resetMoodleState,
         importDoors, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,
         bodyParts, bodyPartInputLimits, thermalActionModifier, canSaveBodyState, saveBodyState, loadBodyState,

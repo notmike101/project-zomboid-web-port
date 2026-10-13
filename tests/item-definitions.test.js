@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createEngine } from '../src/engine.js';
 import { parseItemDefinitions, parseModelDefinitions, parseClothingDefinition } from '../src/item-definitions.js';
+import { seedOriginalWearables } from '../src/native-game-resources.js';
 
 test('script structure preserves source order, provenance and unknown quoted fields without defaults', () => {
     const provenance = { path: 'authored.txt', build: 'synthetic' };
@@ -31,6 +34,136 @@ test('script structure preserves source order, provenance and unknown quoted fie
     assert.equal(records[0].provenance.path, 'authored.txt');
     records[0].provenance.path = 'detached';
     assert.equal(records[1].provenance.path, 'authored.txt');
+});
+
+test('source Tags become detached canonical resource IDs without adding missing gameplay fields', () => {
+    const provenance = { path: 'tags.txt', build: 'synthetic' };
+    const text = `module Test { item AwkwardHands {
+        ItemType = base:clothing, BodyLocation = base:hands,
+        Tags = "AwkwardGloves; MOD:Some/Path; Other:Nested:Path",
+        UnknownTagMetadata = KeepMe,
+    } item BareHands { BodyLocation = base:hands, } }`;
+    const [tagged, bare] = parseItemDefinitions(text, provenance);
+
+    assert.deepEqual(tagged.tags, ['base:awkwardgloves', 'mod:some/path', 'other:nested:path']);
+    assert.equal(tagged.rawFields.find(({ name }) => name === 'Tags').value, 'AwkwardGloves; MOD:Some/Path; Other:Nested:Path');
+    assert.equal(tagged.rawFields.at(-1).value, 'KeepMe');
+    assert.equal(tagged.rawFields.find(({ name }) => name === 'Tags').offset, text.indexOf('Tags'));
+    assert.ok(!Object.hasOwn(tagged, 'conditionMax'));
+    assert.ok(!Object.hasOwn(tagged, 'weight'));
+    assert.ok(!Object.hasOwn(bare, 'tags'));
+    provenance.path = 'changed';
+    tagged.tags[0] = 'changed';
+    assert.equal(tagged.provenance.path, 'tags.txt');
+    assert.deepEqual(parseItemDefinitions(text, provenance)[0].tags, ['base:awkwardgloves', 'mod:some/path', 'other:nested:path']);
+
+    for (const value of [':AwkwardGloves', 'Base:', ';AwkwardGloves', 'AwkwardGloves;', 'One;;Two']) {
+        assert.throws(() => parseItemDefinitions(`module Test { item Bad { Tags = "${value}", } }`, 'bad-tags.txt'), /bad-tags.txt.*Tags/);
+    }
+});
+
+test('original wearable seeding applies script constructor defaults only at registration and preserves existing owners', async () => {
+    const subject = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
+    const source = `module Base {
+        item Shoes_ArmyBoots { BodyLocation = base:shoes, ConditionMax = 30, Weight = 2, RemoveOnBroken = false, }
+        item Shoes_FlipFlop { BodyLocation = base:shoes, ConditionMax = 1, Weight = .2, }
+    } module Test {
+        item LightHands { ItemType = base:clothing, BodyLocation = base:hands, Weight = .1, Tags = AwkwardGloves, }
+        item HeavyHands { ItemType = base:clothing, BodyLocation = base:hands, Weight = 1, Tags = IgnoreZombieDensity;AwkwardGloves, }
+        item DefaultHands { BodyLocation = base:hands, }
+        item SourceHands { BodyLocation = base:hands, ConditionMax = 4, ConditionLowerChanceOneIn = 3, Weight = .5, RunSpeedModifier = .8, RemoveOnBroken = false, }
+        item Unrelated { BodyLocation = base:head, }
+    }`;
+    const content = {
+        manifest: { sourceBuild: { version: 'synthetic' } },
+        /**
+         * Supply the synthetic source file consumed by wearable seeding.
+         *
+         * @returns {object} Source metadata and text reader.
+         */
+        getFile: () => ({
+            size: source.length,
+            lastModified: 123,
+            /**
+             * Read synthetic source without external content.
+             *
+             * @returns {Promise<string>} Fixture script text.
+             */
+            text: () => Promise.resolve(source),
+        }),
+    };
+    const existing = subject.registerItemDefinition({
+        fullType: 'Base.Shoes_ArmyBoots', bodyLocation: 'base:shoes', conditionMax: 7,
+        conditionLowerChanceOneIn: 4, removeOnBroken: false, stackLimit: 1, weight: 3,
+        provenance: { path: 'saved-owner' },
+    }, { owner: 'saved-mod' });
+
+    await seedOriginalWearables(subject, content);
+    const definitions = subject.itemDefinitions();
+
+    assert.deepEqual(definitions.map(({ fullType }) => fullType), [
+        'Base.Shoes_ArmyBoots', 'Base.Shoes_FlipFlop', 'Test.LightHands', 'Test.HeavyHands',
+        'Test.DefaultHands', 'Test.SourceHands',
+    ]);
+    assert.deepEqual(definitions[0], existing);
+
+    for (const [fullType, weight, tags] of [
+        ['Test.LightHands', 0.1, ['base:awkwardgloves']],
+        ['Test.HeavyHands', 1, ['base:ignorezombiedensity', 'base:awkwardgloves']],
+        ['Test.DefaultHands', 1, []],
+    ]) {
+        const definition = definitions.find((entry) => entry.fullType === fullType);
+
+        assert.equal(definition.owner, 'ProjectZomboid');
+        assert.equal(definition.conditionMax, 10);
+        assert.equal(definition.conditionLowerChanceOneIn, 10);
+        assert.equal(definition.removeOnBroken, true);
+        assert.equal(definition.runSpeedModifier, 1);
+        assert.equal(definition.stackLimit, 1);
+        assert.ok(Math.abs(definition.weight - weight) < 1e-6);
+        assert.deepEqual(definition.tags, tags);
+        assert.equal(definition.provenance.path, 'media/scripts/generated/items/clothing.txt');
+        const id = subject.command({ type: 'spawnItem', fullType, x: 5, y: 5 }).id;
+
+        assert.equal(subject.items().find((item) => item.id === id).condition, 10);
+        subject.command({ type: 'pickup', id });
+        subject.command({ type: 'wear', id });
+        assert.equal(subject.isWearingAwkwardGloves(), tags.includes('base:awkwardgloves'));
+    }
+
+    const explicit = definitions.find(({ fullType }) => fullType === 'Test.SourceHands');
+
+    assert.equal(explicit.conditionMax, 4);
+    assert.equal(explicit.conditionLowerChanceOneIn, 3);
+    assert.equal(explicit.weight, 0.5);
+    assert.equal(explicit.runSpeedModifier, 0.8);
+    assert.equal(explicit.removeOnBroken, false);
+    assert.ok(!Object.hasOwn(parseItemDefinitions(source, 'synthetic')[2], 'conditionMax'));
+    await seedOriginalWearables(subject, content);
+    assert.deepEqual(subject.itemDefinitions(), definitions);
+});
+
+test('original wearable seeding still refuses missing required footwear before registration', async () => {
+    const subject = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
+    const content = {
+        manifest: { sourceBuild: { version: 'synthetic' } },
+        /**
+         * Supply a fixture intentionally missing the required footwear.
+         *
+         * @returns {object} Synthetic source text reader.
+         */
+        getFile: () => ({
+            /**
+             * Read the synthetic hands-only script.
+             *
+             * @returns {Promise<string>} Fixture script text.
+             */
+            text: () => Promise.resolve('module Test { item Hands { BodyLocation = base:hands, } }'),
+        }),
+    };
+
+    await assert.rejects(seedOriginalWearables(subject, content), /Original footwear definition missing/);
+    assert.deepEqual(subject.itemDefinitions(), []);
 });
 
 test('malformed script structure and recognized numeric or boolean values reject with source context', () => {

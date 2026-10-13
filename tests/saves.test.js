@@ -312,6 +312,38 @@ test('portable inventory restores stable worn IDs and damaged condition without 
     assert.deepEqual(restored.engine.snapshot(), engine.snapshot());
 });
 
+test('portable save restores tagged native handwear without a stored actor glove flag', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.registerItemDefinition({
+        fullType: 'Synthetic.Gloves', bodyLocation: 'base:hands', conditionMax: 10,
+        stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 10,
+        tags: ['base:awkwardgloves', 'fixture:portable'],
+    }, { owner: 'test' });
+    const actor = engine.snapshot();
+    const id = engine.command({ type: 'spawnItem', fullType: 'Synthetic.Gloves', x: actor.x, y: actor.y }).id;
+
+    engine.command({ type: 'pickup', id });
+    engine.command({ type: 'wear', id });
+    assert.equal(engine.isWearingAwkwardGloves(), true);
+    const cells = record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: new Uint8Array(Buffer.from(cell.bytes, 'base64')),
+    }));
+    const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+    const restored = await store.restore(exported);
+
+    assert.deepEqual(restored.engine.itemDefinitions()[0].tags, ['base:awkwardgloves', 'fixture:portable']);
+    assert.equal(restored.engine.wornItem('base:hands').id, id);
+    assert.equal(restored.engine.isWearingAwkwardGloves(), true);
+    assert.deepEqual(restored.engine.items(), engine.items());
+    assert.equal(restored.engine.saveState().values.length, 12, 'actor persistence has no additional glove flag');
+    restored.engine.command({ type: 'unequip', id });
+    assert.equal(restored.engine.isWearingAwkwardGloves(), false);
+    restored.engine.command({ type: 'wear', id });
+    assert.equal(restored.engine.isWearingAwkwardGloves(), true);
+    assert.equal(engine.isWearingAwkwardGloves(), true, 'restored inventory mutations are isolated');
+});
+
 test('portable moodle inputs retain pain timing and reject signed invalid state atomically', async () => {
     const { engine, record, store } = await fixture();
 

@@ -74,6 +74,7 @@ method on that handle throws (`stage: 'api'`).
 | `api.items.inventoryState()` | detached `ModInventoryState` | Native flat-player `capacityWeight`, carry `capacity` and independently stored `maxWeight`; ordinary initial limits are 50 versus 8, not one threshold. |
 | `api.items.setWeight(id, weight)` / `.setActualWeight(id, actualWeight)` | `ModCommandResult` | Independent live native f32 fields through shared precommit hooks; finite/nonnegative/full-precision f32 range required before conversion. |
 | `api.character.getHealth()` / `.isDead()` / `.setHealth(health)` | number / boolean / `ModCommandResult` | WASM health `[0,100]`; health zero is current port death policy, not native survival fidelity. |
+| `api.character.isWearingAwkwardGloves()` | boolean | Actual native `base:hands` equipment and its definition's `base:awkwardgloves` tag; unsupported native capability throws, never a fabricated false. |
 | `api.character.moodles()` | detached `ModMoodle[]` | Ordered original opaque IDs/levels `0..4`, statically derived rules over explicit inputs; no invented neutral fallback. |
 | `api.character.moodleInputs()` / `.inputLimits()` | detached named inputs / validation metadata | WASM-owned values/limits; numeric `{min,max,default,integer}` or boolean `{type:'boolean',default}`. |
 | `api.character.setStat(name, value)` / `.setMoodleInputs(inputs)` | `ModCommandResult` | Single stat or atomic partial input update through precommit hooks; exact names/types/full-precision limits required. |
@@ -130,13 +131,23 @@ before conversion to F32 state, avoiding boundary-rounding escapes. The page own
 `ModAction`](../../types/mod-api.d.ts) are the public records, not internal
 ordinals/pointers. Definitions contain `fullType`, nullable `bodyLocation`,
 `conditionMax`, `stackLimit`, `removeOnBroken`, `conditionLowerChanceOneIn`, native
-f32 `weight` and detached source/appearance metadata; returned definitions add
-the real owner. Omitted weight uses the original script-item constructor value 1.
-Registration is legal only inside synchronous `activate`, bound to that mod id.
-Duplicates require `{override:true}`. Failed activation restores first-touch
-numeric rows/owners and appended metadata. The application seeds missing original
-footwear on New/restore without replacing saved definitions, then freezes
-registration before play; freezing is not a mod API.
+f32 `weight`, optional `tags?: readonly string[]` and detached source/appearance
+metadata; returned definitions add the real owner. Omitted weight uses the
+original script-item constructor value 1. Registration is legal only inside
+synchronous `activate`, bound to that mod id. Duplicates require `{override:true}`.
+Failed activation restores first-touch numeric rows/owners and appended metadata.
+The application seeds missing original footwear/hands on New/restore without
+replacing saved definitions or owners, then freezes registration before play;
+freezing is not a mod API.
+
+Source semicolon-delimited `Tags` parse into canonical lowercase `namespace:path`
+identities with default namespace `base`; raw fields/provenance remain intact.
+Public registration accepts an optional array of resource-ID strings, validates
+and canonicalizes it before native registration, and clones it on ingress/query;
+omission means an empty list. The parser adds no gameplay defaults. Only original
+wearable seeding applies verified constructor values before authored fields:
+condition maximum/chance 10, weight/run-speed modifier 1 and remove-on-broken true.
+These loader defaults are not new defaults for required public definition fields.
 
 Items contain stable never-reused positive u32 `id`, `fullType`,
 `location:'ground'|'inventory'`, `x`, `y`, `condition`, `count`, independent live
@@ -167,11 +178,28 @@ That aggregate is not stored as a new save field or written into bounded moodle
 inputs. This is not nested-container, ammo/fluid-content, hotbar, Moveable or
 trait/dynamic-weight parity. Lua unknown-content cases refuse explicitly.
 
-The current game path is a bounded original-footwear subset, not full inventory,
-loot or containers. One wearable per stack is explicit port policy. Equipped
-clothing is not connected to skinned rendering, and static FBX ground parsing is
-not ground-item visual acceptance. Native flat-item carry now exists; automatic
-encumbrance/run-speed/tear, broader item use and survival dynamics remain unsupported.
+The current game path is a bounded source footwear/hands subset, not full
+inventory, loot or containers. One wearable per stack (`stackLimit:1`) is explicit
+port policy, not a source constructor default. Equipped clothing is not connected
+to skinned rendering, and static FBX ground parsing is not ground-item visual
+acceptance. Native flat-item carry now exists; automatic encumbrance/run-speed/tear,
+broader item use and survival dynamics remain unsupported.
+
+`api.character.isWearingAwkwardGloves()` and live Lua
+`player:isWearingAwkwardGloves()` query the actual native item worn on `base:hands`
+and the current definition's `base:awkwardgloves` flag, without an actor flag or
+host-only cached result. Existing definition/item saves retain detached tags;
+restore derives the native flag from validated definitions and worn state.
+Actor format 2/twelve words and ABI 1 stay unchanged. Unsupported native
+capabilities throw attributed errors instead of returning false.
+
+Six focused native/parser/SDK/Lua/portable-save checks passed after the new
+real-WASM query failed before implementation; the build passed and the full
+integrated check is pending. Actual original-scene public SDK boxing-glove
+wear/unequip/rewear produced true/false/true. Trusted Save revision 6 and browser
+reload retained worn ID 1/condition 10, tags and true query. These numeric/state
+proofs do not establish visible glove art, source pickup duration or a native
+timed-action queue; original accessible context and roof visibility remain open.
 
 Health accepts finite `[0,100]`; `isDead()` currently means health zero.
 `onCharacterDeath` receives detached `{type:'CharacterDeath', submittedBy,

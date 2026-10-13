@@ -4,7 +4,7 @@ import { createEngine } from './engine.js';
 import { openMapCell } from './map-tiles.js';
 import { createModManager, parseModPackage, readPackageFile, resolveModOrder } from './mod-manager.js';
 import { createModHost } from './mods.js';
-import { loadNativeGameResources, seedOriginalFootwear } from './native-game-resources.js';
+import { loadNativeGameResources, seedOriginalWearables } from './native-game-resources.js';
 import { bindNativeSession, closeNativeSession, discoverNativePackages, nativePackageFiles, prepareNativeSession } from './native-mod-loader.js';
 import { openPack } from './packs.js';
 import { createRenderer, worldFromCanvas } from './renderer.js';
@@ -1208,6 +1208,12 @@ function createSessionModHost(binding) {
          */
         wornItem: (bodyLocation) => binding.engine.wornItem(bodyLocation),
         /**
+         * Query this session's actual native hands item and definition tag.
+         *
+         * @returns {boolean} Whether the current hands wearable is awkward.
+         */
+        isWearingAwkwardGloves: () => binding.engine.isWearingAwkwardGloves(),
+        /**
          * Read this session's authoritative health scalar.
          *
          * @returns {number} Engine health within [0, 100].
@@ -1396,7 +1402,7 @@ async function activateSession(staged, namespaces, required) {
     let targetUI;
 
     try {
-        await seedOriginalFootwear(staged.engine, content);
+        await seedOriginalWearables(staged.engine, content);
 
         const resources = await loadNativeGameResources(content, selectedNative, 1 / FIXED_STEP_SECONDS);
 

@@ -965,6 +965,65 @@ const footwear = {
     removeOnBroken: false, conditionLowerChanceOneIn: 3, texture: 'fixture-shoe',
 };
 
+test('SDK awkward-glove query follows real native handwear and live definition replacement', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    await host.load(moduleUrl(`${manifestSource('fx-gloves')}
+export function activate(api) {
+  fx.api = api;
+  api.items.definitions.register(${JSON.stringify({
+        ...footwear, fullType: 'Fixture.Gloves', bodyLocation: 'base:hands', tags: ['base:awkwardgloves'],
+    })});
+  api.items.definitions.register(${JSON.stringify({
+        ...footwear, fullType: 'Fixture.LightGloves', bodyLocation: 'base:hands',
+    })});
+  api.items.definitions.register(${JSON.stringify({
+        ...footwear, fullType: 'Fixture.TaggedShoes', bodyLocation: 'base:shoes', tags: ['base:awkwardgloves'],
+    })});
+}`));
+    const api = fx.api;
+    const ids = ['Fixture.Gloves', 'Fixture.LightGloves', 'Fixture.TaggedShoes'].map((fullType) => {
+        const id = api.items.spawn({ fullType, x: 5, y: 5 }).snapshot.id;
+
+        api.items.pickup(id);
+
+        return id;
+    });
+    const query = api.character.isWearingAwkwardGloves;
+
+    assert.equal(query(), false, 'tagged carried gloves are not worn');
+    api.items.wear(ids[2]);
+    assert.equal(query(), false, 'a tagged non-hands item does not qualify');
+    api.items.wear(ids[0]);
+    assert.equal(query(), true);
+    const metadata = api.items.definitions.get('Fixture.Gloves');
+
+    metadata.tags.length = 0;
+    assert.deepEqual(api.items.definitions.get('Fixture.Gloves').tags, ['base:awkwardgloves']);
+    assert.equal(query(), true, 'detached metadata cannot alter the native tag flag');
+    api.items.wear(ids[1]);
+    assert.equal(query(), false, 'replacement handwear controls the query');
+    api.items.wear(ids[0]);
+    assert.equal(query(), true);
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('fx-gloves-rollback')}
+export function activate(api) {
+  api.items.definitions.register(${JSON.stringify({
+        ...footwear, fullType: 'Fixture.Gloves', bodyLocation: 'base:hands', tags: [],
+    })}, {override: true});
+  assert.equal(api.character.isWearingAwkwardGloves(), false);
+  throw new Error('rollback glove definition');
+}`)), { modId: 'fx-gloves-rollback', stage: 'activate' });
+    assert.equal(query(), true, 'failed activation restores the native awkward-gloves definition flag');
+    assert.deepEqual(api.items.definitions.get('Fixture.Gloves').tags, ['base:awkwardgloves']);
+    engine.registerItemDefinition({
+        ...footwear, fullType: 'Fixture.Gloves', bodyLocation: 'base:hands', tags: [],
+    }, { owner: 'fx-gloves', override: true });
+    assert.equal(query(), false, 'the live definition, not an actor flag, controls the query');
+    host.dispose();
+    assert.throws(query, { modId: 'fx-gloves', stage: 'api' });
+});
+
 test('public footwear actions preserve ids and authoritative condition through hooks', async () => {
     const engine = await newEngine();
     const host = createModHost(engine);
@@ -1322,6 +1381,7 @@ test('core-only engines refuse item and health capabilities while movement mods 
         () => host.api.items.setActualWeight(1, 1),
         () => host.api.character.isDead(), () => host.api.character.setHealth(0),
         () => host.api.character.moodles(),
+        () => host.api.character.isWearingAwkwardGloves(),
     ]) {
         assert.throws(attempt, /unsupported/);
     }

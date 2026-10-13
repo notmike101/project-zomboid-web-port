@@ -176,6 +176,7 @@ local function item(id)
 end
 function player:getClothingItem_Feet() return item(hostCall('worn','base:shoes')) end
 function player:getWornItem(location) return item(hostCall('worn',location)) end
+function player:isWearingAwkwardGloves() return hostCall('isWearingAwkwardGloves') end
 local inventory = nativeObject('ItemContainer')
 function inventory:getCapacityWeight() return hostCall('inventoryState').capacityWeight end
 function inventory:getMaxWeight() return hostCall('inventoryState').maxWeight end
@@ -939,6 +940,7 @@ export async function createLuaSession(options = {}) {
 
                 return typeof worn === 'object' && worn !== null ? worn.id : worn;
             }
+            case 'isWearingAwkwardGloves': return capability('character', 'isWearingAwkwardGloves');
             case 'health': return capability('character', 'getHealth');
             case 'isDead': return capability('character', 'isDead');
             case 'bodyParts': return capability('character', 'bodyParts');

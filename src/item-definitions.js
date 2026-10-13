@@ -218,6 +218,28 @@ function scriptRecords(text, provenance, wanted) {
 }
 
 /**
+ * Normalize source Tags with ResourceLocation's first-colon/default-base rule.
+ *
+ * @param {string} value - Semicolon-delimited source tag identifiers.
+ * @param {() => never} fail - Source-context rejection for an empty namespace or path.
+ * @returns {string[]} Detached lowercase resource identifiers in source order.
+ */
+function canonicalTags(value, fail) {
+    return value.split(';').map((tag) => {
+        const identifier = tag.trim();
+        const colon = identifier.indexOf(':');
+        const namespace = colon === -1 ? 'base' : identifier.slice(0, colon);
+        const path = colon === -1 ? identifier : identifier.slice(colon + 1);
+
+        if (!namespace || !path) {
+            fail();
+        }
+
+        return `${namespace.toLowerCase()}:${path.toLowerCase()}`;
+    });
+}
+
+/**
  * Map only fields explicitly present in source to the consumer contract.
  *
  * @param {string} text - Original script source.
@@ -246,6 +268,8 @@ function definitions(text, provenance, kind, mapping) {
                 }
 
                 value = value === 'true';
+            } else if (type === 'tags') {
+                value = canonicalTags(value, () => fail(`Invalid ${field.name} resource location.`, field.offset));
             } else if (type) {
                 const number = Number(value);
 
@@ -275,7 +299,7 @@ function parseItemDefinitions(text, provenance) {
         ItemType: ['type'], Type: ['type'], DisplayName: ['displayName'], BodyLocation: ['bodyLocation'],
         ConditionMax: ['conditionMax', 'integer'], ConditionLowerChanceOneIn: ['conditionLowerChanceOneIn', 'positiveInteger'],
         RemoveOnBroken: ['removeOnBroken', 'boolean'], Weight: ['weight', 'number'], RunSpeedModifier: ['runSpeedModifier', 'number'],
-        WorldStaticModel: ['worldStaticModel'], ClothingItem: ['clothingItem'],
+        WorldStaticModel: ['worldStaticModel'], ClothingItem: ['clothingItem'], Tags: ['tags', 'tags'],
     });
 }
 

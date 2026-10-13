@@ -1468,6 +1468,7 @@ struct ItemDefinition {
     remove_on_broken: bool,
     condition_lower_chance_one_in: u32,
     weight: f32,
+    awkward_gloves: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1624,6 +1625,7 @@ pub extern "C" fn item_definition_register(
     chance: u32,
     override_existing: u32,
     weight: f64,
+    awkward_gloves: u32,
 ) -> i32 {
     let weight = match item_weight(weight) {
         Ok(weight) => weight,
@@ -1638,6 +1640,7 @@ pub extern "C" fn item_definition_register(
             || stack_limit == 0
             || remove_on_broken > 1
             || override_existing > 1
+            || awkward_gloves > 1
             || (items.transaction_owner != 0 && items.transaction_owner != owner)
             || index > items.definitions.len()
             || (index == items.definitions.len() && index >= MAX_DEFS)
@@ -1659,6 +1662,7 @@ pub extern "C" fn item_definition_register(
             remove_on_broken: remove_on_broken != 0,
             condition_lower_chance_one_in: chance,
             weight,
+            awkward_gloves: awkward_gloves != 0,
         };
         if index == items.definitions.len() {
             items.definitions.push(row);
@@ -1883,6 +1887,21 @@ pub extern "C" fn item_wear(id: u32) -> i32 {
         }
         items.live[index].slot = slot;
         OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_wearing_awkward_gloves(hands_slot: u32) -> u32 {
+    if hands_slot == 0 {
+        return 0;
+    }
+    ITEMS.with(|items| {
+        let items = items.borrow();
+        u32::from(items.live.iter().any(|item| {
+            item.slot == hands_slot
+                && item.location == 1
+                && items.definitions[item.definition as usize].awkward_gloves
+        }))
     })
 }
 

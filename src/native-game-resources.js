@@ -6,19 +6,19 @@ const FONT_DESCRIPTOR = 'media/fonts/zomboidSmall.fnt';
 const FONT_ATLAS = 'media/fonts/zomboidSmall_0.png';
 
 /**
- * Seed missing original footwear while retaining every present definition and owner.
- * Missing original fields refuse registration rather than inventing gameplay values.
+ * Seed missing original shoes and hands wearables, retaining present definitions and owners.
+ * Verified script Item constructor defaults precede explicitly authored source fields.
  *
  * @param {object} engine - Uncommitted candidate engine, fresh or restored.
  * @param {object} content - Validated external content directory.
- * @returns {Promise<void>} Registers source-ordered footwear.
+ * @returns {Promise<void>} Registers source-ordered shoes and hands wearables.
  */
-export async function seedOriginalFootwear(engine, content) {
+export async function seedOriginalWearables(engine, content) {
     const path = 'media/scripts/generated/items/clothing.txt';
     const source = content.getFile(path);
     const definitions = parseItemDefinitions(await source.text(), {
         path, sourceBuild: content.manifest.sourceBuild, size: source.size, lastModified: source.lastModified,
-    }).filter((definition) => definition.bodyLocation === 'base:shoes');
+    }).filter((definition) => definition.bodyLocation === 'base:shoes' || definition.bodyLocation === 'base:hands');
 
     for (const fullType of ['Base.Shoes_ArmyBoots', 'Base.Shoes_FlipFlop']) {
         if (!definitions.some((definition) => definition.fullType === fullType)) {
@@ -34,7 +34,10 @@ export async function seedOriginalFootwear(engine, content) {
         }
 
         // Project clothing policy: one wearable instance per stack, not a native default claim.
-        engine.registerItemDefinition({ ...definition, stackLimit: 1 }, { owner: 'ProjectZomboid' });
+        engine.registerItemDefinition({
+            conditionMax: 10, conditionLowerChanceOneIn: 10, weight: 1, runSpeedModifier: 1, removeOnBroken: true,
+            ...definition, stackLimit: 1,
+        }, { owner: 'ProjectZomboid' });
     }
 }
 

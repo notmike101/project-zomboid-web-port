@@ -570,6 +570,7 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.importItems([]),
         () => subject.inventoryState(),
         () => subject.wornItem('base:shoes'),
+        () => subject.isWearingAwkwardGloves(),
         () => subject.getHealth(),
         () => subject.isDead(),
         () => subject.command({ type: 'setHealth', health: 0 }),
@@ -842,7 +843,7 @@ test('invalid state envelopes and semantic refusals leave every state word untou
 function shoe(fullType = 'Base.Shoe', extra = {}) {
     return {
         fullType, bodyLocation: 'base:shoes', conditionMax: 30, stackLimit: 1,
-        removeOnBroken: false, conditionLowerChanceOneIn: 20, weight: 1,
+        removeOnBroken: false, conditionLowerChanceOneIn: 20, weight: 1, tags: [],
         source: { file: 'clothing.txt', model: 'Boots_Ground' }, ...extra,
     };
 }
@@ -862,7 +863,7 @@ test('native item pickup refuses source weight51 without treating maxWeight8 as 
     const { instance } = await WebAssembly.instantiate(moduleBytes, {});
     const api = instance.exports;
 
-    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 51), 0);
+    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 51, 0), 0);
     assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
     assert.notEqual(api.item_pickup(1), 0, 'the native shared pickup must enforce capacity');
 });
@@ -977,13 +978,24 @@ test('native live base and actual weights remain independent across definition o
 test('native item weight restore and definition rollback refuse malformed overflow atomically', async () => {
     const subject = await engine();
 
-    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 1.25 }), { owner: 'base' });
+    subject.registerItemDefinition(shoe('Base.Shoe', {
+        weight: 1.25, bodyLocation: 'base:hands', tags: ['base:awkwardgloves'],
+    }), { owner: 'base' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
+
+    subject.command({ type: 'pickup', id });
+    subject.command({ type: 'wear', id });
+    assert.equal(subject.isWearingAwkwardGloves(), true);
     subject.beginItemDefinitionRegistration('mod');
-    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 3 }), { owner: 'mod', override: true });
-    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 4 }), { owner: 'mod', override: true });
+    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 3, bodyLocation: 'base:hands' }),
+        { owner: 'mod', override: true });
+    assert.equal(subject.isWearingAwkwardGloves(), false);
+    subject.registerItemDefinition(shoe('Base.Shoe', { weight: 4, bodyLocation: 'base:hands' }),
+        { owner: 'mod', override: true });
     subject.rollbackItemDefinitionRegistration('mod');
     assert.equal(subject.itemDefinitions()[0].weight, 1.25);
-    const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
+    assert.deepEqual(subject.itemDefinitions()[0].tags, ['base:awkwardgloves']);
+    assert.equal(subject.isWearingAwkwardGloves(), true);
 
     subject.command({ type: 'setWeight', id, weight: 9.75 });
     subject.command({ type: 'setActualWeight', id, actualWeight: 0.125 });
@@ -994,6 +1006,7 @@ test('native item weight restore and definition rollback refuse malformed overfl
     restored.importItems(records);
     restored.loadState(subject.saveState());
     assert.deepEqual(restored.items(), records);
+    assert.equal(restored.isWearingAwkwardGloves(), true);
     const actor = restored.saveState();
     const definitions = restored.itemDefinitions();
 
@@ -1027,7 +1040,7 @@ test('native item weight restore and definition rollback refuse malformed overfl
     const { instance } = await WebAssembly.instantiate(moduleBytes, {});
     const api = instance.exports;
 
-    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1.25), 0);
+    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1.25, 0), 0);
     assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
     assert.equal(api.item_import_begin(), 0);
     assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 30, 1, 0, 2.5, 0.5), 0);
@@ -1038,7 +1051,7 @@ test('native item weight restore and definition rollback refuse malformed overfl
     assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr(), true), 1);
 
     for (const value of [-Number.MIN_VALUE, 3.402_823_466_385_288_6e38 + 2 ** 102, Number.NaN, Infinity]) {
-        assert.notEqual(api.item_definition_register(1, 1, 30, 1, 1, 0, 20, 0, value), 0);
+        assert.notEqual(api.item_definition_register(1, 1, 30, 1, 1, 0, 20, 0, value, 0), 0);
         assert.equal(api.item_definition_count(), 1);
         assert.notEqual(api.item_set_weight(1, value), 0);
         assert.notEqual(api.item_set_actual_weight(1, value), 0);
@@ -1115,6 +1128,88 @@ test('equipment replacement and broken-item policy preserve stable IDs and movem
     assert.equal(subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id, second + 1);
     subject.step(STEP);
     assert.equal(subject.snapshot().action, MOVING);
+});
+
+test('awkward-glove timing follows the actual tagged item worn on hands', async () => {
+    const subject = await engine();
+
+    assert.equal(subject.isWearingAwkwardGloves(), false);
+
+    for (const [fullType, bodyLocation, tags] of [
+        ['Base.TaggedGlove', 'base:hands', ['base:awkwardgloves']],
+        ['Base.PlainGlove', 'base:hands', []],
+        ['Base.TaggedShoe', 'base:shoes', ['base:awkwardgloves']],
+    ]) {
+        subject.registerItemDefinition(shoe(fullType, { bodyLocation, tags }), { owner: 'base' });
+    }
+
+    const tagged = subject.command({ type: 'spawnItem', fullType: 'Base.TaggedGlove', x: 5, y: 5 }).id;
+    const plain = subject.command({ type: 'spawnItem', fullType: 'Base.PlainGlove', x: 5, y: 5 }).id;
+    const shoeId = subject.command({ type: 'spawnItem', fullType: 'Base.TaggedShoe', x: 5, y: 5 }).id;
+
+    for (const id of [tagged, plain, shoeId]) {
+        subject.command({ type: 'pickup', id });
+    }
+
+    subject.command({ type: 'wear', id: tagged });
+    assert.equal(subject.isWearingAwkwardGloves(), true);
+    subject.command({ type: 'wear', id: plain });
+    subject.command({ type: 'wear', id: shoeId });
+    assert.equal(subject.isWearingAwkwardGloves(), false);
+    subject.command({ type: 'wear', id: tagged });
+    subject.command({ type: 'unequip', id: tagged });
+    assert.equal(subject.isWearingAwkwardGloves(), false);
+});
+
+test('item tags normalize detached resource IDs and reject malformed new rows and overrides atomically', async () => {
+    const subject = await engine();
+    const definition = shoe('Base.Glove', {
+        bodyLocation: 'base:hands', tags: [' AwkwardGloves ', 'Other:Tool:Grip'],
+    });
+    const registered = subject.registerItemDefinition(definition, { owner: 'base' });
+
+    assert.deepEqual(registered.tags, ['base:awkwardgloves', 'other:tool:grip']);
+    definition.tags.length = 0;
+    registered.tags.length = 0;
+    assert.deepEqual(subject.itemDefinitions()[0].tags, ['base:awkwardgloves', 'other:tool:grip']);
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.Glove', x: 5, y: 5 }).id;
+
+    subject.command({ type: 'pickup', id });
+    assert.equal(subject.isWearingAwkwardGloves(), false);
+    subject.command({ type: 'wear', id });
+    const before = subject.itemDefinitions();
+
+    for (const tags of [null, undefined, 'AwkwardGloves', {}, [1], [''], [':path'],
+        ['namespace:'], ['  '], ['base:awkwardgloves', null], Array.from({ length: 1 })]) {
+        assert.throws(() => subject.registerItemDefinition(shoe('Bad.Glove', { tags }), { owner: 'mod' }));
+        assert.throws(() => subject.registerItemDefinition(shoe('Base.Glove', { tags, bodyLocation: 'base:hands' }),
+            { owner: 'mod', override: true }));
+        assert.deepEqual(subject.itemDefinitions(), before);
+        assert.equal(subject.isWearingAwkwardGloves(), true);
+    }
+
+    const plain = shoe('Base.PlainGlove', { bodyLocation: 'base:hands' });
+
+    delete plain.tags;
+    assert.deepEqual(subject.registerItemDefinition(plain, { owner: 'base' }).tags, []);
+    subject.command({ type: 'drop', id, x: 5, y: 5 });
+    assert.equal(subject.isWearingAwkwardGloves(), false);
+});
+
+test('native awkward-glove ingress rejects nonboolean flags without changing definitions or worn state', async () => {
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+    const api = instance.exports;
+
+    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1, 1), 0);
+    assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
+    assert.equal(api.item_pickup(1), 0);
+    assert.equal(api.item_wear(1), 0);
+    assert.equal(api.item_wearing_awkward_gloves(0), 0);
+    assert.equal(api.item_wearing_awkward_gloves(1), 1);
+    assert.notEqual(api.item_definition_register(0, 2, 30, 1, 1, 0, 20, 1, 1, 2), 0);
+    assert.notEqual(api.item_definition_register(1, 2, 30, 1, 1, 0, 20, 0, 1, 2), 0);
+    assert.equal(api.item_definition_count(), 1);
+    assert.equal(api.item_wearing_awkward_gloves(1), 1);
 });
 
 test('explicit-ID import is atomic, detached and advances the exhausted sentinel without wrapping', async () => {
@@ -1224,7 +1319,7 @@ test('numeric WASM staging cannot publish a valid prefix after a later invalid r
     const { instance } = await WebAssembly.instantiate(moduleBytes, {});
     const api = instance.exports;
 
-    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1), 0);
+    assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1, 0), 0);
     assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
     assert.equal(api.item_import_begin(), 0);
     assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 20, 1, 1, 1, 1), 0);
@@ -1234,8 +1329,8 @@ test('numeric WASM staging cannot publish a valid prefix after a later invalid r
     assert.equal(api.item_read(0), 0);
     assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr(), true), 1);
     assert.equal(api.item_definition_begin(2), 0);
-    assert.equal(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1, 2), 0);
-    assert.equal(api.item_definition_register(0, 2, 50, 1, 1, 0, 5, 1, 3), 0);
+    assert.equal(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1, 2, 0), 0);
+    assert.equal(api.item_definition_register(0, 2, 50, 1, 1, 0, 5, 1, 3, 0), 0);
     assert.equal(api.item_definition_rollback(2), 0);
     assert.equal(api.item_definition_read(0), 0);
     const row = new DataView(api.memory.buffer, api.scratch_ptr());
@@ -1243,7 +1338,7 @@ test('numeric WASM staging cannot publish a valid prefix after a later invalid r
     assert.deepEqual(Array.from({ length: 7 }, (_, index) => row.getFloat64(index * 8, true)),
         [1, 30, 1, 1, 0, 20, 1]);
     assert.equal(api.item_definition_freeze(), 0);
-    assert.notEqual(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1, 2), 0);
+    assert.notEqual(api.item_definition_register(0, 2, 40, 1, 1, 0, 10, 1, 2, 0), 0);
 });
 
 test('live references refuse incompatible overrides and unloaded world holes refuse drops', async () => {
@@ -1307,11 +1402,11 @@ test('bounded numeric tables refuse overflow without changing live rows or the n
     const api = instance.exports;
 
     for (let index = 0; index < 4_096; index += 1) {
-        assert.equal(api.item_definition_register(index, 1, 30, 0, 1, 0, 20, 0, 1), 0);
+        assert.equal(api.item_definition_register(index, 1, 30, 0, 1, 0, 20, 0, 1, 0), 0);
         assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
     }
 
-    assert.notEqual(api.item_definition_register(4_096, 1, 30, 0, 1, 0, 20, 0, 1), 0);
+    assert.notEqual(api.item_definition_register(4_096, 1, 30, 0, 1, 0, 20, 0, 1, 0), 0);
     assert.notEqual(api.item_spawn(0, 5, 5, 1, 30), 0);
     assert.equal(api.item_definition_count(), 4_096);
     assert.equal(api.item_count(), 4_096);
