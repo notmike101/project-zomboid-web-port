@@ -1250,7 +1250,55 @@
     "realWindowsShortNameAlias": true,
     "deliveryTestsPassed": 9,
     "teardownRootFix": "One fixture finalizer awaits owned preview server exit before removing its working directory; no suppression or retry",
-    "productionRelease": "pending clean source checkpoint and release",
-    "hostedWindowsCI": "pending new run; previous hosted short-name cause remains inference"
+    "productionRelease": {
+      "path": "release/0.1.0-preview.1-ae37f0b17641",
+      "version": "0.1.0-preview.1",
+      "revision": "ae37f0b17641e7eafc7983d84a000fb53c737bb0",
+      "assetFreeAudit": true,
+      "filesVerified": 26,
+      "totalApplicationBytes": 917025,
+      "dependencyLicenses": [
+        {
+          "path": "licenses/lua.txt",
+          "bytes": 1294,
+          "sha256": "0cd55b0f241d9d40ceb477e3bdc74ed4a9bea4e6ad31f8106f7877c8814e4e95"
+        },
+        {
+          "path": "licenses/wasmoon.txt",
+          "bytes": 1074,
+          "sha256": "9ed9226c0138819a0859cf3c55a3414b4a186a17a4eaf4b5a51ceed7937615ac"
+        }
+      ],
+      "privateContentPackaged": false
+    },
+    "hostedWindowsCI": {
+      "id": 38333092993,
+      "url": "https://github.com/notmike101/project-zomboid-web-port/actions/runs/38333092993",
+      "headSha": "ae37f0b17641e7eafc7983d84a000fb53c737bb0",
+      "conclusion": "success",
+      "verifiedSteps": [
+        "locked setup",
+        "build and verify contracts",
+        "package identified preview",
+        "upload asset-free preview"
+      ],
+      "scope": "Synthetic Windows contracts/delivery; not browser GPU or physical-device proof",
+      "optionalAnnotations": "App token checks read permission unavailable (403); successful run and job results observed",
+      "artifact": {
+        "id": 11783268359,
+        "name": "standalone-preview-ae37f0b17641e7eafc7983d84a000fb53c737bb0",
+        "sizeInBytes": 300631,
+        "digest": "sha256:57b0f6908754e02acafda86dc8212f598d78c11dbf822c0a9dca78dc8a363754",
+        "expired": false
+      }
+    },
+    "sourceProvenance": {
+      "revision": "ae37f0b17641e7eafc7983d84a000fb53c737bb0",
+      "repository": "notmike101/project-zomboid-web-port",
+      "private": true,
+      "linkedAuthor": "agent-notmike101[bot]",
+      "linkedCommitter": "agent-notmike101[bot]",
+      "email": "337478082+agent-notmike101[bot]@users.noreply.github.com"
+    }
   }
 }

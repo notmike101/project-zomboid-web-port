@@ -3,7 +3,7 @@
 > For agentic workers: use subagent-driven-development; preserve the complete product brief as the destination. This file is the authoritative plan; avoid duplicate plans/status files.
 
 **Goal:** complete the standalone browser recreation against the full engineering brief: recognizable gameplay and presentation, substantial WASM simulation, genuine WebGPU, functional animation/effects/audio, persistent saves, accessible desktop/mobile use, comprehensive documented JavaScript mods, portable content/save transfer and asset-free reproducible delivery. Milestones are verification and backup checkpoints, not stopping conditions.
-**Architecture:** dependency-free Rust C ABI, direct browser WebGPU, accessible HTML host, externally provisioned content directory autoloaded from `/content/manifest.json`, trusted JavaScript ES-module mods.
+**Architecture:** dependency-free Rust C ABI, direct browser WebGPU, accessible HTML host, externally provisioned content directory autoloaded from `/content/manifest.json`, trusted JavaScript ES-module mods and unchanged native Lua through the existing package manager/real browser Lua WASM.
 **Tech stack:** Rust 1.96.0; Node 26.10.0/npm 11.19.1; vendored JavaScript/JSDoc ESLint configs.
 **Spec:** DECISIONS.md integration contract and user's engineering brief.
 
@@ -17,7 +17,7 @@ No original binaries/assets, converted caches, content packs or saves tracked or
 |---|---|---|---|
 | M0 Grounded setup | Verified environment, exact build evidence, assets classified, lint configs, bot attribution, reproducible commands | Local installation/toolchains, GitHub access | Verified; private remote and bot pushes established |
 | M1 Architecture proof | Real-content WebGPU rendering, WASM movement/cancel, browser input, mod changes actual WASM rule, standalone evidence | M0 local discovery; WebGPU browser | Verified prototype; source pushed, asset-free release audited, Windows CI passed |
-| M2 First accessibility slice | Directory-manifest autoload, real tile environment, collision, character, door/pickup, accessible UI, browser save/export/import/reload, provisioned local mod management | M1 | In progress: input ownership fix verified; directory boot and real-content integration require fresh browser proof |
+| M2 First accessibility slice | Directory-manifest autoload, real tile environment, collision, character, door/pickup, accessible UI, browser save/export/import/reload, provisioned local mod management | M1 | Directory/game-only boot, original tiles/skinning, navigation, retained-save lifecycle and local packages verified; door/pickup and complete backup-transfer acceptance remain |
 | M3 Gameplay expansion | Coherent increments: items/equipment, zombies/perception/AI, combat, health/needs, crafting/building, world loading, animation, audio, lighting/effects; public extension points per system | M2 and build-specific behavior evidence | Pending |
 | M4 Portability/resilience | Portable content-directory/private-host and save-backup transfer, physical mobile and second-device proof, quotas/recovery, mod migrations, GPU loss and measured performance budgets | M2/M3, physical devices | Pending |
 | M5 Release/handoff | Pinned Windows CI, asset-free versioned release, static hosting/update/rollback docs, exact capability matrix; incomplete releases labelled previews | M4 and remaining fidelity inventory | Pending |
@@ -29,6 +29,17 @@ Completion remains blocked until every required system, delivered mod extension,
 ### Existing native-game mod compatibility
 
 Existing Project Zomboid Lua mod compatibility is an additional completion requirement, not replaced by the browser JavaScript SDK. Implement native package discovery from externally provisioned directories, a real Lua runtime, supported original engine objects/events and data registrations, namespaced saves, lifecycle cleanup and attributed incompatibility diagnostics. Verify representative existing mods without rewriting their Lua source. Lua language compatibility and native Java/engine API coverage are separate gates; unsupported native dependencies must fail explicitly, never become silent no-ops. A Lua 5.4 Wasmoon runtime and Lua 5.1 compatibility preamble are work in progress, not Kahlua equivalence or completed original-mod support. Compatibility coverage grows with the corresponding WASM gameplay systems.
+
+### Current integrated checkpoint
+
+- [x] Original PZPK/legacy sprite-bank indexing, lazy PNG ranges and bounded WebGPU trimmed-sprite residency, observed with Tutorial geometry; nine unresolved vegetation names remain fidelity gaps, not guessed replacements.
+- [x] Original ASCII X model/bone/idle/walk loading and WebGPU skinning route; native character scale/facing and worn-appearance composition remain uncalibrated.
+- [x] Existing local package manager integration, revisioned multifile modules and JavaScript namespace initialization/migration through Save/Load/reboot/New.
+- [x] Disabled-by-default native Lua loader/lifecycle integration with owned real-VM/browser regressions, retained committed-VM rollback and serialized consent; not representative Workshop gameplay acceptance.
+- [x] Bot-authored source checkpoint `ae37f0b17641e7eafc7983d84a000fb53c737bb0`, [pinned Windows CI](https://github.com/notmike101/project-zomboid-web-port/actions/runs/38333092993) and actual asset-free release with both interpreter licenses and byte hashes.
+- [ ] Next: WASM-authoritative original item definitions and inventory/equipment/condition, public registration/action APIs and deterministic v1 save migration; original Lua UI/texture rendering for the representative footwear moodle.
+- [ ] Complete remaining M2 door/pickup and backup-transfer acceptance, then every M3–M5 system and device gate without lowering the destination.
+
 
 
 
