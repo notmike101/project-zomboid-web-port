@@ -74,6 +74,21 @@ test('directory range reads preserve literal paths and return only the requested
     assert.throws(() => directory.getFile('missing.pack'), /content missing/i);
 });
 
+test('untrusted interaction and audio roles are rejected before any private asset request', async (t) => {
+    for (const roles of [
+        { tileDefinitions: [{ path: '../private.tiles', fileId: 1 }] },
+        { tileDefinitions: [{ path: PATH, fileId: null }] },
+        { audio: { footstep: PATH, doorOpen: 'media/missing.wav', doorClose: PATH } },
+    ]) {
+        const document = manifest();
+
+        Object.assign(document.startup, roles);
+        serve(t, document, () => assert.fail('Invalid roles must not request private assets'));
+        // eslint-disable-next-line no-await-in-loop -- Each manifest boundary is independently rejected.
+        await assert.rejects(openContentDirectory(MANIFEST_URL), /path|source|fileId|manifest|audio|tile/u);
+    }
+});
+
 test('ignored ranges cancel their body without consuming a whole asset bank', async (t) => {
     let canceled = false;
     let read = false;

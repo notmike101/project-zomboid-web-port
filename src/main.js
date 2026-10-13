@@ -1,3 +1,4 @@
+import { createAudio } from './audio.js';
 import { openContentDirectory } from './content.js';
 import { createEngine } from './engine.js';
 import { openMapCell } from './map-tiles.js';
@@ -9,6 +10,7 @@ import { openPack } from './packs.js';
 import { createRenderer, worldFromCanvas } from './renderer.js';
 import { createSaveStore } from './saves.js';
 import { createTileLayer } from './tile-renderer.js';
+import { loadNativeTileRegistry, projectWorldObjects } from './world-objects.js';
 import { stageCells } from './world-session.js';
 
 const canvas = document.querySelector('#world');
@@ -65,6 +67,298 @@ let accumulator = 0;
 let lastAnnouncement = '';
 let animation;
 let toggledDirection;
+let tileRegistry;
+let audio;
+let audioError;
+let audioUnlocked = false;
+let audioUnlock;
+let audioResumeRequested = false;
+let nextAudioSession = 1;
+const baseAudioAssets = new Set();
+let presentedX;
+let presentedY;
+let presentedFacing = 0;
+
+/**
+ * Keep optional decoder/autoplay failures visible without stopping committed gameplay.
+ *
+ * @param {unknown} cause - Real browser audio failure.
+ * @returns {void} Retains diagnostic evidence.
+ */
+function reportAudioError(cause) {
+    audioError = cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * Stop voices synchronously; observe the browser's asynchronous suspend result.
+ *
+ * @returns {void} Stops optional playback.
+ */
+function pauseAudio() {
+    audioUnlocked = false;
+    audioResumeRequested = false;
+
+    if (audio) {
+        void audio.pause().catch(reportAudioError);
+    }
+}
+
+/**
+ * Resume only an already-created real context; creation belongs to trusted input.
+ *
+ * @returns {void} Observes asynchronous permission/native failures.
+ */
+function resumeAudio() {
+    if (!audio || failed || paused || sessionBusy || document.hidden) {
+        return;
+    }
+
+    if (audioUnlock) {
+        audioResumeRequested = true;
+
+        return;
+    }
+
+    audioUnlock = audio.unlock().then(() => {
+        audioUnlocked = true;
+
+        if (failed || paused || sessionBusy || document.hidden) {
+            pauseAudio();
+        }
+    }).catch(reportAudioError).finally(() => {
+        audioUnlock = undefined;
+
+        if (audioResumeRequested) {
+            audioResumeRequested = false;
+            resumeAudio();
+        }
+    });
+}
+
+/**
+ * Create the real AudioContext lazily, then decode only explicit original WAV roles.
+ *
+ * @param {Event} event - First or subsequent trusted keyboard/pointer gesture.
+ * @returns {void} Unlocks optional presentation, never a fake backend.
+ */
+function unlockAudio(event) {
+    if (!event.isTrusted || failed || !sessionReady) {
+        return;
+    }
+
+    if (!audio) {
+        try {
+            audio = createAudio();
+            setAudioListener(engine.snapshot());
+
+            for (const role of ['footstep', 'doorOpen', 'doorClose']) {
+                const path = content.manifest.startup.audio?.[role];
+
+                if (!path) {
+                    reportAudioError(new Error(`Original audio role ${role} is not provisioned.`));
+                    continue;
+                }
+
+                void (async () => {
+                    const bytes = await content.getFile(path).arrayBuffer();
+
+                    await audio.load(`base:${role}`, bytes, { owner: 'base' });
+                    baseAudioAssets.add(role);
+                })().catch(reportAudioError);
+            }
+        } catch (cause) {
+            reportAudioError(cause);
+        }
+    }
+
+    resumeAudio();
+}
+
+/**
+ * Match the rendered actor's retained horizontal facing and world position.
+ *
+ * @param {{x: number, y: number}} position - Current native actor coordinates.
+ * @returns {void} Updates the real positional listener when present.
+ */
+function setAudioListener(position) {
+    if (!audio) {
+        return;
+    }
+
+    try {
+        audio.setListener({
+            x: position.x, y: position.y, z: 0,
+            forwardX: Math.cos(presentedFacing), forwardY: Math.sin(presentedFacing),
+        });
+    } catch (cause) {
+        reportAudioError(cause);
+    }
+}
+
+/**
+ * Isolate every mod owner across candidate activation and cutover, while sharing base cues.
+ * Staged hosts cannot register/play; rollback cleanup addresses only their private namespace.
+ *
+ * @param {object} binding - Session-owned engine/context.
+ * @returns {object} Real adapter forwarding, available after the first trusted gesture.
+ */
+function sessionAudio(binding) {
+    const prefix = `session${nextAudioSession++}:`;
+    const assets = new Map();
+    /**
+     * Preserve shared base cue ids and namespace every session-owned asset.
+     *
+     * @param {string} id - Qualified public asset identity.
+     * @returns {string} Shared base identity or private session registration id.
+     */
+    const assetId = (id) => {
+        if (id.startsWith('base:')) {
+            return id;
+        }
+
+        if (!assets.has(id)) {
+            assets.set(id, `${prefix}asset${assets.size + 1}`);
+        }
+
+        return assets.get(id);
+    };
+
+    /**
+     * Isolate one mod owner's registrations and voices within this session.
+     *
+     * @param {string} owner - Exact public mod owner.
+     * @returns {string} Private session owner identity.
+     */
+    const ownerId = (owner) => `${prefix}${owner}`;
+    /**
+     * Refuse staged or replaced sessions before forwarding to the real adapter.
+     *
+     * @returns {object} Committed session's real audio adapter.
+     */
+    const requireLive = () => {
+        if (!audio || binding !== liveModContext) {
+            throw new Error('Audio requires a committed session and a trusted user gesture.');
+        }
+
+        return audio;
+    };
+
+    return {
+        /**
+         * Decode into this session's private registry while returning public identities.
+         *
+         * @param {string} id - Qualified public asset identity.
+         * @param {ArrayBuffer} bytes - Encoded audio consumed by native decoding.
+         * @param {{owner: string, override?: boolean}} options - Public owner and replacement policy.
+         * @returns {Promise<import('../types/mod-api').ModAudioAsset>} Decoded metadata with public ids.
+         */
+        load: async (id, bytes, options) => {
+            const adapter = requireLive();
+            const result = await adapter.load(assetId(id), bytes, { ...options, owner: ownerId(options.owner) });
+
+            return { ...result, id, owner: options.owner };
+        },
+        /**
+         * Play a local or shared cue with voices owned by this session's mod.
+         *
+         * @param {string} id - Qualified local or shared asset identity.
+         * @param {import('../types/mod-api').ModAudioPosition & {owner: string}} options - Public voice owner and playback settings.
+         * @returns {import('../types/mod-api').ModAudioVoice} Stoppable real audio voice.
+         */
+        play: (id, options) => requireLive().play(assetId(id), { ...options, owner: ownerId(options.owner) }),
+        /**
+         * Remove only this owner's registration from the session namespace.
+         *
+         * @param {string} id - Qualified public asset identity.
+         * @param {{owner: string}} options - Exact public registration owner.
+         * @returns {boolean} Whether a decoded or pending registration was removed.
+         */
+        unload: (id, options) => requireLive().unload(assetId(id), { owner: ownerId(options.owner) }),
+        /**
+         * Release this session owner's audio without touching shared base cues.
+         *
+         * @param {string} owner - Exact public mod owner.
+         * @returns {void} Stops owned voices and cancels pending registrations when audio exists.
+         */
+        unloadOwner: (owner) => audio?.unloadOwner(ownerId(owner)),
+    };
+}
+
+/**
+ * Play only decoded base cues in the committed, running session.
+ *
+ * @param {object} binding - Engine owner.
+ * @param {string} role - Explicit legacy original WAV role.
+ * @param {{x: number, y: number, z?: number}} position - Native world position.
+ * @returns {void} Reports real browser failures without mutating simulation.
+ */
+function playBaseCue(binding, role, position) {
+    if (binding !== liveModContext || !audioUnlocked || paused || sessionBusy || failed || document.hidden
+        || !baseAudioAssets.has(role)) {
+        return;
+    }
+
+    try {
+        audio.play(`base:${role}`, { owner: 'base', x: position.x, y: position.y, z: position.z ?? 0 });
+    } catch (cause) {
+        reportAudioError(cause);
+    }
+}
+
+/**
+ * Observe only committed native mutations, including mod-submitted and rewritten actions.
+ *
+ * @param {object} binding - Session-owned engine.
+ * @param {object} action - Validated command after precommit hooks.
+ * @returns {object} Authoritative command result.
+ */
+function sessionCommand(binding, action) {
+    const before = action.type === 'toggleDoor' ? binding.engine.doors() : undefined;
+    const result = binding.engine.command(action);
+
+    if (before && binding === liveModContext) {
+        const old = new Map(before.map((door) => [door.id, door]));
+
+        for (const door of binding.engine.doors()) {
+            if (old.get(door.id)?.open !== door.open) {
+                playBaseCue(binding, door.open ? 'doorOpen' : 'doorClose', door);
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * Accumulate only real accepted simulation displacement, not requested movement or wall contact.
+ *
+ * @param {object} binding - Session-owned engine.
+ * @param {number} seconds - Accepted fixed step duration.
+ * @returns {void} Advances native simulation and optional footsteps.
+ */
+function sessionStep(binding, seconds) {
+    const before = binding.engine.snapshot();
+
+    binding.engine.step(seconds);
+
+    if (binding !== liveModContext) {
+        return;
+    }
+
+    const after = binding.engine.snapshot();
+    const dx = after.x - before.x;
+    const dy = after.y - before.y;
+    const distance = Math.hypot(dx, dy);
+
+    if (distance > 1e-6) {
+        // Port presentation cadence: one legacy sample per 0.75 real world units.
+        binding.stepDistance = (binding.stepDistance ?? 0) + distance;
+        while (binding.stepDistance >= 0.75) {
+            binding.stepDistance -= 0.75;
+            playBaseCue(binding, 'footstep', after);
+        }
+    }
+}
 
 /**
  * Report failure without concealing unavailable WebGPU.
@@ -81,6 +375,7 @@ function report(cause) {
     error.textContent = cause.message ?? String(cause);
     failed = true;
     paused = true;
+    pauseAudio();
     held.clear();
     toggledDirection = undefined;
 
@@ -128,6 +423,7 @@ function refresh() {
         packages: packages?.diagnostics(), nativePackages, lua: luaSession?.diagnostics(), safeMods,
         startup, sessionReady, savedRevision, navigationCells: worldCells.map(({ x, y }) => ({ x, y })),
         tiles: tiles ? { cells: geometryCells.length, ...tiles } : null,
+        audio: audio ? { ...audio.diagnostics(), integrationError: audioError } : { contextState: 'not-created', integrationError: audioError },
         paused, failed, hidden: document.hidden, fixedStepSeconds: 1 / 60,
     }, null, 2);
     const actionName = ['idle', 'traveling to destination', 'toggle/manual walking'][snapshot.action];
@@ -263,7 +559,22 @@ function frame(time) {
 
     if (sessionReady && !sessionBusy) {
         try {
-            renderer.render(engine.snapshot());
+            const snapshot = engine.snapshot();
+            const dx = presentedX === undefined ? 0 : snapshot.x - presentedX;
+            const dy = presentedY === undefined ? 0 : snapshot.y - presentedY;
+
+            renderer.render(snapshot);
+
+            if (Math.hypot(dx, dy) > 1e-6) {
+                presentedFacing = Math.atan2(dy, dx);
+            }
+
+            if (presentedX !== snapshot.x || presentedY !== snapshot.y) {
+                setAudioListener(snapshot);
+            }
+
+            presentedX = snapshot.x;
+            presentedY = snapshot.y;
             canvas.style.cursor = gameUI?.cursorVisible() ? 'default' : '';
         } catch (cause) {
             report(cause);
@@ -498,6 +809,7 @@ function openPauseMenu() {
 
     stop();
     paused = true;
+    pauseAudio();
     accumulator = 0;
     lastFrame = undefined;
     pauseMenu.showModal();
@@ -526,6 +838,7 @@ function resumeGame() {
         canvas.focus({ preventScroll: true });
     }
 
+    resumeAudio();
     refresh();
 }
 
@@ -635,6 +948,13 @@ function keyUp(event) {
  */
 function visibilityChanged() {
     stop();
+
+    if (document.hidden) {
+        pauseAudio();
+    } else {
+        resumeAudio();
+    }
+
     accumulator = 0;
     lastFrame = undefined;
 }
@@ -685,6 +1005,7 @@ async function toggleMod() {
 function pageHidden(event) {
     cancelAnimationFrame(animation);
     stop();
+    pauseAudio();
 
     if (!event.persisted) {
         try {
@@ -699,6 +1020,10 @@ function pageHidden(event) {
         renderer?.destroy();
         clearInterval(autosave);
         saves?.close();
+
+        if (audio) {
+            void audio.dispose().catch(reportAudioError);
+        }
     }
 }
 
@@ -713,6 +1038,7 @@ function pageShown(event) {
         accumulator = 0;
         lastFrame = undefined;
         animation = requestAnimationFrame(frame);
+        resumeAudio();
     }
 }
 
@@ -800,7 +1126,20 @@ function createSessionModHost(binding) {
          * @param {object} action - Validated mod action.
          * @returns {object} Post-command snapshot.
          */
-        command: (action) => binding.engine.command(action),
+        command: (action) => sessionCommand(binding, action),
+        /**
+         * Read detached door state from this host's authoritative engine.
+         *
+         * @returns {object[]} Stable native door identities and current state.
+         */
+        doors: () => binding.engine.doors(),
+        /**
+         * Submit a door toggle through this session's shared command path.
+         *
+         * @param {string} id - Stable imported native door identity.
+         * @returns {object} Authoritative command result after hook resolution.
+         */
+        toggleDoor: (id) => sessionCommand(binding, { type: 'toggleDoor', id }),
         /**
          * Register source metadata and numeric fields in this session's engine.
          *
@@ -911,7 +1250,7 @@ function createSessionModHost(binding) {
          * @param {number} seconds - Simulation step.
          * @returns {void} Advances simulation.
          */
-        step: (seconds) => binding.engine.step(seconds),
+        step: (seconds) => sessionStep(binding, seconds),
         /**
          * Reset the current session.
          *
@@ -953,6 +1292,7 @@ function createSessionModHost(binding) {
             }
         },
     }, {
+        audio: sessionAudio(binding),
         /**
          * Return only an explicitly saved namespace, never object prototypes.
          *
@@ -1001,6 +1341,7 @@ async function activateSession(staged, namespaces, required) {
             selectedNative = [];
 
             for (const entry of installed.filter((item) => item.enabled && item.settings?.nativeLua)) {
+                // Read and validate descriptors in resolved order without retaining parallel file buffers.
                 // eslint-disable-next-line no-await-in-loop
                 const file = await readPackageFile(entry.id, entry.revision, 'native.json');
 
@@ -1113,11 +1454,13 @@ async function activateSession(staged, namespaces, required) {
     }
 
     // No callbacks run between UI publication and these synchronous session-owned bindings.
+    pauseAudio();
     liveModContext = targetContext;
     engine = targetContext.engine;
     worldCells = targetContext.cells;
     savedModState = targetContext.namespaces;
     mods = targetMods;
+    setAudioListener(engine.snapshot());
     packages = targetPackages;
     luaSession = targetLua;
     activeNativeDescriptors = selectedNative;
@@ -1144,6 +1487,7 @@ async function sessionOperation(action) {
     const wasPaused = paused;
 
     paused = true;
+    pauseAudio();
     document.querySelector('#session-controls').disabled = true;
     packageControls.disabled = true;
     try {
@@ -1158,6 +1502,7 @@ async function sessionOperation(action) {
     } finally {
         sessionBusy = false;
         paused = failed || !sessionReady || wasPaused || pauseMenu.open;
+        resumeAudio();
         document.querySelector('#session-controls').disabled = false;
         packageControls.disabled = startup === 'loading';
         refresh();
@@ -1208,7 +1553,7 @@ async function loadSession(id, prepared) {
         x: cell.x, y: cell.y, bytes: Uint8Array.from(atob(cell.bytes), (character) => character.charCodeAt(0)),
     }));
 
-    const geometry = await loadGeometry(cells, staged.engine.snapshot());
+    const geometry = await loadGeometry(cells, staged.engine, staged.doorState);
 
     try {
         await activateSession({ engine: staged.engine, cells }, staged.record.modState, staged.record.mods);
@@ -1254,18 +1599,55 @@ async function exportSession() {
  * Stage a visible original tile layer using deterministic pack precedence.
  *
  * @param {object[]} cells - Fully indexed staged geometry cells.
- * @param {object} [snapshot] - Staged player position for the first real tile window.
+ * @param {object} candidateEngine - Staged authoritative engine, never the old scene.
+ * @param {object} [doorState] - Exact persisted state; absent means normal source initialization.
  * @returns {Promise<object>} Validated layer/cells staged without replacing the scene.
  */
-async function rebuildTileLayer(cells, snapshot = engine.snapshot()) {
+async function rebuildTileLayer(cells, candidateEngine, doorState) {
     if (importedPacks.length === 0 || cells.length === 0) {
         throw new Error('The local content directory must contain texture packs and matching lotheader/lotpack geometry.');
+    }
+
+    const snapshot = candidateEngine.snapshot();
+    const projection = await projectWorldObjects(cells, tileRegistry);
+    const seed = new Uint32Array(1);
+
+    if (doorState) {
+        seed[0] = doorState.seed;
+    } else {
+        do {
+            crypto.getRandomValues(seed);
+        } while (seed[0] === 0);
+    }
+
+    candidateEngine.importDoors(projection.doors, {
+        squares: projection.squares, seed: seed[0], lockedHouses: 4,
+        initializeLocks: !doorState,
+    });
+
+    if (doorState) {
+        candidateEngine.loadDoorState(doorState);
     }
 
     const layer = createTileLayer({
         ...renderer.gpuResources(),
         packs: importedPacks,
         cells,
+        doors: {
+            visuals: projection.doorVisuals,
+            /**
+             * Read the authoritative native door mutation revision.
+             *
+             * @returns {number} Current imported door revision.
+             */
+            revision: () => candidateEngine.doorRevision(),
+            /**
+             * Read detached native door state for visual variant selection.
+             *
+             * @returns {object[]} Stable door identities and current native state.
+             */
+            read: () => candidateEngine.doors(),
+        },
     });
 
     try {
@@ -1312,10 +1694,11 @@ async function importPacks(files) {
  * Import paired original map catalogue and compressed tile placements.
  *
  * @param {object[]} files - Lazy cell lotheader and lotpack sources.
- * @param {object} snapshot - Staged player location.
+ * @param {object} candidateEngine - Isolated authoritative engine.
+ * @param {object} [doorState] - Exact validated restore state.
  * @returns {Promise<object>} Staged original geometry ready for atomic publication.
  */
-async function importGeometry(files, snapshot) {
+async function importGeometry(files, candidateEngine, doorState) {
     const selected = new Map(files.map((file) => [file.name, file]));
     const next = new Map();
 
@@ -1343,7 +1726,7 @@ async function importGeometry(files, snapshot) {
         throw new Error('No matching original geometry for the saved navigation cells. Provision their lotheader and lotpack files in the content directory.');
     }
 
-    return rebuildTileLayer([...next.values()], snapshot);
+    return rebuildTileLayer([...next.values()], candidateEngine, doorState);
 }
 
 /**
@@ -1372,10 +1755,11 @@ async function importCharacter() {
  * Load only geometry matching authoritative navigation; do not merge worlds.
  *
  * @param {object[]} cells - New or retained navigation cells.
- * @param {object} snapshot - Staged player position.
+ * @param {object} candidateEngine - Isolated authoritative engine.
+ * @param {object} [doorState] - Validated state to apply after matching source import.
  * @returns {Promise<object>} Staged geometry for every authoritative navigation cell.
  */
-async function loadGeometry(cells, snapshot) {
+async function loadGeometry(cells, candidateEngine, doorState) {
     if (importedPacks.length === 0) {
         await importPacks(content.manifest.startup.packs.map((path) => content.getFile(path)));
     }
@@ -1404,7 +1788,7 @@ async function loadGeometry(cells, snapshot) {
         files.push(content.getFile(header), content.getFile(lotpack));
     }
 
-    return importGeometry(files, snapshot);
+    return importGeometry(files, candidateEngine, doorState);
 }
 
 /**
@@ -1427,7 +1811,7 @@ async function newSession() {
 
     sessionState.values = [spawn.x, spawn.y, sessionState.values[2], spawn.x, spawn.y, 0, 0, 0, 0, 1, ...sessionState.values.slice(10)];
     staged.engine.loadState(sessionState);
-    const geometry = await loadGeometry(staged.cells, staged.engine.snapshot());
+    const geometry = await loadGeometry(staged.cells, staged.engine);
 
     try {
         await activateSession(staged, Object.create(null));
@@ -1551,6 +1935,7 @@ try {
             document.querySelector('#visual-status').textContent = `Loading local content: ${JSON.stringify(progress)}`;
         },
     });
+    tileRegistry = await loadNativeTileRegistry(content);
     let prepared;
     let restoreError;
 
@@ -1705,6 +2090,8 @@ pauseMenu.addEventListener('cancel', (event) => {
     resumeGame();
 });
 document.addEventListener('keydown', keyDown);
+document.addEventListener('keydown', unlockAudio, { capture: true });
+document.addEventListener('pointerdown', unlockAudio, { capture: true });
 document.addEventListener('keyup', keyUp);
 globalThis.addEventListener('blur', stop);
 document.addEventListener('visibilitychange', visibilityChanged);

@@ -1303,3 +1303,179 @@ for (const ending of ['return', 'throw']) {
         host.dispose();
     });
 }
+
+test('door capabilities refuse core-only engines with caller attribution and preserve movement', async () => {
+    const engine = await newEngine();
+    const host = createModHost({ snapshot: engine.snapshot, command: engine.command, setSpeed: engine.setSpeed });
+
+    await host.load(moduleUrl(`${manifestSource('fx-door-unsupported')}
+export function activate(api) { fx.api = api; }`));
+    assert.throws(() => fx.api.world.getDoors(), { name: 'ModError', modId: 'fx-door-unsupported', stage: 'world' });
+    assert.throws(() => fx.api.world.toggleDoor('door:5:5:0:0'), {
+        name: 'ModError', modId: 'fx-door-unsupported', stage: 'action',
+    });
+    assert.equal(host.command({ type: 'walk', x: 1, y: 0 }).committed, true);
+    host.dispose();
+});
+
+test('missing audio adapter fails honestly with owner attribution and inert captured handles', async () => {
+    const host = createModHost(await newEngine());
+
+    await host.load(moduleUrl(`${manifestSource('fx-audio-unsupported')}
+export function activate(api) { fx.api = api; }`));
+    const api = fx.api;
+
+    await assert.rejects(() => api.audio.load('cue', new ArrayBuffer(4)), {
+        name: 'ModError', modId: 'fx-audio-unsupported', stage: 'audio', message: /unsupported/,
+    });
+    assert.throws(() => api.audio.play('base:cue', { x: 5, y: 5, z: 0 }), {
+        name: 'ModError', modId: 'fx-audio-unsupported', stage: 'audio', message: /unsupported/,
+    });
+    assert.throws(() => api.audio.unload('cue'), {
+        name: 'ModError', modId: 'fx-audio-unsupported', stage: 'audio', message: /unsupported/,
+    });
+    assert.equal(Object.isFrozen(api.audio), true);
+    host.dispose();
+    await assert.rejects(() => api.audio.load('cue', new ArrayBuffer(4)), { stage: 'api' });
+    assert.throws(() => api.audio.play('cue', { x: 5, y: 5, z: 0 }), { stage: 'api' });
+    assert.throws(() => api.audio.unload('cue'), { stage: 'api' });
+    assert.deepEqual(fx.unhandled, []);
+});
+
+/**
+ * Imports an independently authored closed portal into the real WASM world.
+ *
+ * @param {object} engine - Compiled authoritative wrapper.
+ * @returns {string} Stable source placement identity.
+ */
+function importClosedDoor(engine) {
+    const id = 'door:10:10:0:0';
+    const squares = [];
+
+    for (let y = 9; y <= 11; y += 1) {
+        for (let x = 9; x <= 11; x += 1) {
+            squares.push({
+                x, y, z: 0, roomId: -1, outside: true, solid: false,
+                solidTrans: false, tree: false, independentWalls: 0, vehicleObstructed: false,
+            });
+        }
+    }
+
+    engine.worldImportCell(0, 0, navigationCell());
+    engine.importDoors([{
+        id, x: 10, y: 10, z: 0, north: true, open: false, locked: false,
+        lockedByKey: false, forceLocked: false, keyId: -1, roomId: -1,
+        oppositeRoomId: -1, attachedE: false, attachedS: false, barricaded: false,
+        independentWalls: 0, doubleDoor: 0, garageDoor: 0, interiorSide: false,
+    }], { squares });
+    engine.loadState({ version: 2, values: [10.5, 10.5, 1.5, 10.5, 10.5, 0, 0, 0, 0, 1, 100, 1] });
+
+    return id;
+}
+
+test('public door veto preserves actual closed collision, then opens through shared attributed hooks', async () => {
+    const engine = await newEngine();
+    const id = importClosedDoor(engine);
+    const host = createModHost(engine);
+
+    await host.load(moduleUrl(`${manifestSource('fx-door-owner')}
+export function activate(api) { fx.api = api; assert.equal(api.world.getDoors()[0].open, false); }`));
+    const api = fx.api;
+    const detached = api.world.getDoors();
+
+    detached[0].open = true;
+    detached[0].x = 0;
+    detached.length = 0;
+    assert.equal(api.world.getDoors()[0].open, false);
+    assert.equal(api.world.getDoors()[0].x, 10);
+    const before = engine.saveDoorState();
+    const unveto = host.api.hooks.beforeAction((action) => {
+        if (action.type === 'toggleDoor') {
+            assert.equal(engine.doors()[0].open, false, 'hooks run before any door mutation');
+            assert.throws(() => api.world.toggleDoor(id), { modId: 'fx-door-owner', stage: 'action' });
+
+            return false;
+        }
+    });
+    const veto = api.world.toggleDoor(id);
+
+    assert.deepEqual([veto.committed, veto.cancelled, veto.submittedBy, veto.cancelledBy],
+        [false, true, 'fx-door-owner', 'host']);
+    assert.deepEqual(engine.saveDoorState(), before);
+    assert.throws(() => engine.command({ type: 'walk', x: 0, y: -1 }), /blocked/u);
+    unveto();
+    const opening = api.world.toggleDoor(id);
+
+    assert.deepEqual([opening.committed, opening.cancelled, opening.submittedBy], [true, false, 'fx-door-owner']);
+    assert.equal(api.world.getDoors()[0].open, true);
+    assert.equal(engine.saveDoorState().revision, before.revision + 1);
+    host.command({ type: 'walk', x: 0, y: -1 });
+    host.step(0.1);
+    assert.ok(engine.snapshot().y < 10.5, 'opening changes actual CPU/WASM traversal');
+    host.command({ type: 'cancel' });
+    await host.load(moduleUrl(`${manifestSource('fx-door-other')}
+export function activate(api) { fx.api = api; }`));
+    assert.equal(fx.api.world.toggleDoor(id).submittedBy, 'fx-door-other');
+    assert.equal(engine.doors()[0].open, false);
+    const replace = host.api.hooks.beforeAction((action) => action.type === 'toggleDoor'
+        ? { type: 'walk', x: 1, y: 0 }
+        : undefined);
+    const changed = fx.api.world.toggleDoor(id);
+
+    assert.deepEqual(changed.modifiedBy, ['host']);
+    assert.equal(engine.doors()[0].open, false, 'hook replacement commits movement, not the original door action');
+    assert.equal(engine.snapshot().action, 2);
+    replace();
+    host.dispose();
+    assert.throws(() => api.world.getDoors(), { stage: 'api' });
+    assert.throws(() => api.world.toggleDoor(id), { stage: 'api' });
+});
+
+test('door activation mutation and malformed stable identities cannot leak into WASM', async () => {
+    const engine = await newEngine();
+    const id = importClosedDoor(engine);
+    const host = createModHost(engine);
+    const before = engine.saveDoorState();
+
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('fx-door-activation')}
+export function activate(api) { api.world.toggleDoor('${id}'); }`)), { stage: 'activate' });
+    assert.deepEqual(engine.saveDoorState(), before);
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('fx-door-action-activation')}
+export function activate(api) { api.actions.submit({type: 'toggleDoor', id: '${id}'}); }`)), { stage: 'activate' });
+    assert.deepEqual(engine.saveDoorState(), before);
+    const redirect = host.api.hooks.beforeAction(() => ({ type: 'toggleDoor', id }));
+
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('fx-door-rewritten-activation')}
+export function activate(api) { api.actions.submit({type: 'walk', x: 1, y: 0}); }`)), { stage: 'activate' });
+    assert.deepEqual(engine.saveDoorState(), before, 'a hook cannot disguise a door mutation as activation movement');
+    redirect();
+
+    for (const invalid of ['', null, 1, 'x'.repeat(257)]) {
+        assert.throws(() => host.api.world.toggleDoor(invalid), { name: 'ModError', modId: 'host', stage: 'action' });
+    }
+
+    assert.deepEqual(engine.saveDoorState(), before);
+    host.dispose();
+});
+
+test('audio namespace and activation guards reject before any decoder can consume bytes', async () => {
+    const host = createModHost(await newEngine());
+    const bytes = new ArrayBuffer(8);
+
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('fx-audio-activation')}
+export function activate(api) { fx.result = api.audio.load('cue', new ArrayBuffer(8)); return fx.result; }`)),
+    { stage: 'activate' });
+    await assert.rejects(fx.result, { stage: 'audio', message: /synchronous activate/ });
+    await host.load(moduleUrl(`${manifestSource('fx-audio-namespace')}
+export function activate(api) { fx.api = api; }`));
+
+    await Promise.all(['base:cue', 'host:cue', 'other:cue'].map(async (id) => {
+        await assert.rejects(() => fx.api.audio.load(id, bytes), { stage: 'audio', message: /namespace/ });
+        assert.throws(() => fx.api.audio.unload(id), { stage: 'audio', message: /namespace/ });
+    }));
+
+    assert.equal(bytes.byteLength, 8, 'rejected namespace checks never detach the caller buffer');
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('base')}
+export function activate() { throw new Error('reserved base owner reached activation'); }`)), { stage: 'manifest' });
+    host.dispose();
+});

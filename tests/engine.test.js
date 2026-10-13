@@ -578,6 +578,12 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.command({ type: 'unequip', id: 1 }),
         () => subject.command({ type: 'drop', id: 1, x: 5, y: 5 }),
         () => subject.command({ type: 'setCondition', id: 1, condition: 0 }),
+        () => subject.importDoors([], { squares: [] }),
+        () => subject.doors(),
+        () => subject.toggleDoor('door:10:10:0:0'),
+        () => subject.saveDoorState(),
+        () => subject.loadDoorState({}),
+        () => subject.command({ type: 'toggleDoor', id: 'door:10:10:0:0' }),
     ]) {
         assert.throws(attempt, /unsupported/u);
     }
@@ -1423,4 +1429,449 @@ test('direct WASM moodle staging refuses malformed order, range and incomplete i
         assert.notEqual(api.set_character_stat(index, value), 0);
         assert.deepEqual(Array.from({ length: 37 }, (_, i) => api.moodle_state_value(i)), before);
     }
+});
+
+/**
+ * Source-shaped door; identity refers to CLOSED placement, not moved panels.
+ *
+ * @param {object} [extra={}] - Explicit source overrides.
+ * @returns {object} Detached fixture.
+ */
+function nativeDoor(extra = {}) {
+    return {
+        id: 'door:10:10:0:0', x: 10, y: 10, z: 0, north: true,
+        open: false, locked: false, lockedByKey: false, forceLocked: false,
+        keyId: -1, roomId: -1, oppositeRoomId: -1, attachedE: false,
+        attachedS: false, barricaded: false, independentWalls: 0,
+        doubleDoor: 0, garageDoor: 0, interiorSide: false, ...extra,
+    };
+}
+
+/**
+ * Source square data stays separate from placement identities.
+ *
+ * @param {object} [extra={}] - Source overrides keyed by x:y.
+ * @returns {object[]} Unique native square metadata.
+ */
+function doorSquares(extra = {}) {
+    const rows = [];
+
+    for (let y = 7; y <= 14; y += 1) {
+        for (let x = 7; x <= 14; x += 1) {
+            rows.push({
+                x, y, z: 0, roomId: -1, outside: true, solid: false,
+                solidTrans: false, tree: false, independentWalls: 0,
+                vehicleObstructed: false, ...(extra[`${x}:${y}`] ?? {}),
+            });
+        }
+    }
+
+    return rows;
+}
+
+/**
+ * Spawns through the existing authoritative actor save boundary.
+ *
+ * @param {object} subject - Real WASM wrapper.
+ * @param {number} x - Actor x.
+ * @param {number} y - Actor y.
+ */
+function doorSpawn(subject, x, y) {
+    subject.loadState({ version: 2, values: [x, y, 1.5, x, y, 0, 0, 0, 0, 1, 100, 1] });
+}
+
+test('native doors close the original portal in both directions without corner cutting', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+    // Optional call keeps RED about observed traversal, not missing exports.
+    subject.importDoors?.([nativeDoor()], { squares: doorSquares() });
+    doorSpawn(subject, 10.5, 10.5);
+    assert.throws(() => subject.command({ type: 'walk', x: 0, y: -1 }), /blocked/u,
+        'a closed native door must block actual WASM movement');
+    assert.throws(() => subject.command({ type: 'walk', x: -1, y: -1 }), /blocked/u);
+    doorSpawn(subject, 10.5, 9.5);
+    assert.throws(() => subject.command({ type: 'walk', x: 0, y: 1 }), /blocked/u);
+    subject.toggleDoor(nativeDoor().id);
+    subject.command({ type: 'walk', x: 0, y: 1 });
+    subject.step(0.1);
+    assert.ok(subject.snapshot().y > 9.5);
+    subject.command({ type: 'cancel' });
+    doorSpawn(subject, 10.5, 10.5);
+    subject.command({ type: 'walk', x: 0, y: -1 });
+    subject.step(0.1);
+    assert.ok(subject.snapshot().y < 10.5);
+});
+
+test('native open ordinary doors leave render-wing edges passable and preserve independent walls', async () => {
+    const subject = await engine();
+
+    for (const [door, from, heading, opposite] of [
+        [nativeDoor({ open: true }), [10.5, 10.5], [-1, 0], [9.5, 10.5]],
+        [nativeDoor({ open: true, north: false }), [10.5, 10.5], [0, -1], [10.5, 9.5]],
+        [nativeDoor({ open: true, attachedE: true }), [10.5, 10.5], [1, 0], [11.5, 10.5]],
+        [nativeDoor({ open: true, attachedS: true }), [10.5, 10.5], [0, 1], [10.5, 11.5]],
+    ]) {
+        const portalFlags = door.north ? 2 : 4;
+
+        subject.worldImportCell(0, 0, cellBytes((x, y) => (x === 10 && y === 10 ? portalFlags : 0)));
+        subject.importDoors([door], { squares: doorSquares() });
+
+        for (const [position, direction] of [
+            [from, heading], [opposite, heading.map((value) => -value)],
+        ]) {
+            doorSpawn(subject, ...position);
+            subject.command({ type: 'walk', x: direction[0], y: direction[1] });
+            subject.step(0.1);
+            assert.ok(subject.snapshot().x !== position[0] || subject.snapshot().y !== position[1],
+                'native open TestCollide must not add a rotated render-wing blocker');
+            subject.command({ type: 'cancel' });
+        }
+    }
+
+    subject.worldImportCell(0, 0, cellBytes((x, y) => (x === 10 && y === 10 ? 2 : 0)));
+    subject.importDoors([nativeDoor({ open: true, independentWalls: 2 })],
+        { squares: doorSquares({ '10:10': { independentWalls: 2 } }) });
+    doorSpawn(subject, 10.5, 10.5);
+    assert.throws(() => subject.command({ type: 'walk', x: 0, y: -1 }), /blocked/u);
+    doorSpawn(subject, 10.5, 9.5);
+    assert.throws(() => subject.command({ type: 'walk', x: 0, y: 1 }), /blocked/u);
+});
+
+test('native door refusals leave lock state actor state and revision untouched', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+
+    for (const [door, squares, position] of [
+        [nativeDoor({ locked: true }), doorSquares(), [10.5, 9.5]],
+        [nativeDoor({ locked: true, lockedByKey: true, keyId: 7 }), doorSquares(), [10.5, 9.5]],
+        [nativeDoor({ barricaded: true }), doorSquares(), [10.5, 10.5]],
+        [nativeDoor(), doorSquares({ '10:10': { solid: true } }), [10.5, 9.5]],
+        [nativeDoor(), doorSquares({ '10:10': { solidTrans: true } }), [10.5, 9.5]],
+        [nativeDoor(), doorSquares({ '10:10': { tree: true } }), [10.5, 9.5]],
+        [nativeDoor(), doorSquares(), [13.5, 13.5]],
+        [nativeDoor({ id: 'door:10:10:1:0', z: 1 }), doorSquares(), [10.5, 10.5]],
+    ]) {
+        subject.importDoors([door], { squares });
+        doorSpawn(subject, ...position);
+        const before = subject.saveDoorState();
+        const actor = subject.saveState();
+
+        assert.throws(() => subject.toggleDoor(door.id), RangeError);
+        assert.deepEqual(subject.saveDoorState(), before);
+        assert.deepEqual(subject.saveState(), actor);
+    }
+});
+
+test('native inside unlocking requires the exact adjacent room and respects forceLocked', async () => {
+    const subject = await engine();
+    const squares = doorSquares({
+        '10:10': { roomId: 7, outside: false },
+        '10:9': { roomId: 8, outside: false },
+        '11:10': { roomId: 99, outside: false },
+    });
+    const door = nativeDoor({ locked: true, lockedByKey: true, keyId: 12, roomId: 7, oppositeRoomId: 8 });
+
+    subject.worldImportCell(0, 0, cellBytes());
+    subject.importDoors([door], { squares });
+    doorSpawn(subject, 11.5, 10.5);
+    assert.throws(() => subject.toggleDoor(door.id), RangeError);
+    doorSpawn(subject, 10.5, 9.5);
+    subject.command({ type: 'toggleDoor', id: door.id });
+    assert.equal(subject.doors()[0].open, true);
+    assert.equal(subject.doors()[0].locked, false);
+    assert.equal(subject.doors()[0].lockedByKey, false);
+    subject.importDoors([{ ...door, forceLocked: true }], { squares });
+    const before = subject.saveDoorState();
+
+    assert.throws(() => subject.toggleDoor(door.id), RangeError);
+    assert.deepEqual(subject.saveDoorState(), before);
+});
+
+test('native door imports and restores validate all identities atomically', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+    subject.importDoors([nativeDoor()], { squares: doorSquares() });
+    const before = subject.saveDoorState();
+    const actor = subject.saveState();
+
+    for (const rows of [
+        [nativeDoor(), nativeDoor()], [nativeDoor(), nativeDoor({ id: 'wrong' })],
+        [nativeDoor({ open: 1 })], [nativeDoor({ x: 10.25 })],
+        [nativeDoor({ doubleDoor: 9 })], [nativeDoor({ roomId: Number.NaN })],
+    ]) {
+        assert.throws(() => subject.importDoors(rows, { squares: doorSquares() }));
+        assert.deepEqual(subject.saveDoorState(), before);
+        assert.deepEqual(subject.saveState(), actor);
+    }
+
+    for (const state of [
+        { ...before, doors: [] },
+        { ...before, doors: [{ ...before.doors[0], id: 'door:99:99:0:0' }] },
+        { ...before, doors: [{ ...before.doors[0], open: true, x: 11 }] },
+        { ...before, doors: [{ ...before.doors[0], locked: 1 }] },
+        { ...before, revision: -1 },
+    ]) {
+        assert.throws(() => subject.loadDoorState(state));
+        assert.deepEqual(subject.saveDoorState(), before);
+    }
+
+    const detached = subject.doors();
+
+    detached[0].open = true;
+    detached[0].id = 'modified';
+    assert.deepEqual(subject.saveDoorState(), before);
+});
+
+test('native door saved closure and lock state restore without RNG or identity reroll', async () => {
+    const subject = await engine();
+    const restored = await engine();
+    const rows = [nativeDoor({ locked: true, lockedByKey: true, keyId: 42, roomId: 7 })];
+    const squares = doorSquares({ '10:10': { roomId: 7, outside: false } });
+
+    for (const instance of [subject, restored]) {
+        instance.worldImportCell(0, 0, cellBytes());
+        instance.importDoors(rows, { squares });
+        doorSpawn(instance, 10.5, 10.5);
+    }
+
+    const locked = subject.saveDoorState();
+
+    subject.toggleDoor(rows[0].id);
+    assert.equal(subject.saveDoorState().revision, locked.revision + 1);
+    subject.toggleDoor(rows[0].id);
+    assert.equal(subject.doors()[0].locked, false);
+    const closed = subject.saveDoorState();
+
+    restored.loadDoorState(closed);
+    assert.deepEqual(restored.saveDoorState(), closed);
+    restored.loadDoorState(closed);
+    assert.deepEqual(restored.saveDoorState(), closed, 'unchanged restoration must not increment revision');
+    restored.loadDoorState(locked);
+    assert.deepEqual(restored.saveDoorState(), locked);
+});
+
+test('native door changes invalidate already planned routes before crossing', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes((x, y) => (
+        x === 10 && y >= 8 && y <= 12 ? 0 : 1
+    )));
+    subject.importDoors([nativeDoor({ open: true })], { squares: doorSquares() });
+    doorSpawn(subject, 10.5, 10.5);
+    subject.command({ type: 'moveTo', x: 10.5, y: 8.5 });
+    subject.toggleDoor(nativeDoor().id);
+    runUntilIdle(subject);
+    assert.ok(subject.snapshot().y >= 10, 'stale direct route crossed a closed portal');
+});
+
+test('native double panels move together and garage panels retain their original edge', async () => {
+    const subject = await engine();
+    const rows = [1, 2, 3, 4].map((doubleDoor) => nativeDoor({
+        id: `door:${9 + doubleDoor}:10:0:0`, x: 9 + doubleDoor, doubleDoor,
+        attachedE: doubleDoor >= 3,
+    }));
+
+    subject.worldImportCell(0, 0, cellBytes());
+    subject.importDoors(rows, { squares: doorSquares() });
+    doorSpawn(subject, 10.5, 10.5);
+    subject.toggleDoor(rows[0].id);
+    assert.deepEqual(subject.doors().map(({ open, x, y }) => [open, x, y]),
+        [[true, 10, 10], [true, 10, 11], [true, 13, 11], [true, 13, 10]]);
+    assert.ok(subject.doors().every(({ toggled }) => toggled === true));
+    subject.toggleDoor(rows[0].id);
+    assert.deepEqual(subject.doors().map(({ open, x, y }) => [open, x, y]),
+        [[false, 10, 10], [false, 11, 10], [false, 12, 10], [false, 13, 10]]);
+    assert.ok(subject.doors().every(({ toggled }) => toggled === true));
+    const garage = [1, 2, 3].map((garageDoor) => nativeDoor({
+        id: `door:${9 + garageDoor}:10:0:0`, x: 9 + garageDoor, garageDoor,
+    }));
+
+    subject.importDoors(garage, { squares: doorSquares() });
+    subject.toggleDoor(garage[1].id);
+    assert.ok(subject.doors().every(({ open }) => open));
+    assert.ok(subject.doors().every(({ toggled }) => toggled === true));
+    subject.command({ type: 'walk', x: 0, y: -1 });
+    subject.command({ type: 'cancel' });
+    subject.command({ type: 'walk', x: -1, y: 0 });
+});
+
+test('native new-world door constructors own seeded probabilities and force/open overrides', async () => {
+    const subject = await engine();
+    const repeat = await engine();
+    const rows = [];
+    const squares = [];
+
+    for (let y = 0; y <= 33; y += 1) {
+        for (let x = 0; x <= 33; x += 1) {
+            squares.push({
+                x, y, z: 0, roomId: -1, outside: true, solid: false,
+                solidTrans: false, tree: false, independentWalls: 0, windows: 0,
+                doorWalls: 0, vehicleObstructed: false,
+            });
+
+            if (x >= 1 && x <= 32 && y >= 1 && y <= 32) {
+                rows.push(nativeDoor({ id: `door:${x}:${y}:0:0`, x, y }));
+            }
+        }
+    }
+
+    for (const instance of [subject, repeat]) {
+        instance.worldImportCell(0, 0, cellBytes());
+        instance.importDoors(rows, { squares, seed: 12_345, initializeLocks: true });
+    }
+
+    assert.deepEqual(subject.saveDoorState(), repeat.saveDoorState(), 'port seed must reproduce native state');
+    const initialized = subject.saveDoorState();
+    const lockedCount = initialized.doors.filter(({ locked }) => locked).length;
+    const keyedCount = initialized.doors.filter(({ lockedByKey }) => lockedByKey).length;
+
+    assert.ok(lockedCount >= 400 && lockedCount <= 620, `default4 locks ${lockedCount}/1024`);
+    assert.ok(keyedCount >= 100 && keyedCount <= 260, `conditional1/3 key locks ${keyedCount}/1024`);
+    assert.notDeepEqual(initialized.rngState, [12_345, 0]);
+    subject.importDoors(rows, { squares, seed: 12_345, lockedHouses: 1, initializeLocks: true });
+    assert.ok(subject.doors().every(({ locked, lockedByKey }) => !locked && !lockedByKey));
+    assert.deepEqual(subject.saveDoorState().rngState, [12_345, 0], 'NeverLocked skips native random draws');
+    subject.importDoors([
+        nativeDoor({ forceLocked: true }),
+        nativeDoor({ id: 'door:11:10:0:0', x: 11, forceLocked: true, open: true }),
+    ], { squares, seed: 12_345, lockedHouses: 1, initializeLocks: true });
+    assert.deepEqual(subject.doors().map(({ locked, lockedByKey }) => [locked, lockedByKey]),
+        [[true, true], [false, false]], 'native forceLocked then initial open override order');
+    repeat.loadDoorState(initialized);
+    assert.deepEqual(repeat.saveDoorState(), initialized, 'restore must not invoke constructor RNG');
+});
+
+test('native special-panel obstruction and unrelated reach blockers refuse atomically', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+    const doubles = [1, 2, 3, 4].map((doubleDoor) => nativeDoor({
+        id: `door:${9 + doubleDoor}:10:0:0`, x: 9 + doubleDoor, doubleDoor,
+    }));
+
+    subject.importDoors(doubles, { squares: doorSquares({ '11:11': { tree: true } }) });
+    doorSpawn(subject, 10.5, 10.5);
+    let before = subject.saveDoorState();
+
+    assert.throws(() => subject.toggleDoor(doubles[0].id), RangeError);
+    assert.deepEqual(subject.saveDoorState(), before);
+    const garage = [1, 2, 3].map((garageDoor) => nativeDoor({
+        id: `door:${9 + garageDoor}:10:0:0`, x: 9 + garageDoor, garageDoor, open: true,
+    }));
+
+    subject.importDoors(garage, { squares: doorSquares({ '12:10': { vehicleObstructed: true } }) });
+    before = subject.saveDoorState();
+    assert.throws(() => subject.toggleDoor(garage[0].id), RangeError);
+    assert.deepEqual(subject.saveDoorState(), before);
+    subject.importDoors([nativeDoor()], { squares: doorSquares({ '10:10': { independentWalls: 4 } }) });
+    doorSpawn(subject, 9.5, 10.5);
+    before = subject.saveDoorState();
+    assert.throws(() => subject.toggleDoor(nativeDoor().id), RangeError);
+    assert.deepEqual(subject.saveDoorState(), before);
+    subject.importDoors([nativeDoor({ locked: true, lockedByKey: true, hoppable: true })],
+        { squares: doorSquares() });
+    doorSpawn(subject, 10.5, 10.5);
+    subject.toggleDoor(nativeDoor().id);
+    assert.equal(subject.doors()[0].locked, false);
+    assert.equal(subject.doors()[0].lockedByKey, false);
+});
+
+test('native barricaded open doors block original facing edges but not render wings', async () => {
+    const subject = await engine();
+
+    for (const door of [
+        nativeDoor({ open: true, barricaded: true }),
+        nativeDoor({ open: true, barricaded: true, north: false }),
+        nativeDoor({ open: true, barricaded: true, attachedE: true }),
+        nativeDoor({ open: true, barricaded: true, attachedS: true }),
+    ]) {
+        const portalFlags = door.north ? 2 : 4;
+
+        subject.worldImportCell(0, 0, cellBytes((x, y) => (x === 10 && y === 10 ? portalFlags : 0)));
+        subject.importDoors([door], { squares: doorSquares() });
+        const originalHeading = door.north ? [0, -1] : [-1, 0];
+        const originalOpposite = door.north ? [10.5, 9.5] : [9.5, 10.5];
+
+        doorSpawn(subject, 10.5, 10.5);
+        assert.throws(() => subject.command({
+            type: 'walk', x: originalHeading[0], y: originalHeading[1],
+        }), /blocked/u, 'native barricades retain the original getNorth() facing');
+        doorSpawn(subject, ...originalOpposite);
+        assert.throws(() => subject.command({
+            type: 'walk', x: -originalHeading[0], y: -originalHeading[1],
+        }), /blocked/u);
+        let wingHeading;
+
+        if (door.attachedE) {
+            wingHeading = [1, 0];
+        } else if (door.attachedS) {
+            wingHeading = [0, 1];
+        } else if (door.north) {
+            wingHeading = [-1, 0];
+        } else {
+            wingHeading = [0, -1];
+        }
+
+        const wingOpposite = [10.5 + wingHeading[0], 10.5 + wingHeading[1]];
+
+        for (const [position, direction] of [
+            [[10.5, 10.5], wingHeading],
+            [wingOpposite, wingHeading.map((value) => -value)],
+        ]) {
+            doorSpawn(subject, ...position);
+            subject.command({ type: 'walk', x: direction[0], y: direction[1] });
+            subject.step(0.1);
+            assert.ok(subject.snapshot().x !== position[0] || subject.snapshot().y !== position[1]);
+            subject.command({ type: 'cancel' });
+        }
+
+        doorSpawn(subject, 10.5, 10.5);
+        const before = subject.saveDoorState();
+
+        assert.throws(() => subject.toggleDoor(door.id), RangeError);
+        assert.deepEqual(subject.saveDoorState(), before);
+    }
+});
+
+test('native door render history survives toggling back and portable restoration per identity', async () => {
+    const subject = await engine();
+    const restored = await engine();
+    const rows = [nativeDoor(), nativeDoor({ id: 'door:13:13:0:0', x: 13, y: 13 })];
+    const squares = doorSquares();
+
+    for (const instance of [subject, restored]) {
+        instance.worldImportCell(0, 0, cellBytes());
+        instance.importDoors(rows, { squares });
+        doorSpawn(instance, 10.5, 10.5);
+    }
+
+    subject.toggleDoor(rows[0].id);
+    subject.toggleDoor(rows[0].id);
+    assert.deepEqual(subject.doors().map(({ open, toggled }) => [open, toggled]),
+        [[false, true], [false, false]], 'native art family is per door, not inferred from current open/revision');
+    const saved = subject.saveDoorState();
+
+    assert.deepEqual(saved.doors.map(({ toggled }) => toggled), [true, false]);
+    restored.loadDoorState(saved);
+    assert.deepEqual(restored.saveDoorState(), saved);
+    assert.deepEqual(restored.doors().map(({ toggled }) => toggled), [true, false]);
+
+    for (const value of [undefined, 0, 'true', null]) {
+        const bad = structuredClone(saved);
+
+        bad.doors[0].toggled = value;
+        assert.throws(() => restored.loadDoorState(bad));
+        assert.deepEqual(restored.saveDoorState(), saved);
+    }
+
+    const before = restored.saveDoorState();
+
+    assert.throws(() => restored.toggleDoor(rows[1].id), RangeError);
+    assert.deepEqual(restored.saveDoorState(), before);
+    restored.importDoors(rows.map((row) => ({ ...row, toggled: true })), { squares });
+    assert.ok(restored.doors().every(({ toggled }) => toggled === false),
+        'source imports cannot spoof native successful-toggle history');
 });

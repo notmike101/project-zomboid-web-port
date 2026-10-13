@@ -65,6 +65,7 @@ method on that handle throws (`stage: 'api'`).
 | `api.world.getBounds()` | detached `ModWorldBounds` | Reads committed navigation cell extents, not a proposed import. Optional engine capability. |
 | `api.world.getNavFlags(tileX, tileY)` | unsigned number | Reads committed navigation bits at an absolute integer tile. Optional engine capability. |
 | `api.world.importNavigationCell(cx, cy, bytes)` | `ModWorldImportResult` | Validates complete navigation bytes, resolves precommit hooks, then imports once. Cancels movement on success; no automatic undo. |
+| `api.world.getDoors()` / `.toggleDoor(id)` | detached `ModDoor[]` / `ModCommandResult` | Original stable identities and native state; toggle uses shared precommit hooks and WASM reach/collision/lock rules. Mutation is forbidden during activation. |
 | `api.hooks.beforeWorldImport(callback, { priority = 0 })` | `() => boolean` | Synchronous precommit veto with detached coordinates and bytes; unsubscribe/ordering match `beforeAction`. |
 | `api.items.definitions.list()` / `.get(fullType)` | detached `ModItemDefinition[]` / definition or `null` | Numeric fields and owner read from WASM; valid unknown identities return `null`. |
 | `api.items.definitions.register(input, { override = false })` | `ModItemDefinition` | Owner-bound, synchronous activation only; explicit duplicate override; failed activation rolls back touched rows/owners/metadata. No SDK freeze method. |
@@ -75,6 +76,9 @@ method on that handle throws (`stage: 'api'`).
 | `api.character.moodleInputs()` / `.inputLimits()` | detached named inputs / validation metadata | WASM-owned values/limits; numeric `{min,max,default,integer}` or boolean `{type:'boolean',default}`. |
 | `api.character.setStat(name, value)` / `.setMoodleInputs(inputs)` | `ModCommandResult` | Single stat or atomic partial input update through precommit hooks; exact names/types/full-precision limits required. |
 | `api.ui.readOptions(modOptionsID)` / `.writeOptions(modOptionsID, values)` | detached JSON or `undefined` / `undefined` | This owner's `saveData.nativeUIOptions` entry; preserves other namespace fields, existing schema guard and complete 256 KiB cap; no new UI panel. |
+| `api.audio.load(id, bytes, { override = false })` | `Promise<ModAudioAsset>` | Owner-qualified registration; native decoding consumes the ArrayBuffer. Forbidden during synchronous activation; missing host adapter throws an attributed unsupported error. |
+| `api.audio.play(id, position)` | `ModAudioVoice` | Real positional voice owned by this mod; host must have unlocked audio. Registered qualified shared cues may be played, not replaced or unloaded by another owner. |
+| `api.audio.unload(id)` | boolean | Removes this owner's registration and stops its voices; pending loads cannot re-admit buffers after cleanup. |
 | `api.saveData.read()` | detached JSON value or `undefined` | This manifest id's document; `undefined` means absent, not JSON null. |
 | `api.saveData.write(value)` | `undefined` | Replaces only this manifest id's finite JSON document; whole namespace limited to 256 KiB UTF-8. |
 | `api.events.onTick(callback, { priority = 0 })` | `() => boolean` | Runs synchronously after an executed engine step, with detached `{ seconds, snapshot }`. |
@@ -91,6 +95,7 @@ extents; WASM additionally refuses unloaded tiles, solid destinations and blocke
 { type: 'moveTo', x, y } // destination within authoritative world bounds; refused, never clamped
 { type: 'walk', x, y }   // any finite signed heading, normalised by WASM; only (0,0) cancels
 { type: 'cancel' }       // stops movement, position unchanged
+{ type: 'toggleDoor', id } // exact original stable string identity, not a numeric item ID
 { type: 'spawnItem', fullType, x, y } // optional count/condition; omitted values resolved in WASM
 { type: 'pickup', id }
 { type: 'wear', id }
@@ -147,6 +152,39 @@ attributed to `onCharacterDeath`/`onCharacterDeath.late`. The Lua bridge dispatc
 original `OnPlayerDeath` with real player index zero. This is a port health/event
 policy, not native injury, survival or death-avatar animation.
 
+### Original door state
+
+`world.getDoors()` returns detached source-bound records, including current panel
+coordinates, original facing, open/lock/barricade state and `toggled`. That flag
+starts false on source import and becomes true after a successful native toggle,
+including every coupled panel; closing again does not reset it. The renderer
+needs this history to choose the original constructor versus toggled sprite
+family, not merely closed versus open art.
+
+Toggles share action validation, attribution and precommit veto with movement
+and item commands. WASM owns adjacency, independent walls, inside unlocking,
+forced locks, coupled double/garage panels and obstruction refusal. An open
+ordinary door does not turn its decorative render wing into a collision wall.
+Queries do not mutate state. This is not yet the original approach-and-timed-action
+context-menu pipeline or general keys, vehicles and door damage.
+
+### Owned positional audio
+
+Audio is presentation, not simulation authority. `load`/`unload` accept this
+manifest's namespace; unqualified IDs gain that prefix, while `base` and `host`
+are reserved. `play` may reference an already registered shared cue, but its
+voice belongs to the calling mod. Unload/disposal stops looping voices and
+withdraws pending registrations without removing another owner's buffers.
+
+The host creates its native AudioContext only on a trusted gesture. Playing
+before unlock or with no injected adapter fails explicitly. Positions use
+finite world coordinates: `(x, y, z)` maps to audio `(x, z, y)`; the port's
+presentation scale is one tile per metre. `volume` is linear `[0,1]`, default 1;
+`loop` defaults false. The returned handle has an idempotent `stop()`.
+Pause, visibility/session replacement and disposal are host-owned. The current
+scene uses three privately provisioned legacy WAV cues; this does not implement
+Build 42 FMOD banks, authored event routing or complete material-specific audio.
+
 ### Authoritative moodle inputs
 
 `character.moodles()` exposes `ModMoodle` IDs/levels in original registry order.
@@ -187,6 +225,15 @@ named `inputs`, `painTimer`, `painLevel`, `cantSprintTimer`, preserving hidden
 timer continuity without expanding actor words. Earlier v1/v2 saves lacking this
 optional field retain fresh-engine defaults; malformed present state refuses the
 staged restore. Failed restore does not publish the candidate over the live game.
+
+Optional version-1 `doorState` is covered by the same integrity hash. It retains
+source identities, current panel positions, locks, per-identity `toggled`,
+revision, seed and RNG state without changing actor words or engine ABI. Scene
+restore imports matching original geometry before applying it, before the first
+draw and mod activation; malformed or mismatched rows fail staged restoration.
+Legacy saves without this field initialize from source. New-world lock rolls use
+the port's nonzero seeded RNG and the original LockedHouses probability table,
+not native CellularAutomaton RNG parity.
 
 ### `beforeAction` hook
 
@@ -683,8 +730,11 @@ Enabled installed packages load automatically at startup, unless `?safe-mods`
 is present. This is not an origin policy — the trusted loader performs no origin
 or sandbox check of its own, and packages are trusted code. Beyond the package
 manager there is **no zip import, no
-per-mod live unload, no general JavaScript content/asset/animation or
-audio APIs, no JavaScript UI registration and no general settings channel into `activate`**. The documented namespaced `api.ui` options and bounded native Lua UI bridge are exceptions, not a complete UI SDK. Those absent capabilities are
+per-mod live unload, no general JavaScript content/asset/animation or FMOD bank/event
+APIs, no JavaScript UI registration and no general settings channel into `activate`**.
+The documented owned positional `api.audio`, namespaced `api.ui` options and
+bounded native Lua UI bridge are exceptions, not a complete presentation/UI SDK.
+Those absent capabilities are
 later M2–M5 work in [`../ROADMAP.md`](../ROADMAP.md); no placeholder APIs exist for
 them now.
 

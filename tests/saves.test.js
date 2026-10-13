@@ -186,3 +186,191 @@ test('portable moodle inputs retain pain timing and reject signed invalid state 
     await assert.rejects(store.restore(await signed(invalid)));
     assert.deepEqual(engine.saveMoodleState(), before);
 });
+
+/**
+ * Build genuine native metadata; never load persisted rows without their source.
+ *
+ * @returns {Promise<object>} Independent compiled engine, store and source metadata.
+ */
+async function doorFixture() {
+    const value = await fixture();
+    const rows = [{
+        id: 'door:10:10:0:0', x: 10, y: 10, z: 0, north: true,
+        open: false, locked: true, lockedByKey: true, forceLocked: false,
+        keyId: 42, roomId: 7, oppositeRoomId: -1, attachedE: false,
+        attachedS: false, barricaded: false, independentWalls: 0,
+        doubleDoor: 0, garageDoor: 0, interiorSide: false,
+    }];
+    const squares = [];
+
+    for (let y = 7; y <= 14; y++) {
+        for (let x = 7; x <= 14; x++) {
+            squares.push({
+                x, y, z: 0, roomId: x === 10 && y === 10 ? 7 : -1,
+                outside: !(x === 10 && y === 10), solid: false, solidTrans: false,
+                tree: false, independentWalls: 0, vehicleObstructed: false,
+            });
+        }
+    }
+
+    value.engine.importDoors(rows, { squares, seed: 0xFF_FF_FF_FF, lockedHouses: 4, initializeLocks: true });
+    value.engine.loadState({ version: 2, values: [10.5, 10.5, 1.5, 10.5, 10.5, 0, 0, 0, 0, 1, 100, 1] });
+    const cells = value.record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: new Uint8Array(Buffer.from(cell.bytes, 'base64')),
+    }));
+
+    return { ...value, rows, squares, cells };
+}
+
+test('portable door state preserves unlocked closure and RNG after matching source import', async () => {
+    const { engine, store, rows, squares, cells } = await doorFixture();
+
+    engine.toggleDoor(rows[0].id);
+    engine.toggleDoor(rows[0].id);
+    const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+
+    assert.equal(exported.formatVersion, 2);
+    assert.equal(exported.engine.state.values.length, 12);
+    assert.equal(exported.doorState.seed, 0xFF_FF_FF_FF);
+    assert.equal(exported.doorState.doors[0].locked, false);
+    assert.equal(exported.doorState.doors[0].toggled, true);
+    assert.equal(exported.doorState.doors[0].open, false);
+    const restored = await store.restore(exported);
+
+    assert.deepEqual(restored.doorState, engine.saveDoorState());
+    assert.deepEqual(restored.engine.doors(), [], 'store must not perform a source-free door restore');
+    restored.engine.importDoors(rows, { squares, seed: restored.doorState.seed, initializeLocks: false });
+    restored.engine.loadDoorState(restored.doorState);
+    assert.deepEqual(restored.engine.saveDoorState(), engine.saveDoorState());
+    assert.throws(() => restored.engine.command({ type: 'walk', x: 0, y: -1 }), /blocked/u);
+    restored.engine.toggleDoor(rows[0].id);
+    restored.engine.command({ type: 'walk', x: 0, y: -1 });
+    restored.engine.step(0.1);
+    assert.ok(restored.engine.snapshot().y < 10.5, 'restored native portal changes actual movement');
+    restored.doorState.doors[0].locked = true;
+    assert.equal(exported.doorState.doors[0].locked, false, 'restored field is detached from exported bytes');
+});
+
+test('door state corruption fails integrity without changing the live native world', async () => {
+    const { engine, store, cells } = await doorFixture();
+    const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+    const before = engine.saveDoorState();
+
+    exported.doorState.doors[0].open = true;
+    await assert.rejects(store.restore(exported), /integrity/u);
+    assert.deepEqual(engine.saveDoorState(), before);
+});
+
+test('signed door state rejects malformed boundaries and duplicate identities before source import', async () => {
+    const { engine, store, cells } = await doorFixture();
+    const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+    const before = engine.saveDoorState();
+    const changes = [
+        (state) => {
+            state.version = 2;
+        },
+        (state) => {
+            state.seed = 0;
+        },
+        (state) => {
+            state.seed = 0x1_00_00_00_00;
+        },
+        (state) => {
+            state.revision = -1;
+        },
+        (state) => {
+            state.revision = 0x1_00_00_00_00;
+        },
+        (state) => {
+            state.rngState = [1];
+        },
+        (state) => {
+            state.rngState[1] = -1;
+        },
+        (state) => {
+            state.rngState = Array.from({ length: 2 });
+        },
+        (state) => {
+            state.lockedHouses = 7;
+        },
+        (state) => {
+            state.doors[0].x = 25_856;
+        },
+        (state) => {
+            state.doors[0].y = -25_601;
+        },
+        (state) => {
+            state.doors[0].z = 32;
+        },
+        (state) => {
+            state.doors[0].open = 1;
+        },
+        (state) => {
+            state.doors[0].keyId = -2;
+        },
+        (state) => {
+            state.doors[0].id = 'door:010:10:0:0';
+        },
+        (state) => {
+            state.doors[0].toggled = 1;
+        },
+        (state) => {
+            delete state.doors[0].toggled;
+        },
+        (state) => {
+            state.doors[0].extra = true;
+        },
+        (state) => {
+            state.doors.push({ ...state.doors[0] });
+        },
+        (state) => {
+            state.extra = true;
+        },
+    ];
+
+    await Promise.all(changes.map(async (change) => {
+        const invalid = structuredClone(exported);
+
+        delete invalid.integrity;
+        change(invalid.doorState);
+        await assert.rejects(store.restore(await signed(invalid)), /door/iu);
+    }));
+
+    const boundary = structuredClone(exported);
+
+    delete boundary.integrity;
+    Object.assign(boundary.doorState, { revision: 0xFF_FF_FF_FF, rngState: [0, 0xFF_FF_FF_FF], lockedHouses: 6 });
+    Object.assign(boundary.doorState.doors[0], { x: -25_600, y: 25_855, z: -32, keyId: 0x7F_FF_FF_FF });
+    assert.deepEqual((await validateSave(await signed(boundary))).doorState, boundary.doorState);
+    assert.deepEqual(engine.saveDoorState(), before);
+    assert.notDeepEqual(before.rngState, [0xFF_FF_FF_FF, 0], 'constructor consumes real native lock RNG');
+});
+
+test('legacy and current backups without door state retain explicit source initialization', async () => {
+    const { record, store } = await fixture();
+    const restored = await store.restore(record);
+
+    assert.equal(Object.hasOwn(restored.record, 'doorState'), false);
+    assert.equal(Object.hasOwn(restored, 'doorState'), false);
+    const current = structuredClone(restored.record);
+
+    assert.equal(current.formatVersion, 2);
+    assert.equal(Object.hasOwn(await validateSave(current), 'doorState'), false);
+    assert.equal(Object.hasOwn(await store.restore(current), 'doorState'), false);
+});
+
+test('door metadata mismatch fails staged native restore without altering the prior world', async () => {
+    const { engine, store, rows, squares, cells } = await doorFixture();
+    const before = engine.saveDoorState();
+    const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+    const staged = await store.restore(exported);
+
+    staged.engine.importDoors([{ ...rows[0], id: 'door:10:10:0:1' }], {
+        squares, seed: staged.doorState.seed, initializeLocks: false,
+    });
+    const candidateBefore = staged.engine.saveDoorState();
+
+    assert.throws(() => staged.engine.loadDoorState(staged.doorState), /identit/iu);
+    assert.deepEqual(staged.engine.saveDoorState(), candidateBefore);
+    assert.deepEqual(engine.saveDoorState(), before);
+});

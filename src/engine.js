@@ -119,6 +119,12 @@
  * @property {function(): object} saveMoodleState Private-host detached version1 state.
  * @property {function(object): void} loadMoodleState Atomic private-host full restore.
  * @property {function(): void} resetMoodleState Source defaults plus explicit bounded-world policies.
+ * @property {function(object[], object): void} importDoors Atomically imports native placements and source squares.
+ * @property {function(): object[]} doors Reads detached stable-ID native door state.
+ * @property {function(): number} doorRevision Reads the native door revision without allocating door records.
+ * @property {function(string): object} toggleDoor Executes a native door interaction.
+ * @property {function(): object} saveDoorState Saves optional native door state, separate from actor format2.
+ * @property {function(object): void} loadDoorState Restores every native door identity atomically.
  */
 
 /** Engine ABI version this host supports; anything else is refused. */
@@ -250,6 +256,46 @@ function requireInteger(value, name, min, max) {
     }
 
     return value;
+}
+
+/**
+ * Packs strict source booleans without truthiness conversion.
+ *
+ * @param {object} row - Source record.
+ * @param {string[]} names - Ordered flag names.
+ * @returns {number} Numeric native flags.
+ */
+function doorFlags(row, names) {
+    let flags = 0;
+
+    for (const [index, name] of names.entries()) {
+        const value = (name === 'hoppable' || name === 'customLock') ? row[name] ?? false : row[name];
+
+        if (typeof value !== 'boolean') {
+            throw new TypeError(`${name} must be a boolean.`);
+        }
+
+        flags |= Number(value) << index;
+    }
+
+    return flags;
+}
+
+/**
+ * Validates original cardinal source masks, not sprite-name heuristics.
+ *
+ * @param {unknown} value - N2/W4 mask.
+ * @param {string} name - Refusal label.
+ * @returns {number} Native edge mask.
+ */
+function doorMask(value, name) {
+    const mask = requireInteger(value, name, 0, 6);
+
+    if ((mask & ~6) !== 0) {
+        throw new RangeError(`${name} must contain only north2/west4.`);
+    }
+
+    return mask;
 }
 
 /**
@@ -492,6 +538,9 @@ async function createEngine(source) {
             case 'cancel':
                 api.cancel();
                 break;
+            case 'toggleDoor':
+                toggleDoor(action.id);
+                break;
             case 'spawnItem': {
                 requireOptional('spawnItem', ['item_spawn', 'item_last_id']);
                 const ordinal = definitionOrdinal(action.fullType);
@@ -590,6 +639,8 @@ async function createEngine(source) {
      */
     function reset() {
         api.reset();
+        doorIds = [null];
+        doorOrdinals.clear();
         definitionMetadata.length = 0;
         definitionOrdinals.clear();
         ownerIds.clear();
@@ -725,6 +776,281 @@ async function createEngine(source) {
     function worldReset() {
         requireOptional('worldReset', ['world_reset']);
         api.world_reset();
+        doorIds = [null];
+        doorOrdinals.clear();
+    }
+
+    // Stable public identities only; all door policy and numeric state live in WASM.
+    let doorIds = [null];
+    let doorOrdinals = new Map();
+    const doorBooleanNames = ['north', 'open', 'locked', 'lockedByKey', 'forceLocked',
+        'attachedE', 'attachedS', 'barricaded', 'interiorSide', 'hoppable', 'customLock'];
+    const squareBooleanNames = ['outside', 'solid', 'solidTrans', 'tree', 'vehicleObstructed'];
+
+    /**
+     * Transfers one validated numeric record into bounded private scratch.
+     *
+     * @param {number[]} values - At most twelve native words.
+     * @param {string} method - Operation label.
+     */
+    function doorWords(values, method) {
+        const view = scratch(method);
+
+        for (let index = 0; index < 12; index += 1) {
+            view.setFloat64(index * 8, values[index] ?? 0, true);
+        }
+    }
+
+    /**
+     * Imports source geometry and explicit state atomically. Native constructors
+     * may initialize new-world locks with a saved port-owned seed; restores never
+     * generate locks. Vehicle flags are valid only for the explicit zero-vehicle
+     * world until an authoritative native vehicle geometry producer exists.
+     *
+     * @param {object[]} rows - Stable CLOSED-placement identities and source flags.
+     * @param {object} options - Native geometry and generation configuration.
+     * @param {object[]} options.squares - Unique source square metadata.
+     * @param {number} [options.seed=1] - Positive port-owned u32 world seed.
+     * @param {number} [options.lockedHouses=4] - Source sandbox choice 1..6.
+     * @param {boolean} [options.initializeLocks=false] - New world only.
+     */
+    function importDoors(rows, { squares, seed = 1, lockedHouses = 4, initializeLocks = false } = {}) {
+        requireOptional('importDoors', ['door_import_begin', 'door_import_stage', 'door_square_stage',
+            'door_import_commit', 'door_import_abort', 'door_read', 'door_count']);
+
+        if (!Array.isArray(rows) || rows.length > 65_536
+            || !Array.isArray(squares) || squares.length > 1_048_576) {
+            throw new TypeError('importDoors requires bounded door and unique square arrays.');
+        }
+
+        requireInteger(seed, 'door seed', 1, 0xFF_FF_FF_FF);
+        requireInteger(lockedHouses, 'lockedHouses', 1, 6);
+
+        if (typeof initializeLocks !== 'boolean') {
+            throw new TypeError('initializeLocks must be a boolean.');
+        }
+
+        const ids = [null];
+        const ordinals = new Map();
+        const numeric = rows.map((row, index) => {
+            requireMoodleObject(row, 'Door row');
+            const x = requireInteger(row.x, 'door x', -25_600, 25_855);
+            const y = requireInteger(row.y, 'door y', -25_600, 25_855);
+            const z = requireInteger(row.z, 'door z', -32, 31);
+            const id = requireName(row.id, 'door id');
+            const match = /^door:(-?\d+):(-?\d+):(-?\d+):(\d+)$/u.exec(id);
+
+            if (!match || id !== `door:${x}:${y}:${z}:${Number(match[4])}`
+                || !Number.isSafeInteger(Number(match[4])) || ordinals.has(id)) {
+                throw new TypeError('Door identity must match its exact original placement and unique order.');
+            }
+
+            ids.push(id);
+            ordinals.set(id, index + 1);
+            const doubleDoor = requireInteger(row.doubleDoor ?? 0, 'doubleDoor', 0, 4);
+            const garageDoor = requireInteger(row.garageDoor ?? 0, 'garageDoor', 0, 3);
+
+            if (doubleDoor !== 0 && garageDoor !== 0) {
+                throw new TypeError('Door cannot be both double and garage.');
+            }
+
+            return [index + 1, x, y, z, doorFlags(row, doorBooleanNames),
+                requireInteger(row.keyId ?? -1, 'keyId', -1, 0x7F_FF_FF_FF),
+                requireInteger(row.roomId, 'roomId', -1, Number.MAX_SAFE_INTEGER),
+                requireInteger(row.oppositeRoomId, 'oppositeRoomId', -1, Number.MAX_SAFE_INTEGER),
+                doorMask(row.independentWalls, 'independentWalls'), doubleDoor, garageDoor];
+        });
+        const squareIds = new Set();
+        const squareRows = squares.map((row) => {
+            requireMoodleObject(row, 'Door square');
+            const x = requireInteger(row.x, 'square x', -25_600, 25_855);
+            const y = requireInteger(row.y, 'square y', -25_600, 25_855);
+            const z = requireInteger(row.z, 'square z', -32, 31);
+            const id = `${x}:${y}:${z}`;
+
+            if (squareIds.has(id)) {
+                throw new TypeError(`Duplicate source square ${id}.`);
+            }
+
+            squareIds.add(id);
+
+            return [x, y, z, requireInteger(row.roomId, 'square roomId', -1, Number.MAX_SAFE_INTEGER),
+                doorFlags(row, squareBooleanNames), doorMask(row.independentWalls, 'square independentWalls'),
+                doorMask(row.windows ?? 0, 'square windows'), doorMask(row.doorWalls ?? 0, 'square doorWalls')];
+        });
+
+        scratch('importDoors');
+        requireAccepted(api.door_import_begin(seed, lockedHouses, Number(initializeLocks)), 'importDoors');
+        try {
+            for (const row of numeric) {
+                doorWords(row, 'importDoors');
+                requireAccepted(api.door_import_stage(), 'importDoors row');
+            }
+
+            for (const row of squareRows) {
+                doorWords(row, 'importDoors');
+                requireAccepted(api.door_square_stage(), 'importDoors square');
+            }
+
+            requireAccepted(api.door_import_commit(), 'importDoors commit');
+            doorIds = ids;
+            doorOrdinals = ordinals;
+        } finally {
+            api.door_import_abort();
+        }
+    }
+
+    /**
+     * Reads native invalidation state without allocating detached door rows.
+     *
+     * @returns {number} Global native door revision.
+     */
+    function doorRevision() {
+        requireOptional('doorRevision', ['door_header_read']);
+        api.door_header_read();
+
+        return scratch('doorRevision').getFloat64(0, true);
+    }
+
+    /**
+     * Reads detached native positions, locks, successful-toggle art history and source policy flags.
+     *
+     * @returns {object[]} Doors with stable public string identities.
+     */
+    function doors() {
+        requireOptional('doors', ['door_count', 'door_read', 'door_header_read']);
+        const revision = doorRevision();
+        const rows = [];
+
+        for (let index = 0; index < api.door_count(); index += 1) {
+            requireAccepted(api.door_read(index), 'doors');
+            const view = scratch('doors');
+            const ordinal = view.getFloat64(0, true);
+            const id = doorIds[ordinal];
+
+            if (!id) {
+                throw new Error('Native door identity has no registered source placement.');
+            }
+
+            const flags = view.getFloat64(32, true);
+            const row = {
+                id, revision, x: view.getFloat64(8, true), y: view.getFloat64(16, true),
+                z: view.getFloat64(24, true), keyId: view.getFloat64(40, true),
+                roomId: view.getFloat64(48, true), oppositeRoomId: view.getFloat64(56, true),
+                independentWalls: view.getFloat64(64, true), doubleDoor: view.getFloat64(72, true),
+                garageDoor: view.getFloat64(80, true),
+            };
+
+            for (const [bit, name] of doorBooleanNames.entries()) {
+                row[name] = (flags & (1 << bit)) !== 0;
+            }
+
+            row.toggled = (flags & 4_096) !== 0;
+
+            rows.push(row);
+        }
+
+        return rows;
+    }
+
+    /**
+     * Submits an authoritative same-level adjacent door interaction.
+     *
+     * @param {string} id - Exact stable public placement.
+     * @returns {Snapshot} Detached actor snapshot; refusal changes nothing.
+     */
+    function toggleDoor(id) {
+        requireOptional('toggleDoor', ['door_toggle']);
+        requireName(id, 'door id');
+        const ordinal = doorOrdinals.get(id);
+
+        if (ordinal === undefined) {
+            throw new RangeError(`Unknown door identity: ${id}.`);
+        }
+
+        requireAccepted(api.door_toggle(ordinal), 'toggleDoor');
+
+        return snapshot();
+    }
+
+    /**
+     * Saves numeric door state without changing actor12/format2/ABI1.
+     *
+     * @returns {object} Detached version1 locks, positions, required toggled history and port RNG state.
+     */
+    function saveDoorState() {
+        requireOptional('saveDoorState', ['door_header_read']);
+        api.door_header_read();
+        const view = scratch('saveDoorState');
+        const state = {
+            version: 1, revision: view.getFloat64(0, true),
+            seed: view.getFloat64(8, true),
+            rngState: [view.getFloat64(16, true), view.getFloat64(24, true)],
+            lockedHouses: view.getFloat64(32, true),
+        };
+
+        return {
+            ...state, doors: doors().map(({ id, open, locked, lockedByKey, keyId, x, y, z, toggled }) =>
+                ({ id, open, locked, lockedByKey, keyId, x, y, z, toggled })),
+        };
+    }
+
+    /**
+     * Restores every identity atomically after source geometry has been ingested.
+     * No constructor/RNG runs and missing identities are never substituted.
+     *
+     * @param {object} state - Exact detached native door save.
+     */
+    function loadDoorState(state) {
+        requireOptional('loadDoorState', ['door_restore_begin', 'door_restore_stage',
+            'door_restore_commit', 'door_restore_abort']);
+        requireMoodleObject(state, 'Door state');
+        const keys = ['version', 'revision', 'seed', 'rngState', 'lockedHouses', 'doors'];
+
+        if (state.version !== 1 || Object.keys(state).length !== keys.length
+            || keys.some((key) => !Object.hasOwn(state, key))
+            || !Array.isArray(state.rngState) || state.rngState.length !== 2
+            || !Array.isArray(state.doors) || state.doors.length !== doorOrdinals.size) {
+            throw new TypeError('Door state requires exact version1 shape and every registered identity.');
+        }
+
+        const revision = requireInteger(state.revision, 'door revision', 0, 0xFF_FF_FF_FF);
+        const seed = requireInteger(state.seed, 'door seed', 1, 0xFF_FF_FF_FF);
+        const lo = requireInteger(state.rngState[0], 'door RNG low', 0, 0xFF_FF_FF_FF);
+        const hi = requireInteger(state.rngState[1], 'door RNG high', 0, 0xFF_FF_FF_FF);
+        const houses = requireInteger(state.lockedHouses, 'lockedHouses', 1, 6);
+        const seen = new Set();
+        const rows = state.doors.map((row) => {
+            requireMoodleObject(row, 'Saved door');
+            const id = requireName(row.id, 'saved door id');
+            const ordinal = doorOrdinals.get(id);
+
+            if (ordinal === undefined || seen.has(id)) {
+                throw new TypeError('Saved door identities must match the entire imported set exactly.');
+            }
+
+            seen.add(id);
+            const flags = doorFlags(row, ['open', 'locked', 'lockedByKey', 'toggled']);
+
+            return [ordinal, flags & 1, (flags >> 1) & 1, (flags >> 2) & 1,
+                requireInteger(row.keyId, 'saved keyId', -1, 0x7F_FF_FF_FF),
+                requireInteger(row.x, 'saved door x', -25_600, 25_855),
+                requireInteger(row.y, 'saved door y', -25_600, 25_855),
+                requireInteger(row.z, 'saved door z', -32, 31), (flags >> 3) & 1];
+        });
+
+        scratch('loadDoorState');
+        requireAccepted(api.door_restore_begin(revision, seed, lo, hi, houses), 'loadDoorState');
+        try {
+            for (const row of rows) {
+                doorWords(row, 'loadDoorState');
+                requireAccepted(api.door_restore_stage(), 'loadDoorState row');
+            }
+
+            requireAccepted(api.door_restore_commit(), 'loadDoorState commit');
+        } finally {
+            api.door_restore_abort();
+        }
     }
 
     // Identity/source metadata only. Numeric behavior is always read from WASM.
@@ -1181,6 +1507,7 @@ async function createEngine(source) {
         commitItemDefinitionRegistration, rollbackItemDefinitionRegistration, freezeItemDefinitions,
         items, importItems, wornItem, getHealth, isDead,
         moodles, moodleInputLimits, saveMoodleState, loadMoodleState, resetMoodleState,
+        importDoors, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,
     });
 }
 

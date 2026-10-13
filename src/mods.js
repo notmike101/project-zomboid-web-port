@@ -12,8 +12,8 @@
  * isolated. A mod can read and write anything a page script can. This API is
  * experimental (0.1.0) and may change between previews.
  *
- * World navigation, item/health actions and postcommit callbacks expose only
- * implemented engine behavior; original UI options share per-mod save namespaces.
+ * World navigation, doors, item/health actions and postcommit callbacks expose
+ * implemented engine behavior; optional audio is an owner-bound native presentation adapter.
  */
 
 import { validateNavigationCell } from './engine.js';
@@ -29,7 +29,7 @@ const WORLD_MAX = 10;
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 10;
 const MAX_SAVE_BYTES = 256 * 1_024;
-const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setHealth', 'setCharacterStat', 'setMoodleInputs']);
+const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel', 'toggleDoor', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setHealth', 'setCharacterStat', 'setMoodleInputs']);
 /** Reserved internal attribution id for page input; a mod cannot claim it. */
 const RESERVED_ID = 'host';
 
@@ -78,7 +78,7 @@ const RESERVED_ID = 'host';
 /**
  * One loaded mod.
  *
- * @typedef {{ id: string, manifest: ModManifest, url: string, cleanup: (() => void)|undefined, active: boolean, activating?: boolean, definitionTransaction?: boolean }} ModEntry
+ * @typedef {{ id: string, manifest: ModManifest, url: string, cleanup: (() => void)|undefined, active: boolean, activating?: boolean, definitionTransaction?: boolean, audioGeneration?: number }} ModEntry
  */
 /**
  * The host surface returned by `createModHost`.
@@ -233,7 +233,7 @@ function identity(value, label, max = Infinity) {
  * without changing state.
  *
  * @param {ModEngine} engine - Authoritative engine wrapper.
- * @param {Partial<import('../types/mod-api').ModHostOptions>} [options] - Synchronous detached namespace backing; omitted means per-host in-memory only.
+ * @param {Partial<import('../types/mod-api').ModHostOptions>} [options] - Detached namespace backing and an optional actual audio adapter; no context is created by this host.
  * @returns {ModHost} `api` is a host-owned handle (same surface mods get) for parity checks; `load` activates one module; `dispose` unloads every mod in reverse load order; `command` runs host input through hooks then commits once; `diagnostics` returns detached evidence.
  * @throws {TypeError} When the engine lacks `snapshot`, `command` or `setSpeed`.
  */
@@ -377,6 +377,39 @@ export function createModHost(engine, options = {}) {
         }
 
         return engine[name].bind(engine);
+    }
+
+    /**
+     * Requires the injected native presentation adapter, never a fake context.
+     *
+     * @template {keyof import('../types/mod-api').ModAudioAdapter} Name
+     * @param {Name} name - Required adapter operation.
+     * @returns {import('../types/mod-api').ModAudioAdapter[Name]} Bound adapter method.
+     */
+    function audioCapability(name) {
+        if (typeof options.audio?.[name] !== 'function') {
+            throw new TypeError(`audio.${name} is unsupported without an audio adapter`);
+        }
+
+        return options.audio[name].bind(options.audio);
+    }
+
+    /**
+     * Cancels pending admission and releases only this owner's presentation resources.
+     *
+     * @param {ModEntry} entry - Owner being withdrawn.
+     * @returns {void}
+     */
+    function releaseAudio(entry) {
+        entry.audioGeneration = (entry.audioGeneration ?? 0) + 1;
+
+        if (options.audio) {
+            try {
+                audioCapability('unloadOwner')(entry.id);
+            } catch (cause) {
+                record(entry.id, 'audio', cause);
+            }
+        }
     }
 
     /**
@@ -620,6 +653,14 @@ export function createModHost(engine, options = {}) {
         }
 
         const type = candidate.type;
+
+        if (type === 'toggleDoor') {
+            capability('doors');
+            capability('toggleDoor');
+
+            return { type, id: identity(candidate.id, 'door id', 256) };
+        }
+
         /**
          * Validate an action's integral field before engine submission.
          *
@@ -807,6 +848,24 @@ export function createModHost(engine, options = {}) {
             alive();
 
             return submitAction(action, entry.id);
+        };
+
+        /**
+         * Binds local cues without permitting another registration namespace.
+         *
+         * @param {string} id - Exact bounded local or qualified identity.
+         * @param {boolean} owned - Whether this operation registers/releases owned bytes.
+         * @returns {string} Qualified identity.
+         */
+        const audioId = (id, owned) => {
+            identity(id, 'audio id', 256);
+            const qualified = id.includes(':') ? id : `${entry.id}:${id}`;
+
+            if (owned && qualified.slice(0, qualified.indexOf(':')) !== entry.id) {
+                throw new TypeError('audio registration must stay in the owning namespace');
+            }
+
+            return identity(qualified, 'qualified audio id', 256);
         };
 
         /**
@@ -1069,6 +1128,81 @@ export function createModHost(engine, options = {}) {
                     writeRecord(entry, document);
                 }),
             },
+            audio: {
+                /**
+                 * Async decode consumes the original buffer; no unnecessary source-byte clone.
+                 * Forbidden during activation, which must remain synchronous and rollback-safe.
+                 *
+                 * @param {string} id - Owned local or qualified cue identity.
+                 * @param {ArrayBuffer} bytes - Nonempty encoded bytes; native adapter enforces byte budgets.
+                 * @param {{override?: boolean}} [loadOptions={}] - Explicit same-owner replacement policy.
+                 * @returns {Promise<import('../types/mod-api').ModAudioAsset>} Actual decoded metadata.
+                 */
+                async load(id, bytes, loadOptions = {}) {
+                    alive();
+                    try {
+                        if (entry.activating) {
+                            throw new Error('audio loading is forbidden during synchronous activate');
+                        }
+
+                        if (!loadOptions || typeof loadOptions !== 'object' || Array.isArray(loadOptions)
+                            || (loadOptions.override !== undefined && typeof loadOptions.override !== 'boolean')) {
+                            throw new TypeError('audio load options must contain a boolean override');
+                        }
+
+                        const qualified = audioId(id, true);
+                        const loadAudio = audioCapability('load');
+
+                        audioCapability('unloadOwner');
+                        const generation = entry.audioGeneration ?? 0;
+                        const asset = await loadAudio(qualified, bytes, { owner: entry.id, override: loadOptions.override ?? false });
+
+                        if (!entry.active || generation !== (entry.audioGeneration ?? 0)) {
+                            throw new Error('audio load completed after owner cleanup');
+                        }
+
+                        return asset;
+                    } catch (cause) {
+                        throw fail(entry.id, 'audio', cause instanceof Error ? cause.message : String(cause), cause);
+                    }
+                },
+                /**
+                 * Plays a real registered cue with this mod owning the returned voice.
+                 *
+                 * @param {string} id - Local cue or a qualified shared cue, including base cues.
+                 * @param {import('../types/mod-api').ModAudioPosition} [playOptions={}] - Finite world position and native gain/loop options.
+                 * @returns {import('../types/mod-api').ModAudioVoice} Stoppable native voice.
+                 */
+                play: (id, playOptions = {}) => access('audio', () => {
+                    if (entry.activating) {
+                        throw new Error('audio playback is forbidden during synchronous activate');
+                    }
+
+                    if (!playOptions || typeof playOptions !== 'object' || Array.isArray(playOptions)) {
+                        throw new TypeError('audio play options must be an object');
+                    }
+
+                    const qualified = audioId(id, false);
+
+                    audioCapability('unloadOwner');
+
+                    return audioCapability('play')(qualified, {
+                        x: playOptions.x, y: playOptions.y, z: playOptions.z,
+                        volume: playOptions.volume, loop: playOptions.loop, owner: entry.id,
+                    });
+                }),
+                /**
+                 * Releases only an owned registration; cannot claim base/foreign bytes.
+                 *
+                 * @param {string} id - Owned local or qualified identity.
+                 * @returns {boolean} Whether a loaded/pending registration was removed.
+                 */
+                unload: (id) => access('audio', () => {
+                    const qualified = audioId(id, true);
+
+                    return audioCapability('unload')(qualified, { owner: entry.id });
+                }),
+            },
             actions: {
                 /**
                  * Submits a command through the same synchronous pipeline as host input:
@@ -1096,6 +1230,20 @@ export function createModHost(engine, options = {}) {
 
                     return attributed(entry, 'world', () => ({ ...capability('worldBounds')() }));
                 },
+                /**
+                 * Reads detached actual door rows, including during activation.
+                 *
+                 * @returns {import('../types/mod-api').ModDoor[]} Native current state, coordinates and revision.
+                 */
+                getDoors: () => access('world', () => capability('doors')().map((door) => ({ ...door }))),
+                /**
+                 * Toggles through the shared synchronous precommit command path.
+                 *
+                 * @param {string} id - Exact nonempty stable identity, at most 256 characters.
+                 * @returns {ModCommandResult} Cancelled on hook veto; otherwise authoritative committed state.
+                 * @throws {Error} ModError/action for unsupported, invalid, activation or reentrant mutation.
+                 */
+                toggleDoor: (id) => mutate({ type: 'toggleDoor', id }),
                 /**
                  * Reads authoritative navigation at an absolute tile.
                  *
@@ -1227,6 +1375,7 @@ export function createModHost(engine, options = {}) {
         Object.freeze(api.items);
         Object.freeze(api.character);
         Object.freeze(api.ui);
+        Object.freeze(api.audio);
 
         return Object.freeze(api);
     }
@@ -1254,6 +1403,7 @@ export function createModHost(engine, options = {}) {
     function rollback(entry, speedBefore, cause) {
         entry.active = false;
         entry.activating = false;
+        releaseAudio(entry);
 
         if (entry.definitionTransaction) {
             try {
@@ -1332,8 +1482,8 @@ export function createModHost(engine, options = {}) {
             throw fail(id, 'manifest', 'manifest.name must be a non-empty string');
         }
 
-        if (id === RESERVED_ID) {
-            throw fail(id, 'manifest', `'${RESERVED_ID}' is the host's internal attribution id and cannot be used as a mod id`);
+        if (id === RESERVED_ID || id === 'base') {
+            throw fail(id, 'manifest', `'${id}' is a reserved host/source owner and cannot be used as a mod id`);
         }
 
         if (mods.has(id)) {
@@ -1429,6 +1579,7 @@ export function createModHost(engine, options = {}) {
                 entry.active = false;
                 mods.delete(entry.id);
                 dropHooks(entry);
+                releaseAudio(entry);
             }
 
             if (result !== undefined && result !== null) {
@@ -1439,6 +1590,7 @@ export function createModHost(engine, options = {}) {
 
         hooks.length = 0;
         registrations = 0;
+        releaseAudio(hostEntry);
     }
 
     /**
@@ -1475,6 +1627,10 @@ export function createModHost(engine, options = {}) {
             }
 
             throw modError(submitterId, 'action', cause instanceof Error ? cause.message : String(cause), cause);
+        }
+
+        if (submitted.type === 'toggleDoor' && mods.get(submitterId)?.activating) {
+            throw modError(submitterId, 'action', 'door mutation is forbidden during synchronous activate');
         }
 
         if (dispatching) {
@@ -1560,6 +1716,10 @@ export function createModHost(engine, options = {}) {
             counts.cancelled += 1;
 
             return { committed: false, cancelled: true, submittedBy: submitterId, modifiedBy, cancelledBy, snapshot: engine.snapshot() };
+        }
+
+        if (current.type === 'toggleDoor' && mods.get(submitterId)?.activating) {
+            throw modError(submitterId, 'action', 'door mutation is forbidden during synchronous activate');
         }
 
         const wasDead = current.type === 'setHealth' ? capability('isDead')() : engine.snapshot().dead;

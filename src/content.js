@@ -120,6 +120,30 @@ function validateManifest(manifest) {
         reference(startup.character[key]);
     }
 
+    if (startup.tileDefinitions !== undefined) {
+        if (!Array.isArray(startup.tileDefinitions) || startup.tileDefinitions.length === 0) {
+            throw new TypeError('Invalid content tile definition sources');
+        }
+
+        for (const source of startup.tileDefinitions) {
+            if (!record(source) || !Number.isSafeInteger(source.fileId)) {
+                throw new TypeError('Invalid content tile definition fileId');
+            }
+
+            reference(source.path);
+        }
+    }
+
+    if (startup.audio !== undefined) {
+        if (!record(startup.audio)) {
+            throw new TypeError('Invalid content startup audio');
+        }
+
+        for (const role of ['footstep', 'doorOpen', 'doorClose']) {
+            reference(startup.audio[role]);
+        }
+    }
+
     for (const mod of manifest.mods) {
         if (!record(mod) || !['javascript', 'native-lua'].includes(mod.kind) || !Array.isArray(mod.files)) {
             throw new TypeError('Invalid content mod schema');

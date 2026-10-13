@@ -5,6 +5,8 @@ import { dirname, extname, join, parse, relative, resolve, sep } from 'node:path
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
+import { nativeTileSources } from '../src/world-objects.js';
+
 const extensions = new Set(['.pack', '.png', '.jpg', '.jpeg', '.dds', '.x', '.fbx', '.ogg', '.wav', '.bank', '.bin', '.lotheader', '.lotpack', '.tiles', '.txt', '.fnt', '.lua', '.xml', '.json', '.info', '.js', '.mjs', '.vert', '.frag', '.glsl', '.tmx', '.tga', '.bmp', '.gif', '.ini', '.cfg', '.properties', '.mesh', '.anim', '.ttf', '.otf', '.woff', '.woff2', '.csv', '.css', '.svg', '.html', '.webp', '.mp3', '.flac']);
 const mapRoot = 'media/maps/challengemaps/Tutorial';
 const startup = {
@@ -17,9 +19,17 @@ const startup = {
         model: 'media/models_X/Skinned/MaleBody.x', idle: 'media/anims_X/Bob/Bob_Idle.x',
         walk: 'media/anims_X/Bob/Bob_Walk.x', texture: 'media/textures/Body/MaleBody02a.png',
     },
+    tileDefinitions: nativeTileSources,
+    audio: {
+        footstep: 'media/sound/PZ_FootSteps_Concrete_01.wav',
+        doorOpen: 'media/sound/dooropen.wav', doorClose: 'media/sound/doorclose.wav',
+    },
     spawn: { x: 190.5, y: 190.5 },
 };
-const startupPaths = new Set([...startup.packs, ...startup.cells.flatMap(({ navigation, header, lotpack }) => [navigation, header, lotpack]), ...Object.values(startup.character)]);
+const startupPaths = new Set([
+    ...startup.packs, ...startup.cells.flatMap(({ navigation, header, lotpack }) => [navigation, header, lotpack]),
+    ...Object.values(startup.character), ...startup.tileDefinitions.map(({ path }) => path), ...Object.values(startup.audio),
+]);
 
 /**
  * Match startup roles against actual inventory spelling, rejecting case collisions.
@@ -433,6 +443,8 @@ export async function provisionContent(options = {}) {
             ...cell, navigation: matched.get(cell.navigation), header: matched.get(cell.header), lotpack: matched.get(cell.lotpack),
         })),
         character: Object.fromEntries(Object.entries(startup.character).map(([role, path]) => [role, matched.get(path)])),
+        tileDefinitions: startup.tileDefinitions.map(({ path, fileId }) => ({ path: matched.get(path), fileId })),
+        audio: Object.fromEntries(Object.entries(startup.audio).map(([role, path]) => [role, matched.get(path)])),
     };
     const files = [];
 

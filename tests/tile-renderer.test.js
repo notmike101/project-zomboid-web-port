@@ -114,3 +114,126 @@ test('cropped residency charges unique original trim rectangles and never exceed
     assert.equal(createSpriteResidencyPlan([{ key: 'transparent', w: 0, h: 0 }], 4).selected.size, 0);
     assert.throws(() => createSpriteResidencyPlan([{ key: 'bad', w: -1, h: 1 }], 4), /dimensions/iu);
 });
+
+// Catches per-frame door snapshot reads, constructor/toggled art confusion and moved-panel source-coordinate reuse.
+test('door render projection refreshes only by native revision and preserves current panel position and original stack order', async () => {
+    const { createDoorRenderProjection } = await import('../src/tile-renderer.js');
+
+    const visuals = [
+        { id: 'door:7:3:1:4', x: 7, y: 3, z: 1, order: 4, sourceX: 7, sourceY: 3, sourceSpriteName: 'synthetic_closed', closedSpriteName: 'synthetic_closed', openSpriteName: 'synthetic_constructor_open', toggledClosedSpriteName: 'synthetic_toggle_closed', toggledOpenSpriteName: 'synthetic_toggle_open' },
+        { id: 'door:-1:0:0:9', x: -1, y: 0, z: 0, order: 9, sourceX: -2, sourceY: 1, sourceSpriteName: 'synthetic_open', closedSpriteName: 'synthetic_constructor_closed', openSpriteName: 'synthetic_open', toggledClosedSpriteName: 'synthetic_panel_closed', toggledOpenSpriteName: 'synthetic_panel_open' },
+    ];
+    const before = structuredClone(visuals);
+    let revision = 0;
+    let reads = 0;
+    let rows = [
+        { id: visuals[0].id, x: 7, y: 3, z: 1, open: false, toggled: false },
+        { id: visuals[1].id, x: -2, y: 1, z: 0, open: true, toggled: false },
+    ];
+    const refresh = createDoorRenderProjection({
+        visuals,
+        /**
+         * Read the fixture's native revision without allocating a snapshot.
+         *
+         * @returns {number} Current native revision.
+         */
+        revision: () => revision,
+        /**
+         * Count native reads and return the current fixture state.
+         *
+         * @returns {Array<{id:string,x:number,y:number,z:number,open:boolean,toggled:boolean}>} Current door rows.
+         */
+        read: () => {
+            reads += 1;
+
+            return rows;
+        },
+    });
+    const initial = refresh();
+
+    assert.deepEqual(initial.tiles, [
+        { x: 7, y: 3, z: 1, order: 4, spriteName: 'synthetic_closed' },
+        { x: -2, y: 1, z: 0, order: 9, spriteName: 'synthetic_open' },
+    ]);
+    assert.equal(initial.sourceKeys.has('7:3:1:4'), true);
+    assert.equal(initial.sourceKeys.has('-2:1:0:9'), true);
+    assert.equal(initial.sourceKeys.has('7:3:1:5'), false);
+    assert.equal(refresh(), initial);
+    assert.equal(refresh(), initial);
+    assert.equal(reads, 1);
+    rows = [
+        { id: visuals[0].id, x: 8, y: 4, z: 1, open: true, toggled: true },
+        { id: visuals[1].id, x: -1, y: 0, z: 0, open: false, toggled: true },
+    ];
+    revision += 1;
+    const opened = refresh();
+
+    assert.notEqual(opened, initial);
+    assert.deepEqual(opened.tiles, [
+        { x: 8, y: 4, z: 1, order: 4, spriteName: 'synthetic_toggle_open' },
+        { x: -1, y: 0, z: 0, order: 9, spriteName: 'synthetic_panel_closed' },
+    ]);
+    assert.equal(opened.sourceKeys, initial.sourceKeys);
+    assert.equal(refresh(), opened);
+    assert.equal(reads, 2);
+    // Exact current-position culling still respects original z instead of flattening moved panels.
+    const view = { x: 8, y: 4, width: 2, height: 2, tilePixels: 64 };
+
+    assert.equal(isTileVisible(opened.tiles[0], { left: -1, top: -1, width: 2, height: 2 }, view), false);
+    assert.equal(isTileVisible({ ...opened.tiles[0], z: 0 }, { left: -1, top: -1, width: 2, height: 2 }, view), true);
+    rows[0] = { ...rows[0], x: 7, y: 3, open: false };
+    revision += 1;
+    assert.equal(refresh().tiles[0].spriteName, 'synthetic_toggle_closed');
+    assert.deepEqual(visuals, before);
+});
+
+// Catches detached native IDs, duplicate source identity and partial publication on invalid native state.
+test('door render projection refuses missing or invalid native state without guessing a closed sprite', async () => {
+    const { createDoorRenderProjection } = await import('../src/tile-renderer.js');
+
+    const visual = { id: 'door:0:0:0:1', x: 0, y: 0, z: 0, order: 1, sourceX: 0, sourceY: 0, sourceSpriteName: 'synthetic_closed', closedSpriteName: 'synthetic_closed', openSpriteName: 'synthetic_open', toggledClosedSpriteName: 'synthetic_closed', toggledOpenSpriteName: 'synthetic_open' };
+    const row = { id: visual.id, x: 0, y: 0, z: 0, open: false, toggled: false };
+    let rows = [row];
+    let revision = 1;
+    const refresh = createDoorRenderProjection({
+        visuals: [visual],
+        /**
+         * Read the revision shared by valid and invalid fixture states.
+         *
+         * @returns {number} Current native revision.
+         */
+        revision: () => revision,
+        /**
+         * Return fixture rows, including deliberately invalid toggle history.
+         *
+         * @returns {Array<{id:string,x:number,y:number,z:number,open:boolean,toggled:boolean|undefined}>} Current test state.
+         */
+        read: () => rows,
+    });
+    const initial = refresh();
+
+    rows = [];
+    revision += 1;
+    assert.throws(refresh, /missing.*door/i);
+    rows = [{ ...row, toggled: undefined }];
+    assert.throws(refresh, /toggled/i);
+    rows = [{ ...row, x: Number.NaN }];
+    assert.throws(refresh, /coordinate/i);
+    rows = [row];
+    assert.deepEqual(refresh().tiles, initial.tiles);
+    assert.throws(() => createDoorRenderProjection({
+        visuals: [visual, { ...visual, id: 'different' }],
+        /**
+         * Supply a stable revision for duplicate source rejection.
+         *
+         * @returns {number} Fixed native revision.
+         */
+        revision: () => 1,
+        /**
+         * Supply the native row for the original fixture identity.
+         *
+         * @returns {Array<{id:string,x:number,y:number,z:number,open:boolean,toggled:boolean}>} Single original door row.
+         */
+        read: () => [row],
+    }), /duplicate.*source/i);
+});

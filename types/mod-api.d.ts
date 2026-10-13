@@ -37,6 +37,7 @@ export type ModAction =
   | { type: 'moveTo'; x: number; y: number }
   | { type: 'walk'; x: number; y: number }
   | { type: 'cancel' }
+  | { type: 'toggleDoor'; id: string }
   | ({ type: 'spawnItem' } & ModItemSpawn)
   | { type: 'pickup' | 'wear' | 'unequip'; id: number }
   | { type: 'drop'; id: number; x: number; y: number }
@@ -94,7 +95,7 @@ export type ModCommandSnapshot = ModSnapshot & { id?: number };
 /** Mod identity exported by every mod module. */
 export interface ModManifest {
   /** Unique id: `[a-z0-9][a-z0-9._-]{0,63}`. Duplicate ids are rejected, and the
-   * id `host` is reserved for page-input attribution. */
+   * ids `host` and `base` are reserved for page input and source-owned cues. */
   id: string;
   /** Dotted `major.minor.patch` mod version (informational; not compared). */
   version: string;
@@ -128,6 +129,76 @@ export interface ModWorldBounds {
   maxCx: number;
   maxCy: number;
   cells: number;
+}
+
+/** Detached native door row. ID refers to CLOSED source placement; no public ordinal. */
+export interface ModDoor {
+  id: string;
+  /** Current world tile coordinates, including moved double-door panels. One unit = one tile. */
+  x: number;
+  y: number;
+  z: number;
+  open: boolean;
+  /** False on source import; true after any successful native toggle, including coupled panels. */
+  toggled: boolean;
+  locked: boolean;
+  lockedByKey: boolean;
+  keyId: number;
+  roomId: number;
+  oppositeRoomId: number;
+  independentWalls: number;
+  doubleDoor: number;
+  garageDoor: number;
+  north: boolean;
+  forceLocked: boolean;
+  attachedE: boolean;
+  attachedS: boolean;
+  barricaded: boolean;
+  interiorSide: boolean;
+  hoppable: boolean;
+  customLock: boolean;
+  /** Global authoritative uint32 door revision, shared by all rows in this query. */
+  revision: number;
+}
+
+/** Native decoded registration metadata, never PCM or source bytes. */
+export interface ModAudioAsset {
+  id: string;
+  owner: string;
+  encodedBytes: number;
+  decodedBytes: number;
+  /** Duration in seconds. */
+  duration: number;
+  channels: number;
+  frames: number;
+  /** Frames per second. */
+  sampleRate: number;
+}
+
+/** Finite world coordinates; world (x,y,z) maps to audio (x,z,y), one tile = one metre. */
+export interface ModAudioPosition {
+  x?: number;
+  y?: number;
+  z?: number;
+  /** Linear gain in [0,1], default 1. */
+  volume?: number;
+  /** Default false; cleanup stops even looping voices. */
+  loop?: boolean;
+}
+
+export interface ModAudioVoice {
+  readonly id: number;
+  /** Idempotently stops and disconnects this voice, including after owner cleanup. */
+  stop(): void;
+}
+
+/** Host-injected real createAudio adapter; context creation/unlock/pause/dispose stay host-owned. */
+export interface ModAudioAdapter {
+  load(id: string, bytes: ArrayBuffer, options: { owner: string; override?: boolean }): Promise<ModAudioAsset>;
+  play(id: string, options: ModAudioPosition & { owner: string }): ModAudioVoice;
+  unload(id: string, options: { owner: string }): boolean;
+  /** Synchronously cancels pending admission, releases owned buffers and stops owned voices. */
+  unloadOwner(owner: string): void;
 }
 
 /** Detached proposed import; editing it never edits the pending import. */
@@ -181,10 +252,12 @@ export interface ModSaveRecord {
   data: ModJsonValue;
 }
 
-/** Optional synchronous backing. Omission means private per-host memory, not durability. */
+/** Optional synchronous backing and actual audio adapter. Omitted backing is per-host memory only. */
 export interface ModHostOptions {
-  readModState(id: string): ModSaveRecord | undefined;
-  writeModState(id: string, record: ModSaveRecord): void;
+  readModState?(id: string): ModSaveRecord | undefined;
+  writeModState?(id: string, record: ModSaveRecord): void;
+  /** No fake audio or automatic context: absence throws attributed unsupported errors. */
+  audio?: ModAudioAdapter;
 }
 
 /** Optional module export, called before activate when saved schemas differ.
@@ -263,12 +336,32 @@ export interface ModApi {
   /** Optional extended-engine navigation capabilities; unsupported calls throw ModError/world. */
   world: {
     getBounds(): ModWorldBounds;
+    /** Read-only during activation too. Unsupported engine throws ModError/world. */
+    getDoors(): ModDoor[];
+    /** Exact nonempty stable id, at most 256 characters; no namespace normalization.
+     * Uses actions.submit hooks before WASM mutation and returns cancelled on veto.
+     * Forbidden during synchronous activate; malformed/unsupported/reentrant calls throw ModError/action. */
+    toggleDoor(id: string): ModCommandResult;
     /** Absolute int32 tiles; unsigned bits 1 solid, 2 south wall, 4 east wall,
      * 8 floor, 16 water, 32 room. 0xFFFFFFFF means unloaded. */
     getNavFlags(tileX: number, tileY: number): number;
     /** Cells in [-100,100]^2, complete validated 00 01 navigation bytes.
      * Commits once, cancels movement without relocating; no automatic undo. */
     importNavigationCell(cx: number, cy: number, bytes: Uint8Array | DataView): ModWorldImportResult;
+  };
+  /** Presentation only, not engine authority. Errors are ModError/audio (inert handles: ModError/api). */
+  audio: {
+    /** Unqualified ids become `${manifest.id}:${id}`; qualified load/unload ids must be owned.
+     * `base` and `host` are reserved owners. Registration is forbidden inside synchronous activate.
+     * Native decode consumes/detaches bytes: retain a copy yourself only if needed.
+     * Pending loads reject after unload/disposal, never re-admitting buffers. */
+    load(id: string, bytes: ArrayBuffer, options?: { override?: boolean }): Promise<ModAudioAsset>;
+    /** Unqualified ids are local; qualified cues, including `base:cue`, may be played.
+     * Forbidden during synchronous activate. Context must already be running/unlocked by the host; voice owner is this mod.
+     * Omitted coordinates default to origin. Volume defaults to 1, loop to false. */
+    play(id: string, options?: ModAudioPosition): ModAudioVoice;
+    /** Only this owner's namespace; returns whether a loaded/pending registration was removed. */
+    unload(id: string): boolean;
   };
   /** This manifest id's finite JSON document; complete record capped at 256 KiB UTF-8. */
   saveData: {
@@ -341,6 +434,14 @@ export interface ModFailure {
   message: string;
 }
 
+/** Error object thrown/rejected by the SDK; original adapter/engine error is retained as cause. */
+export interface ModError extends Error {
+  name: 'ModError';
+  modId: string;
+  stage: string;
+  cause?: unknown;
+}
+
 /** Counters reported by `diagnostics()`. */
 export interface ModCounts {
   /** Actions that entered the shared path, page input and mod submissions alike. */
@@ -375,6 +476,9 @@ export interface ModEngine {
   worldBounds?(): ModWorldBounds;
   navFlags?(x: number, y: number): number;
   worldImportCell?(cx: number, cy: number, bytes: Uint8Array | DataView): void;
+  /** Optional actual native-door wrapper. Validation checks availability without toggling. */
+  doors?(): ModDoor[];
+  toggleDoor?(id: string): ModCommandSnapshot;
   /** Optional authoritative item/character extensions; never required for movement activation. */
   itemDefinitions?(): ModItemDefinition[];
   registerItemDefinition?(input: ModItemDefinitionInput, options: { owner: string; override?: boolean }): ModItemDefinition;

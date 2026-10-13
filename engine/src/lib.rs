@@ -25,6 +25,8 @@
 
 use std::cell::RefCell;
 
+mod doors;
+
 /// Engine ABI version; the host refuses any other value.
 const API_VERSION: u32 = 1;
 
@@ -671,7 +673,9 @@ impl World {
 
     fn flags_at(&self, tile: Tile) -> u32 {
         match self.byte_at(tile) {
-            Some(byte) => byte as u32,
+            Some(byte) => {
+                doors::flags(tile_abs_x(tile) as i32, tile_abs_y(tile) as i32, byte) as u32
+            }
             None => 0xFFFF_FFFF,
         }
     }
@@ -683,10 +687,17 @@ impl World {
     }
 
     fn edge_clear(&self, tile: Tile, dx: i64, dy: i64) -> bool {
-        let Some(from) = self.byte_at(tile) else {
+        let Some(from) = self
+            .byte_at(tile)
+            .map(|byte| doors::flags(tile_abs_x(tile) as i32, tile_abs_y(tile) as i32, byte))
+        else {
             return false;
         };
-        let Some(to) = self.byte_at(neighbour(tile, dx, dy)) else {
+        let next = neighbour(tile, dx, dy);
+        let Some(to) = self
+            .byte_at(next)
+            .map(|byte| doors::flags(tile_abs_x(next) as i32, tile_abs_y(next) as i32, byte))
+        else {
             return false;
         };
         if dx == 1 {
@@ -1260,6 +1271,7 @@ pub extern "C" fn world_reset() {
         world.path.clear();
         world.path_index = 0;
     });
+    doors::reset();
     mutate(|engine| engine.cancel());
 }
 

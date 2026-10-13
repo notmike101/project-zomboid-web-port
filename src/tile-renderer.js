@@ -234,13 +234,118 @@ function compareTiles(a, b) {
 }
 
 /**
+ * Cache detached current door placements only when native state changes.
+ * Source keys remove exactly the authored base placement; dynamic placements are
+ * drawn separately so a moved panel never depends on its source chunk residency.
+ *
+ * @param {{visuals:object[],revision:()=>number,read:()=>object[]}} doors - Static source identities and authoritative native state.
+ * @returns {()=>{revision:number,sourceKeys:Set<string>,tiles:object[]}} Atomic revision snapshot reader.
+ */
+function createDoorRenderProjection(doors) {
+    if (!doors || !Array.isArray(doors.visuals) || typeof doors.revision !== 'function' || typeof doors.read !== 'function') {
+        throw new TypeError('Door rendering requires source visuals and native revision/read callbacks');
+    }
+
+    const sourceKeys = new Set();
+    const identities = new Set();
+
+    for (const visual of doors.visuals) {
+        if (!visual || typeof visual.id !== 'string' || !visual.id || identities.has(visual.id)
+            || !Number.isInteger(visual.sourceX) || !Number.isInteger(visual.sourceY) || !Number.isInteger(visual.z)
+            || !Number.isInteger(visual.order) || visual.order < 0
+            || ['closedSpriteName', 'openSpriteName', 'toggledClosedSpriteName', 'toggledOpenSpriteName'].some((key) => typeof visual[key] !== 'string' || !visual[key])) {
+            throw new TypeError('Invalid or duplicate source door visual identity');
+        }
+
+        const key = `${visual.sourceX}:${visual.sourceY}:${visual.z}:${visual.order}`;
+
+        if (sourceKeys.has(key)) {
+            throw new Error(`Duplicate source door placement ${key}`);
+        }
+
+        sourceKeys.add(key);
+        identities.add(visual.id);
+    }
+
+    let snapshot;
+
+    return function refresh() {
+        const revision = doors.revision();
+
+        if (!Number.isSafeInteger(revision) || revision < 0) {
+            throw new TypeError('Invalid native door revision');
+        }
+
+        if (snapshot?.revision === revision) {
+            return snapshot;
+        }
+
+        const rows = doors.read();
+
+        if (!Array.isArray(rows)) {
+            throw new TypeError('Native door state must be an array');
+        }
+
+        const current = new Map();
+
+        for (const row of rows) {
+            if (!row || !identities.has(row.id) || current.has(row.id)) {
+                throw new Error('Unknown or duplicate native door identity');
+            }
+
+            if (![row.x, row.y, row.z].every((value) => Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647)) {
+                throw new TypeError(`Invalid native door coordinate for ${row.id}`);
+            }
+
+            if (typeof row.open !== 'boolean' || typeof row.toggled !== 'boolean') {
+                throw new TypeError(`Native door open/toggled state must be boolean for ${row.id}`);
+            }
+
+            current.set(row.id, row);
+        }
+
+        const tiles = doors.visuals.map((visual) => {
+            const row = current.get(visual.id);
+
+            if (!row) {
+                throw new Error(`Missing native door state for ${visual.id}`);
+            }
+
+            if (row.z !== visual.z) {
+                throw new TypeError(`Native door coordinate level changed for ${visual.id}`);
+            }
+
+            let spriteName;
+
+            if (row.toggled) {
+                if (row.open) {
+                    spriteName = visual.toggledOpenSpriteName;
+                } else {
+                    spriteName = visual.toggledClosedSpriteName;
+                }
+            } else if (row.open) {
+                spriteName = visual.openSpriteName;
+            } else {
+                spriteName = visual.closedSpriteName;
+            }
+
+            return { x: row.x, y: row.y, z: row.z, order: visual.order, spriteName };
+        });
+
+        snapshot = { revision, sourceKeys, tiles };
+
+        return snapshot;
+    };
+}
+
+/**
  * Create one bounded original-content world layer. Pack precedence is the supplied
  * array order, followed by first on-disk occurrence; no missing names are remapped.
  *
- * @param {{device:GPUDevice,format:string,sampler:GPUSampler,packs:Array<PackIndex>,cells:Array<MapCell>,anchor?:TileAnchor,textureBudget?:number}} options - Shared renderer resources and user-selected metadata.
+ * @param {{device:GPUDevice,format:string,sampler:GPUSampler,packs:Array<PackIndex>,cells:Array<MapCell>,anchor?:TileAnchor,textureBudget?:number,doors?:{visuals:object[],revision:()=>number,read:()=>object[]}}} options - Shared renderer resources and user-selected metadata.
  * @returns {object} Async update/whenLoaded, synchronous render, diagnostics and destroy.
  */
-function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAULT_ANCHOR, textureBudget = MAX_TEXTURE_BYTES }) {
+function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAULT_ANCHOR, textureBudget = MAX_TEXTURE_BYTES, doors }) {
     if (!Number.isSafeInteger(textureBudget) || textureBudget < 4 || textureBudget > MAX_TEXTURE_BYTES) {
         throw new RangeError('Tile texture budget must be positive and below 64 MiB');
     }
@@ -250,6 +355,16 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
     }
 
     const effectiveAnchor = Object.freeze({ ...anchor });
+    const refreshDoors = doors === undefined ? undefined : createDoorRenderProjection(doors);
+    const doorSpriteNames = new Set();
+
+    for (const visual of doors?.visuals ?? []) {
+        doorSpriteNames.add(visual.closedSpriteName);
+        doorSpriteNames.add(visual.openSpriteName);
+        doorSpriteNames.add(visual.toggledClosedSpriteName);
+        doorSpriteNames.add(visual.toggledOpenSpriteName);
+    }
+
     /** @type {Map<string, JoinedSprite>} */
     const catalogue = new Map();
     const missingSprites = new Set();
@@ -281,8 +396,10 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
     for (const cell of cells) {
         extents.minLevel = Math.min(extents.minLevel, cell.minLevel);
         extents.maxLevel = Math.max(extents.maxLevel, cell.maxLevel);
+    }
 
-        for (const name of cell.tileNames) {
+    for (const names of [...cells.map((cell) => cell.tileNames), doorSpriteNames]) {
+        for (const name of names) {
             if (catalogue.has(name) || missingSprites.has(name)) {
                 continue;
             }
@@ -530,9 +647,10 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
      * Compute the cheap screen/height window key before touching chunk metadata.
      *
      * @param {TileView} view - Requested camera viewport.
+     * @param {object|undefined} doorSnapshot - Revision-cached native door projection.
      * @returns {{key:string,bounds:object,tilePixels:number}} Normalized window identity.
      */
-    function windowFor(view) {
+    function windowFor(view, doorSnapshot) {
         const tilePixels = view.tilePixels ?? Math.min(view.width, view.height) / 10;
         const bounds = visibleChunkBounds(view, {
             left: extents.left * tilePixels, right: extents.right * tilePixels,
@@ -540,17 +658,17 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
             minLevel: extents.minLevel, maxLevel: extents.maxLevel,
         });
 
-        return { key: `${view.x}:${view.y}:${view.width}:${view.height}:${tilePixels}`, bounds, tilePixels };
+        return { key: `${view.x}:${view.y}:${view.width}:${view.height}:${tilePixels}:${doorSnapshot?.revision ?? ''}`, bounds, tilePixels, doorSnapshot };
     }
 
     /**
      * Select actual cell-local chunk indices only when the window changes.
      *
      * @param {TileView} view - Requested camera viewport.
-     * @param {{key:string,bounds:object,tilePixels:number}} window - Normalized window identity.
-     * @returns {{key:string,view:TileView,selected:Map<string,object>}} Bounded selected window.
+     * @param {{key:string,bounds:object,tilePixels:number,doorSnapshot?:object}} window - Normalized camera/native-state identity.
+     * @returns {{key:string,view:TileView,selected:Map<string,object>,doorSnapshot?:object}} Bounded selected window.
      */
-    function select(view, { key, bounds, tilePixels }) {
+    function select(view, { key, bounds, tilePixels, doorSnapshot }) {
         const selected = new Map();
 
         for (const [cellIndex, cell] of cells.entries()) {
@@ -581,7 +699,7 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
             throw new RangeError(`Tile viewport exceeds the ${MAX_CHUNKS}-chunk cache limit`);
         }
 
-        return { key, view: { ...view, tilePixels }, selected };
+        return { key, view: { ...view, tilePixels }, selected, doorSnapshot };
     }
 
     /**
@@ -649,10 +767,24 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
             visiblePlacements = 0;
             visibleMissingPlacements = 0;
 
-            for (const placements of chunks.values()) {
-                cachedPlacements += placements.length;
+            const placementGroups = [...chunks.values()];
+
+            if (request.doorSnapshot) {
+                placementGroups.push(request.doorSnapshot.tiles);
+            }
+
+            for (const placements of placementGroups) {
+                const dynamicDoors = placements === request.doorSnapshot?.tiles;
+
+                if (!dynamicDoors) {
+                    cachedPlacements += placements.length;
+                }
 
                 for (const tile of placements) {
+                    if (!dynamicDoors && request.doorSnapshot?.sourceKeys.has(`${tile.x}:${tile.y}:${tile.z}:${tile.order}`)) {
+                        continue;
+                    }
+
                     const joined = catalogue.get(tile.spriteName);
 
                     if (!joined) {
@@ -768,7 +900,7 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
             return Promise.reject(new Error('Tile layer is destroyed'));
         }
 
-        const window = windowFor(view);
+        const window = windowFor(view, refreshDoors?.());
 
         if (window.key === activeKey && loading) {
             desired = null;
@@ -980,4 +1112,4 @@ function texturePageKey(texture) {
     return texture.pageKey;
 }
 
-export { compareTiles, createSpriteResidencyPlan, createTileLayer, isTileVisible, spriteQuad, tileScreenPosition, visibleChunkBounds };
+export { compareTiles, createDoorRenderProjection, createSpriteResidencyPlan, createTileLayer, isTileVisible, spriteQuad, tileScreenPosition, visibleChunkBounds };

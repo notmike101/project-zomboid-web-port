@@ -148,6 +148,56 @@ function validateInventory(record) {
 }
 
 /**
+ * Test an integer against inclusive saved-state bounds without coercion.
+ *
+ * @param {unknown} value - Candidate saved scalar.
+ * @param {number} min - Inclusive minimum.
+ * @param {number} max - Inclusive maximum.
+ * @returns {boolean} Whether the scalar is an integer within the bounds.
+ */
+const integer = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
+
+/**
+ * Validate portable door metadata without pretending a source-free engine can restore it.
+ *
+ * @param {object} state - Authenticated optional version-one door state.
+ * @returns {void} Rejects malformed state before a candidate engine is created.
+ */
+function validateDoorState(state) {
+    const keys = ['version', 'revision', 'seed', 'rngState', 'lockedHouses', 'doors'];
+
+    if (!state || typeof state !== 'object' || Array.isArray(state)
+        || Object.keys(state).length !== keys.length || keys.some((key) => !Object.hasOwn(state, key))
+        || state.version !== 1 || !integer(state.revision, 0, 0xFF_FF_FF_FF)
+        || !integer(state.seed, 1, 0xFF_FF_FF_FF) || !integer(state.lockedHouses, 1, 6)
+        || !Array.isArray(state.rngState) || state.rngState.length !== 2
+        || !integer(state.rngState[0], 0, 0xFF_FF_FF_FF) || !integer(state.rngState[1], 0, 0xFF_FF_FF_FF)
+        || !Array.isArray(state.doors) || state.doors.length > 65_536) {
+        throw new TypeError('Malformed saved door state.');
+    }
+
+    const ids = new Set();
+    const rowKeys = ['id', 'open', 'locked', 'lockedByKey', 'keyId', 'x', 'y', 'z', 'toggled'];
+
+    for (const row of state.doors) {
+        const match = typeof row?.id === 'string' && /^door:(-?\d+):(-?\d+):(-?\d+):(\d+)$/u.exec(row.id);
+
+        if (!row || typeof row !== 'object' || Array.isArray(row)
+            || Object.keys(row).length !== rowKeys.length || rowKeys.some((key) => !Object.hasOwn(row, key))
+            || !match || row.id !== `door:${Number(match[1])}:${Number(match[2])}:${Number(match[3])}:${Number(match[4])}`
+            || !integer(Number(match[1]), -25_600, 25_855) || !integer(Number(match[2]), -25_600, 25_855)
+            || !integer(Number(match[3]), -32, 31) || !integer(Number(match[4]), 0, Number.MAX_SAFE_INTEGER)
+            || ids.has(row.id) || !integer(row.x, -25_600, 25_855) || !integer(row.y, -25_600, 25_855)
+            || !integer(row.z, -32, 31) || !integer(row.keyId, -1, 0x7F_FF_FF_FF)
+            || ['open', 'locked', 'lockedByKey', 'toggled'].some((key) => typeof row[key] !== 'boolean')) {
+            throw new TypeError('Malformed or duplicate saved door identity/state.');
+        }
+
+        ids.add(row.id);
+    }
+}
+
+/**
  * Validate integrity and versions before executing any restore commands.
  *
  * @param {object} record - Candidate save envelope.
@@ -199,6 +249,10 @@ async function validateSave(record) {
 
         coordinates.add(key);
         decodeCell(cell.bytes);
+    }
+
+    if (Object.hasOwn(copy, 'doorState')) {
+        validateDoorState(copy.doorState);
     }
 
     if (copy.formatVersion === 1) {
@@ -316,7 +370,10 @@ function createSaveStore({ engineSource, appVersion }) {
             engine.loadMoodleState(validated.moodleState);
         }
 
-        return { engine, record: validated };
+        return {
+            engine, record: validated,
+            ...(Object.hasOwn(validated, 'doorState') ? { doorState: structuredClone(validated.doorState) } : {}),
+        };
     }
 
     /**
@@ -336,6 +393,7 @@ function createSaveStore({ engineSource, appVersion }) {
             itemDefs: engine.itemDefinitions(),
             items: engine.items().sort((left, right) => left.id - right.id),
             moodleState: engine.saveMoodleState(),
+            ...(typeof engine.saveDoorState === 'function' ? { doorState: engine.saveDoorState() } : {}),
             world: {
                 cells: (captured.cells ?? []).map((cell) => ({
                     x: cell.x, y: cell.y, bytes: encodeCell(cell.bytes),

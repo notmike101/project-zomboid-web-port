@@ -60,6 +60,16 @@ async function startup(source) {
     await put(source, 'media/anims_X/Bob/Bob_Walk.x');
     await put(source, 'media/textures/Body/MaleBody02a.png');
 
+    for (const path of [
+        'media/newtiledefinitions.tiles', 'media/tiledefinitions_erosion.tiles',
+        'media/tiledefinitions_overlays.tiles', 'media/tiledefinitions_b42chunkcaching.tiles',
+        'media/tiledefinitions_noiseworks.patch.tiles', 'media/jumbo_trees_big.tiles', 'media/jumbo_trees.tiles',
+        'media/sound/PZ_FootSteps_Concrete_01.wav', 'media/sound/dooropen.wav', 'media/sound/doorclose.wav',
+    ]) {
+        // eslint-disable-next-line no-await-in-loop -- Keep fixture writes ordered.
+        await put(source, path);
+    }
+
     for (const [x, y] of [[0, 0], [0, 1], [1, 0], [1, 1]]) {
         // eslint-disable-next-line no-await-in-loop -- Keep fixture writes ordered.
         await put(source, `media/maps/challengemaps/Tutorial/${x}_${y}.lotheader`);
@@ -239,6 +249,21 @@ test('startup-only copying excludes unrelated media and incomplete startup fails
     await rm(join(output, 'media/anims_X/Bob/Bob_Walk.x'));
     await rm(join(output, 'manifest.json'));
     await assert.rejects(provisionContent({ output, indexOnly: true }), /Bob_Walk/u);
+    await assert.rejects(readFile(join(output, 'manifest.json')), { code: 'ENOENT' });
+});
+
+test('bounded startup retains door collision definitions and playable samples without copying sound banks', async (t) => {
+    const { source, output } = await fixture(t);
+
+    await startup(source);
+    await put(source, 'media/sound/banks/Desktop/ZomboidSound.bank', 'PRIVATE_BANK');
+    await provisionContent({ source, output, startupOnly: true });
+    assert.equal(await readFile(join(output, 'media/newtiledefinitions.tiles'), 'utf8'), 'synthetic-only');
+    assert.equal(await readFile(join(output, 'media/sound/dooropen.wav'), 'utf8'), 'synthetic-only');
+    await assert.rejects(readFile(join(output, 'media/sound/banks/Desktop/ZomboidSound.bank')), { code: 'ENOENT' });
+    await rm(join(output, 'media/newtiledefinitions.tiles'));
+    await rm(join(output, 'manifest.json'));
+    await assert.rejects(provisionContent({ output, indexOnly: true }), /newtiledefinitions/u);
     await assert.rejects(readFile(join(output, 'manifest.json')), { code: 'ENOENT' });
 });
 
