@@ -308,6 +308,8 @@ test('native standability distinguishes actual windows inserted before doors fro
     subject.importDoors(projection.doors, { squares: projection.squares });
     assert.equal(subject.getSquare(0, 1, 0).canStand, false);
     assert.equal(projection.squares[9].windowEdges, 2, 'generic north frame still participates outside specialObjects');
+    assert.equal(subject.isBlockedTo({ x: 1, y: 1, z: 0 }, { x: 0, y: 1, z: 0 }), true,
+        'hasBlockedWindow searches all actual objects, not only specialObjects');
 });
 
 // Conditional diamond-floor replacement preserves the first object's class but replaces its contributing sprite.
@@ -814,4 +816,174 @@ test('loads every required original tile source in exact native order without re
     await assert.rejects(loadNativeTileRegistry(cased), /required.*newtiledefinitions/i);
     sources.delete(paths[3]);
     await assert.rejects(loadNativeTileRegistry(content), /required.*media\/tiledefinitions_b42chunkcaching\.tiles/i);
+});
+
+// Source property aggregation is separate from constructor class/state and raw collision.
+test('blocked-square projection distinguishes lower flags, frames, destroyed windows and constructor priority', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    )));
+    const north = { x: 0, y: 0, z: 0 };
+    const from = { x: 0, y: 1, z: 0 };
+    const cases = [
+        { tiles: [[['WindowN', 'false']]], placed: 0, blocked: true, window: false, actual: false, label: 'uppercase frame remains a wall, not an IsoWindow' },
+        { tiles: [[['windowN', 'false'], ['collideN', 'false'], ['lightswitch', 'false']]], placed: 0, blocked: false, window: true, actual: false, label: 'earlier lightswitch constructor retains lower flag only' },
+        { tiles: [[['windowN', 'false'], ['collideN', 'false'], ['open', 'false']]], placed: 0, blocked: true, window: true, actual: true, label: 'IsoWindow constructor starts closed despite sprite open flag' },
+        { tiles: [[['windowN', 'false'], ['collideN', 'false'], ['SmashedTileOffset', '1'], ['GlassRemovedOffset', '2']], [], []], placed: 1, blocked: false, window: true, actual: false, label: 'setSmashed destroys actual window' },
+        { tiles: [[['windowN', 'false'], ['collideN', 'false'], ['SmashedTileOffset', '1'], ['GlassRemovedOffset', '2']], [], []], placed: 2, blocked: false, window: true, actual: false, label: 'setSmashed then setGlassRemoved preserves destroyed state' },
+        { tiles: [[['windowN', 'false'], ['blueprint', 'false']]], placed: 0, blocked: true, window: false, actual: true, label: 'blueprint skips square flags but not actual window lookup' },
+    ];
+
+    const projections = await Promise.all(cases.map(async ({ tiles, placed, ...expected }) => {
+        const map = await cell({ names: [`synthetic_${placed}`], records: [-1, 1, 2, -1, 0, -1, 62] });
+        const projection = await projectWorldObjects([map], registry(tiles));
+
+        return { projection, ...expected };
+    }));
+
+    for (const { projection, blocked, window, actual, label } of projections) {
+        const props = projection.squares.find((row) => row.x === 0 && row.y === 1).interactionProperties;
+
+        assert.equal(props.windowN === true, window, label);
+        assert.equal(props.blockedWindowN === true, actual, label);
+        subject.importDoors(projection.doors, { squares: projection.squares });
+        assert.equal(subject.isBlockedTo(from, north), blocked, label);
+        assert.equal(subject.isBlockedTo(north, from), blocked, label);
+    }
+});
+
+test('blocked-square projection reads final surviving shared properties and cached types after blueprint exclusion', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    )));
+    const tiles = registry([[['windowN', 'false'], ['collideN', 'false'], ['OpenTileOffset', '1']], []]);
+    const earlier = await cell({ names: ['synthetic_1'], records: [-1, 1, 2, -1, 0, -1, 62] });
+    const later = await cell({ cellX: 1, records: [2, -1, 0, -1, 63] });
+    const projection = await projectWorldObjects([later, earlier], tiles);
+    const earlierSquare = projection.squares.find((row) => row.x === 0 && row.y === 1);
+
+    assert.equal(earlierSquare.independentWalls, 0, 'legacy raw placement collision is unchanged');
+    assert.equal(earlierSquare.interactionProperties.collideN, true);
+    assert.equal(earlierSquare.interactionProperties.windowN, true);
+    assert.notEqual(earlierSquare.interactionProperties.blockedWindowN, true, 'later mutation cannot turn earlier generic class into a window');
+    subject.importDoors(projection.doors, { squares: projection.squares });
+    assert.equal(subject.isBlockedTo({ x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 0 }), false);
+
+    const cases = [
+        { properties: [['stairsTN', 'false']], blocked: true },
+        { properties: [['stairsTN', 'false'], ['lightswitch', 'false']], blocked: false },
+        { properties: [['stairsTN', 'false'], ['blueprint', 'false']], blocked: false },
+    ];
+
+    const stairProjections = await Promise.all(cases.map(async ({ properties, blocked }) => {
+        const map = await cell({ records: [-1, 1, 2, -1, 0, -1, 62] });
+        const projected = await projectWorldObjects([map], registry([properties]));
+
+        return { projected, blocked };
+    }));
+
+    for (const { projected, blocked } of stairProjections) {
+        subject.importDoors(projected.doors, { squares: projected.squares });
+        assert.equal(subject.isBlockedTo({ x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 0 }), blocked);
+        assert.equal(subject.isBlockedTo({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }), false);
+    }
+
+    const map = await cell({ names: ['synthetic_0', 'synthetic_1'], records: [-1, 1, 3, -1, 0, 1, -1, 62] });
+    const replaced = await projectWorldObjects([map], registry([[['tree', '1'], ['collideN', 'false']], [['tree', '1']]]));
+
+    assert.equal(replaced.squares.find((row) => row.x === 0 && row.y === 1).independentWalls, 2);
+    subject.importDoors(replaced.doors, { squares: replaced.squares });
+    assert.equal(subject.isBlockedTo({ x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 0 }), false, 'removed tree contributes no current collision properties');
+});
+
+test('blocked-square source door properties switch with native current sprite instead of stale base aggregation', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    )));
+    const navigation = new Uint8Array(1_026);
+
+    navigation[1] = 1;
+    subject.worldImportCell(0, 0, navigation);
+    const tiles = registry([[['doorN', 'false'], ['collideW', 'false']], [], []]);
+    const projection = await projectWorldObjects([await cell({ records: [-1, 1, 2, -1, 0, -1, 62] })], tiles);
+    const from = { x: 0, y: 1, z: 0 };
+    const west = { x: -1, y: 1, z: 0 };
+    const extraSquare = { ...projection.squares[0], ...west };
+
+    assert.deepEqual(projection.doors[0].interactionProperties.map((props) => props.collideW === true), [true, false, true, false]);
+    assert.notEqual(projection.squares.find((row) => row.x === 0 && row.y === 1).interactionProperties.collideW, true);
+    subject.importDoors(projection.doors, { squares: [...projection.squares, extraSquare] });
+    assert.equal(subject.isBlockedTo(from, west), true);
+    subject.loadState({ version: 2, values: [0.5, 0.5, 1.5, 0.5, 0.5, 0, 0, 0, 0, 1, 100, 1] });
+    subject.toggleDoor(projection.doors[0].id);
+    assert.equal(subject.isBlockedTo(from, west), false, 'open door is unblocked and its actual open sprite has no west wall');
+    subject.toggleDoor(projection.doors[0].id);
+    assert.equal(subject.isBlockedTo(from, west), true);
+});
+
+test('four source door relation snapshots use genuine distinct initial and toggled partners without constructor merging', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = Array.from({ length: 11 }, () => []);
+
+    tiles[0] = [['doorN', 'false'], ['DoubleDoor', '1'], ['collideN', 'false']];
+    tiles[4] = [['doorW', 'false'], ['DoubleDoor', '6'], ['windowW', 'false']];
+    tiles[5] = [['doorW', 'false'], ['DoubleDoor', '5'], ['WindowW', 'false'], ['doorW', 'false']];
+    tiles[6] = [['doorN', 'false'], ['DoubleDoor', '2'], ['windowN', 'false']];
+    tiles[7] = [['doorN', 'false'], ['DoubleDoor', '2'], ['collideW', 'false'], ['blueprint', 'false']];
+    tiles[10] = [['doorN', 'false'], ['DoubleDoor', '6'], ['collideW', 'false']];
+    const map = await cell({ names: ['synthetic_0', 'synthetic_10'], records: [2, -1, 0, 2, -1, 1, -1, 62] });
+    const projected = await projectWorldObjects([map], registry(tiles));
+
+    assert.deepEqual(projected.doors.map((door) => door.interactionProperties), [
+        [{ collideN: true }, { windowW: true }, { collideN: true }, { collideW: true }],
+        [{ windowN: true }, { collideW: true }, {}, { collideW: true }],
+    ]);
+    assert.deepEqual(projected.squares.slice(0, 2).map((square) => square.interactionProperties), [{}, {}],
+        'base excludes every actual door contribution');
+});
+
+test('shared current type mutations rebuild source stair caches without changing an earlier object class', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    )));
+    const tiles = registry([[['windowN', 'false'], ['stairsTN', 'false'], ['OpenTileOffset', '1']], []]);
+    const earlier = await cell({ names: ['synthetic_1'], records: [-1, 1, 2, -1, 0, -1, 62] });
+    const later = await cell({ cellX: 1, records: [2, -1, 0, -1, 63] });
+    const projected = await projectWorldObjects([earlier, later], tiles);
+    const props = projected.squares.find((row) => row.x === 0 && row.y === 1).interactionProperties;
+
+    assert.equal(props.stairsTN, true, 'RecalcProperties uses final shared getType, not creation-time type or property spelling');
+    assert.notEqual(props.blockedWindowN, true, 'earlier generic object remains generic after shared mutation');
+    subject.importDoors(projected.doors, { squares: projected.squares });
+    assert.equal(subject.isBlockedTo({ x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 0 }), true);
+    assert.equal(subject.isBlockedTo({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }), false);
+});
+
+test('actual window facing and blocked state survive unrelated current sprite replacement', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    )));
+    const both = await projectWorldObjects([await cell({ records: [-1, 9, 2, -1, 0, -1, 54] })],
+        registry([[['windowN', 'false'], ['windowW', 'false'], ['collideN', 'false'], ['collideW', 'false']]]));
+    const from = { x: 1, y: 1, z: 0 };
+
+    subject.importDoors(both.doors, { squares: both.squares });
+    assert.equal(subject.isBlockedTo(from, { x: 1, y: 0, z: 0 }), true, 'constructor is north-first');
+    assert.equal(subject.isBlockedTo(from, { x: 0, y: 1, z: 0 }), false, 'opposite lower flag does not invent west actual blockage');
+    const map = await cell({ names: ['synthetic_0', 'synthetic_1'], records: [-1, 9, 3, -1, 0, 1, -1, 54] });
+    const replaced = await projectWorldObjects([map], registry([
+        [['windowN', 'false'], ['solidfloor', 'false'], ['diamondFloor', 'false']],
+        [['solidfloor', 'false'], ['diamondFloor', 'false']],
+    ]));
+    const props = replaced.squares.find((row) => row.x === 1 && row.y === 1).interactionProperties;
+
+    assert.notEqual(props.windowN, true, 'final replacement sprite has no window resemblance');
+    assert.equal(props.blockedWindowN, true, 'setSprite does not destroy or open the surviving actual IsoWindow');
+    subject.importDoors(replaced.doors, { squares: replaced.squares });
+    assert.equal(subject.isBlockedTo(from, { x: 1, y: 0, z: 0 }), true);
 });

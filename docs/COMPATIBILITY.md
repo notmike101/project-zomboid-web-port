@@ -98,11 +98,25 @@ Unresolved component-bearing conditional floor replacement refuses import;
 entity-component execution, texture failures and full object lifecycle are not
 implemented by this subset.
 
-Fresh original-content Chromium/NVIDIA reload retained Save revision 6, actor
-191.5/199.5 at tick 864, 18 doors and square 191/199 with room 6,
-inside/solid-floor/standability facts. Absent elevation 100 returned `null`;
-no nonempty alert was present. This does not verify roof cutaways, visible
-interactions, the timed-action queue or full interaction-gate completion.
+Native `world.isBlockedTo(from, to)` and genuine Lua
+`square:isBlockedTo(otherSquareOrNil)` now evaluate the source wall,
+blocked-window, blocked-door and directional stair-top relation. Lowercase
+window flags, actual window destroyed/open state and uppercase frames remain
+distinct; final shared properties/cached types and current door partner history
+are projected separately from unchanged legacy movement collision. Same or
+null/absent other squares return false; an absent caller, foreign Lua userdata
+or unsupported capability errors. These are imported-constructor/current-door
+facts, not window-action or player-built-thumpable runtime parity.
+
+A fresh owned Chromium reload exercised the public SDK across four genuine
+closed-door pairs in both directions, retained 18 doors and returned false for
+same/null/absent-other relations. Actor 191.5/199.5, tick 864, idle, health 100
+was identical before and after these read-only queries; no nonempty alerts were
+present. Full local verification passed 37 Rust tests, 375 Node tests with one
+Linux-only skip, zero-warning lint, formatting/clippy, document links and build.
+
+Neither square query proves roof cutaways, visible interactions, the timed-action
+queue or full interaction-gate completion.
 
 
 

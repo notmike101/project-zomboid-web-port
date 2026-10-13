@@ -260,6 +260,82 @@ test('Lua cell and square userdata retain identity while native replacement chan
     }
 });
 
+test('Lua stable square blocked-to delegates directional and nil relations to actual native current state', async () => {
+    const { engine, host, session, saved } = await fixture();
+    const from = { x: 5, y: 5, z: 0 };
+    const north = { x: 5, y: 4, z: 0 };
+    const base = { roomId: -1, outside: true, solid: false, solidTrans: false, tree: false, independentWalls: 0, vehicleObstructed: false };
+
+    /**
+     * Replace real source facts, optionally removing the other square.
+     *
+     * @param {object} interactionProperties - Explicit source properties.
+     * @param {boolean} [includeNorth=true] - Whether the other square remains imported.
+     * @returns {void} Commits native square metadata.
+     */
+    const replace = (interactionProperties, includeNorth = true) => engine.importDoors([], {
+        squares: [{ ...base, ...from, interactionProperties }, ...(includeNorth ? [{ ...base, ...north }] : [])],
+    });
+
+    try {
+        replace({ stairsTN: true });
+        const cleanup = activate(session, host, `
+            local square = getCell():getGridSquare(5,5,0)
+            local north = getCell():getGridSquare(5,4,0)
+            assert(type(square) == 'userdata' and square == getPlayer():getCurrentSquare())
+            assert(square:isBlockedTo(north) == true)
+            assert(north:isBlockedTo(square) == false)
+            assert(square:isBlockedTo(nil) == false and square:isBlockedTo(square) == false)
+            assert(not pcall(function() return square:isBlockedTo(getPlayer()) end))
+            assert(not pcall(function() return square:isBlockedTo(getCell()) end))
+            assert(not pcall(function() return square:isBlockedTo({getX=function() return 5 end}) end))
+            assert(not pcall(function() return square.isBlockedTo(getPlayer(), nil) end))
+            assert(not pcall(function() return square:isBlockedTo(nil, north) end))
+            getModData().blockedState = {}
+            Events.OnTick.Add(function()
+                assert(square == getCell():getGridSquare(5,5,0))
+                getModData().blockedState.forward = square:isBlockedTo(north)
+                getModData().blockedState.nilOther = square:isBlockedTo(nil)
+            end)
+        `, 'blocked-state');
+
+        replace({ collideN: true, windowN: true });
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.deepEqual(saved.get('host').data.nativePlayerData.blockedState, { forward: false, nilOther: false });
+        replace({ blockedWindowN: true });
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.equal(saved.get('host').data.nativePlayerData.blockedState.forward, true);
+        replace({ blockedWindowN: true }, false);
+        host.step(1 / 60);
+        session.flushSaveData();
+        assert.equal(saved.get('host').data.nativePlayerData.blockedState.forward, false, 'previously real other userdata now refers to an absent native square');
+        cleanup();
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('Lua square nil relation refuses an engine lacking the genuine native query', async () => {
+    const engine = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
+    const host = createModHost({ snapshot: engine.snapshot, command: engine.command, setSpeed: engine.setSpeed, getSquare: engine.getSquare });
+    const session = await createLuaSession();
+
+    try {
+        engine.importDoors([], { squares: [{ x: 5, y: 5, z: 0, roomId: -1, outside: true, solid: false, solidTrans: false, tree: false, vehicleObstructed: false, independentWalls: 0 }] });
+        activate(session, host, `
+            local square = getCell():getGridSquare(5,5,0)
+            local ok, message = pcall(function() return square:isBlockedTo(nil) end)
+            assert(not ok and tostring(message):find('unsupported', 1, true))
+        `, 'unsupported-blocked-state');
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
 test('Lua body userdata retain identity while real ticks observe native pain and cold-hand timing', async () => {
     const { engine, host, session, saved } = await fixture();
 

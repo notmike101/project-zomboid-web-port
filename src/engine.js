@@ -146,6 +146,7 @@
  * @property {function(object): void} loadBodyState Atomic complete native body restore.
  * @property {function(object[], object): void} importDoors Atomically imports native placements and source squares.
  * @property {function(number, number, number): EngineSquare|null} getSquare Reads detached source metadata; null only when absent.
+ * @property {function(object, object|null): boolean} isBlockedTo Reads the native directional source-square relation.
  * @property {function(): object[]} doors Reads detached stable-ID native door state.
  * @property {function(): number} doorRevision Reads the native door revision without allocating door records.
  * @property {function(string): object} toggleDoor Executes a native door interaction.
@@ -417,6 +418,20 @@ function requireMoodleObject(value, label) {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
         throw new TypeError(`${label} must be an object.`);
     }
+}
+
+/**
+ * Copy validated coordinates before native int32 conversion.
+ *
+ * @param {object} value - Coordinate record.
+ * @param {string} label - Boundary diagnostic.
+ * @returns {number[]} Exact signed int32 coordinates.
+ */
+function squareCoordinates(value, label) {
+    requireMoodleObject(value, label);
+
+    return ['x', 'y', 'z'].map((name) =>
+        requireInteger(value[name], `${label} ${name}`, -0x80_00_00_00, 0x7F_FF_FF_FF));
 }
 
 /**
@@ -897,7 +912,49 @@ async function createEngine(source) {
     const doorBooleanNames = ['north', 'open', 'locked', 'lockedByKey', 'forceLocked',
         'attachedE', 'attachedS', 'barricaded', 'interiorSide', 'hoppable', 'customLock'];
     const squareBooleanNames = ['outside', 'solid', 'solidTrans', 'tree', 'vehicleObstructed', 'solidFloor'];
+    const interactionBits = new Map([
+        ['collideN', 2], ['collideW', 4], ['windowN', 8], ['windowW', 16],
+        ['blockedWindowN', 32], ['blockedWindowW', 64], ['stairsTN', 128], ['stairsTW', 256],
+    ]);
     // Source square flags: exterior1, solid2, solidtrans4, tree8, vehicle16, solidfloor32.
+
+    /**
+     * Validates complete source relation snapshots before any scratch/native staging.
+     *
+     * @param {object} value - Explicit boolean property snapshot.
+     * @param {string} label - Boundary diagnostic.
+     * @param {boolean} [door] - Actual doors cannot supply blocked-window state.
+     * @returns {number} Native source property mask.
+     */
+    function interactionMask(value, label, door = false) {
+        requireMoodleObject(value, label);
+        const prototype = Object.getPrototypeOf(value);
+
+        if (prototype !== Object.prototype && prototype !== null) {
+            throw new TypeError(`${label} must be a plain object.`);
+        }
+
+        let mask = 0;
+
+        for (const key of Reflect.ownKeys(value)) {
+            const bit = interactionBits.get(key);
+            const enabled = value[key];
+
+            if (bit === undefined || typeof enabled !== 'boolean') {
+                throw new TypeError(`${label} requires only known boolean source properties.`);
+            }
+
+            if (door && enabled && (bit === 32 || bit === 64)) {
+                throw new TypeError(`${label} cannot mark an IsoDoor as a blocked IsoWindow.`);
+            }
+
+            if (enabled) {
+                mask |= bit;
+            }
+        }
+
+        return mask;
+    }
 
     /**
      * Transfers one validated numeric record into bounded private scratch.
@@ -925,6 +982,10 @@ async function createEngine(source) {
      * Base squares may supply solidFloor (default false) and hoppableEdges (default zero).
      * Square windows retains raw collision bits; windowEdges supplies actual
      * created-window/frame stand edges, defaulting to windows when omitted.
+     * Optional square interactionProperties supplies strictly boolean source flags,
+     * actual blocked-window state and cached stair tops, independently of old masks.
+     * Door interactionProperties supplies four current-sprite snapshots in the same
+     * state order as standEdges; absent snapshots mean empty source properties.
      *
      * @param {object[]} rows - Stable CLOSED-placement identities and source flags.
      * @param {object} options - Native geometry and generation configuration.
@@ -935,7 +996,7 @@ async function createEngine(source) {
      */
     function importDoors(rows, { squares, seed = 1, lockedHouses = 4, initializeLocks = false } = {}) {
         requireOptional('importDoors', ['door_import_begin', 'door_import_stage', 'door_square_stage',
-            'door_import_commit', 'door_import_abort', 'door_read', 'door_count']);
+            'door_import_commit', 'door_import_abort', 'door_read', 'door_count', 'door_import_interaction_properties']);
 
         if (!Array.isArray(rows) || rows.length > 65_536
             || !Array.isArray(squares) || squares.length > 1_048_576) {
@@ -951,6 +1012,7 @@ async function createEngine(source) {
 
         const ids = [null];
         const ordinals = new Map();
+        const interactionRows = [];
         const numeric = rows.map((row, index) => {
             requireMoodleObject(row, 'Door row');
             const x = requireInteger(row.x, 'door x', -25_600, 25_855);
@@ -972,6 +1034,15 @@ async function createEngine(source) {
             if (doubleDoor !== 0 && garageDoor !== 0) {
                 throw new TypeError('Door cannot be both double and garage.');
             }
+
+            if (row.interactionProperties !== undefined
+                && (!Array.isArray(row.interactionProperties) || row.interactionProperties.length !== 4)) {
+                throw new TypeError('door interactionProperties requires four source property objects.');
+            }
+
+            interactionRows.push(Array.from({ length: 4 }, (_, state) => row.interactionProperties === undefined
+                ? 0
+                : interactionMask(row.interactionProperties[state], `door interactionProperties[${state}]`, true)));
 
             if (row.standEdges !== undefined
                 && (!Array.isArray(row.standEdges) || row.standEdges.length !== 4)) {
@@ -1026,15 +1097,18 @@ async function createEngine(source) {
                 doorFlags(row, squareBooleanNames), doorMask(row.independentWalls, 'square independentWalls'),
                 doorMask(row.windows ?? 0, 'square windows'), doorMask(row.doorWalls ?? 0, 'square doorWalls'),
                 doorMask(row.hoppableEdges === undefined ? 0 : row.hoppableEdges, 'square hoppableEdges'),
-                doorMask(row.windowEdges === undefined ? row.windows ?? 0 : row.windowEdges, 'square windowEdges')];
+                doorMask(row.windowEdges === undefined ? row.windows ?? 0 : row.windowEdges, 'square windowEdges'),
+                row.interactionProperties === undefined ? 0 : interactionMask(row.interactionProperties, 'square interactionProperties')];
         });
 
         scratch('importDoors');
         requireAccepted(api.door_import_begin(seed, lockedHouses, Number(initializeLocks)), 'importDoors');
         try {
-            for (const row of numeric) {
+            for (const [index, row] of numeric.entries()) {
                 doorWords(row, 'importDoors');
                 requireAccepted(api.door_import_stage(), 'importDoors row');
+                requireAccepted(api.door_import_interaction_properties(row[0], ...interactionRows[index]),
+                    'importDoors interactionProperties');
             }
 
             for (const row of squareRows) {
@@ -1083,6 +1157,27 @@ async function createEngine(source) {
         }
 
         return row;
+    }
+
+    /**
+     * Reads source isBlockedTo without deriving geometry from basic snapshots.
+     *
+     * @param {import('../types/mod-api').ModWorldCoordinates} from - Calling source square.
+     * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Other square or source null.
+     * @returns {boolean} Native directional wall/window/door/stair relation.
+     */
+    function isBlockedTo(from, to) {
+        requireOptional('isBlockedTo', ['square_blocked_to']);
+
+        const source = squareCoordinates(from, 'isBlockedTo from');
+        const target = to === null ? [0, 0, 0] : squareCoordinates(to, 'isBlockedTo to');
+        const code = api.square_blocked_to(...source, ...target, Number(to !== null));
+
+        if (code !== 0 && code !== 1) {
+            requireAccepted(code, 'isBlockedTo');
+        }
+
+        return code === 1;
     }
 
     /**
@@ -1931,7 +2026,7 @@ async function createEngine(source) {
         commitItemDefinitionRegistration, rollbackItemDefinitionRegistration, freezeItemDefinitions,
         items, inventoryState, importItems, wornItem, isWearingAwkwardGloves, getHealth, isDead,
         moodles, moodleInputLimits, saveMoodleState, loadMoodleState, resetMoodleState,
-        importDoors, getSquare, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,
+        importDoors, getSquare, isBlockedTo, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,
         bodyParts, bodyPartInputLimits, thermalActionModifier, canSaveBodyState, saveBodyState, loadBodyState,
     });
 }

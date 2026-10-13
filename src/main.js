@@ -1143,6 +1143,14 @@ function createSessionModHost(binding) {
          */
         getSquare: (x, y, z) => binding.engine.getSquare(x, y, z),
         /**
+         * Read this session's native directional source-square relation.
+         *
+         * @param {import('../types/mod-api').ModWorldCoordinates} from - Calling source square.
+         * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Other square or null.
+         * @returns {boolean} Actual current source blockage.
+         */
+        isBlockedTo: (from, to) => binding.engine.isBlockedTo(from, to),
+        /**
          * Submit a door toggle through this session's shared command path.
          *
          * @param {string} id - Stable imported native door identity.

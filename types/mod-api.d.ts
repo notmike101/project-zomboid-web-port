@@ -104,6 +104,13 @@ export interface ModInventoryState {
   maxWeight: number;
 }
 
+/** Detached coordinate record: every axis is a signed int32, including query elevations. */
+export interface ModWorldCoordinates {
+  x: number;
+  y: number;
+  z: number;
+}
+
 /** Detached authoritative source-square facts; absent metadata returns null, not a guessed tile. */
 export interface ModWorldSquare {
   x: number;
@@ -443,6 +450,9 @@ export interface ModApi {
     getDoors(): ModDoor[];
     /** Signed int32 coordinates. Returns null only for absent source metadata; unsupported engines throw. */
     getSquare(x: number, y: number, z: number): ModWorldSquare | null;
+    /** Directional native wall/window/door/stair relation. Null/absent other is false;
+     * absent calling square, invalid records and unsupported engines throw ModError/world. */
+    isBlockedTo(from: ModWorldCoordinates, to: ModWorldCoordinates | null): boolean;
     /** Exact nonempty stable id, at most 256 characters; no namespace normalization.
      * Uses actions.submit hooks before WASM mutation and returns cancelled on veto.
      * Forbidden during synchronous activate; malformed/unsupported/reentrant calls throw ModError/action. */
@@ -581,6 +591,7 @@ export interface ModEngine {
   worldBounds?(): ModWorldBounds;
   navFlags?(x: number, y: number): number;
   getSquare?(x: number, y: number, z: number): ModWorldSquare | null;
+  isBlockedTo?(from: ModWorldCoordinates, to: ModWorldCoordinates | null): boolean;
   worldImportCell?(cx: number, cy: number, bytes: Uint8Array | DataView): void;
   /** Optional actual native-door wrapper. Validation checks availability without toggling. */
   doors?(): ModDoor[];

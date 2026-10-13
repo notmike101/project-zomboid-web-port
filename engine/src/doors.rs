@@ -21,6 +21,8 @@ const SELECTED: u32 = 2048;
 const TOGGLED: u32 = 4096;
 const WALLS: u8 = NAV_WALL_NORTH | NAV_WALL_WEST;
 const SPRITE_FACTS_MASK: u32 = 126 | (126 << 7) | (126 << 14) | (126 << 21);
+const INTERACTION_PROPERTIES_MASK: u32 = 510;
+const DOOR_INTERACTION_PROPERTIES_MASK: u32 = INTERACTION_PROPERTIES_MASK & !(32 | 64);
 const LIMIT: usize = 65_536;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -35,6 +37,7 @@ struct Door {
     double: u32,
     garage: u32,
     sprite_facts: u32,
+    interaction_properties: [u16; 4],
 }
 impl Door {
     fn open(self) -> bool {
@@ -44,6 +47,10 @@ impl Door {
         let shift =
             if self.flags & TOGGLED != 0 { 14 } else { 0 } + if self.open() { 7 } else { 0 };
         ((self.sprite_facts >> shift) & 126) as u8
+    }
+    fn interaction_properties(self) -> u16 {
+        let index = if self.flags & TOGGLED != 0 { 2 } else { 0 } + usize::from(self.open());
+        self.interaction_properties[index]
     }
     fn blocked(self) -> bool {
         !self.open() || self.flags & BARRICADED != 0
@@ -121,6 +128,7 @@ struct Square {
     door_walls: u8,
     hoppable_edges: u8,
     window_edges: u8,
+    interaction_properties: u16,
 }
 impl Square {
     fn solid(self) -> bool {
@@ -135,7 +143,8 @@ struct Doors {
     squares: HashMap<SquareKey, Square>,
     removed: HashMap<SquareKey, u8>,
     edges: HashMap<SquareKey, u8>,
-    sprite_facts: HashMap<SquareKey, u8>,
+    // Low seven bits retain legacy stand/square facts; upper bits are source facts.
+    sprite_facts: HashMap<SquareKey, u32>,
     revision: u32,
     seed: u32,
     rng: u64,
@@ -159,7 +168,8 @@ impl Doors {
         self.edges.clear();
         self.sprite_facts.clear();
         for door in &self.rows {
-            let sprite_facts = door.sprite_facts();
+            let sprite_facts =
+                door.sprite_facts() as u32 | ((door.interaction_properties() as u32) << 7);
             if sprite_facts != 0 {
                 *self.sprite_facts.entry(door.position()).or_default() |= sprite_facts;
             }
@@ -263,7 +273,8 @@ impl Doors {
     fn query_square(&self, key: SquareKey) -> Option<Square> {
         self.square(key).map(|mut square| {
             let facts = self.sprite_facts.get(&key).copied().unwrap_or(0);
-            square.flags |= (((facts & 24) >> 2) | (facts & 32) | ((facts & 64) >> 3)) as u32;
+            square.flags |= ((facts & 24) >> 2) | (facts & 32) | ((facts & 64) >> 3);
+            square.interaction_properties |= (facts >> 7) as u16;
             square
         })
     }
@@ -271,8 +282,56 @@ impl Doors {
         self.square(key).map_or(0, |square| {
             square.window_edges
                 | square.hoppable_edges
-                | (self.sprite_facts.get(&key).copied().unwrap_or(0) & WALLS)
+                | (self.sprite_facts.get(&key).copied().unwrap_or(0) as u8 & WALLS)
         })
+    }
+    fn source_edge_blocked(&self, key: SquareKey, north: bool) -> bool {
+        let Some(square) = self.query_square(key) else {
+            return false;
+        };
+        let (collide, window, blocked_window, door_edge) = if north {
+            (2, 8, 32, NAV_WALL_NORTH)
+        } else {
+            (4, 16, 64, NAV_WALL_WEST)
+        };
+        let properties = square.interaction_properties;
+        (properties & collide != 0 && properties & window == 0)
+            || properties & blocked_window != 0
+            || self.edges.get(&key).copied().unwrap_or(0) & door_edge != 0
+    }
+    fn source_neighbor_edge_blocked(&self, (x, y, z): SquareKey, north: bool) -> bool {
+        // SOUTH/EAST look up the next square, not a second facing on this square.
+        let x = x as i64 + i64::from(!north);
+        let y = y as i64 + i64::from(north);
+        match (i32::try_from(x), i32::try_from(y)) {
+            (Ok(x), Ok(y)) => self.source_edge_blocked((x, y, z), north),
+            _ => false,
+        }
+    }
+    fn source_blocked_to(&self, from: SquareKey, to: SquareKey) -> bool {
+        if from == to {
+            return false;
+        }
+        let dx = from.0 as i64 - to.0 as i64;
+        let dy = from.1 as i64 - to.1 as i64;
+        // Source isEdgeElementTo tests both endpoint-facing edges, even far apart
+        // or on different elevations. It does not trace the intermediate path.
+        (dx > 0
+            && (self.source_edge_blocked(from, false)
+                || self.source_neighbor_edge_blocked(to, false)))
+            || (dx < 0
+                && (self.source_edge_blocked(to, false)
+                    || self.source_neighbor_edge_blocked(from, false)))
+            || (dy > 0
+                && (self.source_edge_blocked(from, true)
+                    || self.source_neighbor_edge_blocked(to, true)))
+            || (dy < 0
+                && (self.source_edge_blocked(to, true)
+                    || self.source_neighbor_edge_blocked(from, true)))
+            || self.query_square(from).is_some_and(|square| {
+                (dx > 0 && square.interaction_properties & 256 != 0)
+                    || (dy > 0 && square.interaction_properties & 128 != 0)
+            })
     }
     fn can_stand(&self, (x, y, z): SquareKey, square: Square) -> bool {
         if square.flags & 2 != 0 {
@@ -464,6 +523,7 @@ pub extern "C" fn door_import_stage() -> i32 {
         double: w[9] as u32,
         garage: w[10] as u32,
         sprite_facts: w[11] as u32,
+        interaction_properties: [0; 4],
     };
     STAGING.with(|state| {
         let mut state = state.borrow_mut();
@@ -478,6 +538,34 @@ pub extern "C" fn door_import_stage() -> i32 {
     })
 }
 #[unsafe(no_mangle)]
+pub extern "C" fn door_import_interaction_properties(
+    id: u32,
+    initial_closed: u32,
+    initial_open: u32,
+    toggled_closed: u32,
+    toggled_open: u32,
+) -> i32 {
+    let properties = [initial_closed, initial_open, toggled_closed, toggled_open];
+    if id == 0
+        || properties
+            .iter()
+            .any(|mask| mask & !DOOR_INTERACTION_PROPERTIES_MASK != 0)
+    {
+        return BAD_FORMAT;
+    }
+    STAGING.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some((state, _)) = state.as_mut() else {
+            return BAD_FORMAT;
+        };
+        let Some(door) = state.rows.iter_mut().find(|row| row.id == id) else {
+            return BAD_FORMAT;
+        };
+        door.interaction_properties = properties.map(|mask| mask as u16);
+        OK
+    })
+}
+#[unsafe(no_mangle)]
 pub extern "C" fn door_square_stage() -> i32 {
     let w = words();
     if !integer(w[0], -25_600.0, 25_855.0)
@@ -488,7 +576,9 @@ pub extern "C" fn door_square_stage() -> i32 {
         || w[5..10]
             .iter()
             .any(|v| !integer(*v, 0.0, WALLS as f64) || *v as u8 & !WALLS != 0)
-        || w[10..].iter().any(|v| *v != 0.0)
+        || !integer(w[10], 0.0, INTERACTION_PROPERTIES_MASK as f64)
+        || w[10] as u32 & !INTERACTION_PROPERTIES_MASK != 0
+        || w[11] != 0.0
     {
         return BAD_FORMAT;
     }
@@ -511,6 +601,7 @@ pub extern "C" fn door_square_stage() -> i32 {
                 door_walls: w[7] as u8,
                 hoppable_edges: w[8] as u8,
                 window_edges: w[9] as u8,
+                interaction_properties: w[10] as u16,
             },
         );
         OK
@@ -582,6 +673,32 @@ pub extern "C" fn square_read(x: i32, y: i32, z: i32) -> i32 {
             },
         ]);
         OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn square_blocked_to(
+    from_x: i32,
+    from_y: i32,
+    from_z: i32,
+    to_x: i32,
+    to_y: i32,
+    to_z: i32,
+    has_to: u32,
+) -> i32 {
+    if has_to > 1 {
+        return OUT_OF_RANGE;
+    }
+    DOORS.with(|state| {
+        let state = state.borrow();
+        let from = (from_x, from_y, from_z);
+        if state.square(from).is_none() {
+            return OUT_OF_RANGE;
+        }
+        let to = (to_x, to_y, to_z);
+        if has_to == 0 || state.square(to).is_none() {
+            return 0;
+        }
+        i32::from(state.source_blocked_to(from, to))
     })
 }
 #[unsafe(no_mangle)]
@@ -867,4 +984,281 @@ pub extern "C" fn door_restore_commit() -> i32 {
             OK
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stage_square((x, y, z): SquareKey, properties: f64) -> i32 {
+        put(&[
+            x as f64, y as f64, z as f64, -1.0, 32.0, 0.0, 0.0, 0.0, 0.0, 0.0, properties, 0.0,
+        ]);
+        door_square_stage()
+    }
+
+    fn import_squares(squares: &[(SquareKey, u16)]) {
+        reset();
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        for &(key, properties) in squares {
+            assert_eq!(stage_square(key, properties as f64), OK);
+        }
+        assert_eq!(door_import_commit(), OK);
+    }
+
+    fn blocked(from: SquareKey, to: SquareKey) -> i32 {
+        square_blocked_to(from.0, from.1, from.2, to.0, to.1, to.2, 1)
+    }
+
+    #[test]
+    fn source_wall_excludes_only_raw_window_and_actual_window_blocks_independently() {
+        for (properties, expected) in [
+            (0, 0),
+            (4, 1),
+            (16, 0),
+            (4 | 16, 0),
+            (64, 1),
+            (4 | 16 | 64, 1),
+        ] {
+            import_squares(&[((0, 0, 0), 0), ((1, 0, 0), properties)]);
+            assert_eq!(blocked((0, 0, 0), (1, 0, 0)), expected);
+            assert_eq!(blocked((1, 0, 0), (0, 0, 0)), expected);
+            assert_eq!(square_read(1, 0, 0), OK);
+            assert_eq!(&words()[..6], &[1.0, 0.0, 0.0, -1.0, 32.0, 1.0]);
+            assert_eq!(flags(1, 0, 0), 0);
+        }
+        for (properties, expected) in [(2, 1), (2 | 8, 0), (32, 1)] {
+            import_squares(&[((0, 0, 0), 0), ((0, 1, 0), properties)]);
+            assert_eq!(blocked((0, 0, 0), (0, 1, 0)), expected);
+            assert_eq!(blocked((0, 1, 0), (0, 0, 0)), expected);
+        }
+    }
+
+    #[test]
+    fn source_relation_checks_both_endpoint_edges_and_their_east_south_neighbors() {
+        // A distant diagonal still tests each endpoint, not intermediate path squares.
+        for (endpoint, neighbor) in [(4, 0), (0, 4)] {
+            import_squares(&[((0, 0, 0), 0), ((3, 3, 0), endpoint), ((1, 0, 0), neighbor)]);
+            assert_eq!(blocked((0, 0, 0), (3, 3, 0)), 1);
+            assert_eq!(blocked((3, 3, 0), (0, 0, 0)), 1);
+        }
+        import_squares(&[((0, 0, 0), 0), ((3, 3, 0), 0), ((0, 1, 0), 32)]);
+        assert_eq!(blocked((0, 0, 0), (3, 3, 0)), 1);
+        assert_eq!(blocked((3, 3, 0), (0, 0, 0)), 1);
+        import_squares(&[((0, 0, 0), 0), ((3, 3, 0), 0), ((2, 2, 0), 6)]);
+        assert_eq!(blocked((0, 0, 0), (3, 3, 0)), 0);
+        import_squares(&[((0, 0, 0), 0), ((3, 0, 1), 4)]);
+        assert_eq!(blocked((0, 0, 0), (3, 0, 1)), 1);
+    }
+
+    #[test]
+    fn source_relation_does_not_infer_properties_from_legacy_collision_or_stand_edges() {
+        reset();
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(stage_square((0, 0, 0), 0.0), OK);
+        put(&[
+            1.0,
+            1.0,
+            0.0,
+            -1.0,
+            32.0,
+            WALLS as f64,
+            WALLS as f64,
+            WALLS as f64,
+            WALLS as f64,
+            WALLS as f64,
+            0.0,
+            0.0,
+        ]);
+        assert_eq!(door_square_stage(), OK);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(blocked((0, 0, 0), (1, 1, 0)), 0);
+        assert_eq!(blocked((1, 1, 0), (0, 0, 0)), 0);
+        assert_eq!(flags(1, 1, 0), WALLS);
+    }
+
+    #[test]
+    fn source_stairs_are_directional_and_null_other_does_not_hide_missing_from() {
+        import_squares(&[((0, 0, 0), 0), ((1, 0, 0), 256), ((0, 1, 0), 128)]);
+        assert_eq!(blocked((1, 0, 0), (0, 0, 0)), 1);
+        assert_eq!(blocked((0, 0, 0), (1, 0, 0)), 0);
+        assert_eq!(blocked((0, 1, 0), (0, 0, 0)), 1);
+        assert_eq!(blocked((0, 0, 0), (0, 1, 0)), 0);
+        assert_eq!(blocked((1, 0, 0), (1, 0, 0)), 0);
+        assert_eq!(blocked((1, 0, 0), (i32::MIN, i32::MAX, i32::MAX)), 0);
+        assert_eq!(square_blocked_to(1, 0, 0, 0, 0, 0, 0), 0);
+        assert_eq!(square_blocked_to(9, 9, 0, 0, 0, 0, 0), OUT_OF_RANGE);
+        assert_eq!(square_blocked_to(0, 0, 0, 0, 0, 0, 2), OUT_OF_RANGE);
+        assert_eq!(blocked((0, 0, i32::MAX), (0, 0, 0)), OUT_OF_RANGE);
+    }
+
+    #[test]
+    fn source_edge_offsets_do_not_wrap_extreme_signed_coordinates() {
+        import_squares(&[((0, 0, 0), 0)]);
+        DOORS.with(|state| {
+            let mut state = state.borrow_mut();
+            let square = state.squares[&(0, 0, 0)];
+            state.squares.insert(
+                (i32::MIN, 0, 0),
+                Square {
+                    interaction_properties: 4,
+                    ..square
+                },
+            );
+            state.squares.insert((i32::MAX, 0, 0), square);
+            state.squares.insert(
+                (0, i32::MIN, 0),
+                Square {
+                    interaction_properties: 2,
+                    ..square
+                },
+            );
+            state.squares.insert((0, i32::MAX, 0), square);
+        });
+        assert_eq!(blocked((i32::MIN, 0, 0), (i32::MAX, 0, 0)), 0);
+        assert_eq!(blocked((0, i32::MIN, 0), (0, i32::MAX, 0)), 0);
+    }
+
+    fn stage_door(flags: u32, double: u32) {
+        put(&[
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            flags as f64,
+            -1.0,
+            -1.0,
+            -1.0,
+            0.0,
+            double as f64,
+            0.0,
+            0.0,
+        ]);
+        assert_eq!(door_import_stage(), OK);
+    }
+
+    #[test]
+    fn source_door_current_snapshots_toggle_restore_and_reset_without_metadata_in_save() {
+        reset();
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        for key in [(0, 0, 0), (0, -1, 0), (-1, 0, 0)] {
+            assert_eq!(stage_square(key, 0.0), OK);
+        }
+        stage_door(NORTH, 0);
+        assert_eq!(door_import_interaction_properties(1, 4, 0, 0, 4), OK);
+        assert_eq!(door_import_commit(), OK);
+        ENGINE.with(|engine| {
+            let mut engine = engine.borrow_mut();
+            engine.x = 0.5;
+            engine.y = 0.5;
+        });
+        assert_eq!(blocked((0, 0, 0), (0, -1, 0)), 1);
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 1);
+        assert_eq!(door_toggle(1), OK);
+        assert_eq!(blocked((0, 0, 0), (0, -1, 0)), 0);
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 1);
+        assert_eq!(door_toggle(1), OK);
+        assert_eq!(blocked((0, 0, 0), (0, -1, 0)), 1);
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 0);
+        assert_eq!(door_restore_begin(9, 1, 1, 0, 1), OK);
+        put(&[1.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(door_restore_stage(), OK);
+        assert_eq!(door_restore_commit(), OK);
+        assert_eq!(blocked((0, 0, 0), (0, -1, 0)), 0);
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 0);
+        reset();
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), OUT_OF_RANGE);
+    }
+
+    #[test]
+    fn source_current_door_properties_union_with_base_and_remove_stale_sprite_flags() {
+        reset();
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(stage_square((0, 0, 0), 4.0), OK);
+        for key in [(0, -1, 0), (-1, 0, 0)] {
+            assert_eq!(stage_square(key, 0.0), OK);
+        }
+        stage_door(NORTH | OPEN, 0);
+        assert_eq!(door_import_interaction_properties(1, 0, 16, 0, 0), OK);
+        assert_eq!(door_import_commit(), OK);
+        ENGINE.with(|engine| {
+            let mut engine = engine.borrow_mut();
+            engine.x = 0.5;
+            engine.y = 0.5;
+        });
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 0);
+        assert_eq!(door_toggle(1), OK);
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 1);
+        assert_eq!(door_toggle(1), OK);
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 1);
+    }
+
+    #[test]
+    fn source_barricaded_open_double_panel_blocks_at_current_position_not_origin() {
+        reset();
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        for key in [(0, 0, 0), (-1, 0, 0), (-1, 1, 0), (0, -1, 0)] {
+            assert_eq!(stage_square(key, 0.0), OK);
+        }
+        stage_door(NORTH | OPEN | BARRICADED, 2);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(blocked((-1, 1, 0), (-1, 0, 0)), 1);
+        assert_eq!(blocked((0, 0, 0), (0, -1, 0)), 0);
+    }
+
+    #[test]
+    fn source_metadata_staging_refusals_leave_live_and_previous_staged_facts_unchanged() {
+        import_squares(&[((0, 0, 0), 0), ((1, 0, 0), 4)]);
+        assert_eq!(
+            door_import_interaction_properties(1, 0, 0, 0, 0),
+            BAD_FORMAT
+        );
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(stage_square((0, 0, 0), 0.0), OK);
+        assert_eq!(stage_square((1, 0, 0), 0.0), OK);
+        for mask in [1.0, 512.0, -2.0, 2.5, f64::NAN] {
+            assert_eq!(stage_square((2, 0, 0), mask), BAD_FORMAT);
+            assert_eq!(blocked((0, 0, 0), (1, 0, 0)), 1);
+        }
+        put(&[2.0, 0.0, 0.0, -1.0, 32.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(door_square_stage(), BAD_FORMAT);
+        stage_door(0, 0);
+        assert_eq!(door_import_interaction_properties(1, 4, 0, 4, 0), OK);
+        for (id, masks) in [
+            (0, [0, 0, 0, 0]),
+            (2, [0, 0, 0, 0]),
+            (1, [0, 0, 0, 1]),
+            (1, [0, 32, 0, 0]),
+            (1, [0, 0, 64, 0]),
+            (1, [512, 0, 0, 0]),
+        ] {
+            assert_eq!(
+                door_import_interaction_properties(id, masks[0], masks[1], masks[2], masks[3]),
+                BAD_FORMAT
+            );
+            assert_eq!(blocked((0, 0, 0), (1, 0, 0)), 1);
+        }
+        assert_eq!(door_import_commit(), BAD_FORMAT); // Missing west opposite square.
+        assert_eq!(blocked((0, 0, 0), (1, 0, 0)), 1);
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        for key in [(0, 0, 0), (-1, 0, 0), (0, -1, 0)] {
+            assert_eq!(stage_square(key, 0.0), OK);
+        }
+        stage_door(NORTH | OPEN, 0);
+        assert_eq!(door_import_interaction_properties(1, 0, 4, 0, 0), OK);
+        assert_eq!(
+            door_import_interaction_properties(1, 0, 0, 0, 32),
+            BAD_FORMAT
+        );
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 1);
+        // Re-import with omitted snapshots establishes empty facts, not old facts.
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        for key in [(0, 0, 0), (-1, 0, 0), (0, -1, 0)] {
+            assert_eq!(stage_square(key, 0.0), OK);
+        }
+        stage_door(NORTH | OPEN, 0);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 0);
+    }
 }

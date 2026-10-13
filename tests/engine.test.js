@@ -1798,6 +1798,40 @@ function doorSpawn(subject, x, y) {
     subject.loadState({ version: 2, values: [x, y, 1.5, x, y, 0, 0, 0, 0, 1, 100, 1] });
 }
 
+test('native blocked-square relations distinguish source window properties and directional stairs', async () => {
+    const subject = await engine();
+    const from = { x: 10, y: 10, z: 0 };
+    const north = { x: 10, y: 9, z: 0 };
+    const west = { x: 9, y: 10, z: 0 };
+    /**
+     * Replace the calling square's source properties without legacy collision changes.
+     *
+     * @param {object} interactionProperties - Actual property, window and stair facts.
+     * @returns {void} Commits complete square metadata.
+     */
+    const replace = (interactionProperties) => subject.importDoors([], {
+        squares: doorSquares({ '10:10': { interactionProperties } }),
+    });
+
+    subject.worldImportCell(0, 0, cellBytes());
+    replace({ collideN: true });
+    assert.equal(subject.isBlockedTo(from, north), true);
+    assert.equal(subject.isBlockedTo(north, from), true, 'wall relation tests both endpoint-facing edges');
+    replace({ collideN: true, windowN: true });
+    assert.equal(subject.isBlockedTo(from, north), false, 'raw windowN excludes the wall without inventing a blocked IsoWindow');
+    replace({ collideN: true, windowN: true, blockedWindowN: true });
+    assert.equal(subject.isBlockedTo(from, north), true, 'actual blocked-window state is independent of raw window flags');
+    replace({ stairsTW: true });
+    assert.equal(subject.isBlockedTo(from, west), true);
+    assert.equal(subject.isBlockedTo(west, from), false, 'stair relation belongs to the calling square');
+    replace({ stairsTN: true });
+    assert.equal(subject.isBlockedTo(from, north), true);
+    assert.equal(subject.isBlockedTo(north, from), false);
+    assert.equal(subject.isBlockedTo(from, from), false);
+    assert.equal(subject.isBlockedTo(from, null), false);
+    assert.equal(subject.isBlockedTo(from, { x: 100, y: 100, z: 0 }), false, 'absent other square has source null semantics');
+});
+
 test('native source-square standability keeps floor and adjacent-edge precedence', async () => {
     const subject = await engine();
 
@@ -1976,7 +2010,7 @@ test('direct WASM square staging rejects reserved flags, edges and scratch words
 
     for (const [index, value] of [
         [4, 64], [8, 1], [8, 8], [8, 2.5], [8, Number.NaN],
-        [9, 1], [9, 8], [9, 2.5], [9, Number.NaN], [10, 4], [11, 1],
+        [9, 1], [9, 8], [9, 2.5], [9, Number.NaN], [11, 1],
     ]) {
         const invalid = [...square];
 

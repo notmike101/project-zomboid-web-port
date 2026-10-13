@@ -1500,6 +1500,94 @@ export function activate(api) {
     assert.throws(() => getSquare(5, 5, 0), { name: 'ModError', modId: 'fx-square-owner', stage: 'api' });
 });
 
+test('SDK blocked-square reads live native source facts with owner, null and invalid-boundary errors', async (t) => {
+    const engine = await newEngine();
+    const from = { x: 5, y: 5, z: 0 };
+    const north = { x: 5, y: 4, z: 0 };
+    const base = { roomId: -1, outside: true, solid: false, solidTrans: false, tree: false, independentWalls: 0, vehicleObstructed: false };
+
+    /**
+     * Replace the real source relation facts atomically.
+     *
+     * @param {object} interactionProperties - Explicit source properties.
+     * @returns {void} Commits native square metadata.
+     */
+    const replace = (interactionProperties) => engine.importDoors([], {
+        squares: [{ ...base, ...from, interactionProperties }, { ...base, ...north }],
+    });
+
+    replace({ stairsTN: true });
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-blocked-owner')}
+export function activate(api) {
+    fx.api = api;
+    assert.equal(api.world.isBlockedTo({x:5,y:5,z:0}, {x:5,y:4,z:0}), true);
+}`));
+    const query = fx.api.world.isBlockedTo;
+
+    assert.equal(query(from, north), true);
+    assert.equal(query(north, from), false, 'native stair relation is directional');
+    assert.equal(query(from, null), false);
+    assert.equal(query(from, from), false);
+    assert.equal(query(from, { x: 5, y: 4, z: 32 }), false);
+    replace({ collideN: true, windowN: true });
+    assert.equal(query(from, north), false, 'no detached SDK square cache');
+    replace({ blockedWindowN: true });
+    assert.equal(query(from, north), true);
+
+    for (const invalid of [null, undefined, [], 'square', { x: 5, y: 5 }, { ...from, x: 5.1 }, { ...from, y: 2_147_483_648 }, { ...from, z: Number.NaN }]) {
+        assert.throws(() => query(invalid, null), { name: 'ModError', modId: 'fx-blocked-owner', stage: 'world' });
+
+        if (invalid !== null) {
+            assert.throws(() => query(from, invalid), { name: 'ModError', modId: 'fx-blocked-owner', stage: 'world' });
+        }
+    }
+
+    assert.throws(() => query({ x: 100, y: 100, z: 0 }, null), { name: 'ModError', stage: 'world' });
+    const core = createModHost({ snapshot: engine.snapshot, command: engine.command, setSpeed: engine.setSpeed });
+
+    t.after(() => core.dispose());
+    assert.throws(() => core.api.world.isBlockedTo(from, null), { name: 'ModError', modId: 'host', stage: 'world', message: /unsupported/ });
+    host.dispose();
+    assert.throws(() => query(from, north), { name: 'ModError', modId: 'fx-blocked-owner', stage: 'api' });
+});
+
+test('source interaction imports reject complete malformed property requests before changing native state', async () => {
+    const engine = await newEngine();
+    const id = importClosedDoor(engine);
+    const before = engine.saveDoorState();
+    const door = {
+        id, x: 10, y: 10, z: 0, north: true, open: false, roomId: -1, oppositeRoomId: -1, independentWalls: 0,
+        locked: false, lockedByKey: false, forceLocked: false, attachedE: false, attachedS: false,
+        barricaded: false, interiorSide: false,
+    };
+    const square = { x: 10, y: 10, z: 0, roomId: -1, outside: true, solid: false, solidTrans: false, tree: false, independentWalls: 0, vehicleObstructed: false };
+    const invalid = [null, [], true, new Date(0), Object.create({ collideN: true }), { collideN: 1 }, { windowW: 'true' }, { unknown: false }, { stairsTN: undefined }, { [Symbol('collideN')]: true }];
+
+    for (const interactionProperties of invalid) {
+        assert.throws(() => engine.importDoors([door], { squares: [square, { ...square, x: 11, interactionProperties }] }), /interactionProperties/);
+        assert.deepEqual(engine.saveDoorState(), before);
+        assert.throws(() => engine.importDoors([{ ...door, interactionProperties: [{}, {}, {}, interactionProperties] }], { squares: [square] }), /interactionProperties/);
+        assert.deepEqual(engine.saveDoorState(), before);
+    }
+
+    const sparseSnapshots = [{}, {}, {}, {}];
+
+    delete sparseSnapshots[3];
+
+    for (const interactionProperties of [{}, [], [{}, {}, {}], [{}, {}, {}, { blockedWindowN: true }], [{}, {}, {}, { blockedWindowW: true }], sparseSnapshots]) {
+        assert.throws(() => engine.importDoors([{ ...door, interactionProperties }], { squares: [square] }), /interactionProperties/);
+        assert.deepEqual(engine.saveDoorState(), before);
+    }
+
+    engine.importDoors([{ ...door, interactionProperties: [{ blockedWindowN: false }, {}, {}, {}] }], {
+        squares: [{ ...square, interactionProperties: { collideW: true } }, { ...square, x: 9 }, { ...square, y: 9 }],
+    });
+    assert.equal(engine.isBlockedTo(square, { x: 9, y: 10, z: 0 }), true);
+});
+
 test('door capabilities refuse core-only engines with caller attribution and preserve movement', async () => {
     const engine = await newEngine();
     const host = createModHost({ snapshot: engine.snapshot, command: engine.command, setSpeed: engine.setSpeed });

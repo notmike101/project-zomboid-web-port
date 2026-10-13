@@ -390,6 +390,31 @@ function doorSquareFlags(sprite, square) {
 }
 
 /**
+ * RecalcProperties skips blueprint before both current flags and cached type membership.
+ *
+ * @param {object} target - Source relation snapshot receiving positive facts.
+ * @param {object} sprite - Final surviving shared current sprite.
+ * @returns {object} The supplied snapshot.
+ */
+function addInteractionProperties(target, sprite) {
+    const props = sprite.properties;
+
+    if (!props.has('blueprint')) {
+        for (const name of ['collideN', 'collideW', 'windowN', 'windowW']) {
+            if (props.has(name)) {
+                target[name] = true;
+            }
+        }
+
+        if (sprite.tileType === 'stairsTN' || sprite.tileType === 'stairsTW') {
+            target[sprite.tileType] = true;
+        }
+    }
+
+    return target;
+}
+
+/**
  * Decode native sheet-relative window offsets, with the loader's tolerant remap scan.
  *
  * @param {object} sprite - Source definition.
@@ -649,6 +674,9 @@ function replayPlacement(objects, placement, registry, square) {
     } else if (props.has('windowN') || props.has('windowW')) {
         object.kind = 'window';
         object.north = props.has('windowN');
+        object.open = false;
+        object.destroyed = false;
+        object.glassRemoved = false;
         replacement = constructWindow(sprite, registry.sprites, object.north);
         special = true;
     } else if (props.has('WindowN') || props.has('WindowW')) {
@@ -695,7 +723,10 @@ function replayPlacement(objects, placement, registry, square) {
     insertObject(objects, object, special);
 
     if (replacement && variant) {
-        object.sprite = registry.glass.has(placement.spriteName) ? replacement.glass : replacement.smashed;
+        // CellLoader calls setSmashed(true) before optional setGlassRemoved(true).
+        object.destroyed = true;
+        object.glassRemoved = registry.glass.has(placement.spriteName);
+        object.sprite = object.glassRemoved ? replacement.glass : replacement.smashed;
 
         if (!object.sprite) {
             throw new Error(`Missing original current window sprite at ${square.x},${square.y},${square.z}`);
@@ -729,7 +760,7 @@ function projectDoor(object, square, doors, doorVisuals, doorIds) {
     }
 
     doorIds.add(id);
-    doors.push({ id, x: closedX, y: closedY, z: placement.z, order: placement.order, north, open, locked: false, lockedByKey: false, forceLocked: props.has('forceLocked'), keyId: -1, roomId: -1, oppositeRoomId: -1, attachedE: toggledOpen.properties.has('attachedE'), attachedS: toggledOpen.properties.has('attachedS'), barricaded: false, independentWalls: 0, doubleDoor, garageDoor, interiorSide: props.has('InteriorSide'), hoppable: closed.properties.has('HoppableN') || closed.properties.has('HoppableW'), standEdges: [standEdges(initialClosed), standEdges(initialOpen), standEdges(toggledClosed), standEdges(toggledOpen)], squareFlags: [doorSquareFlags(initialClosed, square), doorSquareFlags(initialOpen, square), doorSquareFlags(toggledClosed, square), doorSquareFlags(toggledOpen, square)], customLock: false });
+    doors.push({ id, x: closedX, y: closedY, z: placement.z, order: placement.order, north, open, locked: false, lockedByKey: false, forceLocked: props.has('forceLocked'), keyId: -1, roomId: -1, oppositeRoomId: -1, attachedE: toggledOpen.properties.has('attachedE'), attachedS: toggledOpen.properties.has('attachedS'), barricaded: false, independentWalls: 0, doubleDoor, garageDoor, interiorSide: props.has('InteriorSide'), hoppable: closed.properties.has('HoppableN') || closed.properties.has('HoppableW'), standEdges: [standEdges(initialClosed), standEdges(initialOpen), standEdges(toggledClosed), standEdges(toggledOpen)], squareFlags: [doorSquareFlags(initialClosed, square), doorSquareFlags(initialOpen, square), doorSquareFlags(toggledClosed, square), doorSquareFlags(toggledOpen, square)], interactionProperties: [initialClosed, initialOpen, toggledClosed, toggledOpen].map((current) => addInteractionProperties({}, current)), customLock: false });
     doorVisuals.push({ id, x: closedX, y: closedY, z: placement.z, order: placement.order, sourceX: placement.x, sourceY: placement.y, sourceSpriteName: placement.spriteName, closedSpriteName: closed.name, openSpriteName: openSprite.name, closedSpriteId: closed.id, openSpriteId: openSprite.id, closedSheetIndex: closed.tileSheetIndex, openSheetIndex: openSprite.tileSheetIndex, toggledClosedSpriteName: toggledClosed.name, toggledOpenSpriteName: toggledOpen.name });
 }
 
@@ -746,13 +777,22 @@ function projectDoor(object, square, doors, doorVisuals, doorIds) {
 function projectSquareObjects(square, objects, doors, doorVisuals, doorIds) {
     let slope;
 
+    square.interactionProperties = {};
+
     for (const object of objects) {
-        const { sprite, kind, special, north } = object;
+        const { sprite, kind, special, north, destroyed, open } = object;
         const props = sprite.properties;
 
         if (kind === 'door') {
             projectDoor(object, square, doors, doorVisuals, doorIds);
             continue;
+        }
+
+        addInteractionProperties(square.interactionProperties, sprite);
+
+        // hasBlockedWindow searches actual objects, even blueprint/non-special windows.
+        if (kind === 'window' && !destroyed && !open) {
+            square.interactionProperties[north ? 'blockedWindowN' : 'blockedWindowW'] = true;
         }
 
         square.hoppableEdges |= hoppableEdges(sprite);

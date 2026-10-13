@@ -65,6 +65,7 @@ method on that handle throws (`stage: 'api'`).
 | `api.world.getBounds()` | detached `ModWorldBounds` | Reads committed navigation cell extents, not a proposed import. Optional engine capability. |
 | `api.world.getNavFlags(tileX, tileY)` | unsigned number | Reads committed navigation bits at an absolute integer tile. Optional engine capability. |
 | `api.world.getSquare(x, y, z)` | detached `ModWorldSquare` or `null` | Reads actual source-square metadata and current native `canStand`; absent metadata is `null`, unsupported capability throws. Coordinates are signed int32 integers. |
+| `api.world.isBlockedTo(from, to)` | boolean | Native source relation between signed-int32 `{ x, y, z }` records. Missing caller errors; `null` or absent other square returns false. Capability/lifecycle failures are attributed `ModError/world`. |
 | `api.world.importNavigationCell(cx, cy, bytes)` | `ModWorldImportResult` | Validates complete navigation bytes, resolves precommit hooks, then imports once. Cancels movement on success; no automatic undo. |
 | `api.world.getDoors()` / `.toggleDoor(id)` | detached `ModDoor[]` / `ModCommandResult` | Original stable identities and native state; toggle uses shared precommit hooks and WASM reach/collision/lock rules. Mutation is forbidden during activation. |
 | `api.hooks.beforeWorldImport(callback, { priority = 0 })` | `() => boolean` | Synchronous precommit veto with detached coordinates and bytes; unsubscribe/ordering match `beforeAction`. |
@@ -259,7 +260,7 @@ ordinary door does not turn its decorative render wing into a collision wall.
 Queries do not mutate state. This is not yet the original approach-and-timed-action
 context-menu pipeline or general keys, vehicles and door damage.
 
-### Source squares and standability
+### Source squares, standability and blocked relations
 
 `world.getSquare(x, y, z)` reads native source-square metadata, not navigation
 bits or a synthesized tile. Its detached result contains `x`, `y`, `z`,
@@ -292,6 +293,26 @@ uses the current panel position and current source sprite, including constructor
 versus toggled sprite history. Tree and vehicle fields are exposed facts, not
 substitutes for this predicate's `solid` flag.
 
+`world.isBlockedTo(from, to)` reads the native source relation, independently of
+navigation collision and `canStand`. Supply `{ x, y, z }` signed-int32 records
+(a detached `ModWorldSquare` also works); `to` may be `null`. The caller must
+exist. An absent other square has source-null semantics and returns `false`;
+missing capability still throws, including for a null other square.
+
+The relation tests both endpoint-facing edges and their source east/south
+neighbors. Walls use current `collideN`/`collideW` flags excluding lowercase
+`windowN`/`windowW`; actual blocked windows are separate from raw flags, frames
+and stand edges. Door blockage uses current panel position, fixed facing and
+open/barricaded state. Stair-top checks are directional on the calling square:
+west-top blocks toward lower x, north-top toward lower y. Same-square relation
+is false. This is not a distance/radius test or an intermediate-path trace.
+
+Initial window blockage follows actual constructor and smashed/glass setter
+state, even when later sprite replacement or blueprint properties differ.
+Base square properties aggregate final surviving objects; door properties
+follow their genuine initial and toggled sprite partners on toggle/restore.
+Window runtime actions and player-built thumpables remain unsupported.
+
 Lua `getCell()` returns a stable `IsoCell` facade with
 `getGridSquare(x, y, z)`. Numeric lookup follows the source
 `PZMath.fastfloor(double)` conversion: fractional coordinates floor, Java
@@ -299,14 +320,15 @@ double-to-int saturation precedes the comparison and subtraction wraps as an
 int32. Nonnumeric coordinates refuse. Lookup returns `nil` only when native
 metadata is absent. `player:getCurrentSquare()` uses the actual actor position
 and the current port's actor elevation **0**, not invented multi-floor state.
-`IsoGridSquare` userdata retain identity by integer coordinates and expose only
-`getX()`, `getY()`, `getZ()` and `canStand()`, each reading current native facts.
-Retained userdata whose square disappears throw an honest error.
+`IsoGridSquare` userdata retain identity by integer coordinates and expose
+`getX()`, `getY()`, `getZ()`, `canStand()` and `isBlockedTo(otherSquareOrNil)`,
+each backed by current native facts. Foreign userdata/tables and unsupported
+overloads refuse; retained userdata whose calling square disappears error.
 
 `roomId` is the existing dense canonical source-room identity (`-1` outside
 rooms), not the original packed numeric `RoomID`. Lua `getRoom()`,
-`getBuilding()` and `getRoomID()` remain unsupported. This standability subset
-does not establish player-built thumpable state, the native timed-action queue,
+`getBuilding()` and `getRoomID()` remain unsupported. These geometry queries do
+not establish player-built thumpable state, the native timed-action queue,
 the original interaction context menu or full interaction-gate completion.
 
 

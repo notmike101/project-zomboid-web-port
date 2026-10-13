@@ -1377,6 +1377,14 @@ export function createModHost(engine, options = {}) {
                     return square === null ? null : { ...square };
                 }),
                 /**
+                 * Reads the native directional source relation, including genuine null semantics.
+                 *
+                 * @param {import('../types/mod-api').ModWorldCoordinates} from - Calling source square.
+                 * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Other square or null.
+                 * @returns {boolean} Actual current wall/window/door/stair blockage.
+                 */
+                isBlockedTo: (from, to) => access('world', () => capability('isBlockedTo')(from, to)),
+                /**
                  * Toggles through the shared synchronous precommit command path.
                  *
                  * @param {string} id - Exact nonempty stable identity, at most 256 characters.
