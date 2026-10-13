@@ -119,6 +119,7 @@ The normal surface is only the edge-to-edge game canvas. There is no header, sid
 
 ## Source body-part timing prerequisites
 
+- Bot-authored checkpoint `89471f713191e043bcc381ead496f54399b5e5d4` was pushed with both remote identities verified. Pinned Windows CI `38377285730` succeeded, including packaging/upload; local `release/0.1.0-preview.1-89471f713191` contains exactly 33 audited asset-free application files. CI annotation reads lacked permission but did not fail the run.
 - WASM now owns 17 mutable injury/skin-node records with source anatomy, wound/treatment pain order, normalized injury severity and cold timing weights only for hands/forearms/upper arms. Healthy skin 33 °C and uninjured pain come from actual source constructors/reset, not constant fallback getters.
 - SDK body queries/mutations share full-precision ingress, precommit veto/replacement, detached nested values and cleanup attribution. Genuine Lua VM ticks query stable body/part/list/node userdata; unsupported inner-node, climate and treatment lifecycle methods remain unsupported.
 - Optional integrity-covered version-1 `bodyState` captures mutable part fields and severity only, then restores on a candidate after actor/moodle state. Actor format 2/12 words and ABI 1 remain unchanged. A portable regression first lost injuries/temperature after export; native capture/restore integration fixed it.
