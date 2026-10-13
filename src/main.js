@@ -1,15 +1,30 @@
+import { openContentDirectory } from './content.js';
 import { createEngine } from './engine.js';
+import { openMapCell } from './map-tiles.js';
+import { createModManager } from './mod-manager.js';
 import { createModHost } from './mods.js';
+import { openPack } from './packs.js';
 import { createRenderer, worldFromCanvas } from './renderer.js';
+import { createSaveStore } from './saves.js';
+import { createTileLayer } from './tile-renderer.js';
+import { stageCells } from './world-session.js';
 
 const canvas = document.querySelector('#world');
 const state = document.querySelector('#state');
 const error = document.querySelector('#error');
 const diagnostics = document.querySelector('#diagnostics');
 const pauseButton = document.querySelector('#pause');
+const pauseMenu = document.querySelector('#pause-menu');
+const openPauseButton = document.querySelector('#open-pause');
+const loading = document.querySelector('#loading');
 const modCheckbox = document.querySelector('#mod');
-const imageInput = document.querySelector('#image');
 const directionButtons = document.querySelectorAll('[data-walk]');
+const packageControls = document.querySelector('#package-controls');
+const packageList = document.querySelector('#package-list');
+const packageStatus = document.querySelector('#package-status');
+const packageError = document.querySelector('#package-error');
+const packageActivation = document.querySelector('#package-activation');
+const safeMods = new URL(globalThis.location.href).searchParams.has('safe-mods');
 const held = new Set();
 const keys = new Map([
     ['w', [0, -1]], ['arrowup', [0, -1]], ['s', [0, 1]], ['arrowdown', [0, 1]],
@@ -18,7 +33,25 @@ const keys = new Map([
 let engine;
 let renderer;
 let mods;
-let paused = false;
+let packages;
+const engineSource = new URL('../engine/pz_engine.wasm', import.meta.url);
+let saves;
+let worldCells = [];
+let savedModState = Object.create(null);
+let sessionBusy = false;
+let autosave;
+let sessionReady = false;
+let content;
+let startup = 'loading';
+let savedRevision;
+let retainedSave = false;
+let tileLayer;
+let importedPacks = [];
+let geometryCells = [];
+let nativePackages = [];
+let packageBusy = false;
+let packagesActivated = false;
+let paused = true;
 let failed = false;
 let lastFrame;
 let accumulator = 0;
@@ -33,9 +66,21 @@ let toggledDirection;
  * @returns {void} Stops simulation.
  */
 function report(cause) {
+    if (failed) {
+        return;
+    }
+
     error.hidden = false;
     error.textContent = cause.message ?? String(cause);
     failed = true;
+    paused = true;
+    held.clear();
+    toggledDirection = undefined;
+
+    if (pauseMenu.open) {
+        pauseMenu.close();
+    }
+
     engine?.command({ type: 'cancel' });
     state.textContent = 'Simulation stopped. See the error message.';
     refresh();
@@ -47,6 +92,12 @@ function report(cause) {
  * @returns {void} Updates HTML status.
  */
 function refresh() {
+    loading.hidden = sessionReady || failed || startup === 'blocked';
+    openPauseButton.hidden = startup === 'loading';
+    openPauseButton.disabled = failed;
+    openPauseButton.setAttribute('aria-expanded', String(pauseMenu.open));
+    pauseButton.disabled = !sessionReady || sessionBusy || failed;
+
     if (!engine) {
         return;
     }
@@ -57,12 +108,31 @@ function refresh() {
         button.setAttribute('aria-pressed', String(snapshot.action === 2 && toggledDirection === button.dataset.walk));
     }
 
+    const tiles = tileLayer?.diagnostics();
+
+    if (!failed && tiles?.errors.length > 0) {
+        report(new Error(`Required original tile content is unavailable: ${tiles.errors.map(({ source, message }) => `${source}: ${message}`).join('; ')}. Provision the missing content and reload the page.`));
+
+        return;
+    }
+
     diagnostics.textContent = JSON.stringify({
         engine: snapshot, renderer: renderer?.diagnostics(), mods: mods?.diagnostics(),
+        packages: packages?.diagnostics(), nativePackages, safeMods,
+        startup, sessionReady, savedRevision, navigationCells: worldCells.map(({ x, y }) => ({ x, y })),
+        tiles: tiles ? { cells: geometryCells.length, ...tiles } : null,
         paused, failed, hidden: document.hidden, fixedStepSeconds: 1 / 60,
     }, null, 2);
     const actionName = ['idle', 'traveling to destination', 'toggle/manual walking'][snapshot.action];
-    const description = `Position ${snapshot.x.toFixed(2)}, ${snapshot.y.toFixed(2)} · ${actionName} · speed ${snapshot.speed.toFixed(2)} units/s${paused ? ' · paused' : ''}${failed ? ' · stopped' : ''}`;
+    let description;
+
+    if (!sessionReady) {
+        description = startup === 'blocked'
+            ? 'Startup stopped. Resolve the reported issue or explicitly start a new session; retained saves are untouched.'
+            : 'Loading local content and retained save; simulation is paused.';
+    } else {
+        description = `Position ${snapshot.x.toFixed(2)}, ${snapshot.y.toFixed(2)} · ${actionName} · speed ${snapshot.speed.toFixed(2)} units/s${paused ? ' · paused' : ''}${failed ? ' · stopped' : ''}`;
+    }
 
     if (description !== lastAnnouncement) {
         state.textContent = description;
@@ -89,7 +159,7 @@ function clearRecoverableError() {
  * @returns {import('./mods.js').ModCommandResult | undefined} Outcome, or no command when unavailable.
  */
 function submit(action) {
-    if (!mods || failed || (paused && action.type !== 'cancel')) {
+    if (!mods || !sessionReady || sessionBusy || failed || (paused && action.type !== 'cancel')) {
         return;
     }
 
@@ -174,17 +244,19 @@ function frame(time) {
 
     lastFrame = time;
 
-    if (!paused && !document.hidden) {
+    if (sessionReady && !sessionBusy && !paused && !document.hidden) {
         accumulator += elapsed;
         while (accumulator >= 1 / 60) {
-            engine.step(1 / 60);
+            mods.step(1 / 60);
             accumulator -= 1 / 60;
         }
     } else {
         accumulator = 0;
     }
 
-    renderer.render(engine.snapshot());
+    if (sessionReady && !sessionBusy) {
+        renderer.render(engine.snapshot());
+    }
 
     if (Math.floor(time / 500) !== Math.floor((time - elapsed * 1_000) / 500)) {
         refresh();
@@ -194,33 +266,97 @@ function frame(time) {
 }
 
 /**
- * Decode selected local content without uploading or retaining it after reload.
+ * Keep package/storage failures separate from fatal rendering failures.
  *
- * @returns {Promise<void>} Resolves after upload or a visible import error.
+ * @param {unknown} cause - Recoverable package failure.
+ * @returns {void} Shows persistent package feedback.
  */
-async function importImage() {
-    const file = imageInput.files[0];
+function reportPackageError(cause) {
+    packageError.hidden = false;
+    packageError.textContent = cause instanceof Error ? cause.message : String(cause);
+}
 
-    if (!file || !renderer || failed) {
+/**
+ * Show persisted configuration without pretending it is the running set.
+ *
+ * @returns {Promise<void>} Refreshes accessible package controls and evidence.
+ */
+async function refreshPackages() {
+    const installed = await packages.list();
+    const evidence = packages.diagnostics();
+    const activation = evidence.lastActivation;
+    const activeIds = new Set(activation?.disposed ? [] : activation?.activated.map((entry) => entry.id));
+    const entries = installed.map((entry) => {
+        const item = document.createElement('li');
+        const name = document.createElement('p');
+        const label = document.createElement('label');
+        const enabled = document.createElement('input');
+
+        name.textContent = `${entry.name} · ${entry.version} · ${activeIds.has(entry.id) ? 'active' : 'inactive'}`;
+        enabled.type = 'checkbox';
+        enabled.checked = entry.enabled;
+        enabled.addEventListener('change', () => {
+            const desired = enabled.checked;
+
+            enabled.checked = entry.enabled;
+
+            void changePackage(() => packages.setEnabled(entry.id, desired), `${entry.name}: ${desired ? 'enabled' : 'disabled'} for the next reload.`);
+        });
+        label.append(enabled, document.createTextNode(` Enable ${entry.name} after reload`));
+        item.append(name, label);
+
+        return item;
+    });
+
+    packageList.replaceChildren(...entries);
+
+    if (installed.length === 0 && nativePackages.length === 0) {
+        const empty = document.createElement('li');
+
+        empty.textContent = 'No local mod packages installed.';
+        packageList.append(empty);
+    }
+
+    for (const entry of nativePackages) {
+        const item = document.createElement('li');
+
+        item.textContent = `${entry.root} · ${entry.fileCount} native Lua files · ${entry.message}`;
+        packageList.append(item);
+    }
+
+    document.querySelector('#package-reload-status').textContent = evidence.requiresReload
+        ? 'Reload to apply your changes.'
+        : 'Changes apply after reloading.';
+    packageActivation.textContent = JSON.stringify(activation ?? null);
+    refresh();
+}
+
+/**
+ * Serialize configuration writes and make rejected package operations recoverable.
+ *
+ * @param {() => Promise<unknown>} change - Installation or configuration mutation.
+ * @param {string} message - Honest next-reload result.
+ * @returns {Promise<void>} Completes after visible feedback.
+ */
+async function changePackage(change, message) {
+    if (!packages || packageBusy) {
         return;
     }
 
-    imageInput.disabled = true;
+    packageBusy = true;
+    packageControls.disabled = true;
     try {
-        const asset = await renderer.importImage(file);
-
-        clearRecoverableError();
-
-        document.querySelector('#asset').textContent = `${asset.name} · ${asset.width} × ${asset.height} · ${asset.sourceBytes} source bytes · ${asset.textureBytes} texture bytes. Local memory only; reimport after reload.`;
-        refresh();
+        await change();
+        packageError.hidden = true;
+        packageError.textContent = '';
+        packageStatus.textContent = message;
+        await refreshPackages();
     } catch (cause) {
-        if (!failed) {
-            error.hidden = false;
-            error.textContent = cause.message;
-        }
+        reportPackageError(cause);
+        refresh();
     } finally {
-        imageInput.disabled = false;
-        imageInput.value = '';
+        packageBusy = false;
+        packageControls.disabled = false;
     }
 }
 
@@ -251,6 +387,8 @@ function toggleWalking(event) {
     const button = event.currentTarget;
     const [x, y] = button.dataset.walk.split(',').map(Number);
 
+    resumeGame();
+
     if (engine?.snapshot().action === 2 && toggledDirection === button.dataset.walk) {
         stop();
     } else {
@@ -266,21 +404,50 @@ function toggleWalking(event) {
  */
 function formDestination(event) {
     event.preventDefault();
+    resumeGame();
     takeover({ type: 'moveTo', x: Number(document.querySelector('#target-x').value), y: Number(document.querySelector('#target-y').value) });
 }
 
 /**
- * Pause without preserving an action or accumulating elapsed time.
+ * Open the native modal menu and cancel all movement.
  *
- * @returns {void} Updates the pause control.
+ * @returns {void} Pauses without preserving input.
  */
-function togglePause() {
+function openPauseMenu() {
+    if (failed || pauseMenu.open) {
+        return;
+    }
+
     stop();
-    paused = !paused;
+    paused = true;
     accumulator = 0;
     lastFrame = undefined;
-    pauseButton.setAttribute('aria-pressed', String(paused));
-    pauseButton.textContent = paused ? 'Resume simulation' : 'Pause simulation';
+    pauseMenu.showModal();
+    refresh();
+}
+
+/**
+ * Close the menu and restore gameplay focus without catch-up.
+ *
+ * @returns {void} Resumes a ready session.
+ */
+function resumeGame() {
+    if (sessionBusy || failed) {
+        return;
+    }
+
+    paused = !sessionReady;
+    accumulator = 0;
+    lastFrame = undefined;
+
+    if (pauseMenu.open) {
+        pauseMenu.close();
+    }
+
+    if (sessionReady) {
+        canvas.focus({ preventScroll: true });
+    }
+
     refresh();
 }
 
@@ -294,6 +461,21 @@ function keyDown(event) {
     const key = event.key.toLowerCase();
 
     if (key === 'escape') {
+        event.preventDefault();
+
+        if (!event.repeat) {
+            if (pauseMenu.open) {
+                resumeGame();
+            } else {
+                openPauseMenu();
+            }
+        }
+
+        return;
+    }
+
+    if (key === ' ' && document.activeElement === canvas) {
+        event.preventDefault();
         stop();
 
         return;
@@ -345,7 +527,7 @@ function visibilityChanged() {
  * @returns {Promise<void>} Resolves after activation/cleanup or reported failure.
  */
 async function toggleMod() {
-    if (!mods || failed) {
+    if (!mods || !sessionReady || sessionBusy || failed || mods.diagnostics().mods.some((entry) => entry.url !== new URL('../mods/accessible-walking/main.js', import.meta.url).href)) {
         return;
     }
 
@@ -360,7 +542,7 @@ async function toggleMod() {
 
         clearRecoverableError();
 
-        document.querySelector('#mod-status').textContent = modCheckbox.checked ? 'Active: movement speed changed inside WASM by the public mod API.' : 'Disabled: cleanup restored the base WASM speed.';
+        document.querySelector('#mod-status').textContent = modCheckbox.checked ? 'Active: walking speed 2.25.' : 'Disabled: walking speed 1.5.';
     } catch (cause) {
         modCheckbox.checked = false;
 
@@ -387,6 +569,8 @@ function pageHidden(event) {
     if (!event.persisted) {
         mods?.dispose();
         renderer?.destroy();
+        clearInterval(autosave);
+        saves?.close();
     }
 }
 
@@ -404,20 +588,729 @@ function pageShown(event) {
     }
 }
 
+/**
+ * Publish a fully validated WASM session and its staged original geometry.
+ *
+ * @param {object} staged - Fresh engine and imported cell sources.
+ * @returns {void} Replaces only the authoritative simulation instance.
+ */
+function publishSession(staged) {
+    if (failed) {
+        throw new Error('Renderer is no longer active.');
+    }
+
+    renderer.setWorldLayer(staged.geometry.layer);
+    tileLayer = staged.geometry.layer;
+    geometryCells = staged.geometry.cells;
+    worldCells = staged.cells;
+    engine = staged.engine;
+    sessionReady = true;
+    startup = 'ready';
+    clearRecoverableError();
+    pauseButton.disabled = false;
+    document.querySelector('#save-now').disabled = false;
+    modCheckbox.checked = mods.diagnostics().mods.some((entry) => entry.url === new URL('../mods/accessible-walking/main.js', import.meta.url).href);
+    modCheckbox.disabled = mods.diagnostics().mods.some((entry) => entry.url !== new URL('../mods/accessible-walking/main.js', import.meta.url).href);
+    renderer.setWorldMode(worldCells.length > 0);
+    accumulator = 0;
+    lastFrame = undefined;
+    const bounds = engine.worldBounds();
+
+    for (const [axis, min, max] of [['x', bounds.minCx, bounds.maxCx], ['y', bounds.minCy, bounds.maxCy]]) {
+        const input = document.querySelector(`#target-${axis}`);
+
+        input.min = bounds.active ? min * 256 : 0;
+        input.max = bounds.active ? (max + 1) * 256 - 0.001 : 10;
+        input.value = engine.snapshot()[axis];
+    }
+
+    loading.hidden = true;
+    refresh();
+}
+
+/**
+ * Reject restores unless every saved mod has the exact running identity.
+ *
+ * @param {object[]} required - Saved mod provenance.
+ * @returns {void} Allows only a matching running set.
+ */
+function requireSessionMods(required) {
+    const active = new Map(mods.diagnostics().mods.map((entry) => [entry.id, entry]));
+
+    for (const saved of required) {
+        const running = active.get(saved.id);
+
+        if (!running || running.version !== saved.version || running.apiVersion !== saved.apiVersion) {
+            throw new Error(`Save requires mod ${saved.id} ${saved.version}; enable the matching version and reload. Saved namespaces are retained.`);
+        }
+    }
+
+    if (active.size !== required.length) {
+        throw new Error('Running mod set differs from this save. Adjust enabled packages and reload before restoring.');
+    }
+}
+
+/**
+ * Bind the target engine and namespaces before activation or schema migration.
+ * Rollback covers host-owned state/hooks, not arbitrary trusted JavaScript effects.
+ *
+ * @param {object} staged - Validated target engine and navigation.
+ * @param {object} namespaces - Fresh or retained namespace documents.
+ * @param {object[]} [required] - Exact saved mod identities, when restoring.
+ * @returns {Promise<void>} Initializes the session's live mod handles.
+ */
+async function activateSession(staged, namespaces, required) {
+    const running = mods.diagnostics().mods;
+    const previous = {
+        engine, cells: worldCells, namespaces: Object.assign(Object.create(null), savedModState),
+        state: engine.saveState(),
+    };
+
+    mods.dispose();
+    engine = staged.engine;
+    worldCells = staged.cells;
+    savedModState = Object.assign(Object.create(null), namespaces);
+    try {
+        if (!packagesActivated) {
+            const activation = await packages.activateEnabled({ safeMode: safeMods });
+
+            if (activation.errors.length > 0) {
+                throw new Error(activation.errors.map((entry) => `${entry.id} [${entry.stage}]: ${entry.message}`).join('\n'));
+            }
+
+            packageStatus.textContent = safeMods ? 'Safe mode: no local JavaScript packages executed. Discovered new packages remain disabled.' : 'Directory packages discovered. New packages are disabled; only your enabled packages activate on reload.';
+
+            if (!safeMods && required?.some(({ id }) => id === 'accessible-walking')) {
+                await mods.load(new URL('../mods/accessible-walking/main.js', import.meta.url).href);
+            }
+        } else {
+            for (const { url } of running) {
+                // Reactivate the running set, not next-reload package configuration.
+                // eslint-disable-next-line no-await-in-loop
+                await mods.load(url);
+            }
+        }
+
+        if (required) {
+            requireSessionMods(required);
+        }
+
+        if (failed) {
+            throw new Error('Renderer is no longer active.');
+        }
+
+        packagesActivated = true;
+    } catch (cause) {
+        if (!failed) {
+            reportPackageError(cause);
+        }
+
+        mods.dispose();
+        engine = previous.engine;
+        worldCells = previous.cells;
+        savedModState = Object.assign(Object.create(null), previous.namespaces);
+        try {
+            for (const { url } of running) {
+                // Restore host-owned hooks against the prior namespace backing.
+                // eslint-disable-next-line no-await-in-loop
+                await mods.load(url);
+            }
+        } catch (rollbackError) {
+            reportPackageError(rollbackError);
+            report(new Error(`Previous session mods could not be reactivated: ${rollbackError.message}. Reload the page before continuing.`));
+        } finally {
+            engine.loadState(previous.state);
+            savedModState = previous.namespaces;
+        }
+
+        throw cause;
+    }
+}
+
+/**
+ * Keep save/import failures recoverable and visible without stopping WebGPU.
+ *
+ * @param {() => Promise<void>} action - Session operation.
+ * @returns {Promise<void>} Completes after operation feedback.
+ */
+async function sessionOperation(action) {
+    if (sessionBusy || failed || !content || !saves) {
+        return;
+    }
+
+    sessionBusy = true;
+    const wasPaused = paused;
+
+    paused = true;
+    document.querySelector('#session-controls').disabled = true;
+    try {
+        await action();
+    } catch (cause) {
+        document.querySelector('#save-status').textContent = cause.message;
+
+        if (!failed) {
+            error.hidden = false;
+            error.textContent = cause.message;
+        }
+    } finally {
+        sessionBusy = false;
+        paused = failed || !sessionReady || wasPaused || pauseMenu.open;
+        document.querySelector('#session-controls').disabled = false;
+        refresh();
+    }
+}
+
+/**
+ * Capture detached cells and current mod provenance for an atomic save.
+ *
+ * @returns {Promise<void>} Committed save feedback.
+ */
+async function saveSession() {
+    if (!sessionReady) {
+        throw new Error('No successfully loaded session to save. Retained browser saves have not been changed.');
+    }
+
+    const record = await saves.save(engine, {
+        cells: worldCells,
+        mods: mods.diagnostics().mods.map(({ id, version, apiVersion }) => ({ id, version, apiVersion })),
+        modState: savedModState,
+    });
+
+    savedRevision = record.revision;
+    retainedSave = true;
+    document.querySelector('#save-status').textContent = `Saved revision ${record.revision}. Export a backup to protect against browser storage loss.`;
+}
+
+/**
+ * Load a validated backup only when its running mod versions match.
+ *
+ * @param {string} [id] - Save slot.
+ * @param {object} [prepared] - Validated retained save staged before mod activation.
+ * @returns {Promise<void>} Publishes the restored game after compatibility checks.
+ */
+async function loadSession(id, prepared) {
+    stop();
+    const staged = prepared ?? await saves.load(id);
+
+    /* Boot activation validates identities after initialization; running restores
+       reject incompatible packages before touching the previous scene or hooks. */
+    if (packagesActivated) {
+        requireSessionMods(staged.record.mods);
+    }
+
+    const cells = staged.record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: Uint8Array.from(atob(cell.bytes), (character) => character.charCodeAt(0)),
+    }));
+
+    const geometry = await loadGeometry(cells, staged.engine.snapshot());
+
+    try {
+        await activateSession({ engine: staged.engine, cells }, staged.record.modState, staged.record.mods);
+        publishSession({ engine: staged.engine, cells: worldCells, geometry });
+    } catch (cause) {
+        geometry.layer.destroy();
+        throw cause;
+    }
+
+    savedRevision = staged.record.revision;
+    document.querySelector('#save-status').textContent = staged.recovered
+        ? `Recovered previous committed revision ${staged.record.revision}: ${staged.recoveryReason}. The damaged current save has not been replaced.`
+        : `Loaded revision ${staged.record.revision}.`;
+}
+
+/**
+ * Download a validated backup without requiring persistence or a remote service.
+ *
+ * @returns {Promise<void>} Initiates a user-selected local download.
+ */
+async function exportSession() {
+    const blob = sessionReady
+        ? await saves.exportLive(engine, {
+                cells: worldCells,
+                mods: mods.diagnostics().mods.map(({ id, version, apiVersion }) => ({ id, version, apiVersion })),
+                modState: savedModState,
+            })
+        : await saves.exportSave();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+
+    link.href = url;
+    link.download = 'pz-web-save.json';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+/**
+ * Stage a visible original tile layer using deterministic pack precedence.
+ *
+ * @param {object[]} cells - Fully indexed staged geometry cells.
+ * @param {object} [snapshot] - Staged player position for the first real tile window.
+ * @returns {Promise<object>} Validated layer/cells staged without replacing the scene.
+ */
+async function rebuildTileLayer(cells, snapshot = engine.snapshot()) {
+    if (importedPacks.length === 0 || cells.length === 0) {
+        throw new Error('The local content directory must contain texture packs and matching lotheader/lotpack geometry.');
+    }
+
+    const layer = createTileLayer({
+        ...renderer.gpuResources(),
+        packs: importedPacks,
+        cells,
+    });
+
+    try {
+        await layer.update({ x: snapshot.x, y: snapshot.y, width: canvas.width, height: canvas.height });
+        const evidence = layer.diagnostics();
+
+        if (evidence.errors.length > 0 || evidence.residentSprites === 0) {
+            throw new Error(`Original tile startup failed: ${evidence.errors.map((entry) => entry.message).join('; ') || 'no original sprites loaded for this saved position'}. Provision matching geometry and texture packs.`);
+        }
+
+        return { layer, cells };
+    } catch (cause) {
+        layer.destroy();
+        throw cause;
+    }
+}
+
+/**
+ * Import real atlas packs without reading complete texture banks into memory.
+ *
+ * @param {object[]} files - Lazy local-directory .pack sources.
+ * @returns {Promise<void>} Indexes available tile art without materializing banks.
+ */
+async function importPacks(files) {
+    const indexed = [];
+
+    for (const file of files) {
+        document.querySelector('#visual-status').textContent = `Indexing ${file.name} metadata…`;
+        // Sequential index passes bound peak metadata/read-buffer allocation.
+        // eslint-disable-next-line no-await-in-loop
+        indexed.push(await openPack(file));
+    }
+
+    const next = new Map(importedPacks.map((pack) => [pack.source.name, pack]));
+
+    for (const pack of indexed) {
+        next.set(pack.source.name, pack);
+    }
+
+    importedPacks = [...next.values()].sort((left, right) => left.source.name.localeCompare(right.source.name));
+}
+
+/**
+ * Import paired original map catalogue and compressed tile placements.
+ *
+ * @param {object[]} files - Lazy cell lotheader and lotpack sources.
+ * @param {object} snapshot - Staged player location.
+ * @returns {Promise<object>} Staged original geometry ready for atomic publication.
+ */
+async function importGeometry(files, snapshot) {
+    const selected = new Map(files.map((file) => [file.name, file]));
+    const next = new Map();
+
+    for (const file of files) {
+        const match = /^(-?\d+)_(-?\d+)\.lotheader$/u.exec(file.name);
+
+        if (!match) {
+            continue;
+        }
+
+        const lotpack = selected.get(`world_${match[1]}_${match[2]}.lotpack`);
+
+        if (!lotpack) {
+            throw new Error(`Missing world_${match[1]}_${match[2]}.lotpack for ${file.name}.`);
+        }
+
+        // Catalogue/index parsing is ordered so only one cell's buffers are live.
+        // eslint-disable-next-line no-await-in-loop
+        const cell = await openMapCell({ cellX: Number(match[1]), cellY: Number(match[2]), header: file, lotpack });
+
+        next.set(`${cell.cellX},${cell.cellY}`, cell);
+    }
+
+    if (next.size === 0) {
+        throw new Error('No matching original geometry for the saved navigation cells. Provision their lotheader and lotpack files in the content directory.');
+    }
+
+    return rebuildTileLayer([...next.values()], snapshot);
+}
+
+/**
+ * Materialize only the small explicit character files, never texture banks.
+ *
+ * @returns {Promise<void>} Uploads the original animated character.
+ */
+async function importCharacter() {
+    const files = {};
+    const materialized = new Map();
+
+    for (const [role, path] of Object.entries(content.manifest.startup.character)) {
+        if (!materialized.has(path)) {
+            // eslint-disable-next-line no-await-in-loop
+            materialized.set(path, await content.getFile(path).toFile());
+        }
+
+        files[role] = materialized.get(path);
+    }
+
+    await renderer.importCharacter(files);
+    refresh();
+}
+
+/**
+ * Load only geometry matching authoritative navigation; do not merge worlds.
+ *
+ * @param {object[]} cells - New or retained navigation cells.
+ * @param {object} snapshot - Staged player position.
+ * @returns {Promise<object>} Staged geometry for every authoritative navigation cell.
+ */
+async function loadGeometry(cells, snapshot) {
+    if (importedPacks.length === 0) {
+        await importPacks(content.manifest.startup.packs.map((path) => content.getFile(path)));
+    }
+
+    if (!renderer.diagnostics().character) {
+        await importCharacter();
+    }
+
+    const declared = new Map(content.manifest.startup.cells.map((cell) => [`${cell.x},${cell.y}`, cell]));
+    const paths = new Set(content.manifest.files.map(({ path }) => path));
+    const firstHeader = content.manifest.startup.cells[0].header;
+    const root = firstHeader.slice(0, firstHeader.lastIndexOf('/') + 1);
+    const files = [];
+
+    for (const { x, y } of cells) {
+        const cell = declared.get(`${x},${y}`);
+        const header = cell?.header ?? `${root}${x}_${y}.lotheader`;
+        const lotpack = cell?.lotpack ?? `${root}world_${x}_${y}.lotpack`;
+
+        const missing = [header, lotpack].filter((path) => !paths.has(path));
+
+        if (missing.length > 0) {
+            throw new Error(`Saved navigation cell ${x},${y} is missing required original geometry: ${missing.join(', ')}. Provision every saved cell's lotheader and lotpack files.`);
+        }
+
+        files.push(content.getFile(header), content.getFile(lotpack));
+    }
+
+    return importGeometry(files, snapshot);
+}
+
+/**
+ * Stage bounded startup navigation and use the manifest's passable spawn.
+ *
+ * @returns {Promise<void>} Publishes a real original-content new session.
+ */
+async function newSession() {
+    stop();
+    const files = content.manifest.startup.cells.map(({ navigation }) => content.getFile(navigation));
+    const staged = await stageCells({ engineSource, engine, cells: [], files });
+    const { spawn } = content.manifest.startup;
+    const flags = staged.engine.navFlags(Math.floor(spawn.x), Math.floor(spawn.y));
+
+    if (flags === 0xFF_FF_FF_FF || (flags & 0x29) !== 0) {
+        throw new Error(`Content manifest spawn ${spawn.x}, ${spawn.y} is not dry, passable loaded navigation. Correct the manifest; no approximate or blank world was started.`);
+    }
+
+    const sessionState = staged.engine.saveState();
+
+    sessionState.values = [spawn.x, spawn.y, sessionState.values[2], spawn.x, spawn.y, 0, 0, 0, 0, 1];
+    staged.engine.loadState(sessionState);
+    const geometry = await loadGeometry(staged.cells, staged.engine.snapshot());
+
+    try {
+        await activateSession(staged, Object.create(null));
+        publishSession({ ...staged, cells: worldCells, geometry });
+    } catch (cause) {
+        geometry.layer.destroy();
+        throw cause;
+    }
+
+    savedRevision = undefined;
+    document.querySelector('#save-status').textContent = 'New session loaded. Autosave runs every 30 seconds.';
+}
+
+/**
+ * Install static-directory JavaScript packages without enabling new code.
+ *
+ * @returns {Promise<void>} Completes discovery before any package activation.
+ */
+async function discoverPackages() {
+    nativePackages = content.manifest.mods.filter((entry) => entry.kind === 'native-lua').map(({ root, files }) => ({
+        root, fileCount: files.length, supported: false,
+        message: 'Discovered native Lua package; the native Lua runtime is not yet integrated. No Lua code executed.',
+    }));
+
+    for (const entry of content.manifest.mods.filter((item) => item.kind === 'javascript')) {
+        const files = [];
+        let total = 0;
+
+        if (entry.files.length > 512) {
+            throw new Error(`Mod package ${entry.root} exceeds the 512-file limit.`);
+        }
+
+        for (const path of entry.files) {
+            const source = content.getFile(path);
+
+            total += source.size;
+
+            if (total > 64 * 1_024 * 1_024) {
+                throw new Error(`Mod package ${entry.root} exceeds the 64 MiB limit.`);
+            }
+
+            // Sequential bounded materialization; preserve multifile ESM paths.
+            // eslint-disable-next-line no-await-in-loop
+            const file = await source.toFile();
+
+            Object.defineProperty(file, 'webkitRelativePath', { value: path.slice(entry.root.length + 1) });
+            files.push(file);
+        }
+
+        // New installations are atomically disabled; updates retain consent.
+        // eslint-disable-next-line no-await-in-loop
+        await packages.install(files);
+    }
+}
+
+/**
+ * Keep a failed restore stopped while leaving explicit recovery controls usable.
+ *
+ * @param {unknown} cause - Content or retained-save startup failure.
+ * @returns {void} Reports the issue without committing any save.
+ */
+function blockStartup(cause) {
+    startup = 'blocked';
+    paused = true;
+    sessionReady = false;
+
+    if (!failed) {
+        error.hidden = false;
+        error.textContent = `${cause instanceof Error ? cause.message : String(cause)} Retained browser saves were not replaced. Provision the local content directory, correct enabled mods, or explicitly choose New session.`;
+    }
+
+    document.querySelector('#save-status').textContent = 'Automatic restoration stopped; autosave and movement remain disabled. Export the retained backup before choosing New session.';
+    refresh();
+}
+
 try {
     engine = await createEngine(new URL('../engine/pz_engine.wasm', import.meta.url));
-    mods = createModHost(engine);
+    saves = createSaveStore({ engineSource, appVersion: '0.1.0-preview.1' });
+    content = await openContentDirectory(undefined, {
+        /**
+         * Show content transfer progress while the retained session remains paused.
+         *
+         * @param {{path: string, loaded: number, total: number|null}} progress - Current bounded content transfer.
+         */
+        onProgress: (progress) => {
+            document.querySelector('#visual-status').textContent = `Loading local content: ${JSON.stringify(progress)}`;
+        },
+    });
+    let prepared;
+    let restoreError;
+
+    try {
+        retainedSave = (await saves.list()).some(({ id }) => id === 'autosave');
+
+        if (retainedSave) {
+            prepared = await saves.load();
+        }
+    } catch (cause) {
+        retainedSave = true;
+        restoreError = cause;
+    }
+
+    // Mod callbacks retain this session handle, not a superseded WASM instance.
+    mods = createModHost({
+        /**
+         * Read the currently published engine, including after save restoration.
+         *
+         * @returns {object} Detached snapshot.
+         */
+        snapshot: () => engine.snapshot(),
+        /**
+         * Submit through the current session's authoritative engine.
+         *
+         * @param {object} action - Validated mod action.
+         * @returns {object} Post-command snapshot.
+         */
+        command: (action) => engine.command(action),
+        /**
+         * Apply mod speed changes to the current engine.
+         *
+         * @param {number} speed - Tiles per second.
+         * @returns {void} Changes engine speed.
+         */
+        setSpeed: (speed) => engine.setSpeed(speed),
+        /**
+         * Advance the current engine through the fixed-step contract.
+         *
+         * @param {number} seconds - Simulation step.
+         * @returns {void} Advances simulation.
+         */
+        step: (seconds) => engine.step(seconds),
+        /**
+         * Reset the current session.
+         *
+         * @returns {void} Drops engine world and movement.
+         */
+        reset: () => engine.reset(),
+        /**
+         * Query loaded navigation extents from the currently published world.
+         *
+         * @returns {object} Detached cell bounds.
+         */
+        worldBounds: () => engine.worldBounds(),
+        /**
+         * Query an absolute navigation tile.
+         *
+         * @param {number} x - Integer world tile x.
+         * @param {number} y - Integer world tile y.
+         * @returns {number} Navigation flags or unloaded sentinel.
+         */
+        navFlags: (x, y) => engine.navFlags(x, y),
+        /**
+         * Commit a validated mod cell and retain the exact source for saves.
+         *
+         * @param {number} x - Cell x.
+         * @param {number} y - Cell y.
+         * @param {Uint8Array} bytes - Full navigation cell.
+         * @returns {void} Updates authoritative navigation and retained provenance.
+         */
+        worldImportCell: (x, y, bytes) => {
+            engine.worldImportCell(x, y, bytes);
+            const retained = worldCells.filter((cell) => cell.x !== x || cell.y !== y);
+
+            retained.push({ x, y, bytes: bytes.slice() });
+            worldCells = retained;
+            renderer?.setWorldMode(true);
+        },
+    }, {
+        /**
+         * Return only an explicitly saved namespace, never object prototypes.
+         *
+         * @param {string} id - Validated mod identifier.
+         * @returns {object|undefined} Saved schema document.
+         */
+        readModState: (id) => Object.hasOwn(savedModState, id) ? savedModState[id] : undefined,
+        /**
+         * Retain a validated detached mod record in the session envelope.
+         *
+         * @param {string} id - Validated mod identifier.
+         * @param {object} record - Schema version and JSON data.
+         * @returns {void} Replaces only this namespace.
+         */
+        writeModState: (id, record) => {
+            Object.defineProperty(savedModState, id, { value: record, enumerable: true, configurable: true, writable: true });
+        },
+    });
+    try {
+        packages = createModManager(mods);
+        await discoverPackages();
+    } catch (cause) {
+        reportPackageError(cause);
+        packageStatus.textContent = 'Local package startup failed; no further packages were activated. Correct the package configuration or reload in safe mode.';
+        restoreError ??= cause;
+    }
+
     renderer = await createRenderer(canvas, report);
+    try {
+        await importPacks(content.manifest.startup.packs.map((path) => content.getFile(path)));
+        await importCharacter();
+
+        if (restoreError) {
+            throw restoreError;
+        }
+
+        if (prepared) {
+            await loadSession(undefined, prepared);
+        } else {
+            await newSession();
+        }
+
+        paused = failed || pauseMenu.open;
+
+        if (!pauseMenu.open) {
+            canvas.focus({ preventScroll: true });
+        }
+    } catch (cause) {
+        blockStartup(cause);
+    }
+
+    if (packages) {
+        try {
+            await refreshPackages();
+        } catch (cause) {
+            reportPackageError(cause);
+        }
+
+        packageControls.disabled = false;
+    }
+
+    document.querySelector('#session-controls').disabled = false;
+    autosave = setInterval(() => {
+        if (sessionReady && !sessionBusy && !failed && !document.hidden) {
+            void sessionOperation(saveSession);
+        }
+    }, 30_000);
     // Restored browser form state must never claim an active mod before startup succeeded.
-    modCheckbox.checked = false;
-    modCheckbox.disabled = false;
+    modCheckbox.checked = mods.diagnostics().mods.some((entry) => entry.url === new URL('../mods/accessible-walking/main.js', import.meta.url).href);
+    modCheckbox.disabled = !sessionReady || mods.diagnostics().mods.some((entry) => entry.url !== new URL('../mods/accessible-walking/main.js', import.meta.url).href);
+
+    if (modCheckbox.checked) {
+        document.querySelector('#mod-status').textContent = 'Active: restored with the save.';
+    } else if (modCheckbox.disabled) {
+        document.querySelector('#mod-status').textContent = 'Unavailable while other mods are active or the game is not ready.';
+    }
+
     refresh();
     animation = requestAnimationFrame(frame);
 } catch (cause) {
-    report(cause);
+    startup = 'blocked';
+    report(new Error(`${cause.message ?? String(cause)} Copy original files into content/ and run node scripts/provision-content.mjs --source "C:/Games/steam/steamapps/common/ProjectZomboid" --startup-only, then serve with the content server and reload. No session or save was started.`, { cause }));
 }
 
-imageInput.addEventListener('change', importImage);
+document.querySelector('#new-session').addEventListener('click', () => {
+    if ((retainedSave || sessionReady) && !globalThis.confirm('Start a new session at the content manifest spawn? This replaces the active world and subsequent saves will replace the retained autosave. Export a backup first to keep it.')) {
+        return;
+    }
+
+    void sessionOperation(async () => {
+        await newSession();
+        await saveSession();
+    });
+});
+document.querySelector('#save-now').addEventListener('click', () => {
+    void sessionOperation(saveSession);
+});
+document.querySelector('#load-save').addEventListener('click', () => {
+    void sessionOperation(() => loadSession());
+});
+document.querySelector('#export-save').addEventListener('click', () => {
+    void sessionOperation(exportSession);
+});
+document.querySelector('#import-save').addEventListener('change', (event) => {
+    const file = event.target.files[0];
+
+    if (file) {
+        void sessionOperation(async () => {
+            const imported = await saves.importSave(file);
+
+            await loadSession(imported.id);
+        });
+    }
+
+    event.target.value = '';
+});
+document.querySelector('#package-reload').addEventListener('click', () => globalThis.location.reload());
+
+const safeUrl = new URL(globalThis.location.href);
+const normalUrl = new URL(globalThis.location.href);
+
+safeUrl.searchParams.set('safe-mods', '1');
+normalUrl.searchParams.delete('safe-mods');
+document.querySelector('#package-safe-mode').href = safeUrl.href;
+document.querySelector('#package-normal-mode').href = normalUrl.href;
 canvas.addEventListener('pointerdown', pointDestination);
 
 for (const button of directionButtons) {
@@ -426,12 +1319,16 @@ for (const button of directionButtons) {
 
 document.querySelector('#destination').addEventListener('submit', formDestination);
 document.querySelector('#stop').addEventListener('click', stop);
-pauseButton.addEventListener('click', togglePause);
+pauseButton.addEventListener('click', resumeGame);
+openPauseButton.addEventListener('click', openPauseMenu);
+pauseMenu.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    resumeGame();
+});
 document.addEventListener('keydown', keyDown);
 document.addEventListener('keyup', keyUp);
 globalThis.addEventListener('blur', stop);
 document.addEventListener('visibilitychange', visibilityChanged);
 modCheckbox.addEventListener('change', toggleMod);
-document.querySelector('#refresh').addEventListener('click', refresh);
 globalThis.addEventListener('pagehide', pageHidden);
 globalThis.addEventListener('pageshow', pageShown);

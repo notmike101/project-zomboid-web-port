@@ -253,3 +253,95 @@ test('the preview server stays inside dist and never follows a link out', { time
     assert.equal(await statusOf(`${base}%2e%2e%2fprivate%2fsecret.txt`), 404, 'encoded traversal is refused');
     assert.equal(await statusOf(`${base}missing.js`), 404);
 });
+
+test('content URLs stream bounded ranges only from the separate approved root', { timeout: 15_000 }, async (t) => {
+    const fixture = await mkdtemp(join(tmpdir(), 'pz-content-server-'));
+    const root = join(fixture, 'app');
+    const outside = join(fixture, 'private');
+    const content = join(root, 'approved-content');
+
+    await put(root, 'dist/index.html', approvedHtml);
+    await put(content, 'manifest.json', '{"format":"pz-web-content-directory"}');
+    await put(content, 'media/texturepacks/Example pack.pack', '0123456789');
+    await put(content, 'media/body.png', new Uint8Array([1, 2, 3]));
+    await put(content, 'ProjectZomboid64.exe', secretBytes);
+    await put(content, 'media/private.jar', secretBytes);
+    await put(content, 'saves/player.bin', secretBytes);
+    await put(outside, 'secret.pack', secretBytes);
+    await makeOutsideLink(outside, join(content, 'media', 'linked'));
+    const child = spawn(process.execPath, [serveScript], {
+        cwd: root, env: { ...process.env, HOST: '127.0.0.1', PORT: '0', CONTENT_ROOT: content },
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    t.after(async () => {
+        if (child.exitCode === null && child.signalCode === null) {
+            const exited = once(child, 'exit', { signal: AbortSignal.timeout(3_000) });
+
+            child.kill('SIGKILL');
+            await exited;
+        }
+
+        child.stdout.destroy();
+        child.stderr.destroy();
+        await rm(fixture, { recursive: true, force: true });
+    });
+    const base = `http://${await readAddress(child)}`;
+    const url = `${base}/content/media/texturepacks/Example%20pack.pack`;
+    const range = await fetch(url, { headers: { Range: 'bytes=2-5' } });
+
+    assert.equal(range.status, 206);
+    assert.equal(range.headers.get('content-range'), 'bytes 2-5/10');
+    assert.equal(range.headers.get('content-length'), '4');
+    assert.equal(range.headers.get('accept-ranges'), 'bytes');
+    assert.equal(await range.text(), '2345');
+    const head = await fetch(url, { method: 'HEAD', headers: { Range: 'bytes=2-5' } });
+
+    assert.equal(head.status, 206);
+    assert.equal(head.headers.get('content-length'), '4');
+    assert.equal(await head.text(), '');
+    const suffix = await fetch(url, { headers: { Range: 'bytes=-3' } });
+    const open = await fetch(url, { headers: { Range: 'bytes=8-' } });
+
+    assert.equal(await suffix.text(), '789');
+    assert.equal(await open.text(), '89');
+
+    for (const value of ['bytes=10-', 'bytes=7-2', 'bytes=0-1,3-4', 'bytes=-0', 'garbage']) {
+        // eslint-disable-next-line no-await-in-loop -- Exercise each independent range rejection serially.
+        const response = await fetch(url, { headers: { Range: value } });
+
+        assert.equal(response.status, 416);
+        assert.equal(response.headers.get('content-range'), 'bytes */10');
+        // eslint-disable-next-line no-await-in-loop -- Drain each rejected response before the next request.
+        assert.equal(await response.text(), '');
+    }
+
+    const png = await fetch(`${base}/content/media/body.png`);
+
+    assert.equal(png.headers.get('content-type'), 'image/png');
+    await png.arrayBuffer();
+    await put(content, 'media/anims_X/Bob/Bob_Idle.X', 'synthetic-animation');
+    const actualCase = await fetch(`${base}/content/media/anims_X/Bob/Bob_Idle.X`);
+
+    assert.equal(actualCase.status, 200);
+    assert.equal(await actualCase.text(), 'synthetic-animation');
+
+    if (process.platform === 'linux') {
+        assert.equal(await statusOf(`${base}/content/media/anims_X/Bob/Bob_Idle.x`), 404);
+    }
+
+    for (const path of ['media/linked/secret.pack', '%2e%2e%2fprivate%2fsecret.pack', 'ProjectZomboid64.exe', 'media/private.jar', 'saves/player.bin']) {
+        // eslint-disable-next-line no-await-in-loop -- Check each privacy boundary independently.
+        assert.equal(await statusOf(`${base}/content/${path}`), 404);
+    }
+
+    assert.equal(await statusOf(`${base}/approved-content/manifest.json`), 404);
+    assert.equal(await statusOf(`${base}/content/manifest.json`), 200);
+    assert.equal(await statusOf(`${base}/`), 200);
+    await put(root, 'dist/ProjectZomboid64.exe', secretBytes);
+    assert.equal(await statusOf(`${base}/ProjectZomboid64.exe`), 404);
+    await rm(content, { recursive: true, force: true });
+    await put(outside, 'manifest.json', '{"private":true}');
+    await symlink(outside, content, 'junction');
+    assert.equal(await statusOf(`${base}/content/manifest.json`), 404, 'a linked content root is never approved');
+});

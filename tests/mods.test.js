@@ -600,3 +600,361 @@ export function activate(api) {
     );
     assert.deepEqual(fx.unhandled, [], 'the rejected cleanup promise was observed by the host');
 });
+
+/**
+ * Real cell format: open records except one solid tile in the first 8x8 chunk.
+ *
+ * @returns {Uint8Array} Independently authored navigation cell.
+ */
+function navigationCell() {
+    const bytes = new Uint8Array(1_090);
+
+    bytes[1] = 1;
+    bytes[2] = 2;
+    bytes[3 + 5 * 8 + 6] = 1;
+
+    return bytes;
+}
+
+test('public navigation imports cancel movement and change authoritative collision', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    host.command({ type: 'walk', x: 1, y: 0 });
+    const bytes = navigationCell();
+    const result = host.api.world.importNavigationCell(0, 0, bytes);
+
+    assert.equal(result.committed, true);
+    assert.equal(engine.snapshot().action, 0);
+    assert.equal(host.api.world.getNavFlags(6, 5), 1);
+    assert.equal(host.api.world.getNavFlags(256, 0), 0xFF_FF_FF_FF);
+    bytes.fill(0);
+    assert.equal(host.api.world.getNavFlags(6, 5), 1);
+    const bounds = host.api.world.getBounds();
+
+    assert.deepEqual(bounds, { active: true, minCx: 0, minCy: 0, maxCx: 0, maxCy: 0, cells: 1 });
+    bounds.cells = 50;
+    assert.equal(host.api.world.getBounds().cells, 1);
+    assert.throws(() => host.api.actions.submit({ type: 'moveTo', x: 6.5, y: 5.5 }));
+    const beforeBlockedHeading = engine.saveState();
+
+    assert.throws(() => host.api.actions.submit({ type: 'walk', x: 1, y: 0 }), RangeError);
+    assert.deepEqual(engine.saveState(), beforeBlockedHeading, 'the one-unit heading probe refuses without mutation');
+    host.api.actions.submit({ type: 'walk', x: -1, y: 0 });
+
+    for (let tick = 0; tick < 60; tick += 1) {
+        host.step(STEP);
+    }
+
+    const approachStart = engine.snapshot().x;
+
+    host.api.actions.submit({ type: 'walk', x: 1, y: 0 });
+
+    for (let tick = 0; tick < 120; tick += 1) {
+        host.step(STEP);
+    }
+
+    assert.ok(engine.snapshot().x < 6, 'solid tile must stop the actor');
+    assert.ok(engine.snapshot().x > approachStart, 'the accepted approach must advance before hitting the solid tile');
+    assert.equal(engine.snapshot().action, 0, 'collision ends the accepted heading');
+    host.api.actions.submit({ type: 'moveTo', x: 12, y: 5 });
+    assert.equal(engine.snapshot().action, 1, 'active world destinations are not limited to the original room');
+    assert.throws(() => host.api.world.getNavFlags(0.25, 0), { stage: 'world' });
+    assert.throws(() => host.api.world.getNavFlags(2_147_483_648, 0), { stage: 'world' });
+});
+
+test('world import veto and malformed bytes preserve world and in-flight movement', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    host.api.world.importNavigationCell(0, 0, navigationCell());
+    host.command({ type: 'walk', x: -1, y: 0 });
+    const before = engine.saveState();
+    let calls = 0;
+
+    host.api.hooks.beforeWorldImport((payload) => {
+        calls += 1;
+        assert.deepEqual([payload.cx, payload.cy], [1, -1]);
+        payload.bytes.fill(0);
+        assert.throws(() => host.api.world.importNavigationCell(0, 0, navigationCell()), { stage: 'world' });
+        assert.throws(() => host.command({ type: 'cancel' }), { stage: 'action' });
+        assert.throws(() => host.step(STEP), { stage: 'tick' });
+
+        return false;
+    }, { priority: -1 });
+    host.api.hooks.beforeWorldImport((payload) => {
+        assert.equal(payload.bytes[1], 1, 'each hook receives its own bytes');
+    });
+    const veto = host.api.world.importNavigationCell(1, -1, navigationCell());
+
+    assert.deepEqual([veto.committed, veto.cancelled, veto.cancelledBy], [false, true, 'host']);
+    assert.deepEqual(engine.saveState(), before);
+    assert.equal(host.api.world.getBounds().cells, 1);
+    assert.throws(() => host.api.world.importNavigationCell(1, -1, new Uint8Array([0, 1])), { stage: 'world' });
+    assert.throws(() => host.api.world.importNavigationCell(101, 0, navigationCell()), { stage: 'world' });
+    assert.equal(calls, 1, 'invalid input never dispatches hooks');
+    assert.deepEqual(engine.saveState(), before);
+    host.dispose();
+    assert.equal(host.api.world.importNavigationCell(1, -1, navigationCell()).committed, true);
+    assert.equal(host.api.world.getNavFlags(262, -251), 1);
+});
+
+test('world import callback failures are attributed and cannot defer or corrupt a commit', async () => {
+    const host = createModHost(await newEngine());
+
+    await host.load(moduleUrl(`${manifestSource('fx-world-async')}
+export function activate(api) {
+  api.hooks.beforeWorldImport(async () => { throw new Error('late import failure'); });
+  api.hooks.beforeWorldImport(() => { throw new Error('import failure'); });
+}`));
+    assert.equal(host.api.world.importNavigationCell(0, 0, navigationCell()).committed, true);
+    assert.equal(host.api.world.getNavFlags(6, 5), 1);
+    await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+    });
+    assert.deepEqual(host.diagnostics().errors.map(({ modId, stage }) => [modId, stage]), [
+        ['fx-world-async', 'beforeWorldImport'], ['fx-world-async', 'beforeWorldImport'],
+        ['fx-world-async', 'beforeWorldImport.late'],
+    ]);
+    assert.deepEqual(fx.unhandled, []);
+});
+
+test('save documents stay detached and id-namespaced across host reload and synchronous migration', async () => {
+    const records = new Map([['missing-mod', { opaque: ['retain', 7] }]]);
+    const backing = {
+        /**
+         * Read one saved namespace from the shared test backing.
+         *
+         * @param {string} id - Namespace owner.
+         * @returns {object|undefined} Stored record, or absence.
+         */
+        readModState: (id) => records.get(id),
+        /**
+         * Replace one namespace in the shared test backing.
+         *
+         * @param {string} id - Namespace owner.
+         * @param {import('../types/mod-api').ModSaveRecord} record - Detached namespace record.
+         */
+        writeModState: (id, record) => {
+            records.set(id, record);
+        },
+    };
+    const host = createModHost(await newEngine(), backing);
+
+    fx.result = [];
+    const oldUrl = moduleUrl(`${manifestSource('fx-save-a')}
+export function activate(api) { fx.result.push(api); }`);
+
+    await host.load(oldUrl);
+    await host.load(moduleUrl(`${manifestSource('fx-save-b')}
+export function activate(api) { fx.result.push(api); }`));
+    const [a, b] = fx.result;
+
+    assert.equal(a.saveData.read(), undefined);
+    const document = { score: 4, nested: [1, { label: 'a' }] };
+
+    a.saveData.write(document);
+    b.saveData.write({ score: 90 });
+    document.nested[1].label = 'changed';
+    const read = a.saveData.read();
+
+    read.nested[1].label = 'also changed';
+    assert.equal(a.saveData.read().nested[1].label, 'a');
+    assert.equal(b.saveData.read().score, 90);
+    host.dispose();
+    assert.throws(() => a.saveData.read(), { stage: 'api' });
+    const reloaded = createModHost(await newEngine(), backing);
+    const migratedUrl = moduleUrl(`${manifestSource('fx-save-a')}
+manifest.saveSchemaVersion = 2;
+export function migrateSaveData(oldVersion, data) {
+  assert.equal(oldVersion, 1);
+  data.score += 6;
+  return { points: data.score };
+}
+export function activate(api) { fx.api = api; }`);
+
+    await reloaded.load(migratedUrl);
+    assert.deepEqual(fx.api.saveData.read(), { points: 10 });
+    assert.deepEqual(records.get('fx-save-a'), { schemaVersion: 2, data: { points: 10 } });
+    assert.deepEqual(records.get('missing-mod'), { opaque: ['retain', 7] });
+    const migrated = records.get('fx-save-a');
+
+    records.set('fx-save-a', { schemaVersion: 99, data: { opaque: 'external save' } });
+    assert.throws(() => fx.api.saveData.read(), { stage: 'saveData' });
+    assert.throws(() => fx.api.saveData.write({ overwritten: true }), { stage: 'saveData' });
+    assert.deepEqual(records.get('fx-save-a'), { schemaVersion: 99, data: { opaque: 'external save' } });
+    records.set('fx-save-a', migrated);
+    reloaded.dispose();
+    const unchanged = structuredClone(records.get('fx-save-a'));
+
+    await assert.rejects(() => reloaded.load(oldUrl), { modId: 'fx-save-a', stage: 'saveData' });
+    assert.deepEqual(records.get('fx-save-a'), unchanged, 'missing migration never wipes data');
+    await assert.rejects(() => reloaded.load(moduleUrl(`${manifestSource('fx-save-a')}
+manifest.saveSchemaVersion = 3;
+export async function migrateSaveData() { throw new Error('migration refused'); }
+export function activate() { throw new Error('must not activate'); }`)), { stage: 'saveData' });
+    await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+    });
+    assert.deepEqual(records.get('fx-save-a'), unchanged);
+    assert.deepEqual(reloaded.diagnostics().mods, []);
+    assert.ok(reloaded.diagnostics().errors.some(({ stage }) => stage === 'saveData.late'));
+    assert.deepEqual(fx.unhandled, []);
+});
+
+test('save validation rejects lossy JSON and oversized writes without replacing previous data', async () => {
+    const host = createModHost(await newEngine());
+
+    host.api.saveData.write({ safe: true });
+    const cycle = {};
+
+    cycle.self = cycle;
+    const sparse = [];
+
+    sparse.length = 2;
+
+    for (const value of [
+        undefined, Number.NaN, Infinity, 1n, () => undefined, cycle,
+        { nested: undefined },
+        {
+            /**
+             * Supply a function that strict JSON must reject.
+             *
+             * @returns {void} No result.
+             */
+            nested: () => undefined,
+        },
+        [Number.NaN], new Date(), new Uint8Array(2),
+        {
+            /**
+             * Supply a custom serializer that strict JSON must reject.
+             *
+             * @returns {number} Serializer result.
+             */
+            toJSON: () => 4,
+        },
+        {
+            /**
+             * Supply an accessor that strict JSON must reject without invoking.
+             *
+             * @returns {number} Accessor result.
+             */
+            get score() {
+                return 4;
+            },
+        },
+        [Symbol('data')], { [Symbol('key')]: 1 }, sparse,
+        'x'.repeat(256 * 1_024), 'é'.repeat(128 * 1_024),
+    ]) {
+        assert.throws(() => host.api.saveData.write(value), { stage: 'saveData' });
+        assert.deepEqual(host.api.saveData.read(), { safe: true });
+    }
+
+    host.api.saveData.write(null);
+    assert.equal(host.api.saveData.read(), null);
+    const otherHost = createModHost(await newEngine());
+
+    assert.equal(otherHost.api.saveData.read(), undefined, 'default backing is not durable or shared');
+});
+
+test('post-step ticks use committed detached snapshots and skip withdrawn listeners', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+    const calls = [];
+    const withdraw = host.api.events.onTick(() => {
+        calls.push('withdrawn');
+    }, { priority: 10 });
+
+    host.api.events.onTick((event) => {
+        withdraw();
+        calls.push(`first:${event.snapshot.tick}`);
+        event.snapshot.x = -100;
+        assert.equal(event.seconds, STEP);
+        assert.throws(() => host.step(STEP), { stage: 'tick' });
+    }, { priority: -1 });
+    host.api.events.onTick((event) => {
+        calls.push(`second:${event.snapshot.tick}:${event.snapshot.x}`);
+    });
+    host.command({ type: 'walk', x: 1, y: 0 });
+    host.step(STEP);
+    assert.deepEqual(calls, ['first:1', `second:1:${engine.snapshot().x}`]);
+    assert.ok(engine.snapshot().x > 5);
+    assert.equal(withdraw(), false);
+    assert.throws(() => host.step(0), { stage: 'tick' });
+    assert.equal(calls.length, 2, 'refused steps do not emit ticks');
+    host.dispose();
+    host.step(STEP);
+    assert.equal(calls.length, 2);
+});
+
+test('tick errors and async rejection do not prevent later listeners or undo the step', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    fx.seen = [];
+    await host.load(moduleUrl(`${manifestSource('fx-tick')}
+export function activate(api) {
+  fx.api = api;
+  api.events.onTick(() => { throw new Error('tick exploded'); });
+  api.events.onTick(async () => { throw new Error('tick late'); });
+  api.events.onTick((event) => { fx.seen.push(event.snapshot.tick); });
+}`));
+    host.step(STEP);
+    await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+    });
+    assert.equal(engine.snapshot().tick, 1);
+    assert.deepEqual(fx.seen, [1]);
+    assert.deepEqual(host.diagnostics().errors.map(({ modId, stage }) => [modId, stage]), [
+        ['fx-tick', 'onTick'], ['fx-tick', 'onTick'], ['fx-tick', 'onTick.late'],
+    ]);
+    host.dispose();
+    assert.throws(() => fx.api.events.onTick(() => undefined), { stage: 'api' });
+    assert.throws(() => fx.api.world.getBounds(), { stage: 'api' });
+    assert.throws(() => fx.api.world.importNavigationCell(0, 0, navigationCell()), { stage: 'api' });
+    assert.throws(() => fx.api.hooks.beforeWorldImport(() => undefined), { stage: 'api' });
+    assert.throws(() => fx.api.saveData.write({ leaked: true }), { stage: 'api' });
+    host.step(STEP);
+    assert.deepEqual(fx.seen, [1]);
+    assert.deepEqual(fx.unhandled, []);
+});
+
+test('missing optional engine capabilities refuse explicitly without disabling movement', async () => {
+    const engine = await newEngine();
+    const host = createModHost({
+        snapshot: engine.snapshot, command: engine.command, setSpeed: engine.setSpeed,
+    });
+
+    for (const attempt of [
+        () => host.api.world.getBounds(), () => host.api.world.getNavFlags(0, 0),
+        () => host.api.world.importNavigationCell(0, 0, navigationCell()),
+    ]) {
+        assert.throws(attempt, { modId: 'host', stage: 'world' });
+    }
+
+    assert.throws(() => host.step(STEP), { stage: 'tick' });
+    assert.equal(host.command({ type: 'walk', x: -1, y: 0 }).committed, true);
+});
+
+test('failed activation withdraws import hooks and tick listeners without undoing persisted effects', async () => {
+    const host = createModHost(await newEngine());
+
+    fx.seen = [];
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('fx-new-rollback')}
+export function activate(api) {
+  fx.api = api;
+  api.world.importNavigationCell(0, 0, new Uint8Array([0, 1, ...new Array(1024).fill(0)]));
+  api.saveData.write({ retained: true });
+  api.hooks.beforeWorldImport(() => false);
+  api.events.onTick(() => { fx.seen.push('should be withdrawn'); });
+  throw new Error('activation failed after committed effects');
+}`)), { stage: 'activate' });
+    assert.equal(host.diagnostics().hookCount, 0);
+    assert.equal(host.api.world.getBounds().cells, 1);
+    assert.equal(host.api.world.importNavigationCell(0, 0, navigationCell()).committed, true);
+    host.step(STEP);
+    assert.deepEqual(fx.seen, []);
+    assert.throws(() => fx.api.saveData.read(), { stage: 'api' });
+    await host.load(moduleUrl(`${manifestSource('fx-new-rollback')}
+export function activate(api) { assert.deepEqual(api.saveData.read(), { retained: true }); }`));
+});

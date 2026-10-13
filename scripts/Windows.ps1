@@ -1,9 +1,19 @@
-param([ValidateSet('Setup', 'Build', 'Check', 'Run', 'Release')][string]$Task = 'Build')
+param(
+    [ValidateSet('Setup', 'Build', 'Check', 'Run', 'Release', 'ProvisionContent')][string]$Task = 'Build',
+    [string]$Source,
+    [string]$Output = 'content',
+    [string]$ModsSource,
+    [string]$SourceBuild,
+    [string]$ContentRoot,
+    [switch]$IndexOnly,
+    [switch]$StartupOnly,
+    [switch]$Hash
+)
 $ErrorActionPreference = 'Stop'
 Push-Location (Split-Path $PSScriptRoot -Parent)
 try {
     $NpmCommand = (Get-Command -Name @('npm.cmd', 'npm.exe') -ErrorAction SilentlyContinue | Select-Object -First 1).Source
-    if (-not $NpmCommand) { throw 'Install the pinned Node distribution with npm.cmd or npm.exe on PATH.' }
+    if (-not $NpmCommand -and $Task -ne 'ProvisionContent') { throw 'Install the pinned Node distribution with npm.cmd or npm.exe on PATH.' }
     function Invoke-Checked([string]$Program, [string[]]$Arguments) {
         & $Program @Arguments
         if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE" }
@@ -17,7 +27,20 @@ try {
         }
         'Build' { Invoke-Checked $NpmCommand @('run', 'build') }
         'Check' { Invoke-Checked $NpmCommand @('run', 'build'); Invoke-Checked $NpmCommand @('run', 'check') }
-        'Run' { Invoke-Checked $NpmCommand @('start') }
+        'Run' {
+            if ($ContentRoot) { $env:CONTENT_ROOT = $ContentRoot }
+            Invoke-Checked $NpmCommand @('start')
+        }
         'Release' { Invoke-Checked $NpmCommand @('run', 'release') }
+        'ProvisionContent' {
+            $Arguments = @('scripts/provision-content.mjs', '--output', $Output)
+            if ($Source) { $Arguments += @('--source', $Source) }
+            if ($ModsSource) { $Arguments += @('--mods-source', $ModsSource) }
+            if ($SourceBuild) { $Arguments += @('--source-build', $SourceBuild) }
+            if ($IndexOnly) { $Arguments += '--index-only' }
+            if ($StartupOnly) { $Arguments += '--startup-only' }
+            if ($Hash) { $Arguments += '--hash' }
+            Invoke-Checked 'node' $Arguments
+        }
     }
 } finally { Pop-Location }

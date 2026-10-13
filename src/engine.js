@@ -6,8 +6,8 @@
  * This module instantiates it, checks the ABI, refuses unusable input at the
  * trust boundary and hands back detached snapshots. It never mirrors
  * coordinates, so the host cannot drift away from the rules. Numbers submitted
- * to the module are validated at full JavaScript precision; values read back
- * are 32-bit floats.
+ * to the module are validated at full JavaScript precision. Snapshot scalars
+ * originate as 32-bit floats; actor saves transfer ten 64-bit float words.
  */
 
 /**
@@ -19,8 +19,9 @@
  * @property {number} tick Accepted simulation steps since the last reset. The
  *   module counts unsigned 32-bit, so this wraps at 2^32, about 2.3 years at
  *   60 Hz.
- * @property {number} x World x coordinate inside [0, 10], stored as 32-bit.
- * @property {number} y World y coordinate inside [0, 10], stored as 32-bit.
+ * @property {number} x World x coordinate, stored as 32-bit. The synthetic
+ *   plane spans [0, 10]; imported cells use absolute tile coordinates.
+ * @property {number} y World y coordinate, stored as 32-bit.
  * @property {number} speed Movement speed in world units per second, 32-bit.
  * @property {number} action 0 idle, 1 moving to a destination, 2 walking.
  */
@@ -31,8 +32,8 @@
  *
  * @typedef {object} MoveToCommand
  * @property {'moveTo'} type Command selector.
- * @property {number} x Destination x inside [0, 10].
- * @property {number} y Destination y inside [0, 10].
+ * @property {number} x Destination x in the current world.
+ * @property {number} y Destination y in the current world.
  */
 
 /**
@@ -59,7 +60,31 @@
  */
 
 /**
+ * Detached loaded-cell extents. Coordinates are cell indices, not tile units.
+ *
+ * @typedef {object} WorldBounds
+ * @property {boolean} active Whether imported navigation is active.
+ * @property {number} minCx Minimum loaded cell x.
+ * @property {number} minCy Minimum loaded cell y.
+ * @property {number} maxCx Maximum loaded cell x (inclusive).
+ * @property {number} maxCy Maximum loaded cell y (inclusive).
+ * @property {number} cells Number of committed cells.
+ */
+
+/**
+ * Detached actor save; restore cell bytes before loading an active-world save.
+ *
+ * @typedef {object} SavedState
+ * @property {1} version Save envelope version.
+ * @property {number[]} values Ten finite f64 words: x, y, speed, targetX,
+ *   targetY, headingX, headingY, action, tick, worldActive (0 or 1).
+ */
+
+/**
  * Host-facing engine handle. State lives inside the WASM instance.
+ * All world/state methods are optional ABI1 extensions: calling a method whose
+ * exports are absent throws a clear unsupported error, without disabling the
+ * original movement API. Raw WASM memory and scratch addresses stay private.
  *
  * @typedef {object} Engine
  * @property {function(): Snapshot} snapshot Reads detached state.
@@ -67,6 +92,15 @@
  * @property {function(number): void} setSpeed Changes speed inside [0.1, 10].
  * @property {function(number): void} step Advances one frame inside (0, 0.1].
  * @property {function(): void} reset Restores the initial state.
+ * @property {function(number, number, Uint8Array | DataView): void} worldImportCell
+ *   Validates a complete cell before importing it; available on extended ABI1.
+ * @property {function(number, number): number} navFlags Navigation bits for an
+ *   absolute int32 tile; 0xFFFFFFFF means unloaded.
+ * @property {function(): WorldBounds} worldBounds Reads detached cell extents.
+ * @property {function(): SavedState} saveState Reads a detached actor save.
+ * @property {function(SavedState): void} loadState Restores an actor atomically.
+ * @property {function(): void} worldReset Drops imported navigation and cancels
+ *   movement, preserving actor position, speed and tick.
  */
 
 /** Engine ABI version this host supports; anything else is refused. */
@@ -92,6 +126,8 @@ const ABI = [
 const REASONS = new Map([
     [-1, 'non-finite input'],
     [-2, 'value outside the accepted range'],
+    [-3, 'blocked'],
+    [-4, 'malformed input'],
 ]);
 
 /**
@@ -160,6 +196,102 @@ function requireAccepted(code, label) {
 }
 
 /**
+ * Validates integers before WASM's implicit int32 conversion can wrap them.
+ *
+ * @param {unknown} value - Candidate integer.
+ * @param {string} name - Field name used in refusal messages.
+ * @param {number} min - Inclusive minimum.
+ * @param {number} max - Inclusive maximum.
+ * @returns {number} Validated integer.
+ */
+function requireInteger(value, name, min, max) {
+    requireCoordinate(value, name);
+
+    if (!Number.isInteger(value)) {
+        throw new TypeError(`${name} must be an integer.`);
+    }
+
+    if (value < min || value > max) {
+        throw new RangeError(`${name} must be inside [${min}, ${max}].`);
+    }
+
+    return value;
+}
+
+/**
+ * Parses every record before any import call can change the world.
+ *
+ * @param {Uint8Array | DataView} bytes - Cell byte view (header 00 01).
+ * @returns {{view: DataView, tags: Uint8Array, offsets: Int32Array}} Valid records.
+ */
+function parseCell(bytes) {
+    if (!(bytes instanceof Uint8Array) && !(bytes instanceof DataView)) {
+        throw new TypeError('cell bytes must be a Uint8Array or DataView.');
+    }
+
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+    if (view.byteLength < 2) {
+        throw new TypeError('truncated cell header.');
+    }
+
+    if (view.getUint8(0) !== 0 || view.getUint8(1) !== 1) {
+        throw new TypeError('cell header must be 00 01.');
+    }
+
+    const tags = new Uint8Array(1_024);
+    const offsets = new Int32Array(1_024);
+    let offset = 2;
+
+    for (let index = 0; index < 1_024; index += 1) {
+        if (offset >= view.byteLength) {
+            throw new TypeError(`truncated cell record ${index}.`);
+        }
+
+        const tag = view.getUint8(offset++);
+
+        if (tag > 5) {
+            throw new TypeError(`cell record ${index} has invalid tag ${tag}.`);
+        }
+
+        tags[index] = tag;
+
+        if (tag === 2) {
+            if (offset + 64 > view.byteLength) {
+                throw new TypeError(`truncated cell tile data at record ${index}.`);
+            }
+
+            offsets[index] = offset;
+
+            for (let tile = 0; tile < 64; tile += 1) {
+                if (view.getUint8(offset + tile) > 0x3F) {
+                    throw new TypeError(`cell record ${index} has invalid navigation bits.`);
+                }
+            }
+
+            offset += 64;
+        }
+    }
+
+    if (offset !== view.byteLength) {
+        throw new TypeError('cell has trailing bytes after its 1024 records.');
+    }
+
+    return { view, tags, offsets };
+}
+
+/**
+ * Validate a full native navigation cell without changing simulation state.
+ * Used by precommit mod hooks so malformed content never reaches callbacks.
+ *
+ * @param {Uint8Array|DataView} bytes - Complete version1 navigation cell.
+ * @returns {void} Throws on invalid format, records, flags or EOF.
+ */
+function validateNavigationCell(bytes) {
+    parseCell(bytes);
+}
+
+/**
  * Instantiates the engine module and returns the host-facing handle.
  *
  * @param {string | URL | Uint8Array | DataView} source - Module URL, URL-ish
@@ -183,6 +315,56 @@ async function createEngine(source) {
 
     if (apiVersion !== ENGINE_API_VERSION) {
         throw new Error(`Engine module reports ABI ${apiVersion}; this host requires ${ENGINE_API_VERSION}.`);
+    }
+
+    /**
+     * Old ABI1 modules retain movement without requiring optional exports.
+     *
+     * @param {string} method - Host method requesting this capability.
+     * @param {string[]} names - Required optional WASM export names.
+     */
+    function requireOptional(method, names) {
+        if (names.some((name) => typeof api[name] !== 'function')) {
+            throw new Error(`${method} is unsupported by this engine module.`);
+        }
+    }
+
+    /**
+     * Never retain a WASM memory view across a call that could grow memory.
+     *
+     * @param {string} method - Host method requesting scratch space.
+     * @returns {DataView} Fresh view of the private aligned scratch buffer.
+     */
+    function scratch(method) {
+        requireOptional(method, ['scratch_ptr', 'scratch_size']);
+
+        if (!(api.memory instanceof WebAssembly.Memory)) {
+            throw new TypeError(`${method} is unsupported: engine memory is unavailable.`);
+        }
+
+        const ptr = api.scratch_ptr() >>> 0;
+        const size = api.scratch_size() >>> 0;
+        const buffer = api.memory.buffer;
+
+        if (size !== 80 || ptr % 8 !== 0 || ptr + size > buffer.byteLength) {
+            throw new Error(`${method}: invalid engine scratch buffer.`);
+        }
+
+        return new DataView(buffer, ptr, size);
+    }
+
+    /**
+     * Checks an optional state operation and its ten-word ABI.
+     *
+     * @param {string} method - Host method requesting state access.
+     * @param {string} name - Required state operation export.
+     */
+    function requireState(method, name) {
+        requireOptional(method, [name, 'state_size']);
+
+        if (api.state_size() !== 10) {
+            throw new Error(`${method}: engine state must contain ten values.`);
+        }
     }
 
     /**
@@ -264,7 +446,138 @@ async function createEngine(source) {
         api.reset();
     }
 
-    return Object.freeze({ snapshot, command, setSpeed, step, reset });
+    /**
+     * Imports one 256x256-tile cell, atomically replacing the same coordinate.
+     * The format is 00 01 then exactly 1024 row-major 8x8 records: tag 0..5;
+     * tag 2 alone carries 64 bytes, each with known navigation bits <= 0x3F.
+     * A successful import cancels movement; it never relocates the actor.
+     *
+     * @param {number} cx - Integer cell x inside [-100, 100].
+     * @param {number} cy - Integer cell y inside [-100, 100].
+     * @param {Uint8Array | DataView} bytes - Complete cell bytes.
+     * @throws {Error} When the module lacks this optional ABI1 capability.
+     * @throws {TypeError} On malformed or truncated cell bytes.
+     * @throws {RangeError} On coordinates outside the accepted range.
+     */
+    function worldImportCell(cx, cy, bytes) {
+        requireOptional('worldImportCell', ['world_import_chunk']);
+        requireInteger(cx, 'cell x', -100, 100);
+        requireInteger(cy, 'cell y', -100, 100);
+        const { view, tags, offsets } = parseCell(bytes);
+
+        for (let index = 0; index < 1_024; index += 1) {
+            const tag = tags[index];
+            const offset = offsets[index];
+
+            // Eight packed little-endian i64 words, never a call per tile.
+            requireAccepted(api.world_import_chunk(cx, cy, index, tag,
+                tag === 2 ? view.getBigInt64(offset, true) : 0n,
+                tag === 2 ? view.getBigInt64(offset + 8, true) : 0n,
+                tag === 2 ? view.getBigInt64(offset + 16, true) : 0n,
+                tag === 2 ? view.getBigInt64(offset + 24, true) : 0n,
+                tag === 2 ? view.getBigInt64(offset + 32, true) : 0n,
+                tag === 2 ? view.getBigInt64(offset + 40, true) : 0n,
+                tag === 2 ? view.getBigInt64(offset + 48, true) : 0n,
+                tag === 2 ? view.getBigInt64(offset + 56, true) : 0n),
+            `cell(${cx}, ${cy}) record ${index}`);
+        }
+    }
+
+    /**
+     * Reads SOLID1, WALL_NORTH2, WALL_WEST4, WATER8, ROOM16, VOID32 bits.
+     *
+     * @param {number} x - Absolute int32 tile x.
+     * @param {number} y - Absolute int32 tile y.
+     * @returns {number} Unsigned flags, or 0xFFFFFFFF for unloaded tiles.
+     */
+    function navFlags(x, y) {
+        requireOptional('navFlags', ['nav_flags']);
+        requireInteger(x, 'tile x', -2_147_483_648, 2_147_483_647);
+        requireInteger(y, 'tile y', -2_147_483_648, 2_147_483_647);
+
+        return api.nav_flags(x, y) >>> 0;
+    }
+
+    /**
+     * Reads committed-cell bounds without exposing WASM memory.
+     *
+     * @returns {WorldBounds} Detached committed-cell extents.
+     */
+    function worldBounds() {
+        requireOptional('worldBounds', ['world_bounds']);
+        const ptr = scratch('worldBounds').byteOffset;
+
+        api.world_bounds(ptr);
+        const view = scratch('worldBounds');
+
+        return {
+            active: view.getInt32(0, true) !== 0,
+            minCx: view.getInt32(4, true),
+            minCy: view.getInt32(8, true),
+            maxCx: view.getInt32(12, true),
+            maxCy: view.getInt32(16, true),
+            cells: view.getInt32(20, true),
+        };
+    }
+
+    /**
+     * Reads a detached actor save; callers persist imported cells separately.
+     *
+     * @returns {SavedState} Detached actor state, excluding imported cells.
+     */
+    function saveState() {
+        requireState('saveState', 'state_save');
+        const ptr = scratch('saveState').byteOffset;
+
+        api.state_save(ptr);
+        const view = scratch('saveState');
+
+        return {
+            version: 1, values: Array.from({ length: 10 },
+                (_, index) => view.getFloat64(index * 8, true)),
+        };
+    }
+
+    /**
+     * Restores actor state atomically; Rust validates semantics and reconstructs
+     * any destination path against cells already imported into this instance.
+     * To spawn in a nonzero cell use idle state with position=target, zero
+     * heading and worldActive=1.
+     *
+     * @param {SavedState} state - Version 1 envelope containing ten finite numbers.
+     * @throws {TypeError} On an invalid save envelope.
+     * @throws {RangeError} When Rust refuses the state without changing it.
+     */
+    function loadState(state) {
+        requireState('loadState', 'state_load');
+
+        if (state === null || typeof state !== 'object' || state.version !== 1
+            || !Array.isArray(state.values) || state.values.length !== 10) {
+            throw new TypeError('loadState requires version 1 and exactly ten finite values.');
+        }
+
+        // Validate all words before writing even the private scratch buffer.
+        const values = Array.from(state.values, (value, index) =>
+            requireCoordinate(value, `state value ${index}`));
+        const view = scratch('loadState');
+
+        for (let index = 0; index < 10; index += 1) {
+            view.setFloat64(index * 8, values[index], true);
+        }
+
+        requireAccepted(api.state_load(view.byteOffset), 'loadState');
+    }
+
+    /** Drops cells/routes and cancels movement, preserving position/speed/tick. */
+    function worldReset() {
+        requireOptional('worldReset', ['world_reset']);
+        api.world_reset();
+    }
+
+    return Object.freeze({
+        snapshot, command, setSpeed, step, reset,
+        worldImportCell, navFlags, worldBounds, saveState, loadState, worldReset,
+    });
 }
 
-export { ENGINE_API_VERSION, createEngine };
+export { ENGINE_API_VERSION, createEngine, validateNavigationCell };

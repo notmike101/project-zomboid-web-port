@@ -1,3 +1,6 @@
+import { parseX, createSkin, sampleSkin, MAX_X_BYTES } from './models.js';
+
+const canvasCameras = new WeakMap();
 // Direct WebGPU presentation for the M1 proof: one production backend, no WebGL fallback.
 
 const WORLD_MIN = 0;
@@ -11,7 +14,7 @@ const BYTES_PER_TEXEL = 4;
 const SPRITE_WORLD_SIZE = 2;
 const GRID_MAJOR = 1;
 const GRID_MINOR = 0.25;
-const VIEW_UNIFORM_BYTES = 48;
+const VIEW_UNIFORM_BYTES = 80;
 const SPRITE_UNIFORM_BYTES = 64;
 const PNG_HEADER_BYTES = 33;
 const PNG_IHDR_LENGTH = 13;
@@ -44,6 +47,10 @@ struct View {
     pixel: vec2<f32>,
     action: f32,
     plane: f32,
+    camera: vec2<f32>,
+    viewport: vec2<f32>,
+    worldMode: f32,
+    character: f32,
 };
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -65,6 +72,10 @@ fn planeVertex(@builtin(vertex_index) index: u32) -> PlaneVertex {
         (ndc.x - view.rectMin.x) / extent.x,
         1.0 - (ndc.y - view.rectMin.y) / extent.y
     );
+    if (view.worldMode > 0.0) {
+        let screen = vec2<f32>(ndc.x, -ndc.y) * view.viewport * 0.5;
+        out.world = view.camera + vec2<f32>(screen.x + 2.0 * screen.y, -screen.x + 2.0 * screen.y);
+    }
 
     return out;
 }
@@ -82,7 +93,7 @@ fn planeFragment(in: PlaneVertex) -> @location(0) vec4<f32> {
     let inset = min(min(world.x, view.plane - world.x), min(world.y, view.plane - world.y));
     let line = max(view.pixel.x, view.pixel.y);
 
-    if (inset < 0.0) {
+    if (inset < 0.0 && view.worldMode == 0.0) {
         return vec4<f32>(0.055, 0.070, 0.062, 1.0);
     }
 
@@ -92,11 +103,15 @@ fn planeFragment(in: PlaneVertex) -> @location(0) vec4<f32> {
 
     colour = mix(colour, vec3<f32>(0.235, 0.294, 0.247), gridAlpha(world, view.grid.y, line));
     colour = mix(colour, vec3<f32>(0.345, 0.439, 0.361), gridAlpha(world, view.grid.x, line));
-    colour = mix(colour, vec3<f32>(0.565, 0.647, 0.553), 1.0 - smoothstep(0.0, 2.5 * line, inset));
+    if (view.worldMode == 0.0) {
+        colour = mix(colour, vec3<f32>(0.565, 0.647, 0.553), 1.0 - smoothstep(0.0, 2.5 * line, inset));
+    }
 
-    let radius = length(world - view.marker);
-    colour = mix(colour, vec3<f32>(0.980, 0.871, 0.510), 1.0 - smoothstep(0.40, 0.46, radius));
-    colour = mix(colour, vec3<f32>(0.545, 0.780, 0.949), view.action * (1.0 - smoothstep(0.0, 2.0 * line, abs(radius - 0.62))));
+    if (view.character == 0.0) {
+        let radius = length(world - view.marker);
+        colour = mix(colour, vec3<f32>(0.980, 0.871, 0.510), 1.0 - smoothstep(0.40, 0.46, radius));
+        colour = mix(colour, vec3<f32>(0.545, 0.780, 0.949), view.action * (1.0 - smoothstep(0.0, 2.0 * line, abs(radius - 0.62))));
+    }
 
     return vec4<f32>(colour, 1.0);
 }
@@ -141,13 +156,47 @@ fn artFragment(in: ArtVertex) -> @location(0) vec4<f32> {
 }
 `;
 
+const CHARACTER_SHADER = /* wgsl */ `
+@group(0) @binding(0) var<uniform> projection: mat4x4<f32>;
+@group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
+@group(0) @binding(2) var body: texture_2d<f32>;
+@group(0) @binding(3) var bodySampler: sampler;
+struct CharacterVertex {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) light: f32,
+};
+@vertex fn characterVertex(
+    @location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>, @location(3) weights: vec4<f32>,
+    @location(4) bones: vec4<f32>
+) -> CharacterVertex {
+    let skin = palette[u32(bones.x)] * weights.x + palette[u32(bones.y)] * weights.y
+        + palette[u32(bones.z)] * weights.z + palette[u32(bones.w)] * weights.w;
+    var out: CharacterVertex;
+    out.clip = projection * skin * vec4<f32>(position, 1.0);
+    out.uv = uv;
+    let n = normalize((skin * vec4<f32>(normal, 0.0)).xyz);
+    out.light = 0.65 + 0.35 * max(dot(n, normalize(vec3<f32>(-0.4, 0.8, 0.6))), 0.0);
+    return out;
+}
+@fragment fn characterFragment(in: CharacterVertex) -> @location(0) vec4<f32> {
+    let colour = textureSample(body, bodySampler, in.uv);
+    if (colour.a < 0.05) { discard; }
+    return vec4<f32>(colour.rgb * in.light, colour.a);
+}`;
+
 /**
  * Engine snapshot fields the renderer needs.
  *
  * @typedef {object} RendererSnapshot
- * @property {number} x World x coordinate on the shared [0, 10] plane.
- * @property {number} y World y coordinate on the shared [0, 10] plane, increasing south.
+ * @property {number} x World x coordinate (unbounded with world/character mode).
+ * @property {number} y World y coordinate, increasing south.
  * @property {number} action Engine action code: 0 idle, 1 destination, 2 walking.
+ * @property {number} [timeSeconds] Explicit nonnegative animation time; when absent advancing ticks use capped presentation elapsed time.
+ * @property {number} [tick] Engine tick used to freeze animation while simulation is paused.
+ * @property {number} [headingX] Movement heading x, used when position deltas are zero.
+ * @property {number} [headingY] Movement heading y.
  */
 
 /**
@@ -185,6 +234,11 @@ fn artFragment(in: ArtVertex) -> @location(0) vec4<f32> {
  *
  * @typedef {object} RendererHandle
  * @property {(file: File) => Promise<RendererAsset>} importImage Validates, uploads and describes one local PNG.
+ * @property {(files: {model: File, idle?: File, walk?: File, texture: File, ticksPerSecond?: number}) => Promise<object>} importCharacter Uploads an actual skinned ASCII X character with explicit PNG atlas.
+ * @property {(enabled: boolean) => void} setWorldMode Enables unbounded isometric camera following.
+ * @property {(clientX: number, clientY: number) => {x: number, y: number}} worldFromCanvas Maps pointer using the current camera.
+ * @property {(layer: object|null) => void} setWorldLayer Installs an external tile render/destroy layer.
+ * @property {() => {device: GPUDevice, format: string, sampler: GPUSampler}} gpuResources Shared device for the external world layer.
  * @property {(snapshot: RendererSnapshot) => void} render Submits one frame for a detached snapshot.
  * @property {() => RendererDiagnostics} diagnostics Detached backend evidence.
  * @property {() => void} destroy Releases every GPU resource.
@@ -238,9 +292,10 @@ function axisScale(visual, layout) {
  * Reads a finite in-bounds position from an engine snapshot.
  *
  * @param {RendererSnapshot} snapshot - Detached snapshot from the WASM engine.
+ * @param {boolean} unbounded - True bypasses plane clamping for camera-following modes.
  * @returns {{x: number, y: number}} Position clamped onto the bounded plane.
  */
-function requirePosition(snapshot) {
+function requirePosition(snapshot, unbounded = false) {
     if (typeof snapshot?.x !== 'number' || typeof snapshot?.y !== 'number') {
         throw new TypeError('A snapshot with numeric x and y is required.');
     }
@@ -249,7 +304,9 @@ function requirePosition(snapshot) {
         throw new RangeError('Snapshot coordinates must be finite.');
     }
 
-    return { x: clamp(snapshot.x, WORLD_MIN, WORLD_MAX), y: clamp(snapshot.y, WORLD_MIN, WORLD_MAX) };
+    return unbounded
+        ? { x: snapshot.x, y: snapshot.y }
+        : { x: clamp(snapshot.x, WORLD_MIN, WORLD_MAX), y: clamp(snapshot.y, WORLD_MIN, WORLD_MAX) };
 }
 
 /**
@@ -334,6 +391,40 @@ async function requireCompiled(module) {
 }
 
 /**
+ * Releases the GPU buffers and texture owned by the imported character, if any.
+ *
+ * @param {{resources: (GPUBuffer|GPUTexture)[]}|null} value - Character record or null.
+ * @returns {void} Destroys each owned resource.
+ */
+function releaseCharacter(value) {
+    if (!value) {
+        return;
+    }
+
+    for (const resource of value.resources) {
+        resource.destroy();
+    }
+}
+
+/**
+ * Reads one selected local X file and parses its text; no network access.
+ *
+ * @param {File} file - Selected X model or animation file.
+ * @returns {Promise<object>} Parsed X document from {@link parseX}.
+ */
+async function readModel(file) {
+    if (!(file instanceof File)) {
+        throw new TypeError('Character model/animations must be local X Files.');
+    }
+
+    if (!file.size || file.size > MAX_X_BYTES) {
+        throw new RangeError('X file must be between 1 byte and 16 MiB.');
+    }
+
+    return parseX(await file.text());
+}
+
+/**
  * Presents WASM engine state over a bounded synthetic plane using real WebGPU submission.
  * Rendering works before any import; acceptance requires an imported PNG sprite.
  *
@@ -381,6 +472,60 @@ export async function createRenderer(canvas, onError) {
     let texture = null;
     /** @type {GPUBindGroup|null} */
     let spriteBindGroup = null;
+    let worldMode = false;
+    let worldLayer = null;
+    let character = null;
+    let depthTexture = null;
+    let depthWidth = 0;
+    let depthHeight = 0;
+    const projection = new Float32Array(16);
+    const characterProjection = new Float32Array(16);
+    const objectMatrix = new Float32Array(16);
+    let camera = { x: 5, y: 5 };
+
+    /**
+     * Enables or disables unbounded isometric camera following for direct engine coordinates.
+     *
+     * @param {boolean} enabled - True follows the snapshot camera; false restores the bounded plane.
+     */
+    function setWorldMode(enabled) {
+        if (typeof enabled !== 'boolean') {
+            throw new TypeError('World mode requires a boolean.');
+        }
+
+        if (destroyed || stopped) {
+            throw new Error('Renderer is no longer active.');
+        }
+
+        worldMode = enabled;
+
+        if (!worldMode && !character) {
+            canvasCameras.delete(canvas);
+        } else {
+            canvasCameras.set(canvas, camera);
+        }
+    }
+
+    /**
+     * Swaps the active tile layer; the replaced layer is destroyed first.
+     *
+     * @param {{render: (pass: unknown, view: object) => void, destroy: () => void}|null} layer - External world layer providing render and destroy.
+     */
+    function setWorldLayer(layer) {
+        if (destroyed || stopped) {
+            throw new Error('Renderer is no longer active.');
+        }
+
+        if (layer !== null && (typeof layer?.render !== 'function' || typeof layer?.destroy !== 'function')) {
+            throw new TypeError('A world layer must provide render(pass, view) and destroy().');
+        }
+
+        if (worldLayer !== layer) {
+            worldLayer?.destroy();
+        }
+
+        worldLayer = layer;
+    }
 
     /**
      * Reports the first unrecoverable failure once; a page reload is the recovery path.
@@ -520,6 +665,15 @@ export async function createRenderer(canvas, onError) {
         viewData[9] = worldPerPixel;
         viewData[10] = action > 0 ? 1 : 0;
         viewData[11] = WORLD_SPAN;
+        const following = worldMode || !!character;
+        const tilePixels = Math.min(canvas.width, canvas.height) / WORLD_SPAN;
+
+        viewData[12] = camera.x;
+        viewData[13] = camera.y;
+        viewData[14] = canvas.width / tilePixels;
+        viewData[15] = canvas.height / tilePixels;
+        viewData[16] = following ? 1 : 0;
+        viewData[17] = character ? 1 : 0;
         device.queue.writeBuffer(viewBuffer, 0, viewData);
     }
 
@@ -578,9 +732,10 @@ export async function createRenderer(canvas, onError) {
      * an animated PNG contributes its first frame.
      *
      * @param {File} file - Selected PNG file.
+     * @param {boolean} detached - True uploads without installing the texture as the live asset.
      * @returns {Promise<RendererAsset>} Detached metadata of the live texture.
      */
-    async function importImage(file) {
+    async function importImage(file, detached = false) {
         if (destroyed) {
             throw new Error('This renderer has been destroyed.');
         }
@@ -614,6 +769,7 @@ export async function createRenderer(canvas, onError) {
         }
 
         const bitmap = await createImageBitmap(file, { premultiplyAlpha: 'premultiply' });
+        let uploaded = null;
 
         try {
             if (stopped || destroyed) {
@@ -624,7 +780,7 @@ export async function createRenderer(canvas, onError) {
                 throw new Error('The decoded PNG dimensions disagree with its IHDR chunk.');
             }
 
-            const uploaded = device.createTexture({
+            uploaded = device.createTexture({
                 label: 'imported-art',
                 size: { width: header.width, height: header.height },
                 format: 'rgba8unorm',
@@ -636,18 +792,276 @@ export async function createRenderer(canvas, onError) {
                 { texture: uploaded, premultipliedAlpha: true },
                 { width: header.width, height: header.height },
             );
-            replaceAsset(uploaded, {
+            const metadata = {
                 name: file.name,
                 width: header.width,
                 height: header.height,
                 sourceBytes: file.size,
                 textureBytes,
-            });
+            };
+
+            if (detached) {
+                return { texture: uploaded, metadata };
+            }
+
+            replaceAsset(uploaded, metadata);
+        } catch (cause) {
+            uploaded?.destroy();
+            throw cause;
         } finally {
             bitmap.close();
         }
 
         return { ...asset };
+    }
+
+    /**
+     * Import a local ASCII X model and idle/walk AnimationSets plus an explicit PNG UV
+     * atlas. Idle/walk can be separate self-contained X files; if omitted their sets
+     * must exist in model. No texture-name guessing, network access or native converter.
+     * Requires one triangular mesh, <=256 frames and <=4 weights/vertex. Animation
+     * tick rate comes from AnimTicksPerSecond; ticksPerSecond is explicit calibration
+     * only when metadata is absent. Rejected imports preserve the previous character.
+     *
+     * @param {{model: File, idle?: File, walk?: File, texture: File, ticksPerSecond?: number}} files - Local selections.
+     * @returns {Promise<object>} Detached file, geometry, timing, atlas and scale evidence.
+     */
+    async function importCharacter(files) {
+        if (destroyed || stopped) {
+            throw new Error('This renderer is no longer accepting imports.');
+        }
+
+        const { model, idle, walk, texture: bodyTexture, ticksPerSecond } = files ?? {};
+        const parsed = await readModel(model);
+        const idleSource = idle ? await readModel(idle) : parsed;
+        const walkSource = walk ? await readModel(walk) : parsed;
+        const skin = createSkin(parsed);
+
+        /**
+         * Finds the clip for one animation kind and proves it fits the skin's hierarchy.
+         *
+         * @param {object} source - Parsed X file providing the animation sets.
+         * @param {string} kind - Clip name substring to match, `idle` or `walk`.
+         * @param {File|undefined} explicitFile - File selected explicitly for this kind.
+         * @returns {import('./models.js').XClip} Validated animation clip.
+         */
+        function selectClip(source, kind, explicitFile) {
+            const clip = source.animations.find((candidate) => candidate.name?.toLowerCase().includes(kind))
+                ?? (explicitFile && source.animations.length === 1 ? source.animations[0] : null);
+
+            if (!clip) {
+                throw new TypeError(`A ${kind} AnimationSet is required.`);
+            }
+
+            for (const frame of skin.frames) {
+                const weighted = skin.bones.some((bone) => bone.frame === skin.byName.get(frame.name) && bone.weights.some((weight) => weight > 0));
+
+                if (weighted && !clip.tracks.has(frame.name)) {
+                    throw new TypeError(`${kind} animation omits weighted bone ${frame.name}.`);
+                }
+            }
+
+            if (source.frames.length) {
+                const sourceFrames = new Map(source.frames.map((frame) => [frame.name, frame]));
+
+                for (const frame of skin.frames) {
+                    const other = sourceFrames.get(frame.name);
+
+                    if (!other) {
+                        // Unweighted helper frames need not be exported by every clip.
+                        continue;
+                    }
+
+                    const parent = frame.parent < 0 ? null : skin.frames[frame.parent].name;
+                    const otherParent = other.parent < 0 ? null : source.frames[other.parent].name;
+
+                    if (parent !== otherParent) {
+                        throw new TypeError(`Incompatible animation hierarchy at ${frame.name}.`);
+                    }
+                }
+            }
+
+            sampleSkin(skin, clip, 0, ticksPerSecond);
+
+            return clip;
+        }
+
+        const idleClip = selectClip(idleSource, 'idle', idle);
+        const walkClip = selectClip(walkSource, 'walk', walk);
+        const height = skin.bounds.max[1] - skin.bounds.min[1];
+
+        if (!(height > 1e-6)) {
+            throw new TypeError('Character mesh has no vertical extent.');
+        }
+
+        const resources = [];
+
+        device.pushErrorScope('validation');
+        let scopeOpen = true;
+
+        try {
+            const uploaded = await importImage(bodyTexture, true);
+
+            resources.push(uploaded.texture);
+            const module = device.createShaderModule({ label: 'character-skinning', code: CHARACTER_SHADER });
+
+            await requireCompiled(module);
+            const layout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform', minBindingSize: 64 } },
+                    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+                    { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                    { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+                ],
+            });
+            const pipeline = await device.createRenderPipelineAsync({
+                label: 'textured-four-weight-character', layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+                vertex: {
+                    module, entryPoint: 'characterVertex', buffers: [{
+                        arrayStride: 64, attributes: [
+                            { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                            { shaderLocation: 1, offset: 12, format: 'float32x3' },
+                            { shaderLocation: 2, offset: 24, format: 'float32x2' },
+                            { shaderLocation: 3, offset: 32, format: 'float32x4' },
+                            { shaderLocation: 4, offset: 48, format: 'float32x4' },
+                        ],
+                    }],
+                },
+                fragment: {
+                    module, entryPoint: 'characterFragment', targets: [{
+                        format, blend: {
+                            color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                        },
+                    }],
+                },
+                primitive: { topology: 'triangle-list', cullMode: 'none' },
+                depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less-equal' },
+            });
+
+            /**
+             * Creates a writeable device buffer and registers it for release with the character.
+             *
+             * @param {string} label - Buffer label for diagnostics.
+             * @param {Float32Array} data - Initial contents.
+             * @param {number} usage - GPUBufferUsage flags besides COPY_DST.
+             * @returns {GPUBuffer} Initialized device buffer.
+             */
+            function buffer(label, data, usage) {
+                const result = device.createBuffer({ label, size: data.byteLength, usage: usage | GPUBufferUsage.COPY_DST });
+
+                resources.push(result);
+                device.queue.writeBuffer(result, 0, data);
+
+                return result;
+            }
+
+            const vertices = buffer('character-static-vertices', skin.vertices, GPUBufferUsage.VERTEX);
+            const indices = buffer('character-static-indices', skin.indices, GPUBufferUsage.INDEX);
+            const palette = buffer('character-palette', skin.palette, GPUBufferUsage.STORAGE);
+            const transform = buffer('character-projection', new Float32Array(16), GPUBufferUsage.UNIFORM);
+            const bindGroup = device.createBindGroup({
+                layout, entries: [
+                    { binding: 0, resource: { buffer: transform } }, { binding: 1, resource: { buffer: palette } },
+                    { binding: 2, resource: uploaded.texture.createView() }, { binding: 3, resource: sampler },
+                ],
+            });
+            const validation = await device.popErrorScope();
+
+            scopeOpen = false;
+
+            if (validation) {
+                throw new Error(`Character WebGPU validation failed: ${validation.message}`);
+            }
+
+            if (stopped || destroyed) {
+                throw new Error('Renderer stopped during character import.');
+            }
+
+            const metadata = {
+                model: model.name, idle: idle?.name ?? model.name, walk: walk?.name ?? model.name,
+                texture: uploaded.metadata, embeddedTextureNames: [...parsed.textureNames],
+                vertices: skin.vertices.length / 16, triangles: skin.indices.length / 3, bones: skin.bones.length,
+                idleTicksPerSecond: idleClip.ticksPerSecond ?? ticksPerSecond,
+                walkTicksPerSecond: walkClip.ticksPerSecond ?? ticksPerSecond,
+                calibrated: !idleClip.ticksPerSecond || !walkClip.ticksPerSecond,
+                sourceHeight: height, worldHeight: 1.8, scale: 1.8 / height,
+            };
+
+            releaseCharacter(character);
+            character = {
+                resources, skin, idleClip, walkClip, ticksPerSecond, pipeline, vertices, indices, palette, transform, bindGroup, metadata,
+                facing: 0, previous: null, seconds: 0, previousTick: null, previousClock: null, animation: 'idle',
+            };
+            canvasCameras.set(canvas, camera);
+
+            return structuredClone(metadata);
+        } catch (cause) {
+            if (scopeOpen) {
+                await device.popErrorScope();
+            }
+
+            for (const resource of resources) {
+                resource.destroy();
+            }
+
+            throw cause;
+        }
+    }
+
+    /**
+     * Advances facing and animation state, then uploads the character's palette and world matrix.
+     *
+     * @param {RendererSnapshot} snapshot - Detached engine snapshot.
+     * @param {{x: number, y: number}} position - Plane position for the character.
+     */
+    function writeCharacter(snapshot, position) {
+        const c = character;
+        const now = performance.now() / 1_000;
+
+        if (Number.isFinite(snapshot.timeSeconds) && snapshot.timeSeconds >= 0) {
+            c.seconds = snapshot.timeSeconds;
+        } else if (c.previousClock !== null && (snapshot.tick === undefined || snapshot.tick !== c.previousTick)) {
+            c.seconds += Math.max(0, Math.min(0.1, now - c.previousClock));
+        }
+
+        c.previousClock = now;
+        c.previousTick = snapshot.tick;
+        let dx = c.previous ? position.x - c.previous.x : 0;
+        let dy = c.previous ? position.y - c.previous.y : 0;
+
+        if (Math.hypot(dx, dy) < 1e-6 && Number.isFinite(snapshot.headingX) && Number.isFinite(snapshot.headingY)) {
+            dx = snapshot.headingX;
+            dy = snapshot.headingY;
+        }
+
+        if (Math.hypot(dx, dy) > 1e-6) {
+            c.facing = Math.atan2(dy, dx);
+        }
+
+        c.previous = position;
+        c.animation = snapshot.action > 0 ? 'walk' : 'idle';
+        const palette = sampleSkin(c.skin, c.animation === 'walk' ? c.walkClip : c.idleClip, c.seconds, c.ticksPerSecond);
+
+        device.queue.writeBuffer(c.palette, 0, palette);
+        const scale = c.metadata.scale;
+        const cosine = Math.cos(c.facing);
+        const sine = Math.sin(c.facing);
+
+        // Model x/z span ground, model y is elevation. Face local +z along heading.
+        objectMatrix.set([sine * scale, -cosine * scale, 0, 0, 0, 0, scale, 0,
+            cosine * scale, sine * scale, 0, 0, position.x, position.y, -c.skin.bounds.min[1] * scale, 1]);
+
+        for (let col = 0; col < 4; col++) {
+            for (let row = 0; row < 4; row++) {
+                characterProjection[col * 4 + row] = projection[row] * objectMatrix[col * 4]
+                    + projection[4 + row] * objectMatrix[col * 4 + 1]
+                    + projection[8 + row] * objectMatrix[col * 4 + 2]
+                    + projection[12 + row] * objectMatrix[col * 4 + 3];
+            }
+        }
+
+        device.queue.writeBuffer(c.transform, 0, characterProjection);
     }
 
     /**
@@ -661,23 +1075,44 @@ export async function createRenderer(canvas, onError) {
             return;
         }
 
-        const position = requirePosition(snapshot);
+        const following = worldMode || !!character;
+        const position = requirePosition(snapshot, following);
 
         resize();
 
         const box = fitBox(canvas.width, canvas.height);
         const action = typeof snapshot.action === 'number' && snapshot.action > 0 ? 1 : 0;
 
+        camera = { x: position.x, y: position.y };
+        const tilePixels = Math.min(canvas.width, canvas.height) / WORLD_SPAN;
+
+        if (following) {
+            canvasCameras.set(canvas, camera);
+            projection.set([tilePixels / canvas.width, -tilePixels / (2 * canvas.height), -0.002, 0,
+                -tilePixels / canvas.width, -tilePixels / (2 * canvas.height), -0.002, 0,
+                0, 3 * tilePixels / canvas.height, -0.002, 0,
+                (-camera.x + camera.y) * tilePixels / canvas.width,
+                (camera.x + camera.y) * tilePixels / (2 * canvas.height),
+                0.5 + (camera.x + camera.y) * 0.002, 1]);
+        } else {
+            canvasCameras.delete(canvas);
+        }
+
+        if (character) {
+            writeCharacter(snapshot, position);
+        }
+
         writePlane(box, position, action);
 
-        if (asset) {
+        if (asset && !following) {
             writeSprite(box, position, asset);
         }
 
         const encoder = device.createCommandEncoder();
+        const colourView = context.getCurrentTexture().createView();
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
-                view: context.getCurrentTexture().createView(),
+                view: colourView,
                 clearValue: { r: 0, g: 0, b: 0, a: 1 },
                 loadOp: 'clear',
                 storeOp: 'store',
@@ -688,13 +1123,42 @@ export async function createRenderer(canvas, onError) {
         pass.setBindGroup(0, viewBindGroup);
         pass.draw(3);
 
-        if (asset) {
+        if (asset && !following) {
             pass.setPipeline(artPipeline);
             pass.setBindGroup(0, spriteBindGroup);
             pass.draw(4);
         }
 
         pass.end();
+
+        if (following && (character || worldLayer)) {
+            if (!depthTexture || depthWidth !== canvas.width || depthHeight !== canvas.height) {
+                depthTexture?.destroy();
+                depthWidth = canvas.width;
+                depthHeight = canvas.height;
+                depthTexture = device.createTexture({ label: 'world-depth', size: [depthWidth, depthHeight], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+            }
+
+            const worldPass = encoder.beginRenderPass({
+                colorAttachments: [{ view: colourView, loadOp: 'load', storeOp: 'store' }],
+                depthStencilAttachment: { view: depthTexture.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+            });
+
+            if (worldLayer) {
+                worldLayer.render(worldPass, { device, format, projection, camera, tilePixels, width: canvas.width, height: canvas.height });
+            }
+
+            if (character) {
+                worldPass.setPipeline(character.pipeline);
+                worldPass.setBindGroup(0, character.bindGroup);
+                worldPass.setVertexBuffer(0, character.vertices);
+                worldPass.setIndexBuffer(character.indices, 'uint32');
+                worldPass.drawIndexed(character.skin.indices.length);
+            }
+
+            worldPass.end();
+        }
+
         device.queue.submit([encoder.finish()]);
         frames += 1;
     }
@@ -705,6 +1169,20 @@ export async function createRenderer(canvas, onError) {
      * @returns {RendererDiagnostics} Current renderer state.
      */
     function diagnostics() {
+        let presentation = 'legacy-plane';
+
+        if (character) {
+            presentation = 'textured-skinned-character';
+        } else if (worldMode) {
+            presentation = 'navigation-debug-no-character';
+        }
+
+        let cameraEvidence = null;
+
+        if (worldMode || character) {
+            cameraEvidence = { ...camera, projection: 'isometric-64x32', verticalPixelsPerTile: 96 };
+        }
+
         return {
             backend: 'WebGPU',
             fallbackAdapter: adapterInfo?.isFallbackAdapter ?? null,
@@ -728,8 +1206,12 @@ export async function createRenderer(canvas, onError) {
                 pixelRatio: drawScale,
             },
             worldPlane: { min: WORLD_MIN, max: WORLD_MAX },
+            worldMode: worldMode || !!character,
+            presentation,
+            camera: cameraEvidence,
+            character: character ? { ...structuredClone(character.metadata), animation: character.animation, animationSeconds: character.seconds, facingRadians: character.facing } : null,
             frames,
-            textureBytes: asset?.textureBytes ?? 0,
+            textureBytes: (asset?.textureBytes ?? 0) + (character?.metadata.texture.textureBytes ?? 0),
             asset: asset ? { ...asset } : null,
             stopped,
             destroyed,
@@ -748,6 +1230,13 @@ export async function createRenderer(canvas, onError) {
 
         destroyed = true;
         device.onuncapturederror = null;
+        releaseCharacter(character);
+        character = null;
+        worldLayer?.destroy();
+        worldLayer = null;
+        depthTexture?.destroy();
+        depthTexture = null;
+        canvasCameras.delete(canvas);
 
         if (texture) {
             texture.destroy();
@@ -762,7 +1251,23 @@ export async function createRenderer(canvas, onError) {
         device.destroy();
     }
 
-    return Object.freeze({ importImage, render, diagnostics, destroy });
+    return Object.freeze({
+        importImage, importCharacter, render, diagnostics, destroy, setWorldMode, setWorldLayer,
+        /**
+         * Maps a pointer through the live camera or plane fit of this renderer.
+         *
+         * @param {number} clientX - Pointer x in viewport pixels.
+         * @param {number} clientY - Pointer y in viewport pixels.
+         * @returns {{x: number, y: number}} World position under the pointer.
+         */
+        worldFromCanvas: (clientX, clientY) => worldFromCanvas(canvas, clientX, clientY),
+        /**
+         * Shares the device, swap-chain format and linear sampler with an external world layer.
+         *
+         * @returns {{device: GPUDevice, format: string, sampler: GPUSampler}} Shared GPU resources.
+         */
+        gpuResources: () => ({ device, format, sampler }),
+    });
 }
 
 /**
@@ -775,7 +1280,7 @@ export async function createRenderer(canvas, onError) {
  * @param {HTMLCanvasElement} canvas - Presentation canvas.
  * @param {number} clientX - Pointer x in viewport pixels.
  * @param {number} clientY - Pointer y in viewport pixels.
- * @returns {{x: number, y: number}} World coordinates clamped to [0, 10].
+ * @returns {{x: number, y: number}} Unbounded iso ground coordinates when camera follows; otherwise clamped [0,10].
  */
 export function worldFromCanvas(canvas, clientX, clientY) {
     const box = canvas.getBoundingClientRect();
@@ -788,6 +1293,15 @@ export function worldFromCanvas(canvas, clientX, clientY) {
     const plane = fitBox(width, height);
     const ndcX = ((clientX - box.left - canvas.clientLeft * scaleX) / (width * scaleX)) * 2 - 1;
     const ndcY = 1 - ((clientY - box.top - canvas.clientTop * scaleY) / (height * scaleY)) * 2;
+    const camera = canvasCameras.get(canvas);
+
+    if (camera) {
+        const tilePixels = Math.min(width, height) / WORLD_SPAN;
+        const sx = ndcX * width / (2 * tilePixels);
+        const sy = -ndcY * height / (2 * tilePixels);
+
+        return { x: camera.x + sx + 2 * sy, y: camera.y - sx + 2 * sy };
+    }
 
     return {
         x: clamp(WORLD_MIN + WORLD_SPAN * (ndcX - plane.minX) / (plane.maxX - plane.minX), WORLD_MIN, WORLD_MAX),

@@ -2,7 +2,9 @@
 
 ## Current increment
 
-Full-game continuation is active. M1 architecture proof remains verified and backed up, but is not the completion goal. The next playable slice adds real imported tiles/character content, WASM collision/navigation/interaction, save restoration and local mod management; full gameplay, portability and fidelity requirements remain open. No native streaming/client-control implementation.
+Full-game continuation is active. M1 architecture proof remains verified and backed up, but is not the completion goal. The current slice automatically loads original tiles, navigation and character assets from a separately provisioned directory, with browser save restoration and local mod management. The web application must not ask users to import assets. Full gameplay, portability and fidelity requirements remain open. No native streaming/client-control implementation.
+
+The normal surface is only the edge-to-edge game canvas. There is no header, sidebar, decorative footer or visible debug overlay. Real game controls live in a hidden pause menu; machine diagnostics remain nonvisual. Any future necessary debug overlay must follow the original game's collapsible-window conventions.
 
 ## Grounded observations
 
@@ -30,7 +32,7 @@ Full-game continuation is active. M1 architecture proof remains verified and bac
 - Numeric intake now validates F64 before F32 state conversion; scaled normalization accepts extreme finite headings. A compiled failing-before/passing-after probe confirmed tiny nonzero headings no longer acquire an accidental deadzone.
 - Pushed `fae72c7` — `feat(render)` real-content renderer proof. [Isolated renderer evidence](evidence/render-smoke.json) uses a static position, not simulation. Subsequent integrated proof is recorded below.
 
-## Integrated browser acceptance
+## Historical M1 integrated browser acceptance
 
 - Imported original AppleRotten.png through the actual application file input: 64×64, 5931 source bytes, 16384 estimated RGBA8 GPU texture bytes. Real imported pixels rendered; screenshots remain temporary, never tracked.
 - Native-game process count was zero. Base toggle movement measured 1.500005722 units/s over 49 simulation ticks; bundled multifile ES module measured 2.249994278 units/s over 58 ticks. Stop prevented later displacement; disabling the mod restored speed 1.5 and removed its registrations.
@@ -46,6 +48,20 @@ Full-game continuation is active. M1 architecture proof remains verified and bac
 - Continuing correctness check reproduced a held-W → vetoed pointer destination → release-W defect: WASM remained walking because input ownership had been cleared before commit. Shared non-keyboard takeover now clears held keys/assistance only after commitment. Actual compiled-WASM browser checks pass for pointer, coordinate form and direction-button vetoes; release stops in all three. [Failing-before/passing-after metadata](evidence/input-veto-release.json).
 - Runnable browser regression: import `checkHeldVeto` from `scripts/check-browser-input.mjs` in the development browser runner and call `tab.run(checkHeldVeto, { args: [mode] })` for `pointer`, `form`, and `toggle`. It operates the built UI with an independently authored public-API veto mod; no private state exposure or proprietary bytes.
 
+## Directory startup and game-only browser acceptance
+
+- Latest `npm run check && npm run build` passed: zero-warning ESLint, Rust formatting/clippy, 28 native Rust tests, 168 Node passes with one Linux-only case-sensitive fixture skipped on Windows, seven documentation-link checks and an asset-free build. Cargo reported non-failing Windows incremental-cache finalization access-denied notes.
+- Actual Chromium/NVIDIA WebGPU rendered the original Tutorial tiles and skinned MaleBody with Bob idle/walk resources from `/content/`, without any asset picker. Fresh `localhost` origin loaded all four cells and the configured (190.5,190.5) spawn; the separate retained `127.0.0.1` origin restored its saved one-cell world instead.
+- Ready canvas occupied (0,0) through the entire 1252×1222 viewport; backing buffer was 1878×1833 at DPR 1.5. Resize to 900×700 produced 1125×875 at the actual approximately 1.25 DPR. No page scrolling, header, sidebar, footer, loading overlay, open menu or visible diagnostics.
+- Actual keyboard movement, Escape/pause cancellation, keyboard Resume/focus, menu toggle walking, Space cancellation, pointer travel, blur cancellation and fractional coordinate travel passed. The smoke exposed an unnecessarily restrictive numeric step; `step="any"` now accepts the engine's fractional destinations.
+- Save/reload and two actual autosave periods preserved player, authoritative saved cells/navigation hash and mod namespaces; every observed write occurred after readiness. The latest 900×700 viewport proof at approximately DPR 1.25 retained these values across the actual 61-second/two-autosave window, with hidden diagnostics and no decorative chrome. A deliberately unavailable content manifest displayed an explicit stopped error and left the entire retained autosave fingerprint unchanged.
+- Provisioned JavaScript package activation initialization persisted through menu Save/Load, reboot and New session. Schema 1→2 migration persisted under unchanged exact package version `1.0.0`; mismatched package versions intentionally block automatic restoration. This proves namespace lifecycle/schema handling within the existing version contract, not arbitrary package-version migration.
+- Saved-world startup requires original lotheader and lotpack files for **every** saved navigation cell. Removing both files for non-player cell (1,1) stopped startup with the exact missing paths and recovery choices; the complete retained save SHA-256 was unchanged.
+- Actual `device.destroy()` during a held Load geometry request left the fatal WebGPU/reload instruction visible after the request failed with HTTP 503; simulation stayed stopped. A separate streamed lotpack HTTP 503 paused movement and displayed actionable provision/reload feedback on the game error surface, without debug UI.
+- Review corrections also have genuine regressions for atomic content publication (filesystem SIGKILL of media/mod copying and successful rerun) and Lua ownership/cleanup (14 runtime tests, including five added regressions). These are contract checks, not additional native gameplay proof.
+- Real browser Lua WASM computed 5050, dispatched one startup and one actual WASM-movement event, and persisted those results through the public mod state API. This is synthetic package/bridge acceptance, not existing unmodified Workshop gameplay acceptance; original engine APIs remain incomplete and Lua 5.4/partial Lua 5.1 compatibility is not Kahlua equivalence.
+- Temporary screenshots were inspected, not tracked. [Metadata-only evidence](evidence/m2-directory-acceptance.json) records actual scene/input/save/resize/error/Lua results. Nine authored vegetation names remain unresolved in startup texture banks; character scale is uncalibrated and full gameplay/native fidelity remain incomplete.
+
 ## Blockers and outstanding acceptance
 
 - Remote access resolved: private repository and app-authenticated source push verified. Latest source release provenance is `72e238bc2b961b78bf34ee83565198c4c8751941`; subsequent handoff-documentation checkpoints do not change the implementation.
@@ -56,4 +72,4 @@ Full-game continuation is active. M1 architecture proof remains verified and bac
 
 ## Next runnable step
 
-Run `.\scripts\Windows.ps1 Run`, open localhost in a WebGPU-capable browser, and import a PNG from your own installation to exercise the delivered proof. Next implementation experiment: bounded inspection of `media/texturepacks/Tiles2x.pack` headers/page/subtexture metadata, followed by an in-browser atlas decode. Preserve original inputs; no whole-bank read or native converter. M2 also requires real tile collision/character/interaction, browser save transfer and local mod management before gameplay claims.
+Provision the original installation once with `.\scripts\Windows.ps1 ProvisionContent -Source <installation>`, then run `.\scripts\Windows.ps1 Run`. Directory autoload, full-viewport presentation, original terrain/character rendering, retained-save reload and provisioned JavaScript namespace lifecycle are now exercised in the browser. Next: verify representative existing unmodified native Lua packages and implement an interaction such as door/item pickup; complete save-backup restoration acceptance. Preserve original inputs and unresolved fidelity gaps; no whole-bank read or native runtime companion.

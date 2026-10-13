@@ -12,11 +12,11 @@
  * isolated. A mod can read and write anything a page script can. This API is
  * experimental (0.1.0) and may change between previews.
  *
- * Deliberately absent in 0.1.0: mod packages with arbitrary local files, a
- * mod manager, dependency resolution, enable/disable persistence, save data,
- * UI registration and any content or asset APIs. Those are M2+ work; no
- * placeholder surfaces exist here.
+ * World navigation, save namespaces and post-step tick callbacks expose only
+ * implemented engine behaviour. No placeholder subsystem surfaces exist here.
  */
+
+import { validateNavigationCell } from './engine.js';
 
 /** Public mod API version. A manifest must name exactly this value. */
 const MOD_API_VERSION = '0.1.0';
@@ -28,6 +28,7 @@ const WORLD_MIN = 0;
 const WORLD_MAX = 10;
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 10;
+const MAX_SAVE_BYTES = 256 * 1_024;
 const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel']);
 /** Reserved internal attribution id for page input; a mod cannot claim it. */
 const RESERVED_ID = 'host';
@@ -46,7 +47,7 @@ const RESERVED_ID = 'host';
  * @typedef {{ type: 'moveTo', x: number, y: number }|{ type: 'walk', x: number, y: number }|{ type: 'cancel' }} ModAction
  */
 /**
- * @typedef {{ id: string, version: string, apiVersion: string, name: string }} ModManifest
+ * @typedef {{ id: string, version: string, apiVersion: string, name: string, saveSchemaVersion?: number }} ModManifest
  */
 /**
  * What a hook may return: nothing (keep), a replacement action, `false` to cancel, `null` to keep.
@@ -59,17 +60,12 @@ const RESERVED_ID = 'host';
 /**
  * The engine surface the host needs; `src/engine.js` supplies it.
  *
- * @typedef {{ snapshot: () => ModSnapshot, command: (action: ModAction) => ModSnapshot, setSpeed: (speed: number) => void }} ModEngine
+ * @typedef {import('../types/mod-api').ModEngine} ModEngine
  */
 /**
  * The per-mod object passed to `activate`.
  *
- * @typedef {{
- *   version: string,
- *   movement: { getState: () => ModSnapshot, setSpeed: (speed: number) => void },
- *   actions: { submit: (action: ModAction) => ModCommandResult },
- *   hooks: { beforeAction: (callback: BeforeActionHook, options?: { priority?: number }) => () => boolean }
- * }} ModApi
+ * @typedef {import('../types/mod-api').ModApi} ModApi
  */
 /**
  * @typedef {{ committed: boolean, cancelled: boolean, submittedBy: string, modifiedBy: string[], cancelledBy?: string, snapshot: ModSnapshot }} ModCommandResult
@@ -77,7 +73,7 @@ const RESERVED_ID = 'host';
 /**
  * One internal hook registration.
  *
- * @typedef {{ modId: string, entry: ModEntry, callback: BeforeActionHook, priority: number, order: number }} HookRegistration
+ * @typedef {{ modId: string, entry: ModEntry, kind: string, callback: BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener, priority: number, order: number }} HookRegistration
  */
 /**
  * One loaded mod.
@@ -92,6 +88,7 @@ const RESERVED_ID = 'host';
  *   load: (url: string|URL) => Promise<{ id: string, version: string, name: string }>,
  *   dispose: () => void,
  *   command: (action: ModAction) => ModCommandResult,
+ *   step: (seconds: number) => void,
  *   diagnostics: () => ModDiagnostics
  * }} ModHost
  */
@@ -118,6 +115,97 @@ function detach(action) {
 }
 
 /**
+ * Copies strict JSON, refusing values JSON.stringify would silently discard.
+ *
+ * @param {unknown} value - Candidate JSON document or saved record.
+ * @returns {import('../types/mod-api').ModJsonValue} Detached, validated JSON.
+ */
+function cloneJson(value) {
+    const ancestors = new Set();
+
+    /**
+     * Visits data properties while tracking only the current ancestry for cycles.
+     *
+     * @param {unknown} candidate - Value to validate and detach.
+     * @returns {import('../types/mod-api').ModJsonValue} Detached finite JSON.
+     */
+    function copy(candidate) {
+        if (candidate === null || typeof candidate === 'string' || typeof candidate === 'boolean') {
+            return candidate;
+        }
+
+        if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+            return candidate;
+        }
+
+        if (typeof candidate !== 'object' || candidate === null) {
+            throw new TypeError('save data must contain only finite JSON values');
+        }
+
+        const array = Array.isArray(candidate);
+        const prototype = Object.getPrototypeOf(candidate);
+
+        if (!array && prototype !== Object.prototype && prototype !== null) {
+            throw new TypeError('save data must use plain JSON objects');
+        }
+
+        if (ancestors.has(candidate)) {
+            throw new TypeError('save data must not contain cycles');
+        }
+
+        ancestors.add(candidate);
+        const descriptors = Object.getOwnPropertyDescriptors(candidate);
+        const keys = Reflect.ownKeys(descriptors);
+
+        if (keys.some((key) => typeof key !== 'string')) {
+            throw new TypeError('save data must not contain symbol keys');
+        }
+
+        let result;
+
+        if (array) {
+            if (keys.length !== candidate.length + 1) {
+                throw new TypeError('save arrays must be dense with no extra properties');
+            }
+
+            result = [];
+
+            for (let index = 0; index < candidate.length; index += 1) {
+                const descriptor = descriptors[index];
+
+                if (!descriptor || !('value' in descriptor)) {
+                    throw new TypeError('save arrays must not contain holes or accessors');
+                }
+
+                result.push(copy(descriptor.value));
+            }
+        } else {
+            result = Object.fromEntries(keys.map((key) => {
+                const descriptor = descriptors[key];
+
+                if (!descriptor.enumerable || !('value' in descriptor)) {
+                    throw new TypeError('save objects must contain enumerable data properties only');
+                }
+
+                return [key, copy(descriptor.value)];
+            }));
+        }
+
+        ancestors.delete(candidate);
+
+        return result;
+    }
+
+    const detached = copy(value);
+
+    if (new TextEncoder().encode(JSON.stringify(detached)).byteLength > MAX_SAVE_BYTES) {
+        throw new RangeError('save namespace exceeds 256 KiB');
+    }
+
+    return detached;
+}
+
+/**
  * Creates the mod host for one engine instance.
  *
  * Ownership: the host owns hook bookkeeping and the ordering in which mods are
@@ -127,13 +215,25 @@ function detach(action) {
  * without changing state.
  *
  * @param {ModEngine} engine - Authoritative engine wrapper.
+ * @param {Partial<import('../types/mod-api').ModHostOptions>} [options] - Synchronous detached namespace backing; omitted means per-host in-memory only.
  * @returns {ModHost} `api` is a host-owned handle (same surface mods get) for parity checks; `load` activates one module; `dispose` unloads every mod in reverse load order; `command` runs host input through hooks then commits once; `diagnostics` returns detached evidence.
  * @throws {TypeError} When the engine lacks `snapshot`, `command` or `setSpeed`.
  */
-export function createModHost(engine) {
+export function createModHost(engine, options = {}) {
     if (!engine || typeof engine.snapshot !== 'function' || typeof engine.command !== 'function' || typeof engine.setSpeed !== 'function') {
         throw new TypeError('createModHost requires an engine with snapshot(), command() and setSpeed().');
     }
+
+    if ((options.readModState !== undefined || options.writeModState !== undefined)
+        && (typeof options.readModState !== 'function' || typeof options.writeModState !== 'function')) {
+        throw new TypeError('readModState and writeModState must both be synchronous functions.');
+    }
+
+    const saved = new Map();
+    const readModState = options.readModState ?? ((id) => saved.get(id));
+    const writeModState = options.writeModState ?? ((id, value) => {
+        saved.set(id, value);
+    });
 
     /** @type {Map<string, ModEntry>} */
     const mods = new Map();
@@ -144,6 +244,7 @@ export function createModHost(engine) {
     const counts = { commands: 0, committed: 0, cancelled: 0, modified: 0, modSubmitted: 0 };
     let registrations = 0;
     let dispatching = false;
+    let ticking = false;
     /** @type {ModEntry} Owner of the host-side `api` handle; always live while the host exists. */
     const hostEntry = { id: RESERVED_ID, manifest: { id: RESERVED_ID, version: '0.0.0', apiVersion: MOD_API_VERSION, name: 'host' }, url: '', cleanup: undefined, active: true };
 
@@ -229,6 +330,217 @@ export function createModHost(engine) {
     }
 
     /**
+     * Applies common failure attribution to optional engine and save boundaries.
+     *
+     * @param {ModEntry} entry - Caller owning this boundary.
+     * @param {string} stage - Attribution stage.
+     * @param {() => unknown} operation - Synchronous operation to execute.
+     * @returns {unknown} The operation's result.
+     */
+    function attributed(entry, stage, operation) {
+        try {
+            return operation();
+        } catch (cause) {
+            throw fail(entry.id, stage, cause instanceof Error ? cause.message : String(cause), cause);
+        }
+    }
+
+    /**
+     * Optional capabilities fail honestly; old engines keep their movement API.
+     *
+     * @param {'step'|'worldBounds'|'navFlags'|'worldImportCell'} name - Engine method to require.
+     * @returns {ModEngine['step']|ModEngine['worldBounds']|ModEngine['navFlags']|ModEngine['worldImportCell']} Engine-bound optional method.
+     */
+    function capability(name) {
+        if (typeof engine[name] !== 'function') {
+            throw new TypeError(`${name} is unsupported by this engine`);
+        }
+
+        return engine[name].bind(engine);
+    }
+
+    /**
+     * Reads only this namespace, never enumerating or rewriting absent mods' data.
+     *
+     * @param {ModEntry} entry - Namespace owner.
+     * @returns {import('../types/mod-api').ModSaveRecord|undefined} Validated detached record, or absence.
+     */
+    function readRecord(entry) {
+        const record = readModState(entry.id);
+
+        if (record === undefined) {
+            return undefined;
+        }
+
+        if (record && typeof record.then === 'function') {
+            observeRejection(entry.id, 'saveData.late', record);
+            throw new TypeError('readModState must return a record synchronously');
+        }
+
+        const detached = cloneJson(record);
+
+        if (!detached || !Number.isSafeInteger(detached.schemaVersion) || detached.schemaVersion < 1
+            || !Object.hasOwn(detached, 'data')) {
+            throw new TypeError('saved namespace must contain schemaVersion and data');
+        }
+
+        return detached;
+    }
+
+    /**
+     * Validates and detaches the complete record before handing it to storage.
+     *
+     * @param {ModEntry} entry - Namespace owner.
+     * @param {unknown} data - Candidate document.
+     * @returns {void}
+     */
+    function writeRecord(entry, data) {
+        const result = writeModState(entry.id, cloneJson({ schemaVersion: entry.manifest.saveSchemaVersion ?? 1, data }));
+
+        if (result !== undefined && result !== null) {
+            observeRejection(entry.id, 'saveData.late', result);
+            throw new TypeError('writeModState must return nothing synchronously');
+        }
+    }
+
+    /**
+     * One registration book owns action hooks, import hooks and tick listeners.
+     *
+     * @param {ModEntry} entry - Registration owner.
+     * @param {string} kind - Callback phase.
+     * @param {BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener} callback - Synchronous mod callback.
+     * @param {{priority?: number}} [options] - Optional finite priority.
+     * @returns {() => boolean} Registration withdrawal.
+     */
+    function register(entry, kind, callback, options) {
+        if (typeof callback !== 'function') {
+            throw modError(entry.id, 'hooks', `${kind} requires a callback function`);
+        }
+
+        const priority = options?.priority ?? 0;
+
+        if (typeof priority !== 'number' || !Number.isFinite(priority)) {
+            throw modError(entry.id, 'hooks', 'priority must be a finite number');
+        }
+
+        const hook = { modId: entry.id, entry, kind, callback, priority, order: registrations };
+
+        registrations += 1;
+        hooks.push(hook);
+
+        return () => withdraw(hook);
+    }
+
+    /**
+     * Invokes a callback without allowing a failure to break later callbacks.
+     *
+     * @param {HookRegistration} hook - Live callback registration.
+     * @param {object} payload - Detached callback input.
+     * @param {boolean} cancellable - Whether false is a valid veto.
+     * @returns {false|undefined} Veto or no contribution.
+     */
+    function notify(hook, payload, cancellable) {
+        try {
+            const result = hook.callback(payload);
+
+            if (cancellable && result === false) {
+                return false;
+            }
+
+            if (result !== undefined && result !== null) {
+                observeRejection(hook.modId, `${hook.kind}.late`, result);
+                throw new TypeError(`${hook.kind} must return ${cancellable ? 'false or ' : ''}nothing synchronously`);
+            }
+        } catch (cause) {
+            record(hook.modId, hook.kind, cause);
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Validates fully, resolves detached precommit hooks, then imports once.
+     *
+     * @param {ModEntry} entry - Import submitter.
+     * @param {number} cx - Integer cell x in [-100,100].
+     * @param {number} cy - Integer cell y in [-100,100].
+     * @param {Uint8Array|DataView} bytes - Complete cell format.
+     * @returns {import('../types/mod-api').ModWorldImportResult} Veto or committed evidence.
+     */
+    function importNavigationCell(entry, cx, cy, bytes) {
+        return attributed(entry, 'world', () => {
+            if (dispatching) {
+                throw new Error('cannot import navigation while precommit hooks are resolving');
+            }
+
+            const commit = capability('worldImportCell');
+
+            for (const coordinate of [cx, cy]) {
+                if (!Number.isInteger(coordinate) || coordinate < -100 || coordinate > 100) {
+                    throw new RangeError('cell coordinates must be integers inside [-100, 100]');
+                }
+            }
+
+            validateNavigationCell(bytes);
+            const detached = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).slice();
+            let cancelledBy;
+
+            dispatching = true;
+            try {
+                for (const hook of orderedHooks('beforeWorldImport')) {
+                    if (!hook.entry.active || !hooks.includes(hook)) {
+                        continue;
+                    }
+
+                    if (notify(hook, { cx, cy, bytes: detached.slice() }, true) === false && cancelledBy === undefined) {
+                        cancelledBy = hook.modId;
+                    }
+                }
+            } finally {
+                dispatching = false;
+            }
+
+            if (cancelledBy !== undefined) {
+                return { committed: false, cancelled: true, submittedBy: entry.id, cancelledBy, snapshot: { ...engine.snapshot() } };
+            }
+
+            commit(cx, cy, detached);
+
+            return { committed: true, cancelled: false, submittedBy: entry.id, snapshot: { ...engine.snapshot() } };
+        });
+    }
+
+    /**
+     * Emits only after one engine step has really committed; recursive steps fail.
+     *
+     * @param {number} seconds - Finite engine delta in (0,0.1].
+     * @returns {void}
+     */
+    function step(seconds) {
+        return attributed(hostEntry, 'tick', () => {
+            if (dispatching || ticking) {
+                throw new Error('cannot step while callbacks are resolving');
+            }
+
+            ticking = true;
+            try {
+                capability('step')(seconds);
+                const snapshot = { ...engine.snapshot() };
+
+                for (const hook of orderedHooks('onTick')) {
+                    if (!hook.entry.active || !hooks.includes(hook)) {
+                        continue;
+                    }
+
+                    notify(hook, { seconds, snapshot: { ...snapshot } }, false);
+                }
+            } finally {
+                ticking = false;
+            }
+        });
+    }
+
+    /**
      * Validates a finite component, applying world bounds only to destinations.
      *
      * @param {unknown} value - Candidate value.
@@ -242,8 +554,26 @@ export function createModHost(engine) {
             throw modError(modId, 'action', `${label} must be a finite number`);
         }
 
-        if (bounded && (value < WORLD_MIN || value > WORLD_MAX)) {
-            throw modError(modId, 'action', `${label} must be within [${WORLD_MIN}, ${WORLD_MAX}]`);
+        if (bounded) {
+            let bounds;
+
+            if (typeof engine.worldBounds === 'function') {
+                try {
+                    bounds = engine.worldBounds();
+                } catch (cause) {
+                    if (!(cause instanceof Error) || !cause.message.includes('unsupported')) {
+                        throw cause;
+                    }
+                }
+            }
+
+            const axis = label === 'x' ? 'Cx' : 'Cy';
+            const min = bounds?.active ? bounds[`min${axis}`] * 256 : WORLD_MIN;
+            const max = bounds?.active ? (bounds[`max${axis}`] + 1) * 256 : WORLD_MAX;
+
+            if (value < min || (bounds?.active ? value >= max : value > max)) {
+                throw modError(modId, 'action', `${label} must be within the authoritative world bounds`);
+            }
         }
 
         return value;
@@ -390,6 +720,96 @@ export function createModHost(engine) {
                     return submitAction(action, entry.id);
                 },
             },
+            world: {
+                /**
+                 * Reads authoritative committed navigation extents.
+                 *
+                 * @returns {import('../types/mod-api').ModWorldBounds} Detached cell bounds.
+                 */
+                getBounds() {
+                    alive();
+
+                    return attributed(entry, 'world', () => ({ ...capability('worldBounds')() }));
+                },
+                /**
+                 * Reads authoritative navigation at an absolute tile.
+                 *
+                 * @param {number} tileX - Signed int32 tile x.
+                 * @param {number} tileY - Signed int32 tile y.
+                 * @returns {number} Navigation bits or unsigned unloaded sentinel.
+                 */
+                getNavFlags(tileX, tileY) {
+                    alive();
+
+                    return attributed(entry, 'world', () => capability('navFlags')(tileX, tileY));
+                },
+                /**
+                 * Imports validated navigation after synchronous precommit veto hooks.
+                 *
+                 * @param {number} cx - Integer cell x in [-100,100].
+                 * @param {number} cy - Integer cell y in [-100,100].
+                 * @param {Uint8Array|DataView} bytes - Complete cell bytes.
+                 * @returns {import('../types/mod-api').ModWorldImportResult} Detached import outcome.
+                 */
+                importNavigationCell(cx, cy, bytes) {
+                    alive();
+
+                    return importNavigationCell(entry, cx, cy, bytes);
+                },
+            },
+            saveData: {
+                /**
+                 * Reads this mod id's detached saved document.
+                 *
+                 * @returns {import('../types/mod-api').ModJsonValue|undefined} Document or namespace absence.
+                 */
+                read() {
+                    alive();
+
+                    return attributed(entry, 'saveData', () => {
+                        const record = readRecord(entry);
+
+                        if (record && record.schemaVersion !== (entry.manifest.saveSchemaVersion ?? 1)) {
+                            throw new Error('saved schema does not match the active mod');
+                        }
+
+                        return record?.data;
+                    });
+                },
+                /**
+                 * Replaces only this mod id's validated detached saved document.
+                 *
+                 * @param {import('../types/mod-api').ModJsonValue} value - Finite JSON document.
+                 * @returns {void}
+                 */
+                write(value) {
+                    alive();
+
+                    return attributed(entry, 'saveData', () => {
+                        const record = readRecord(entry);
+
+                        if (record && record.schemaVersion !== (entry.manifest.saveSchemaVersion ?? 1)) {
+                            throw new Error('saved schema does not match the active mod');
+                        }
+
+                        writeRecord(entry, value);
+                    });
+                },
+            },
+            events: {
+                /**
+                 * Registers a synchronous post-commit tick listener.
+                 *
+                 * @param {import('../types/mod-api').ModTickListener} callback - Listener receiving detached tick evidence.
+                 * @param {{priority?: number}} [options] - Optional finite priority.
+                 * @returns {() => boolean} Registration withdrawal.
+                 */
+                onTick(callback, options) {
+                    alive();
+
+                    return register(entry, 'onTick', callback, options);
+                },
+            },
             hooks: {
                 /**
                  * Registers a synchronous beforeAction hook that decides every non-cancel
@@ -403,23 +823,19 @@ export function createModHost(engine) {
                 beforeAction(callback, options) {
                     alive();
 
-                    if (typeof callback !== 'function') {
-                        throw modError(entry.id, 'hooks', 'beforeAction requires a callback function');
-                    }
+                    return register(entry, 'beforeAction', callback, options);
+                },
+                /**
+                 * Registers a synchronous detached precommit navigation veto hook.
+                 *
+                 * @param {import('../types/mod-api').BeforeWorldImportHook} callback - Nothing to keep, false to veto.
+                 * @param {{priority?: number}} [options] - Optional finite priority.
+                 * @returns {() => boolean} Registration withdrawal.
+                 */
+                beforeWorldImport(callback, options) {
+                    alive();
 
-                    const priority = options?.priority ?? 0;
-
-                    if (typeof priority !== 'number' || !Number.isFinite(priority)) {
-                        throw modError(entry.id, 'hooks', 'priority must be a finite number');
-                    }
-
-                    /** @type {HookRegistration} */
-                    const hook = { modId: entry.id, entry, callback, priority, order: registrations };
-
-                    registrations += 1;
-                    hooks.push(hook);
-
-                    return () => withdraw(hook);
+                    return register(entry, 'beforeWorldImport', callback, options);
                 },
             },
         };
@@ -427,6 +843,9 @@ export function createModHost(engine) {
         Object.freeze(api.movement);
         Object.freeze(api.actions);
         Object.freeze(api.hooks);
+        Object.freeze(api.world);
+        Object.freeze(api.saveData);
+        Object.freeze(api.events);
 
         return Object.freeze(api);
     }
@@ -435,10 +854,11 @@ export function createModHost(engine) {
      * Hook dispatch order: ascending priority, then registration order. The order
      * never changes whether a command is cancelled, only which replacement wins.
      *
+     * @param {string} kind - Callback phase to select.
      * @returns {HookRegistration[]} Hooks in dispatch order.
      */
-    function orderedHooks() {
-        return hooks.slice().sort((a, b) => a.priority - b.priority || a.order - b.order);
+    function orderedHooks(kind) {
+        return hooks.filter((hook) => hook.kind === kind).sort((a, b) => a.priority - b.priority || a.order - b.order);
     }
 
     /**
@@ -531,8 +951,35 @@ export function createModHost(engine) {
             throw fail(id, 'manifest', 'module must export activate(api)');
         }
 
+        const saveSchemaVersion = manifest.saveSchemaVersion ?? 1;
+
+        if (!Number.isSafeInteger(saveSchemaVersion) || saveSchemaVersion < 1) {
+            throw fail(id, 'manifest', 'manifest.saveSchemaVersion must be a positive safe integer');
+        }
+
         /** @type {ModEntry} */
-        const entry = { id, manifest: { id, version, apiVersion, name }, url: specifier, cleanup: undefined, active: true };
+        const entry = { id, manifest: { id, version, apiVersion, name, saveSchemaVersion }, url: specifier, cleanup: undefined, active: true };
+
+        attributed(entry, 'saveData', () => {
+            const record = readRecord(entry);
+
+            if (!record || record.schemaVersion === saveSchemaVersion) {
+                return;
+            }
+
+            if (typeof module.migrateSaveData !== 'function') {
+                throw new TypeError('saved schema is incompatible; export synchronous migrateSaveData(oldVersion, data)');
+            }
+
+            const migrated = module.migrateSaveData(record.schemaVersion, record.data);
+
+            if (migrated && typeof migrated.then === 'function') {
+                observeRejection(id, 'saveData.late', migrated);
+                throw new TypeError('migrateSaveData must return JSON synchronously');
+            }
+
+            writeRecord(entry, migrated);
+        });
         const speedBefore = engine.snapshot().speed;
 
         mods.set(id, entry);
@@ -643,7 +1090,7 @@ export function createModHost(engine) {
 
         dispatching = true;
         try {
-            for (const hook of orderedHooks()) {
+            for (const hook of orderedHooks('beforeAction')) {
                 /* Another hook can withdraw this registration, or a `dispose()`
                    can withdraw every one of them, after this snapshot was taken. */
                 if (!hook.entry.active || !hooks.includes(hook)) {
@@ -750,7 +1197,7 @@ export function createModHost(engine) {
 
     const api = createHandle(hostEntry);
 
-    return { api, load, dispose, command, diagnostics };
+    return { api, load, dispose, command, step, diagnostics };
 }
 
 export { MOD_API_VERSION };

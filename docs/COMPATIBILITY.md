@@ -1,6 +1,6 @@
 # Compatibility and fidelity record
 
-This record keeps the full recreation target intact. **M1 prototype has no claim of native gameplay parity.** Observed installed content is evidence of shipped formats/definitions, not independently runnable engine source. Details and latest execution proof belong in STATUS.md.
+This record keeps the full recreation target intact. **M1 prototype has no claim of native gameplay parity.** Observed installed content is evidence of shipped formats/definitions, not independently runnable engine source. Current assets come from an externally provisioned directory: the app autoloads `/content/manifest.json` and declared resources, with no web asset picker/import. Historical M1 file-selection proof is not fresh directory-boot evidence. Details and latest execution proof belong in STATUS.md.
 
 ## Build identity and evidence
 
@@ -10,45 +10,65 @@ REA `inspect_pe_resources` observed the x64 PE launcher (990720 bytes), SHA-256 
 
 ## Capability/fidelity destination
 
-| System | M1 coverage | Native fidelity / outstanding acceptance |
+| System | Implemented coverage | Native fidelity / outstanding acceptance |
 |---|---|---|
-| World/regions/tile maps | Synthetic bounded [0,10] plane | Original map loading, chunks, tile rules, objects, multilevel space absent |
-| Movement/actions/navigation | WASM coordinates, direction/destination, cancel, speed, bounds | Original pathfinding, collisions, timed-action queues and rules absent; speed is approximation, not native measurement |
-| Accessibility | HTML toggle directions, destination coordinates, Stop/Escape, keyboard canvas and touch pointer path | Remappable bindings, menu/AT checks and sustained/repeated-action alternatives across systems pending |
-| Character/traits/skills/professions | Position/action marker only | Original meshes, animations, appearance and character rules absent |
-| Items/equipment/loot/containers | Can display imported PNG art | Item definitions/behavior, containers, loot and interaction absent |
+| World/regions/tile maps | WASM imported ground-floor navigation; native LOTH/LOTP catalogue/chunk parser; actual Tutorial geometry and original sprites rendered through browser WebGPU | Nine authored vegetation sprite names unresolved in startup banks; multilevel simulation, object rules and regions remain incomplete |
+| Movement/actions/navigation | WASM direction/destination, edge collision and A* routes; real Tutorial navigation and save continuation exercised | Format-derived collision is not native behavioral parity; timed-action queues and interactions pending |
+| Accessibility | Edge-to-edge focused game canvas; keyboard/pointer movement, Space stop, hidden Escape pause menu and menu-only assisted walking/fractional destinations exercised | Remappable bindings, assistive-technology sessions and sustained/repeated-action alternatives across systems pending; no decorative debug UI |
+| Character/traits/skills/professions | Actual ASCII X parsing and four-weight WebGPU skinning; original 617-vertex/916-triangle/28-bone MaleBody with Bob idle/walk and original body texture rendered from directory assets | Character scale uncalibrated; appearance composition, traits, skills/professions and other character rules pending |
+| Items/equipment/loot/containers | Historical M1 displayed original PNG art | Item definitions/behavior, containers, loot and interaction absent |
 | Zombies/perception/AI | None | Native perception, decisions/population/pathing behavior pending |
 | Combat/health/needs/effects | None | Damage, injury, treatment, nutrition, sleep, effects pending |
 | Crafting/building/dismantling | None | Recipes, requirements, tools and processing pending |
 | Time/weather/lighting/effects | Fixed simulation ticks only | Native time/weather/environment/lighting and effects pending |
 | Audio | None | Decoding/event mapping/positional audio and gesture startup pending |
 | Vehicles/utilities/additional systems | None | Inventory original systems from build-specific scripts/classes before claims; no omission lowers destination |
-| Saves/storage | None | Versioned browser schema, migration, atomic/recoverable writes, quotas/eviction, autosave, export/restore and mod data pending |
-| Mods | Experimental movement/actions API and trusted multifile bundled module | Local import/manager, deterministic dependencies, registries, settings/data/migrations, all corresponding gameplay-system APIs pending |
-| Remote/offline use | Static app + selected local PNG, independent browser simulation | Portable content/save provision and offline cache pending; application hosting does not provide content |
+| Saves/storage | Versioned browser JSON integrity, staged engine/world restore, IDB current+previous transactions, import/export and denied-storage live backup; actual reload/two autosave periods preserve authoritative saved cells/player/mod state; missing manifest or required geometry for any saved cell blocks startup without replacing retained saves | Browser export/import/quota/eviction recovery and future save-format migrations remain pending; no native-save compatibility |
+| Mods | Experimental movement/actions API, bundled module and multifile directory package manager; IndexedDB packages, deterministic dependency ordering, revisioned root SW URLs, next-reload configuration and `?safe-mods` recovery; provisioned JavaScript activation namespaces survive menu Save/Load, reboot and New session; schema 1→2 migration proven at unchanged package version `1.0.0` | Exact package-version mismatch intentionally blocks automatic restoration; broader package/version migration, zip packaging, per-mod live unload, registries, settings and corresponding gameplay-system APIs remain pending |
+| Existing native Lua mods | Native/JavaScript directory discovery; real Wasmoon Lua 5.4 browser WASM with partial Lua 5.1 compatibility; synthetic package computation/events/persistent public mod state exercised; Lua ownership/cleanup contract has 14 passing runtime tests | Original engine-library/API coverage and representative existing unmodified Workshop gameplay verification incomplete; neither Kahlua equivalence nor original API completeness established |
+| Remote/offline use | Asset-free static app + separately provisioned `/content/` on a private range-capable host; fresh automatic browser startup, independent simulation, no native companion | Personal content-directory/save-backup transfer, second-device and offline-cache acceptance pending; hosting the app alone does not provide content |
 
 ## Asset-format coverage
 
 | Content | Browser path | Status/limitation |
 |---|---|---|
-| Standalone PNG gameplay art | File → bounded header validation → createImageBitmap → GPUTexture | Integrated WebGPU/WASM/mod smoke verified with original 64×64 AppleRotten.png; local memory only, one marker resource; valid PNG color/depth pairs and Adam7 accepted, 16-bit downconverted to RGBA8, animated PNG first frame only |
-| Texture/sprite `.pack` | Requires bounded browser parser/atlas metadata | Not implemented; target next format experiment |
+| Standalone PNG gameplay art | HTTP directory resource → bounded header validation → createImageBitmap → GPUTexture | Historical M1 file-picker WebGPU/WASM/mod smoke verified original 64×64 AppleRotten.png; not directory-load proof. Valid PNG color/depth pairs and Adam7 accepted, 16-bit downconverted to RGBA8, animated PNG first frame only |
+| Texture/sprite `.pack` | Bounded HTTP Range source, PZPK v1/legacy metadata parser, lazy PNG page ranges and trimmed GPU sprite crops | Actual five-bank Tutorial directory decode/presentation exercised: 548/557 authored catalogue names resolve; nine vegetation names remain gaps. Current Tiles2x metadata has 321028239 bytes, 369 pages and 35746 entries; no DDS |
 | Item/script definitions | Text parsers and engine-equivalent rules | Definitions are reference evidence, not runnable standalone Java/Lua engine |
-| Meshes/models/animations | Browser-compatible decoding and skeleton/animation integration | Not implemented; inspect exact source formats before loader selection |
+| Meshes/models/animations | Directory resources, bounded ASCII DirectX X parsing and actual WebGPU skinning | Original MaleBody/Bob idle/walk/texture directory loading and browser rendering exercised; native visual scale/facing parity not calibrated. Binary/compressed X and FBX unsupported |
 | Sounds/banks | Browser decoding where compatible, bank/event reference mapping | Not implemented; native FMOD is not browser runtime |
-| Map/world/tile definitions | Bounded browser chunk/tile parsers | Not implemented; no map parity |
+| Map/world/tile definitions | Native tagged navigation and LOTHv1/LOTPv1 lazy geometry loader | Actual Tutorial directory geometry/rendering exercised; saved startup strictly requires lotheader/lotpack for every saved cell, not just the player's; streamed lotpack HTTP 503 pauses movement with actionable visible content feedback. Tile-definition properties/object interactions and native multilevel parity pending |
 | Native saves | Separate compatibility project | Not supported; first browser saves remain distinct/versioned |
 
-All proprietary inputs/caches/packs remain outside tracked source and application release artifacts. Portable private packs and user-chosen transfer remain required, not a mandatory native converter.
+All proprietary inputs/caches/packs remain in a separate externally provisioned content directory, outside tracked source and application release artifacts. Transfer that directory to another device or serve it beside the asset-free app on a private static host with byte-range support. No web asset import or mandatory native converter/runtime companion. Provisioning preserves the original installation and native saves; browser save-backup JSON import/export remains separate and requires matching visual content on the receiving device.
+
+### Browser texture-pack format and index API
+
+`src/content.js` opens the manifest with `await openContentDirectory(manifestUrl, {signal,onProgress})`; `getFile(path)` returns an HTTP-backed handle with manifest `size`, `name`, `lastModified`, `relativePath` and bounded `slice(start,end).arrayBuffer()` reads. Each read is limited to 16 MiB and requires an exact HTTP 206 range, matching `Content-Range` total and byte length; an ignored-range 200 response is cancelled unread. `src/packs.js` exports `await openPack(source)` for these handles and `File`/`Blob` parser inputs. It indexes metadata without decoding images, with at most 16 KiB per metadata window including read-ahead, never a whole-bank buffer. PZPK image payloads are skipped by declared lengths; legacy payloads by PNG chunk lengths. Legacy scanning can nevertheless cumulatively read almost an entire bank because small PNG chunks and read-ahead revisit image regions: bounded windows limit peak buffers, not total legacy bandwidth. PNG inspection records dimensions and half-open source ranges. `createImageBitmap(await index.pageBlob(pageIndex))` fetches/decodes the requested PNG page. Parser `File`/`Blob` support is not a web picker workflow.
+Fully parsed follow-up `Tiles1x.pack` and `JumboTrees2x.pack` also contain none of the nine unresolved vegetation names. The names are authored in original Tutorial catalogues and tile definitions. Their native presentation is unverified; no guessed substitutes are installed. [Bounded read counts and exact coverage](evidence/m2-directory-acceptance.json).
+
+Supported layouts, based on installed build 25485521 observations and corroborating public readers/writers:
+
+- **PZPK v1:** ASCII `PZPK`, little-endian version `1`, page count; each page has a length-prefixed UTF-8 name, entry count, opaque signed `hasAlpha` field, sprite entries, then a little-endian PNG byte length and that PNG. Other PZPK versions are refused.
+- **Legacy v0:** no magic/version; starts with the little-endian page count. Page metadata and sprite fields match v1, but the PNG is self-terminating. The parser walks big-endian PNG chunk lengths through zero-length `IEND`, excluding the optional `EF BE AD DE` (`DEADBEEF`) marker from the returned image slice. An optional marker is also tolerated at page boundaries; its presence in vanilla PZPK was not established.
+- **Sprite entry:** length-prefixed name then eight little-endian unsigned fields: `x,y,w,h,xoff,yoff,totalW,totalH`. The trimmed rectangle `(x,y,w,h)` belongs to one atlas page; its reconstructed canvas is `totalW × totalH`, with the trimmed pixels placed at `(xoff,yoff)`. Atlas pages mix tilesets; page names are not tileset IDs.
+
+The returned index and every exposed object/array are frozen. `pages` contains `{index,name,hasAlpha,width,height,pngStart,pngEnd,sprites}`; each sprite is `{name,pageIndex,entryIndex,x,y,w,h,xoff,yoff,totalW,totalH}`. `sprites` preserves all entries in on-disk page/entry order. `lookup(name)` returns the **first on-disk occurrence**, or `undefined`; duplicate names are never silently discarded: `lookupAll(name)` returns every occurrence, and `findByPrefix(prefix)` returns every matching occurrence in disk order. `pageBlob(pageIndex)` returns a `Promise<Blob>` for that `image/png` page, refusing invalid indices; a native Blob source is sliced, an HTTP source materializes only the exact page range. `source` preserves the provided name, byte size, last-modified timestamp (or `null`) and relative path; these identify the input, not a content hash or authenticity guarantee. Types are declared in `types/packs.d.ts`.
+
+Parser guardrails are application policy, not universal native-format limits: 1–512 pages; ≤100,000 entries/page and ≤250,000 total; names 1–4096 UTF-8 bytes without controls; ≤64 MiB aggregate metadata; PNG dimensions and reconstructed canvases 1–4096 per axis; ≤65,536 chunks per legacy image. Trim rectangles must fit their canvas and atlas. Transparent zero-area trimmed rectangles are allowed when the canvas is valid. Unsupported versions, malformed UTF-8, truncation, out-of-file image/chunk lengths, invalid PNG signature/IHDR/IEND, excessive counts/metadata, and unexpected trailing bytes produce explicit refusals. `hasAlpha` and legacy `W…` sprite-name semantics are preserved, not interpreted.
+
+Indexing is **not** PNG CRC/IDAT validation, full image decode, map loading, tile-property loading, or proof of native rendering/collision fidelity. PNG decompression and CRC acceptance remain with the browser decoder. No DDS decoder is implemented: the inspected installed samples contained PNG, not DDS. Earlier format discovery reported `Tiles2x.pack` with 113 pages (~306.2 MB); the later current-install map/tile probe reports 369 pages and 35,746 sprite names. These observations must not be treated as one immutable pack identity. `Tiles1x.floor.pack`, `UI2.pack`, and `DepthMaps2x.pack` were observed as PZPK v1, while `UI.pack` and `IconsMoveables.pack` were legacy streams. The later Tutorial catalogue probe found 429 of 557 names in Tiles2x alone, so a single pack is not a complete environment asset set; companion floor/tree/overlay packs may be required. Synthetic tests cover both layouts, duplicate lookup, trim geometry, corruption, and bounded 113-page indexing; they contain no proprietary bytes. Execution evidence must be recorded separately rather than inferred from test existence.
+
+Public corroboration: [pz-tilesheet writer](https://github.com/robotsmeller/pz-tilesheet), the Vaileasys `pack_parser.py` reader cited in the format evidence, and [PZ mapping tools documentation](https://github.com/Unjammer/PZ_Mapping_Tools).
 
 ### Narrow installed-content inventory (static observations)
 
 - M1 PNG: `media/textures/WorldItems/AppleRotten.png`, observed 64×64 texture image (not an animated sprite). Other loose PNG examples: `media/inventory/RifleClip.png` (361 bytes), `BerettaClip.png` (420 bytes). Inspect actual semantics before using textures as character art.
-- Atlas packs: `media/texturepacks/Tiles2x.pack` (~306.2 MB), `JumboTreesBigs2x.pack` (~78.8 MB), `UI2.pack` (~52.1 MB). Custom binary containers, not simply standard PNG files. Next experiment: bounded header/page/subtexture inspection and browser atlas decode; do not read the whole bank into memory.
+- Atlas packs: current `media/texturepacks/Tiles2x.pack`321028239 bytes,369 pages,35746 entries, indexed with bounded file-backed slices. Companion floor/overlay/tree packs are required for additional Tutorial sprites. Actual five-bank Tutorial directory decode/presentation is browser-proven; nine vegetation names remain unresolved. Never read the whole bank into memory.
 - Tiles: `media/newtiledefinitions.tiles` (~2.8 MB), `.tiles.txt` (~6.5 MB), `tileGeometry.txt` (~6.1 MB); text sidecars are references, not proof of collision equivalence.
 - Models/animation: `media/models_X` FBX/.X and `media/models/*.txt`; `anims_X`, `animsold/*.txt`, `AnimSets/*.xml`, `actiongroups/player`, `animscript/combat.xml`. Native jassimp presence does not prove every FBX import shape.
 - Audio: loose `media/sound/zombiehit5.wav` (~45.8 KB), `windowopen.ogg` (~35 KB), FMOD banks under `sound/banks`, music OGG. Loose browser decode plausible but unexecuted; FMOD bank handling remains unknown.
-- World: sampled `media/maps` town folders contain `map.info`, `thumb.png`, `spawnpoints.lua`; `.pzby` lot templates under `binmap`/`basement_access`. Main map chunk layout not established by this narrow search.
+- World: Knox cells share `media/maps/Muldraugh, KY/`; towns reference that lot directory. Per-cell `X_Y.lotheader`, `world_X_Y.lotpack`, `chunkdata_X_Y.bin`. Tutorial is the bounded four-cell directory startup target. Cell256×256; navigation32×32 records of8×8 tiles. Geometry has original z levels, but simulation navigation currently only ground floor.
 - Presentation references: GLSL `media/shaders/*.vert/*.frag` (~169 files). WGSL translation must be behavior-verified rather than assuming shader equivalence.
 
 File sizes rounded where inventory reported rounded values; these are format discovery facts, not memory-performance measurements. Original Java movement/animation engine behavior remains unobserved.
@@ -59,17 +79,17 @@ File sizes rounded where inventory reported rounded values; these are format dis
 
 | Target | Eligibility | Project validation |
 |---|---|---|
-| Windows Chromium 154 | HTTPS/localhost + adapter | Built integrated app: real game texture, WASM movement/cancel, multifile mod displacement/cleanup, nonfallback NVIDIA/ampere, bgra8unorm; device-loss stop and import recovery confirmed |
+| Windows Chromium 154 | HTTPS/localhost + adapter | Real nonfallback NVIDIA/ampere WebGPU, bgra8unorm: Tutorial directory autoload, original tiles/skinned character, full-viewport game-only UI, movement/cancel, retained-save/two-autosave continuity and JavaScript namespace lifecycle exercised. Actual device loss retains fatal reload feedback over a delayed Load HTTP 503; streamed lotpack HTTP 503 visibly pauses movement. Metadata-only proof in STATUS; not native visual/gameplay parity |
 | Other Windows Chrome/Edge, Firefox | GPU/driver/browser capability dependent | Unverified |
 | macOS Safari 26 / Chrome | WebGPU-capable device | Unverified |
 | Android Chrome, physical device | Android 12+, eligible GPU + secure context | Existing SDK adb devices-list empty; no attached target, unverified release requirement |
 | iOS/iPadOS Safari 26, physical device | Eligible WebGPU device + secure context | No physical target supplied; unverified release requirement |
 | Software/headless/emulated browser | Actual adapter must be recorded | Contract/render proof only; never mobile/hardware-performance claim |
 
-M1 controls target ≥48 px, responsive layout, canvas DPR capped, pointer input unified. Orientation/pixel-density emulation does not prove physical touch, mobile memory/thermals, background suspension or assistive technology. Device loss stops simulation with visible error; reload/reimport needed. No silent WebGL fallback. UI scale uses rem/browser zoom; further accessibility checks remain acceptance work.
+M1 controls target ≥48 px, responsive layout, canvas DPR capped, pointer input unified. Orientation/pixel-density emulation does not prove physical touch, mobile memory/thermals, background suspension or assistive technology. Device loss stops simulation with visible error; reload recovers through directory autoload, subject to fresh browser proof. No silent WebGL fallback. UI scale uses rem/browser zoom; further accessibility checks remain acceptance work.
 
 ## Resource and timing limits
 
-Input PNG ≤16 MiB, dimensions ≤4096 each, estimated RGBA8 GPU texture ≤64 MiB, also bounded by adapter limits. Browser decoder peak allocation is not measured or guaranteed to equal four bytes/pixel, especially for 16-bit sources. Fixed 60 Hz simulation, at most 100 ms frame catch-up; hidden/pause cancels movement and drops backlog. No shared-memory threads/COOP/COEP requirement. File import/copy decoding is asynchronous; one image only.
+PNG ≤16 MiB, dimensions ≤4096 each, estimated RGBA8 GPU texture ≤64 MiB, also bounded by adapter limits. Browser decoder peak allocation is not measured or guaranteed to equal four bytes/pixel, especially for 16-bit sources. Fixed 60 Hz simulation, at most 100 ms frame catch-up; hidden/pause cancels movement and drops backlog. No shared-memory threads/COOP/COEP requirement. Directory resource fetching/decoding is asynchronous; large packs use bounded ranges, not whole-bank downloads. Historical M1 rendered one marker image only.
 
-These are guardrails, not measured device performance budgets. Record actual frame times, source/decoded memory, import duration and latency before establishing budgets. Audio and storage budgets cannot be claimed for absent systems.
+These are guardrails, not measured device performance budgets. Record actual frame times, source/decoded memory, resource-load duration and latency before establishing budgets. Audio and storage budgets cannot be claimed for absent systems.

@@ -1,9 +1,9 @@
 /**
- * Type declarations for the experimental M1 mod API (0.1.0), mirroring
- * `src/mods.js`. JavaScript authors do not need TypeScript or any build step to
- * use the API; these declarations exist so editors can show the same contracts
- * that docs/modding/README.md documents. Anything not declared here does not
- * exist in 0.1.0.
+ * Type declarations for the experimental mod API (0.1.0), mirroring `src/mods.js`
+ * and the M2 local package manager in `src/mod-manager.js`. JavaScript authors need
+ * no TypeScript and no build step to use the API; these declarations exist so
+ * editors can show the same contracts that docs/modding/README.md documents.
+ * Anything not declared here does not exist in 0.1.0.
  */
 
 /** Engine action state: 0 idle, 1 travelling to a destination, 2 walking a heading. */
@@ -15,9 +15,9 @@ export interface ModSnapshot {
   apiVersion: number;
   /** Unsigned accepted-step counter since reset, wrapping at 2^32. */
   tick: number;
-  /** World x within [0, 10]. */
+  /** World x; within [0, 10] until navigation is imported. */
   x: number;
-  /** World y within [0, 10]. */
+  /** World y; within [0, 10] until navigation is imported. */
   y: number;
   /** Movement speed in world units per second, within [0.1, 10]. */
   speed: number;
@@ -25,9 +25,9 @@ export interface ModSnapshot {
   action: ModActionState;
 }
 
-/** Movement command: destinations are within [0,10]; directions are any finite signed vector,
- * normalised in WASM (only an exactly zero vector cancels). Inputs validated as F64 before
- * F32 state conversion. `cancel` carries no coordinates and bypasses veto. */
+/** Movement command: destinations use [0,10] before navigation import, then loaded
+ * cell extents (WASM refuses unloaded or blocked tiles); directions are any finite
+ * signed vector, normalised in WASM. `cancel` carries no coordinates and bypasses veto. */
 export type ModAction =
   | { type: 'moveTo'; x: number; y: number }
   | { type: 'walk'; x: number; y: number }
@@ -44,6 +44,8 @@ export interface ModManifest {
   apiVersion: string;
   /** Human-readable name for the host UI and diagnostics. */
   name: string;
+  /** Positive safe integer for this namespace's saved document; defaults to 1. */
+  saveSchemaVersion?: number;
 }
 
 /** What a `beforeAction` hook may return. */
@@ -56,6 +58,63 @@ export type BeforeActionResult = ModAction | false | null | undefined | Promise<
  * promise is an error: hooks cannot decide after the command has committed.
  */
 export type BeforeActionHook = (action: ModAction) => BeforeActionResult;
+
+/** Finite JSON only: no cycles, undefined, accessors, functions, symbols or BigInt. */
+export type ModJsonValue = null | boolean | number | string | ModJsonValue[] | { [key: string]: ModJsonValue };
+
+/** Detached authoritative loaded-cell extents; each cell is 256 x 256 tiles. */
+export interface ModWorldBounds {
+  active: boolean;
+  minCx: number;
+  minCy: number;
+  maxCx: number;
+  maxCy: number;
+  cells: number;
+}
+
+/** Detached proposed import; editing it never edits the pending import. */
+export interface ModWorldImport {
+  cx: number;
+  cy: number;
+  bytes: Uint8Array;
+}
+
+/** Return false to veto; other live hooks still run. Promises are rejected. */
+export type BeforeWorldImportHook = (cell: ModWorldImport) => false | null | undefined | Promise<unknown>;
+
+/** Outcome of a navigation import, after veto or authoritative engine commit. */
+export interface ModWorldImportResult {
+  committed: boolean;
+  cancelled: boolean;
+  submittedBy: string;
+  cancelledBy?: string;
+  snapshot: ModSnapshot;
+}
+
+/** One committed step's detached evidence, not a wall-clock/frame event. */
+export interface ModTickEvent {
+  seconds: number;
+  snapshot: ModSnapshot;
+}
+
+/** Must return nothing synchronously; callback failures never undo a step. */
+export type ModTickListener = (event: ModTickEvent) => void | null | Promise<unknown>;
+
+/** Automatically namespaced backing record; data is never exposed by reference. */
+export interface ModSaveRecord {
+  schemaVersion: number;
+  data: ModJsonValue;
+}
+
+/** Optional synchronous backing. Omission means private per-host memory, not durability. */
+export interface ModHostOptions {
+  readModState(id: string): ModSaveRecord | undefined;
+  writeModState(id: string, record: ModSaveRecord): void;
+}
+
+/** Optional module export, called before activate when saved schemas differ.
+ * Pure, synchronous, detached input/output; invalid output preserves old data. */
+export type ModSaveMigration = (oldVersion: number, data: ModJsonValue) => ModJsonValue;
 
 /** Per-mod handle passed to `activate`. Frozen; becomes inert once the mod is
  * unloaded, so a captured handle cannot mutate the engine afterwards. */
@@ -81,6 +140,27 @@ export interface ModApi {
      */
     submit(action: ModAction): ModCommandResult;
   };
+  /** Optional extended-engine navigation capabilities; unsupported calls throw ModError/world. */
+  world: {
+    getBounds(): ModWorldBounds;
+    /** Absolute int32 tiles; unsigned bits 1 solid, 2 south wall, 4 east wall,
+     * 8 floor, 16 water, 32 room. 0xFFFFFFFF means unloaded. */
+    getNavFlags(tileX: number, tileY: number): number;
+    /** Cells in [-100,100]^2, complete validated 00 01 navigation bytes.
+     * Commits once, cancels movement without relocating; no automatic undo. */
+    importNavigationCell(cx: number, cy: number, bytes: Uint8Array | DataView): ModWorldImportResult;
+  };
+  /** This manifest id's finite JSON document; complete record capped at 256 KiB UTF-8. */
+  saveData: {
+    /** Undefined only when absent; throws if the backing schema became incompatible. */
+    read(): ModJsonValue | undefined;
+    /** Replaces this namespace atomically in a synchronous backing; no automatic undo. */
+    write(value: ModJsonValue): void;
+  };
+  /** Post-commit callbacks in priority/registration order, withdrawn on unload. */
+  events: {
+    onTick(callback: ModTickListener, options?: { priority?: number }): () => boolean;
+  };
   /** Hook registration. */
   hooks: {
     /**
@@ -89,6 +169,9 @@ export interface ModApi {
      * @returns An unsubscribe function; `false` if already withdrawn by unload.
      */
     beforeAction(callback: BeforeActionHook, options?: { priority?: number }): () => boolean;
+    /** Precommit, detached cell payload; cancellation wins. No nested import,
+     * action submission or step while precommit hooks resolve. */
+    beforeWorldImport(callback: BeforeWorldImportHook, options?: { priority?: number }): () => boolean;
   };
 }
 
@@ -123,7 +206,7 @@ export interface ModReport {
   apiVersion: string;
   /** Module URL the host imported. */
   url: string;
-  /** Live hook registrations owned by this mod. */
+  /** Live action/import/tick registrations owned by this mod. */
   hooks: number;
 }
 
@@ -131,7 +214,8 @@ export interface ModReport {
 export interface ModFailure {
   /** Mod id, or the module URL when the failure happened before the manifest was read. */
   modId: string;
-  /** Lifecycle stage: `load`, `manifest`, `activate`, `activate.late`, `cleanup`, `cleanup.late`, `beforeAction`, `beforeAction.late`, `api`, `action`, `movement`, `hooks`. */
+  /** Lifecycle/API stage, including world, saveData, tick, beforeWorldImport,
+   * onTick and their .late asynchronous rejection attribution. */
   stage: string;
   message: string;
 }
@@ -165,6 +249,11 @@ export interface ModEngine {
   snapshot(): ModSnapshot;
   command(action: ModAction): ModSnapshot;
   setSpeed(speed: number): void;
+  /** Optional: older engine handles still support original movement calls. */
+  step?(seconds: number): void;
+  worldBounds?(): ModWorldBounds;
+  navFlags?(x: number, y: number): number;
+  worldImportCell?(cx: number, cy: number, bytes: Uint8Array | DataView): void;
 }
 
 /** Host surface returned by `createModHost`. */
@@ -188,6 +277,9 @@ export interface ModHost {
    * `submittedBy: 'host'`.
    */
   command(action: ModAction): ModCommandResult;
+  /** Advances one real engine step, then dispatches detached onTick evidence.
+   * Refused or recursive steps emit no event; absent capability throws ModError/tick. */
+  step(seconds: number): void;
   /** Detached host evidence. */
   diagnostics(): ModDiagnostics;
 }
@@ -201,4 +293,168 @@ export const MOD_API_VERSION: '0.1.0';
  * plus `modId` and `stage` properties.
  * @throws {TypeError} When the engine lacks `snapshot`, `command` or `setSpeed`.
  */
-export function createModHost(engine: ModEngine): ModHost;
+export function createModHost(engine: ModEngine, options?: ModHostOptions): ModHost;
+
+/** One picked package file, as a directory selection provides it. */
+export interface ModPackageSourceFile {
+  name: string;
+  size: number;
+  webkitRelativePath?: string;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
+/** A `mod.json` manifest with every optional field resolved to its default. */
+export interface ModPackageManifest {
+  id: string;
+  name: string;
+  version: string;
+  apiVersion: string;
+  description: string;
+  /** Package-relative `.js` or `.mjs` entry, present among the stored files. */
+  entry: string;
+  /** Exact dotted versions only; ranges are refused at install. */
+  dependencies: Record<string, string>;
+  optionalDependencies: Record<string, string>;
+  conflicts: string[];
+  loadBefore: string[];
+  loadAfter: string[];
+  assets: string[];
+  /** Stored for the host UI; API 0.1.0 gives mods no settings channel. */
+  settings: object;
+}
+
+/** One validated package file, before it is stored. */
+export interface ModPackageFileEntry {
+  path: string;
+  bytes: ArrayBuffer;
+  size: number;
+  mime: string;
+}
+
+/** A validated package that has not been stored yet. */
+export interface ModParsedPackage {
+  manifest: ModPackageManifest;
+  revision: string;
+  entries: ModPackageFileEntry[];
+  totalBytes: number;
+}
+
+/** One stored package file, as the service worker reads it. */
+export interface ModStoredFile {
+  id: string;
+  revision: string;
+  path: string;
+  mime: string;
+  size: number;
+  bytes: ArrayBuffer;
+}
+
+/** Detached package metadata: the manifest plus what the manager recorded. */
+export interface ModPackageMetadata extends ModPackageManifest {
+  /** Content digest, part of every served URL, so an update changes them all. */
+  revision: string;
+  enabled: boolean;
+  installedAt: string;
+  fileCount: number;
+  totalBytes: number;
+  /** Origin-relative served URLs. */
+  urls: { base: string; entry: string };
+}
+
+/** Metadata plus whether the running mods still match stored configuration. */
+export type ModPackageChange = ModPackageMetadata & { requiresReload: boolean };
+
+/** The fields `resolveModOrder` reads. */
+export type ModPackageResolution = Pick<
+  ModPackageMetadata,
+  'id' | 'version' | 'apiVersion' | 'enabled' | 'dependencies' | 'optionalDependencies' | 'conflicts' | 'loadBefore' | 'loadAfter'
+>;
+
+/** One package that activation loaded through the host. */
+export interface ModActivation {
+  id: string;
+  version: string;
+  name: string;
+  revision: string;
+  url: string;
+}
+
+/** One activation failure, attributed to the package that caused it. */
+export interface ModActivationError {
+  id: string;
+  modId: string;
+  stage: string;
+  message: string;
+}
+
+/** Activation outcome; `disposed` is true when a failure unwound what loaded. */
+export interface ModActivationReport {
+  safeMode: boolean;
+  apiVersion: string;
+  order: string[];
+  activated: ModActivation[];
+  errors: ModActivationError[];
+  skipped: string[];
+  disposed: boolean;
+}
+
+/** Detached manager evidence from `diagnostics()`. */
+export interface ModManagerDiagnostics {
+  packageDb: { name: string; schemaVersion: number };
+  worker: { url: string; scope: string; controlling: boolean } | undefined;
+  apiVersion: string;
+  /** The configuration as of the last install/list/enable/remove/activation. */
+  packages: ModPackageMetadata[];
+  requiresReload: boolean;
+  lastActivation: ModActivationReport | undefined;
+  errors: { id: string; stage: string; message: string }[];
+}
+
+/** Package management surface returned by `createModManager`. */
+export interface ModPackageManager {
+  /** Atomically stores provisioned files; first installs are disabled, updates preserve the flag. Failure preserves the old package. */
+  install(files: ModPackageSourceFile[] | FileList): Promise<ModPackageChange>;
+  list(): Promise<ModPackageMetadata[]>;
+  /** Persists the flag for the next activation; nothing already running is undone. */
+  setEnabled(id: string, enabled: boolean): Promise<ModPackageChange>;
+  /** Deletes stored bytes and configuration; loaded code stays loaded until the host disposes it. */
+  remove(id: string): Promise<void>;
+  /** `safeMode: true` performs no module import at all. */
+  activateEnabled(options?: { safeMode?: boolean }): Promise<ModActivationReport>;
+  diagnostics(): ModManagerDiagnostics;
+}
+
+/** Package size and count bounds the manager enforces before writing anything. */
+export const MAX_FILE_BYTES: number;
+export const MAX_PACKAGE_BYTES: number;
+export const MAX_MANIFEST_BYTES: number;
+export const MAX_FILES: number;
+
+/** Dedicated package database identity. */
+export const PACKAGE_DB_NAME: string;
+export const PACKAGE_SCHEMA_VERSION: number;
+export const MANIFEST_NAME: 'mod.json';
+export const MOD_URL_PREFIX: '/__mods__/';
+
+/**
+ * Creates the local package manager for one mod host. Packages are trusted
+ * same-origin code, not sandboxed. Manager failures are `Error`s with
+ * `name === 'ModManagerError'` plus `modId`, `stage` and `ids` properties.
+ * @throws {TypeError} When the host lacks `api.version`, `load` or `dispose`.
+ */
+export function createModManager(host: Pick<ModHost, 'api' | 'load' | 'dispose'>): ModPackageManager;
+
+/** Validates one picked folder without touching storage. */
+export function parseModPackage(files: ModPackageSourceFile[] | FileList): Promise<ModParsedPackage>;
+
+/** Orders enabled packages by dependency, conflict and load-hint rules. */
+export function resolveModOrder(packages: ModPackageResolution[], apiVersion: string): string[];
+
+/** Splits a `/__mods__/` request path, refusing traversal and malformed parts. */
+export function splitModPath(pathname: string): { id: string; revision: string; path: string } | undefined;
+
+/** Reads one stored package file; malformed or reserved lookups never reach storage. */
+export function readPackageFile(id: string, revision: string, path: string): Promise<ModStoredFile | undefined>;
+
+/** Opens the shared package database; `mod-worker.js` reuses this one schema. */
+export function openPackageDb(): Promise<IDBDatabase>;
