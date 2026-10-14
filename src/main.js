@@ -7,9 +7,10 @@ import { createModHost } from './mods.js';
 import { loadNativeGameResources, seedOriginalWearables } from './native-game-resources.js';
 import { bindNativeSession, closeNativeSession, discoverNativePackages, nativePackageFiles, prepareNativeSession } from './native-mod-loader.js';
 import { openPack } from './packs.js';
-import { createRenderer, worldFromCanvas } from './renderer.js';
+import { canvasContentBox, createRenderer, worldFromCanvas } from './renderer.js';
 import { createSaveStore } from './saves.js';
-import { createTileLayer } from './tile-renderer.js';
+import { createSourceFiles } from './source-files.js';
+import { createTileLayer, tileScreenPosition } from './tile-renderer.js';
 import { loadNativeTileRegistry, projectWorldObjects } from './world-objects.js';
 import { stageCells } from './world-session.js';
 
@@ -29,7 +30,7 @@ const packageStatus = document.querySelector('#package-status');
 const packageError = document.querySelector('#package-error');
 const packageActivation = document.querySelector('#package-activation');
 const safeMods = new URL(globalThis.location.href).searchParams.has('safe-mods');
-const FIXED_STEP_SECONDS = 1 / 60;
+const UI_LOCK_FPS = 60;
 const held = new Set();
 const keys = new Map([
     ['w', [0, -1]], ['arrowup', [0, -1]], ['s', [0, 1]], ['arrowdown', [0, 1]],
@@ -53,17 +54,23 @@ let retainedSave = false;
 let tileLayer;
 let importedPacks = [];
 let geometryCells = [];
+const sourceWorldMetadata = new WeakMap();
 let nativePackages = [];
 let luaSession;
 let activeNativeDescriptors = [];
 let gameUI;
+let sourceViewportWidth;
+let sourceViewportHeight;
+let sourcePointerX;
+let sourcePointerY;
+let sourcePointerUnconsumed = false;
 let liveModContext;
 let packageBusy = false;
 let packagesActivated = false;
 let paused = true;
 let failed = false;
 let lastFrame;
-let accumulator = 0;
+const pressedKeys = new Set();
 let lastAnnouncement = '';
 let animation;
 let toggledDirection;
@@ -78,6 +85,7 @@ const baseAudioAssets = new Set();
 let presentedX;
 let presentedY;
 let presentedFacing = 0;
+let contextMenuRequest = 0;
 
 /**
  * Keep optional decoder/autoplay failures visible without stopping committed gameplay.
@@ -313,18 +321,15 @@ function playBaseCue(binding, role, position) {
  * @returns {object} Authoritative command result.
  */
 function sessionCommand(binding, action) {
-    const before = action.type === 'toggleDoor' ? binding.engine.doors() : undefined;
     const result = binding.engine.command(action);
 
-    if (before && binding === liveModContext) {
-        const old = new Map(before.map((door) => [door.id, door]));
-
-        for (const door of binding.engine.doors()) {
-            if (old.get(door.id)?.open !== door.open) {
-                playBaseCue(binding, door.open ? 'doorOpen' : 'doorClose', door);
-            }
+    binding.engine.sourceActions.dispatch((event) => {
+        if (!binding.lua) {
+            throw new Error('Source action callback owner is unavailable.');
         }
-    }
+
+        return binding.lua.dispatchSourceAction(event);
+    });
 
     return result;
 }
@@ -333,13 +338,42 @@ function sessionCommand(binding, action) {
  * Accumulate only real accepted simulation displacement, not requested movement or wall contact.
  *
  * @param {object} binding - Session-owned engine.
- * @param {number} seconds - Accepted fixed step duration.
+ * @param {number} seconds - Explicit logical step or uncapped RAF elapsed.
+ * @param {boolean} [raw=false] - True only for frameStep's raw elapsed contract.
  * @returns {void} Advances native simulation and optional footsteps.
  */
-function sessionStep(binding, seconds) {
+function sessionStep(binding, seconds, raw = false) {
     const before = binding.engine.snapshot();
 
-    binding.engine.step(seconds);
+    if (raw) {
+        binding.engine.frameStep(seconds);
+    } else {
+        binding.engine.step(seconds);
+    }
+
+    binding.engine.sourceActions.dispatch((event) => {
+        if (!binding.lua) {
+            throw new Error('Source action callback owner is unavailable.');
+        }
+
+        return binding.lua.dispatchSourceAction(event);
+    });
+    const doorRevision = binding.engine.doorRevision();
+
+    if (doorRevision !== binding.observedDoorRevision) {
+        const doors = binding.engine.doors();
+
+        for (const door of doors) {
+            const previous = binding.observedDoorOpen.get(door.id);
+
+            if (previous !== undefined && previous !== door.open) {
+                playBaseCue(binding, door.open ? 'doorOpen' : 'doorClose', door);
+            }
+        }
+
+        binding.observedDoorOpen = new Map(doors.map((door) => [door.id, door.open]));
+        binding.observedDoorRevision = doorRevision;
+    }
 
     if (binding !== liveModContext) {
         return;
@@ -373,19 +407,24 @@ function report(cause) {
 
     error.hidden = false;
     error.textContent = cause.message ?? String(cause);
-    failed = true;
-    paused = true;
-    pauseAudio();
-    held.clear();
-    toggledDirection = undefined;
+    try {
+        if (liveModContext) {
+            sessionCommand(liveModContext, { type: 'cancel' });
+        }
+    } finally {
+        failed = true;
+        paused = true;
+        pauseAudio();
+        held.clear();
+        toggledDirection = undefined;
 
-    if (pauseMenu.open) {
-        pauseMenu.close();
+        if (pauseMenu.open) {
+            pauseMenu.close();
+        }
+
+        state.textContent = 'Simulation stopped. See the error message.';
+        refresh();
     }
-
-    engine?.command({ type: 'cancel' });
-    state.textContent = 'Simulation stopped. See the error message.';
-    refresh();
 }
 
 /**
@@ -504,8 +543,16 @@ function takeover(action, direction) {
 function stop() {
     held.clear();
     toggledDirection = undefined;
-    engine?.command({ type: 'cancel' });
-    refresh();
+    try {
+        if (liveModContext) {
+            sessionCommand(liveModContext, { type: 'cancel' });
+        }
+    } catch (cause) {
+        reportPackageError(cause);
+        throw cause;
+    } finally {
+        refresh();
+    }
 }
 
 /**
@@ -533,7 +580,7 @@ function manual() {
 }
 
 /**
- * Advance fixed-step simulation independently of presentation rate.
+ * Advance exactly one source logic frame per unpaused presentation.
  *
  * @param {number} time - RAF timestamp in milliseconds.
  * @returns {void} Schedules the next presentation.
@@ -543,18 +590,17 @@ function frame(time) {
         return;
     }
 
-    const elapsed = lastFrame === undefined ? 0 : Math.min(0.1, Math.max(0, (time - lastFrame) / 1_000));
+    const elapsed = lastFrame === undefined ? 0 : Math.max(0, (time - lastFrame) / 1_000);
 
     lastFrame = time;
 
     if (sessionReady && !sessionBusy && !paused && !document.hidden) {
-        accumulator += elapsed;
-        while (accumulator >= FIXED_STEP_SECONDS) {
-            mods.step(FIXED_STEP_SECONDS);
-            accumulator -= FIXED_STEP_SECONDS;
+        try {
+            mods.frameStep(elapsed);
+        } catch (cause) {
+            reportPackageError(cause);
+            throw cause;
         }
-    } else {
-        accumulator = 0;
     }
 
     if (sessionReady && !sessionBusy) {
@@ -562,6 +608,12 @@ function frame(time) {
             const snapshot = engine.snapshot();
             const dx = presentedX === undefined ? 0 : snapshot.x - presentedX;
             const dy = presentedY === undefined ? 0 : snapshot.y - presentedY;
+
+            if (gameUI) {
+                const { width, height } = canvasContentBox(canvas);
+
+                updateSourceViewport(width, height);
+            }
 
             renderer.render(snapshot);
 
@@ -707,6 +759,64 @@ async function changePackage(change, message) {
 }
 
 /**
+ * Finish real source calls and their closed file writers, preserving both failures if necessary.
+ *
+ * @param {object} lua - The actual active source VM.
+ * @param {()=>unknown} callback - Synchronous source operation.
+ * @returns {Promise<unknown>} Source result after durable client-file publication.
+ */
+async function sourceFileOperation(lua, callback) {
+    let result;
+    let callbackFailure;
+
+    try {
+        result = callback();
+    } catch (cause) {
+        callbackFailure = cause;
+    }
+
+    try {
+        await lua?.flushSourceFiles();
+    } catch (cause) {
+        if (callbackFailure) {
+            throw new AggregateError([callbackFailure, cause], `${callbackFailure.message}; source file persistence failed: ${cause.message}`, { cause: callbackFailure });
+        }
+
+        throw cause;
+    }
+
+    if (callbackFailure) {
+        throw callbackFailure;
+    }
+
+    return result;
+}
+
+/**
+ * Publish real logical viewport changes before original resize consumers run.
+ *
+ * @param {number} width - Border-excluding logical canvas width.
+ * @param {number} height - Border-excluding logical canvas height.
+ * @returns {void} Emits only a changed committed session viewport.
+ */
+function updateSourceViewport(width, height) {
+    const nextWidth = Math.max(1, Math.trunc(width));
+    const nextHeight = Math.max(1, Math.trunc(height));
+
+    if (nextWidth === sourceViewportWidth && nextHeight === sourceViewportHeight) {
+        return;
+    }
+
+    const oldWidth = sourceViewportWidth;
+    const oldHeight = sourceViewportHeight;
+
+    gameUI.setViewport(nextWidth, nextHeight);
+    sourceViewportWidth = nextWidth;
+    sourceViewportHeight = nextHeight;
+    luaSession?.dispatch('OnResolutionChange', oldWidth, oldHeight, nextWidth, nextHeight);
+}
+
+/**
  * Give original gameplay UI first refusal using canvas CSS coordinates.
  *
  * @param {MouseEvent|PointerEvent|WheelEvent} event - Native canvas input.
@@ -719,17 +829,20 @@ function gameUIPointer(event, name, ...args) {
         return false;
     }
 
-    const bounds = canvas.getBoundingClientRect();
-    const width = canvas.clientWidth || canvas.width;
-    const height = canvas.clientHeight || canvas.height;
-    const x = (event.clientX - bounds.left) * width / bounds.width;
-    const y = (event.clientY - bounds.top) * height / bounds.height;
+    const { left, top, width, height, scaleX, scaleY } = canvasContentBox(canvas);
+    const x = (event.clientX - left) / scaleX;
+    const y = (event.clientY - top) / scaleY;
 
     try {
-        gameUI.setViewport(width, height);
+        updateSourceViewport(width, height);
         gameUI.setMouse(x, y);
-        const consumed = gameUI.input(name, x, y, ...args);
+        const consumed = name === 'onMouseMove'
+            ? gameUI.input(name, x, y, args[0] / scaleX, args[1] / scaleY)
+            : gameUI.input(name, x, y, ...args);
 
+        sourcePointerX = x;
+        sourcePointerY = y;
+        sourcePointerUnconsumed = !consumed;
         canvas.style.cursor = gameUI.cursorVisible() ? 'default' : '';
 
         if (consumed) {
@@ -739,8 +852,137 @@ function gameUIPointer(event, name, ...args) {
         return consumed;
     } catch (cause) {
         reportPackageError(cause);
+        sourcePointerUnconsumed = false;
 
         return true;
+    }
+}
+
+/**
+ * Deliver only real renderer phases for the current committed source session.
+ *
+ * @param {'opaque'|'building'} phase - Actual renderer phase.
+ * @param {{characterZ:number}} view - Renderer-owned current world view.
+ * @returns {void}
+ */
+function sourceWorldPhase(phase, view) {
+    if (!sessionReady || sessionBusy || packageBusy || failed || pauseMenu.open || !luaSession || !gameUI) {
+        return;
+    }
+
+    const box = canvasContentBox(canvas);
+
+    updateSourceViewport(box.width, box.height);
+
+    if (phase === 'opaque' && sourcePointerUnconsumed) {
+        const point = renderer.worldFromCanvas(box.left + sourcePointerX * box.scaleX, box.top + sourcePointerY * box.scaleY);
+
+        luaSession.updateWorldPointer(point.x, point.y);
+    }
+
+    luaSession.renderWorldPhase(phase, view.characterZ);
+}
+
+/**
+ * Read the live world pass, not a separate source-menu camera or fixed zoom.
+ *
+ * @returns {{camera: {x: number, y: number}, viewport: {width: number, height: number, pixelRatio: number}, tilePixels: number}} Current physical drawing-buffer projection.
+ */
+function sourceWorldProjection() {
+    const view = renderer.diagnostics();
+
+    if (!view.worldMode || !view.camera || view.frames === 0 || view.stopped || view.destroyed) {
+        throw new Error('Source world projection is unavailable.');
+    }
+
+    return {
+        camera: view.camera,
+        viewport: view.canvas,
+        tilePixels: Math.min(view.canvas.width, view.canvas.height) / (view.worldPlane.max - view.worldPlane.min),
+    };
+}
+
+/**
+ * Select icons for actual ground, inventory and equipped items, not the definition catalog.
+ *
+ * @param {object} engine - Current candidate or committed item owner.
+ * @param {object[]} [definitions] - Optional frozen session catalog for asynchronous preparation.
+ * @returns {object[]} Registered definitions used by native item instances.
+ */
+function instantiatedItemDefinitions(engine, definitions = engine.itemDefinitions()) {
+    const fullTypes = new Set(engine.items().map((item) => item.fullType));
+
+    return definitions.filter((definition) => fullTypes.has(definition.fullType));
+}
+
+/**
+ * Open the genuine source context widget at a hit in the current projection.
+ *
+ * @param {number} clientX - Browser pointer x.
+ * @param {number} clientY - Browser pointer y.
+ * @returns {Promise<void>} Opens only after exact original item textures are ready.
+ */
+async function openWorldContext(clientX, clientY) {
+    if (!sessionReady || sessionBusy || failed || paused) {
+        return;
+    }
+
+    const request = ++contextMenuRequest;
+    const binding = liveModContext;
+    const ui = gameUI;
+    const lua = luaSession;
+
+    try {
+        if (!lua || !ui) {
+            throw new Error('Original world context Lua/UI is unavailable.');
+        }
+
+        const definitions = binding.engine.itemDefinitions();
+        const preparedTypes = new Set();
+
+        /**
+         * Prepare sequential batches, constructing the source menu in the final synchronous pass.
+         * Each upload adds types from the frozen catalog; scene churn cannot extend this bound.
+         *
+         * @returns {Promise<void>} Prepared source menu, or an abandoned stale request.
+         */
+        async function prepareContext() {
+            if (request !== contextMenuRequest || binding !== liveModContext || ui !== gameUI
+                || lua !== luaSession || !sessionReady || sessionBusy || failed || paused) {
+                return;
+            }
+
+            const pending = instantiatedItemDefinitions(binding.engine, definitions)
+                .filter((definition) => !preparedTypes.has(definition.fullType));
+
+            if (pending.length) {
+                await ui.ensureItemTextures(pending);
+
+                for (const definition of pending) {
+                    preparedTypes.add(definition.fullType);
+                }
+
+                return prepareContext();
+            }
+
+            const box = canvasContentBox(canvas);
+            const point = renderer.worldFromCanvas(clientX, clientY);
+
+            const opened = await sourceFileOperation(lua, () => lua.openWorldContextMenu({
+                screenX: (clientX - box.left) / box.scaleX,
+                screenY: (clientY - box.top) / box.scaleY,
+                worldX: point.x, worldY: point.y, z: 0, playerIndex: 0,
+            }));
+
+            if (!opened && request === contextMenuRequest && binding === liveModContext && ui === gameUI
+                && lua === luaSession && sessionReady && !sessionBusy && !failed && !paused) {
+                canvas.focus();
+            }
+        }
+
+        await prepareContext();
+    } catch (cause) {
+        reportPackageError(cause);
     }
 }
 
@@ -751,7 +993,7 @@ function gameUIPointer(event, name, ...args) {
  * @returns {void} Submits destination movement.
  */
 function pointDestination(event) {
-    if (event.button !== 0) {
+    if (event.button !== 0 || (event.pointerType === 'touch' && event.type === 'pointerdown')) {
         return;
     }
 
@@ -759,6 +1001,17 @@ function pointDestination(event) {
 
     if (gameUIPointer(event, 'onMouseDown')) {
         return;
+    }
+
+    if (luaSession && gameUI && sessionReady && !sessionBusy && !packageBusy && !failed && !pauseMenu.open) {
+        try {
+            luaSession.buildingInput();
+        } catch (cause) {
+            event.preventDefault();
+            reportPackageError(cause);
+
+            return;
+        }
     }
 
     const point = worldFromCanvas(canvas, event.clientX, event.clientY);
@@ -807,13 +1060,15 @@ function openPauseMenu() {
         return;
     }
 
-    stop();
-    paused = true;
-    pauseAudio();
-    accumulator = 0;
-    lastFrame = undefined;
-    pauseMenu.showModal();
-    refresh();
+    try {
+        stop();
+    } finally {
+        paused = true;
+        pauseAudio();
+        lastFrame = undefined;
+        pauseMenu.showModal();
+        refresh();
+    }
 }
 
 /**
@@ -827,7 +1082,6 @@ function resumeGame() {
     }
 
     paused = !sessionReady;
-    accumulator = 0;
     lastFrame = undefined;
 
     if (pauseMenu.open) {
@@ -850,6 +1104,8 @@ function resumeGame() {
  */
 function keyDown(event) {
     const key = event.key.toLowerCase();
+
+    pressedKeys.add(key);
 
     if (sessionReady && !paused && !failed && document.activeElement === canvas) {
         try {
@@ -909,6 +1165,8 @@ function keyDown(event) {
 function keyUp(event) {
     const key = event.key.toLowerCase();
 
+    pressedKeys.delete(key);
+
     if (sessionReady && !paused && !failed && document.activeElement === canvas) {
         try {
             if (gameUI?.keyInput('onKeyRelease', event.keyCode)) {
@@ -947,16 +1205,18 @@ function keyUp(event) {
  * @returns {void} Cancels travel on visibility transitions.
  */
 function visibilityChanged() {
-    stop();
+    pressedKeys.clear();
+    try {
+        stop();
+    } finally {
+        if (document.hidden) {
+            pauseAudio();
+        } else {
+            resumeAudio();
+        }
 
-    if (document.hidden) {
-        pauseAudio();
-    } else {
-        resumeAudio();
+        lastFrame = undefined;
     }
-
-    accumulator = 0;
-    lastFrame = undefined;
 }
 
 /**
@@ -970,21 +1230,20 @@ async function toggleMod() {
     }
 
     modCheckbox.disabled = true;
-    stop();
     try {
+        stop();
+
         if (modCheckbox.checked) {
             await mods.load(new URL('../mods/accessible-walking/main.js', import.meta.url).href);
         } else {
-            closeNativeSession();
-            luaSession = undefined;
-            mods.dispose();
+            mods.unload('accessible-walking');
         }
 
         clearRecoverableError();
 
         document.querySelector('#mod-status').textContent = modCheckbox.checked ? 'Active: walking speed 2.25.' : 'Disabled: walking speed 1.5.';
     } catch (cause) {
-        modCheckbox.checked = false;
+        modCheckbox.checked = mods.diagnostics().mods.some((entry) => entry.id === 'accessible-walking');
 
         if (!failed) {
             error.hidden = false;
@@ -1004,25 +1263,30 @@ async function toggleMod() {
  */
 function pageHidden(event) {
     cancelAnimationFrame(animation);
-    stop();
-    pauseAudio();
+    try {
+        stop();
+    } finally {
+        pauseAudio();
 
-    if (!event.persisted) {
-        try {
-            closeNativeSession();
-        } catch (cause) {
-            reportPackageError(cause);
-            closeNativeSession({ discardSaveData: true });
-        }
+        if (!event.persisted) {
+            try {
+                try {
+                    closeNativeSession();
+                } catch (cause) {
+                    reportPackageError(cause);
+                    closeNativeSession({ discardSaveData: true });
+                }
+            } finally {
+                luaSession = undefined;
+                mods?.dispose();
+                renderer?.destroy();
+                clearInterval(autosave);
+                saves?.close();
 
-        luaSession = undefined;
-        mods?.dispose();
-        renderer?.destroy();
-        clearInterval(autosave);
-        saves?.close();
-
-        if (audio) {
-            void audio.dispose().catch(reportAudioError);
+                if (audio) {
+                    void audio.dispose().catch(reportAudioError);
+                }
+            }
         }
     }
 }
@@ -1035,7 +1299,6 @@ function pageHidden(event) {
  */
 function pageShown(event) {
     if (event.persisted && !failed && renderer) {
-        accumulator = 0;
         lastFrame = undefined;
         animation = requestAnimationFrame(frame);
         resumeAudio();
@@ -1066,7 +1329,6 @@ function publishSession(staged) {
     modCheckbox.checked = mods.diagnostics().mods.some((entry) => entry.url === new URL('../mods/accessible-walking/main.js', import.meta.url).href);
     modCheckbox.disabled = mods.diagnostics().mods.some((entry) => entry.url !== new URL('../mods/accessible-walking/main.js', import.meta.url).href);
     renderer.setWorldMode(worldCells.length > 0);
-    accumulator = 0;
     lastFrame = undefined;
     const bounds = engine.worldBounds();
 
@@ -1112,8 +1374,14 @@ function requireSessionMods(required, host = mods) {
  * @returns {object} Existing public mod host.
  */
 function createSessionModHost(binding) {
-    // Each callback retains this binding, including while a different session is staged.
+    /* Each callback retains this binding, including while a different session is staged.
+       Presentation history only: all mutation and revision authority remains native. */
+    binding.observedDoorRevision = binding.engine.doorRevision();
+    binding.observedDoorOpen = new Map(binding.engine.doors().map((door) => [door.id, door.open]));
+
     return createModHost({
+        actions: binding.engine.actions,
+        sourceTiming: binding.engine.sourceTiming,
         /**
          * Read this host's own authoritative engine.
          *
@@ -1205,6 +1473,13 @@ function createSessionModHost(binding) {
          */
         items: () => binding.engine.items(),
         /**
+         * Read one detached item from this session's native identity, without copying its store.
+         *
+         * @param {number} id - Positive uint32 stable item identity.
+         * @returns {import('../types/mod-api').ModItem|null} Current record or absence.
+         */
+        getItem: (id) => binding.engine.getItem(id),
+        /**
          * Read this session's native inventory mass and independent capacity limits.
          *
          * @returns {import('../types/mod-api').ModInventoryState} Detached carry state.
@@ -1224,6 +1499,47 @@ function createSessionModHost(binding) {
          * @returns {import('../types/mod-api').ModItem|null} Worn item or an empty slot.
          */
         wornItem: (bodyLocation) => binding.engine.wornItem(bodyLocation),
+        /**
+         * Read this session's native primary and secondary inventory identities.
+         *
+         * @returns {import('../types/mod-api').ModHandItems} Detached held references.
+         */
+        getHandItems: () => binding.engine.getHandItems(),
+        /**
+         * Commit a native held reference; the host supplies shared item hooks and source owners.
+         *
+         * @param {'primary'|'secondary'} slot - Actual hand slot.
+         * @param {number|null} itemId - Live inventory identity or actual empty hand.
+         * @returns {void} Native mutation.
+         */
+        setHandItem: (slot, itemId) => binding.engine.setHandItem(slot, itemId),
+        /**
+         * Subscribe to real post-native held transitions, never silent hydration.
+         *
+         * @param {import('../types/mod-api').ModHandItemChangedListener} callback - Committed transition receiver.
+         * @param {(cause:unknown)=>void} onError - Owner-attributed native observer failure sink.
+         * @returns {()=>boolean} Native observer withdrawal.
+         */
+        observeHandItems: (callback, onError) => binding.engine.observeHandItems(callback, onError),
+        /**
+         * Probe actual native held-state exports, not the existence of wrapper methods.
+         *
+         * @returns {boolean} Whether held references can be restored atomically.
+         */
+        canSaveHandState: () => binding.engine.canSaveHandState(),
+        /**
+         * Capture this session's exact native hand references.
+         *
+         * @returns {import('../types/mod-api').ModHandState} Detached portable state.
+         */
+        saveHandState: () => binding.engine.saveHandState(),
+        /**
+         * Hydrate validated native hand references without replaying equip callbacks.
+         *
+         * @param {import('../types/mod-api').ModHandState} saved - Complete native held state.
+         * @returns {void} Silent staged hydration.
+         */
+        loadHandState: (saved) => binding.engine.loadHandState(saved),
         /**
          * Query this session's actual native hands item and definition tag.
          *
@@ -1292,12 +1608,19 @@ function createSessionModHost(binding) {
          */
         setSpeed: (speed) => binding.engine.setSpeed(speed),
         /**
-         * Advance the current engine through the fixed-step contract.
+         * Advance one explicit logical step, including the zero-time boundary.
          *
          * @param {number} seconds - Simulation step.
          * @returns {void} Advances simulation.
          */
         step: (seconds) => sessionStep(binding, seconds),
+        /**
+         * Advance a rendered frame through the current session's frame timing.
+         *
+         * @param {number} seconds - Raw nonnegative frame elapsed time.
+         * @returns {void} Advances simulation and dispatches original action callbacks.
+         */
+        frameStep: (seconds) => sessionStep(binding, seconds, true),
         /**
          * Reset the current session.
          *
@@ -1411,30 +1734,205 @@ async function activateSession(staged, namespaces, required) {
 
     selectedNative = activationOrder.filter((id) => nativeById.has(id)).map((id) => nativeById.get(id));
 
+    const inputBindings = staged.settings?.inputBindings ?? { Interact: null };
+
+    if (!inputBindings || Object.keys(inputBindings).length !== 1
+        || !Object.hasOwn(inputBindings, 'Interact') || inputBindings.Interact !== null) {
+        throw new Error('This session supports only the actual unbound Interact input state.');
+    }
+
     const targetContext = { engine: staged.engine, cells: staged.cells, namespaces: Object.assign(Object.create(null), namespaces) };
+
+    targetContext.inputBindings = Object.freeze({ Interact: null });
     const targetMods = createSessionModHost(targetContext);
     // After boot the committed manager is configuration/reporting only; later transitions load targetMods directly.
     const targetPackages = packagesActivated ? packages : createModManager(targetMods);
     let targetLua;
     let targetUI;
+    let targetViewportWidth;
+    let targetViewportHeight;
+    let targetSourceFiles;
 
     try {
         await seedOriginalWearables(staged.engine, content);
+        let queueRestore;
 
-        const resources = await loadNativeGameResources(content, selectedNative, 1 / FIXED_STEP_SECONDS);
+        if (staged.queueState) {
+            const declaredOwners = [{ id: 'pz-base-game', nativeId: 'ProjectZomboid' },
+                ...selectedNative.map(({ id, nativeId }) => ({ id, nativeId }))];
+
+            if (!Array.isArray(staged.sourceOwners) || staged.sourceOwners.some((owner) =>
+                !declaredOwners.some((declared) => declared.id === owner.ownerId))) {
+                throw new Error('Saved source actions require their exact enabled owner packages.');
+            }
+
+            staged.engine.loadQueueState(staged.queueState);
+            staged.engine.sourceActions.validateSourceOwners(staged.sourceOwners);
+            queueRestore = { state: staged.engine.actions.getState(), sourceOwners: staged.sourceOwners, declaredOwners };
+        }
+
+        const resources = await loadNativeGameResources(content, selectedNative, UI_LOCK_FPS, {
+            requireUI: true, itemDefinitions: instantiatedItemDefinitions(staged.engine),
+        });
 
         if (resources) {
             targetUI = renderer.createGameUI();
             await renderer.initializeGameUI({ ui: targetUI, ...resources });
+            const { width, height } = canvasContentBox(canvas);
+
+            targetViewportWidth = Math.max(1, Math.trunc(width));
+            targetViewportHeight = Math.max(1, Math.trunc(height));
+            targetUI.setViewport(targetViewportWidth, targetViewportHeight);
         }
 
+        staged.engine.sourceActions.setContextResolver((action, ownerId) => targetMods.sourcePreflight(action, ownerId));
+        targetSourceFiles = createSourceFiles({
+            storage: globalThis.localStorage, sourceBuild: content.manifest.sourceBuild.version, ownerId: 'pz-base-game',
+        });
         targetLua = await prepareNativeSession(selectedNative, content, {
             staged: true,
+            coreApi: targetMods.coreApi,
+            queueRestore,
             ui: targetUI,
+            sourceFiles: targetSourceFiles,
             engineSources: resources?.engineSources,
-            // Proven ResourceLocation normalization in the installed registry constructor.
-            moodleTypes: { FOOD_EATEN: 'base:foodeaten' },
+            sourceActions: staged.engine.sourceActions,
+            sourceTiming: staged.engine.sourceTiming,
+            sourceWorldContext: {
+                engine: staged.engine,
+                inputBindings: targetContext.inputBindings,
+                /**
+                 * Check the live imported ground-cell footprint, including valid missing squares.
+                 *
+                 * @param {number} x - Integer world tile x.
+                 * @param {number} y - Integer world tile y.
+                 * @param {number} z - Supported ground elevation.
+                 * @returns {boolean} Whether the actual loaded native cell contains the tile.
+                 */
+                isValidSquare: (x, y, z) => {
+                    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || z !== 0) {
+                        throw new TypeError('Source world validity requires integer ground coordinates.');
+                    }
+
+                    // Same 256-tile cell contract as native world_import_chunk and current map metadata.
+                    const cellX = Math.floor(x / 256);
+                    const cellY = Math.floor(y / 256);
+
+                    return targetContext.cells.some((cell) => cell.x === cellX && cell.y === cellY);
+                },
+                /**
+                 * Mutate a source-owned hand through the shared real item hooks.
+                 *
+                 * @param {'primary'|'secondary'} slot - Actual hand slot.
+                 * @param {number|null} itemId - Real inventory identity or nil.
+                 * @param {string} ownerId - Bound live source API owner.
+                 * @returns {import('../types/mod-api').ModCommandResult} Actual native commit or veto.
+                 */
+                setHandItem: (slot, itemId, ownerId) => targetMods.sourceSetHandItem(slot, itemId, ownerId),
+                /**
+                 * Resolve the original translated unbound interaction key label.
+                 *
+                 * @returns {string} Source NONE label or its literal fallback.
+                 */
+                interactKeyName: () => resources.translations.IGUI_Key_NONE ?? 'NONE',
+                rooms: sourceWorldMetadata.get(staged.engine)?.rooms,
+                buildings: sourceWorldMetadata.get(staged.engine)?.buildings,
+                /**
+                 * Project border-excluding logical content coordinates onto ground tiles.
+                 *
+                 * @param {number} x - Horizontal logical content coordinate.
+                 * @param {number} y - Vertical logical content coordinate.
+                 * @param {number} [z=0] - Supported ground-level projection plane.
+                 * @returns {{x: number, y: number}} World coordinates from the renderer projection.
+                 */
+                screenToIso: (x, y, z = 0) => {
+                    if (z !== 0) {
+                        throw new Error('Source projection above ground level is unsupported.');
+                    }
+
+                    const box = canvasContentBox(canvas);
+
+                    return renderer.worldFromCanvas(box.left + x * box.scaleX, box.top + y * box.scaleY);
+                },
+                /**
+                 * Project a native object's world placement into logical content units.
+                 *
+                 * @param {{x: number, y: number, z: number}} point - Native world placement.
+                 * @returns {{x: number, y: number}} Border-excluding logical content position.
+                 */
+                objectScreenPosition: (point) => {
+                    const { camera, viewport, tilePixels } = sourceWorldProjection();
+                    // Native ground records already contain their world placement; no tile-centre or trim offset.
+                    const position = tileScreenPosition(point, camera, tilePixels);
+                    // Match the shared border-excluding logical content/UI coordinates.
+                    const { width, height } = canvasContentBox(canvas);
+
+                    return {
+                        x: (viewport.width / 2 + position.x) * width / viewport.width,
+                        y: (viewport.height / 2 + position.y) * height / viewport.height,
+                    };
+                },
+                /**
+                 * Read the original tile-anchor zoom for the standalone viewport.
+                 *
+                 * @param {number} playerIndex - Supported standalone player index, zero.
+                 * @returns {number} Original tile pixels divided by rendered logical tile pixels.
+                 */
+                getZoom: (playerIndex) => {
+                    if (playerIndex !== 0) {
+                        throw new Error('Only the current standalone source viewport is supported.');
+                    }
+
+                    const { viewport, tilePixels } = sourceWorldProjection();
+                    const sourceTilePixels = tileLayer?.diagnostics().anchor?.nativeTilePixels;
+
+                    if (!Number.isFinite(sourceTilePixels) || sourceTilePixels <= 0) {
+                        throw new Error('Original source tile anchor is unavailable.');
+                    }
+
+                    return sourceTilePixels / (tilePixels / viewport.pixelRatio);
+                },
+                /**
+                 * Read the current session pause state.
+                 *
+                 * @returns {boolean} Whether simulation is paused.
+                 */
+                paused: () => paused,
+                /**
+                 * Read live movement or cancellation input for original actions.
+                 *
+                 * @param {'movement'|'cancel'} kind - Supported original input query.
+                 * @returns {boolean} Whether the requested input is active.
+                 */
+                input: (kind) => {
+                    if (kind === 'movement') {
+                        return held.size !== 0;
+                    }
+
+                    if (kind === 'cancel') {
+                        return pressedKeys.has('escape');
+                    }
+
+                    throw new Error(`Unsupported source input: ${kind}.`);
+                },
+                /**
+                 * Query settings from the staged original UI bindings.
+                 *
+                 * @returns {object} Original UI settings, never a shadow fallback.
+                 */
+                settings: () => {
+                    if (!targetUI) {
+                        throw new Error('Original UI settings unavailable.');
+                    }
+
+                    return targetUI.bindings.call('settings');
+                },
+                onError: reportPackageError,
+            },
         });
+        targetContext.lua = targetLua;
+        staged.engine.sourceActions.setSaveHook(targetLua ? () => targetLua.prepareSourceSave() : null);
+        staged.engine.sourceActions.setOwnerExport(targetLua ? () => targetLua.exportSourceOwners() : null);
 
         if (!packagesActivated) {
             const activation = await targetPackages.activateEnabled({ safeMode: safeMods });
@@ -1462,6 +1960,11 @@ async function activateSession(staged, namespaces, required) {
             throw new Error('Renderer is no longer active.');
         }
 
+        // Enabled mods can spawn items during activation; warm them before original UI callbacks.
+        if (targetUI) {
+            await targetUI.ensureItemTextures(instantiatedItemDefinitions(staged.engine));
+        }
+
         // Reapply genuine restored option callbacks in every candidate; no synthetic menu transition.
         targetLua?.applyOptions();
 
@@ -1476,6 +1979,8 @@ async function activateSession(staged, namespaces, required) {
 
         targetLua?.dispatch('OnCreatePlayer', 0);
         targetLua?.dispatch('OnGameStart');
+        targetLua?.completeSourceRestore();
+        await targetLua?.flushSourceFiles();
 
         staged.engine.freezeItemDefinitions();
         // Flush can refuse; retain the committed VM/UI until every candidate operation succeeds.
@@ -1489,6 +1994,7 @@ async function activateSession(staged, namespaces, required) {
         renderer.setGameUI(targetUI ?? null);
     } catch (cause) {
         targetLua?.close({ discardSaveData: true });
+        targetSourceFiles?.dispose();
         targetMods.dispose();
         targetUI?.dispose();
         bindNativeSession(previous.lua, previous.native);
@@ -1513,6 +2019,12 @@ async function activateSession(staged, namespaces, required) {
     activeNativeDescriptors = selectedNative;
     packagesActivated = true;
     gameUI = targetUI;
+    // A restored/new session starts with its real candidate dimensions, not a resize replay.
+    sourceViewportWidth = targetViewportWidth;
+    sourceViewportHeight = targetViewportHeight;
+    sourcePointerX = undefined;
+    sourcePointerY = undefined;
+    sourcePointerUnconsumed = false;
     previous.lua?.close({ discardSaveData: true });
     previous.mods.dispose();
     previous.ui?.dispose();
@@ -1572,11 +2084,19 @@ async function saveSession() {
         cells: worldCells,
         mods: mods.diagnostics().mods.map(({ id, version, apiVersion }) => ({ id, version, apiVersion })),
         modState: savedModState,
+        settings: { inputBindings: liveModContext.inputBindings },
     });
 
     savedRevision = record.revision;
     retainedSave = true;
     document.querySelector('#save-status').textContent = `Saved revision ${record.revision}. Export a backup to protect against browser storage loss.`;
+    // Genuine source callbacks run only after local persistence, never during capture/export/load.
+    try {
+        await sourceFileOperation(luaSession, () => luaSession?.dispatch('OnPostSave'));
+    } catch (cause) {
+        // Preserve native owner/path fields and the original fault; the committed record remains valid.
+        throw Object.assign(new Error(`Saved revision ${record.revision}, but OnPostSave failed: ${cause.message}. The committed save has been retained.`, { cause }), cause);
+    }
 }
 
 /**
@@ -1587,7 +2107,6 @@ async function saveSession() {
  * @returns {Promise<void>} Publishes the restored game after compatibility checks.
  */
 async function loadSession(id, prepared) {
-    stop();
     const staged = prepared ?? await saves.load(id);
 
     /* Boot activation validates identities after initialization; running restores
@@ -1603,7 +2122,10 @@ async function loadSession(id, prepared) {
     const geometry = await loadGeometry(cells, staged.engine, staged.doorState);
 
     try {
-        await activateSession({ engine: staged.engine, cells }, staged.record.modState, staged.record.mods);
+        await activateSession({
+            engine: staged.engine, cells, queueState: staged.queueState,
+            sourceOwners: staged.sourceOwners, settings: staged.record.settings,
+        }, staged.record.modState, staged.record.mods);
         publishSession({ engine: staged.engine, cells: worldCells, geometry });
     } catch (cause) {
         geometry.layer.destroy();
@@ -1631,6 +2153,7 @@ async function exportSession() {
                 cells: worldCells,
                 mods: mods.diagnostics().mods.map(({ id, version, apiVersion }) => ({ id, version, apiVersion })),
                 modState: savedModState,
+                settings: { inputBindings: liveModContext.inputBindings },
             })
         : await saves.exportSave();
     const url = URL.createObjectURL(blob);
@@ -1704,6 +2227,8 @@ async function rebuildTileLayer(cells, candidateEngine, doorState) {
         if (evidence.errors.length > 0 || evidence.residentSprites === 0) {
             throw new Error(`Original tile startup failed: ${evidence.errors.map((entry) => entry.message).join('; ') || 'no original sprites loaded for this saved position'}. Provision matching geometry and texture packs.`);
         }
+
+        sourceWorldMetadata.set(candidateEngine, { rooms: projection.rooms, buildings: projection.buildings });
 
         return { layer, cells };
     } catch (cause) {
@@ -2008,7 +2533,22 @@ try {
         restoreError ??= cause;
     }
 
-    renderer = await createRenderer(canvas, report);
+    renderer = await createRenderer(canvas, report, {
+        /**
+         * Run source consumers after opaque geometry, before moving objects.
+         *
+         * @param {object} view - Actual renderer-owned world projection.
+         * @returns {void}
+         */
+        onWorldOpaque: (view) => sourceWorldPhase('opaque', view),
+        /**
+         * Run genuine DoBuilding(TRUE) after the world pass, before source UI.
+         *
+         * @param {object} view - Same current world projection.
+         * @returns {void}
+         */
+        onWorldBuilding: (view) => sourceWorldPhase('building', view),
+    });
     try {
         await importPacks(content.manifest.startup.packs.map((path) => content.getFile(path)));
         await importCharacter();
@@ -2107,6 +2647,74 @@ normalUrl.searchParams.delete('safe-mods');
 document.querySelector('#package-safe-mode').href = safeUrl.href;
 document.querySelector('#package-normal-mode').href = normalUrl.href;
 canvas.addEventListener('pointerdown', pointDestination);
+canvas.addEventListener('pointerleave', () => {
+    sourcePointerUnconsumed = false;
+});
+canvas.addEventListener('mousedown', (event) => {
+    if (event.button === 2 && !gameUIPointer(event, 'onRightMouseDown')
+        && gameUI && sessionReady && !sessionBusy && !failed && !pauseMenu.open) {
+        const { left, top, scaleX, scaleY } = canvasContentBox(canvas);
+
+        try {
+            // Native UIManager emits only the genuine newly pressed, unconsumed right button.
+            luaSession?.dispatch('OnRightMouseDown', Math.trunc((event.clientX - left) / scaleX), Math.trunc((event.clientY - top) / scaleY));
+        } catch (cause) {
+            reportPackageError(cause);
+        }
+    }
+});
+canvas.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+
+    if (!gameUIPointer(event, 'onRightMouseUp')) {
+        void openWorldContext(event.clientX, event.clientY);
+    }
+});
+canvas.addEventListener('keydown', (event) => {
+    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+        event.preventDefault();
+        const box = canvasContentBox(canvas);
+
+        openWorldContext(box.left + box.width * box.scaleX / 2, box.top + box.height * box.scaleY / 2);
+    }
+});
+let contextTouch;
+
+canvas.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'touch') {
+        contextTouch = {
+            x: event.clientX, y: event.clientY, opened: false,
+            timer: setTimeout(() => {
+                if (contextTouch) {
+                    contextTouch.opened = true;
+                }
+
+                openWorldContext(event.clientX, event.clientY);
+            }, 600),
+        };
+    }
+});
+
+for (const name of ['pointerup', 'pointercancel']) {
+    canvas.addEventListener(name, (event) => {
+        if (contextTouch) {
+            clearTimeout(contextTouch.timer);
+
+            if (name === 'pointerup' && !contextTouch.opened) {
+                pointDestination(event);
+            }
+        }
+
+        contextTouch = undefined;
+    });
+}
+
+canvas.addEventListener('pointermove', (event) => {
+    if (contextTouch && Math.hypot(event.clientX - contextTouch.x, event.clientY - contextTouch.y) > 8) {
+        clearTimeout(contextTouch.timer);
+        contextTouch = undefined;
+    }
+});
 canvas.addEventListener('pointerup', (event) => {
     if (event.button === 0) {
         gameUIPointer(event, 'onMouseUp');

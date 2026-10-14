@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createGameUI, parseBitmapFont } from '../src/game-ui.js';
 import { createLuaSession } from '../src/lua-runtime.js';
+import { menuDocument } from './queue-test-helpers.js';
 
 // Authored metrics/atlas dimensions only; never original game bytes.
 const descriptor = `info face="Authored" size=10
@@ -67,6 +68,53 @@ test('BMFont advance, pair kerning, line height and right alignment use descript
     ui.dispose();
 });
 
+test('three authored fonts measure and draw their own metrics and atlas without changing Small', () => {
+    const ui = createGameUI();
+    const medium = descriptor.replace('size=10', 'size=17').replace('lineHeight=12', 'lineHeight=19').replace('scaleW=32 scaleH=16', 'scaleW=64 scaleH=32').replace('id=65 x=0 y=0 width=6 height=8', 'id=65 x=16 y=4 width=8 height=10').replace('xadvance=7', 'xadvance=11');
+    const large = descriptor.replace('size=10', 'size=24').replace('lineHeight=12', 'lineHeight=28').replace('scaleW=32 scaleH=16', 'scaleW=128 scaleH=64').replace('id=65 x=0 y=0 width=6 height=8', 'id=65 x=64 y=32 width=12 height=16').replace('xadvance=7', 'xadvance=15');
+
+    ui.setViewport(100, 100);
+    ui.initialize({
+        textures: [{ path: 'small', width: 32, height: 16 }, { path: 'medium', width: 64, height: 32 }, { path: 'large', width: 128, height: 64 }],
+        fonts: {
+            Small: { descriptor, atlasPath: 'small' },
+            Medium: { descriptor: medium, atlasPath: 'medium' },
+            Large: { descriptor: large, atlasPath: 'large' },
+        },
+        translations: {}, settings,
+        fontAliases: { NewSmall: 'Small' },
+    });
+    const b = ui.bindings;
+    const id = b.call('new', 'fonts', {});
+
+    b.call('add', 'fonts', id);
+    ui.setCallbacks(id, {
+        /** Draw one actual glyph from each independently authored font. */
+        render: () => {
+            b.call('element', 'fonts', id, 'DrawTextRight', 'Small', 'A', 40, 0, 1, 1, 1, 1);
+            b.call('element', 'fonts', id, 'DrawTextRight', 'Medium', 'A', 40, 20, 1, 1, 1, 1);
+            b.call('element', 'fonts', id, 'DrawTextCentre', 'Large', 'A', 40, 40, 1, 1, 1, 1);
+        },
+    });
+    try {
+        assert.equal(b.call('measureX', 'fonts', 'Small', 'AV'), 12);
+        assert.equal(b.call('measureX', 'fonts', 'Medium', 'AV'), 16);
+        assert.equal(b.call('measureX', 'fonts', 'Large', 'AV'), 20);
+        assert.equal(b.call('measureX', 'fonts', 'NewSmall', 'AV'), 12);
+        assert.equal(b.call('measureY', 'fonts', 'Medium', 'A\nV'), 38);
+        assert.equal(b.call('fontHeight', 'fonts', 'Large'), 28);
+        assert.equal(b.call('fontSize', 'fonts', 'Medium'), 17);
+        assert.deepEqual(ui.render().map((command) => [command.texture.path, command.x, command.y, command.width, command.height, command.uv]), [
+            ['small', 34, 2, 6, 8, { x: 0, y: 0, width: 0.187_5, height: 0.5 }],
+            ['medium', 30, 22, 8, 10, { x: 0.25, y: 0.125, width: 0.125, height: 0.312_5 }],
+            ['large', 33.5, 42, 12, 16, { x: 0.5, y: 0.5, width: 0.093_75, height: 0.25 }],
+        ]);
+        assert.throws(() => b.call('fontHeight', 'fonts', 'Missing'), /Unsupported font/);
+    } finally {
+        ui.dispose();
+    }
+});
+
 test('ordered root snapshots skip removed elements, retain other owners and clip real input/draw bounds', () => {
     let destroyed = 0;
     const ui = uiFixture(() => destroyed++);
@@ -122,6 +170,68 @@ test('ordered root snapshots skip removed elements, retain other owners and clip
     ui.dispose();
     ui.dispose();
     assert.equal(destroyed, 1);
+});
+
+test('player UI pairs authenticate registry elements and release references on removal and owner cleanup', () => {
+    const ui = uiFixture();
+    const otherUI = uiFixture();
+    const b = ui.bindings;
+    const inventory = b.call('new', 'source', {});
+    const loot = b.call('new', 'source', {});
+    const tooltip = b.call('new', 'source', {});
+    const lootTooltip = b.call('new', 'source', {});
+    const foreign = b.call('new', 'other', {});
+    const otherRealm = otherUI.bindings.call('new', 'source', {});
+
+    try {
+        for (const operation of ['playerInventory', 'playerInventoryTooltip']) {
+            assert.throws(() => b.call(operation, 'source', 1, inventory, loot), /player.*zero/i);
+            assert.throws(() => b.call(operation, 'source', '0', inventory, loot), /player.*zero/i);
+            assert.throws(() => b.call(operation, 'source', 0, inventory), /three arguments/);
+            assert.throws(() => b.call(operation, 'source', 0, {}, loot), /UI element/);
+            assert.throws(() => b.call(operation, 'source', 0, inventory, 'bad'), /UI element/);
+            assert.throws(() => b.call(operation, 'source', 0, inventory, Number.MAX_SAFE_INTEGER), /session/);
+            assert.throws(() => b.call(operation, 'source', 0, inventory, foreign), /owner/);
+            assert.throws(() => b.call(operation, 'source', 0, inventory, otherRealm), /session/);
+            b.call(operation, 'other', 0, null, null);
+        }
+
+        b.call('playerInventory', 'source', 0, inventory, loot);
+        b.call('playerInventoryTooltip', 'source', 0, tooltip, lootTooltip);
+        assert.throws(() => b.call('playerInventory', 'other', 0, null, null), /owner/);
+        assert.throws(() => b.call('playerInventoryTooltip', 'other', 0, null, null), /owner/);
+        b.call('playerInventory', 'source', 0, null, null);
+        b.call('playerInventoryTooltip', 'source', 0, null, null);
+        assert.equal(b.call('element', 'source', inventory, 'getX'), 0);
+        b.call('playerInventory', 'other', 0, foreign, null);
+        b.call('playerInventory', 'other', 0, null, null);
+
+        b.call('element', 'source', inventory, 'AddChild', tooltip);
+        b.call('playerInventory', 'source', 0, inventory, null);
+        b.call('playerInventoryTooltip', 'source', 0, tooltip, null);
+        b.call('remove', 'source', inventory);
+        b.call('playerInventory', 'other', 0, null, null);
+        b.call('playerInventoryTooltip', 'other', 0, null, null);
+        assert.throws(() => b.call('playerInventory', 'source', 0, inventory, null), /removed/);
+        assert.throws(() => b.call('playerInventoryTooltip', 'source', 0, tooltip, null), /removed/);
+        b.call('add', 'source', inventory);
+        b.call('playerInventoryTooltip', 'other', 0, null, null);
+        b.call('playerInventory', 'source', 0, inventory, loot);
+        b.call('playerInventoryTooltip', 'source', 0, tooltip, lootTooltip);
+        b.call('element', 'source', inventory, 'RemoveChild', tooltip);
+        b.call('remove', 'source', lootTooltip);
+        b.call('playerInventoryTooltip', 'other', 0, null, null);
+        assert.throws(() => b.call('playerInventoryTooltip', 'source', 0, tooltip, null), /removed/);
+
+        b.cleanup('source');
+        b.call('playerInventory', 'other', 0, foreign, null);
+        b.call('playerInventoryTooltip', 'other', 0, foreign, null);
+        assert.throws(() => b.call('playerInventory', 'source', 0, inventory, null), /session/);
+        assert.throws(() => b.call('playerInventoryTooltip', 'source', 0, lootTooltip, null), /session/);
+    } finally {
+        otherUI.dispose();
+        ui.dispose();
+    }
 });
 
 /**
@@ -377,7 +487,7 @@ test('owner cleanup preserves foreign child UI at its absolute bounds', () => {
     ui.dispose();
 });
 
-test('registry constants require an independently proven mapping, not guessed ID spelling', async () => {
+test('proven registry constants still require the matching authoritative native member', async () => {
     const api = apiFixture();
     const session = await createLuaSession();
 
@@ -490,6 +600,92 @@ test('indexed UI textures require preload while genuinely missing textures remai
     }
 });
 
+test('native UI routes outside motion and respects explicit false without losing nil consumption', async () => {
+    const ui = uiFixture();
+    const session = await createLuaSession({ ui });
+
+    try {
+        session.activatePackage({
+            id: 'native-pointer', api: apiFixture(), sources: [{
+                path: 'media/lua/client/native-pointer.lua',
+                source: `
+                    local target = { outside = 0 }
+                    function target:onMouseMoveOutside(dx, dy)
+                        assert(dx == 4 and dy == 2)
+                        self.outside = self.outside + 1
+                    end
+                    function target:onMouseDown() return false end
+                    function target:onMouseUp()
+                        assert(self.outside == 1)
+                    end
+                    target.javaObject = UIElement.new(target)
+                    target.javaObject:setX(20)
+                    target.javaObject:setY(20)
+                    target.javaObject:setWidth(30)
+                    target.javaObject:setHeight(20)
+                    target.javaObject:setConsumeMouseEvents(true)
+                    UIManager.AddUI(target.javaObject)
+                `,
+            }],
+        });
+        assert.equal(ui.input('onMouseMove', 10, 10, 4, 2), false);
+        assert.equal(ui.input('onMouseDown', 25, 25), false);
+        assert.equal(ui.input('onMouseUp', 25, 25), true);
+    } finally {
+        session.close({ discardSaveData: true });
+        ui.dispose();
+    }
+});
+
+test('native source menu down consumes its nil return before lower roots can hide the submenu', async () => {
+    const ui = uiFixture();
+    const session = await createLuaSession({ ui });
+
+    try {
+        session.activatePackage({
+            id: 'native-menu-pointer', api: apiFixture(), sources: [{
+                path: 'media/lua/client/native-menu-pointer.lua',
+                source: `
+                    local parent,submenu={}, {selected=0}
+                    function parent:onMouseDownOutside()
+                        submenu.javaObject:setVisible(false)
+                    end
+                    parent.javaObject=UIElement.new(parent)
+                    parent.javaObject:setWidth(10)
+                    parent.javaObject:setHeight(10)
+                    UIManager.AddUI(parent.javaObject)
+                    function submenu:onMouseDown() end
+                    function submenu:onRightMouseDown() return false end
+                    function submenu:onMouseUp()
+                        assert(self.javaObject:isVisible())
+                        self.selected=self.selected+1
+                    end
+                    submenu.javaObject=UIElement.new(submenu)
+                    submenu.javaObject:setX(20)
+                    submenu.javaObject:setY(20)
+                    submenu.javaObject:setWidth(30)
+                    submenu.javaObject:setHeight(20)
+                    UIManager.AddUI(submenu.javaObject)
+                    Events.OnLoad.Add(function()
+                        assert(submenu.selected==1 and submenu.javaObject:isVisible())
+                        submenu.javaObject:setConsumeMouseEvents(false)
+                    end)
+                `,
+            }],
+        });
+        assert.equal(ui.input('onMouseMove', 25, 25, 0, 0), false, 'absent callbacks remain unhandled');
+        assert.equal(ui.input('onRightMouseDown', 25, 25), false, 'explicit false still permits fallthrough');
+        assert.equal(ui.input('onMouseDown', 25, 25), true, 'native empty down cannot leak into lower menus or world movement');
+        assert.equal(ui.input('onMouseUp', 25, 25), true);
+        session.dispatch('OnLoad');
+        assert.equal(ui.input('onMouseDown', 25, 25), false, 'an explicit consume flag override still permits fallthrough');
+        assert.equal(ui.input('onMouseUp', 25, 25), false, 'the lower outside callback really hides the separate submenu root');
+    } finally {
+        session.close({ discardSaveData: true });
+        ui.dispose();
+    }
+});
+
 test('mouse hit testing retains pointer coordinates while move and wheel callbacks receive their native arguments', () => {
     const ui = uiFixture();
     const b = ui.bindings;
@@ -521,7 +717,7 @@ test('mouse hit testing retains pointer coordinates while move and wheel callbac
         assert.equal(ui.input('onMouseMove', 25, 34, -3, 2), true);
         assert.equal(ui.input('onMouseWheel', 25, 34, -1), true);
 
-        for (const name of ['onMouseDown', 'onMouseUp', 'onMouseDoubleClick']) {
+        for (const name of ['onMouseDown', 'onMouseUp', 'onMouseDoubleClick', 'onRightMouseDown', 'onRightMouseUp']) {
             assert.equal(ui.input(name, 25, 34), true);
         }
 
@@ -533,6 +729,9 @@ test('mouse hit testing retains pointer coordinates while move and wheel callbac
             ['onMouseDown', 5, 4],
             ['onMouseUp', 5, 4],
             ['onMouseDoubleClick', 5, 4],
+            ['onRightMouseDown', 5, 4],
+            ['onRightMouseUp', 5, 4],
+            ['onMouseMoveOutside', 25, 34],
         ]);
     } finally {
         ui.dispose();
@@ -643,4 +842,286 @@ test('configuration restore applies actual registered callbacks without menu rep
         session.close({ discardSaveData: true });
         ui.dispose();
     }
+});
+
+/**
+ * Deliver a native key event to one host DOM node.
+ *
+ * @param {EventTarget} node - Target host node.
+ * @param {string} key - Native keyboard key.
+ */
+function menuKey(node, key) {
+    const event = new Event('keydown', { cancelable: true });
+
+    Object.defineProperty(event, 'key', { value: key });
+    node.dispatchEvent(event);
+}
+
+test('source semantic menus select resident paths, preserve disabled labels, navigate submenus and release owners', async () => {
+    const { document, canvas } = menuDocument();
+    const ui = createGameUI({ document, focusTarget: canvas });
+    const selected = [];
+    const errors = [];
+    let closed = 0;
+    const tree = [
+        { name: 'Locked', disabled: true, children: [] },
+        { name: 'Trade', disabled: false, children: [{ name: 'Exchange', disabled: false, children: [] }] },
+        { name: 'Open', disabled: false, children: [] },
+    ];
+    const callbacks = {
+        owner: 'original',
+        /**
+         * Close the resident original source menu.
+         *
+         * @returns {number} Number of native closes observed.
+         */
+        onClose: () => closed++,
+        /**
+         * Preserve authoritative callback failures for the host.
+         *
+         * @param {Error} error - Source callback failure.
+         * @returns {number} Number of failures observed.
+         */
+        onError: (error) => errors.push(error.message),
+    };
+    const root = ui.sourceMenuMirror(tree, (path) => selected.push(path), callbacks);
+    const locked = root.children[0].children[0];
+    const trade = root.children[1].children[0];
+    const submenu = root.children[1].children[1];
+    const exchange = submenu.children[0].children[0];
+
+    assert.equal(root.className, 'sr-only');
+    assert.equal(root.getAttribute('role'), 'menu');
+    assert.equal(locked.getAttribute('aria-disabled'), 'true');
+    assert.equal(trade.getAttribute('aria-label'), 'Trade');
+    assert.equal(document.activeElement, trade);
+    menuKey(trade, 'End');
+    assert.equal(document.activeElement, root.children[2].children[0]);
+    assert.equal(trade.tabIndex, -1);
+    menuKey(root.children[2].children[0], 'Home');
+    assert.equal(document.activeElement, locked);
+    menuKey(locked, 'ArrowDown');
+    assert.equal(document.activeElement, trade);
+    menuKey(locked, 'Enter');
+    assert.deepEqual(selected, []);
+    menuKey(trade, 'ArrowRight');
+    assert.equal(submenu.hidden, false);
+    assert.equal(document.activeElement, exchange);
+    menuKey(exchange, 'ArrowLeft');
+    assert.equal(submenu.hidden, true);
+    assert.equal(document.activeElement, trade);
+    menuKey(trade, 'ArrowRight');
+    menuKey(exchange, 'Enter');
+    await Promise.resolve();
+    assert.deepEqual(selected, [[1, 0]]);
+    tree[1].children[0].name = 'Mutated outside the resident snapshot';
+    assert.equal(exchange.getAttribute('aria-label'), 'Exchange');
+
+    // Detached old nodes cannot keep or invoke a replaced resident closure.
+    ui.sourceMenuMirror([{ name: 'Failure', disabled: false, children: [] }], () => Promise.resolve().then(() => {
+        throw new Error('authoritative source failure');
+    }), callbacks);
+    menuKey(exchange, 'Enter');
+    assert.deepEqual(selected, [[1, 0]]);
+    const replacement = document.body.children[1];
+
+    menuKey(replacement.children[0].children[0], 'Enter');
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(errors, ['authoritative source failure']);
+    menuKey(replacement.children[0].children[0], 'Escape');
+    assert.equal(closed, 1);
+    assert.equal(document.body.children.length, 1);
+    assert.equal(document.activeElement, canvas);
+
+    ui.sourceMenuMirror(tree, (path) => selected.push(path), callbacks);
+    ui.bindings.cleanup('original');
+    assert.equal(document.body.children.length, 1);
+    ui.sourceMenuMirror(tree, (path) => selected.push(path), callbacks);
+    ui.dispose();
+    assert.equal(document.body.children.length, 1);
+    assert.equal(document.activeElement, canvas);
+});
+
+test('source submenu semantics follow native visibility without rebuilding or selecting a callback', () => {
+    const { document, canvas } = menuDocument();
+    const ui = createGameUI({ document, focusTarget: canvas });
+    let selected = 0;
+    const root = ui.sourceMenuMirror([
+        { name: 'Door', disabled: false, expanded: true, children: [{ name: 'Open Door', disabled: false }] },
+    ], () => selected++, { owner: 'source', onClose: noop, onError: noop });
+    const door = root.children[0].children[0];
+    const submenu = root.children[0].children[1];
+
+    try {
+        assert.equal(door.getAttribute('aria-expanded'), 'true');
+        assert.equal(submenu.hidden, false);
+        ui.sourceMenuVisibility([0], false);
+        assert.equal(door.getAttribute('aria-expanded'), 'false');
+        assert.equal(submenu.hidden, true);
+        ui.sourceMenuVisibility([0], true);
+        assert.equal(door.getAttribute('aria-expanded'), 'true');
+        assert.equal(submenu.hidden, false);
+        assert.equal(selected, 0);
+    } finally {
+        ui.dispose();
+    }
+});
+
+test('native null closure restores only menu-owned focus and Escape closes an in-flight selection', async () => {
+    const { document, canvas } = menuDocument();
+    const ui = createGameUI({ document, focusTarget: canvas });
+    const errors = [];
+    let closed = 0;
+    let finish;
+    const pending = new Promise((resolve) => {
+        finish = resolve;
+    });
+    const callbacks = {
+        owner: 'resident',
+        /**
+         * Record native close independently of a pending resident selection.
+         *
+         * @returns {number} Number of observed closes.
+         */
+        onClose: () => closed++,
+        /**
+         * Preserve authoritative failure feedback.
+         *
+         * @param {Error} error - Source callback failure.
+         * @returns {number} Number of recorded failures.
+         */
+        onError: (error) => errors.push(error.message),
+    };
+    const root = ui.sourceMenuMirror([{ name: 'Pending', disabled: false }], () => pending, callbacks);
+
+    menuKey(root.children[0].children[0], 'Enter');
+    menuKey(root.children[0].children[0], 'Escape');
+    assert.equal(closed, 1);
+    assert.equal(document.activeElement, canvas);
+    finish();
+    await pending;
+    ui.sourceMenuMirror([{ name: 'Throw', disabled: false }], () => {
+        throw new Error('synchronous source failure');
+    }, callbacks);
+    menuKey(document.body.children[1].children[0].children[0], 'Enter');
+    assert.deepEqual(errors, ['synchronous source failure']);
+    canvas.focus();
+    ui.sourceMenuMirror(null);
+    assert.equal(document.activeElement, canvas);
+    assert.equal(closed, 1);
+    assert.equal(document.body.children.length, 1);
+    ui.dispose();
+});
+
+test('real trimmed aliases share ownership and preserve native aspect, uniform and natural draw placement', () => {
+    let destroyed = 0;
+    const ui = uiFixture();
+    const b = ui.bindings;
+
+    ui.addTextures([{
+        path: 'Item_Authored', aliases: ['media/textures/Item_Authored.png'], width: 3, height: 4,
+        widthOrig: 5, heightOrig: 7, offsetX: 1, offsetY: 2,
+        /**
+         * Release one physical cropped image despite its two source aliases.
+         *
+         * @returns {number} Previous physical release count.
+         */
+        destroy: () => destroyed++,
+    }]);
+    const icon = b.call('texture', 'original', 'Item_Authored');
+
+    assert.equal(b.call('texture', 'original', 'media/textures/Item_Authored.png'), icon);
+    assert.deepEqual([icon.widthOrig, icon.heightOrig, icon.offsetX, icon.offsetY], [5, 7, 1, 2]);
+    const id = b.call('new', 'original', {});
+
+    b.call('add', 'original', id);
+    ui.setCallbacks(id, {
+        /** Draw native box-centered trim and native uniform trim-offset placement. */
+        render: () => {
+            b.call('element', 'original', id, 'DrawTextureScaledAspect', icon, 10, 20, 10, 14, 1, 1, 1, 0.5);
+            b.call('element', 'original', id, 'DrawTextureScaledUniform', icon, 30, 20, 2, 1, 1, 1, 1);
+        },
+    });
+    assert.deepEqual(ui.render().map(({ x, y, width, height }) => [x, y, width, height]), [
+        [12, 23, 6, 8], [32, 24, 6, 8],
+    ]);
+
+    const parent = b.call('new', 'original', {});
+
+    b.call('element', 'original', parent, 'setX', -4.75);
+    b.call('element', 'original', parent, 'setY', -3.25);
+    b.call('element', 'original', parent, 'setXScroll', 1.5);
+    b.call('element', 'original', parent, 'setYScroll', 0.75);
+    b.call('element', 'original', id, 'setX', 1.25);
+    b.call('element', 'original', id, 'setY', 1.5);
+    b.call('element', 'original', id, 'setXScroll', -2.25);
+    b.call('element', 'original', id, 'setYScroll', -1.25);
+    b.call('element', 'original', parent, 'AddChild', id);
+    b.call('add', 'original', parent);
+    ui.setCallbacks(id, {
+        /** Draw the actual crop at unscaled offsets, then truncate absolute-plus-scroll placement. */
+        render: () => {
+            b.call('element', 'original', id, 'DrawTexture', icon, 1.5, 0.75, 0.5);
+            b.call('element', 'original', id, 'DrawTextureColor', icon, 2.75, 1.25, 0.2, 0.4, 0.6, 0.75);
+        },
+    });
+    /* Child absolute origin=(-2,-1), own scroll=(-2.25,-1.25); natural offsets=(1,2).
+       The two source origins become (-1.75,0.5) and (-0.5,1), truncated toward zero. */
+    assert.deepEqual(ui.render().map(({ x, y, width, height, color }) => [x, y, width, height, color]), [
+        [-1, 0, 3, 4, { r: 1, g: 1, b: 1, a: 0.5 }],
+        [0, 1, 3, 4, { r: 0.2, g: 0.4, b: 0.6, a: 0.75 }],
+    ]);
+    assert.throws(() => ui.addTextures([{ path: 'Item_Invalid', width: 3, height: 4, widthOrig: 2, heightOrig: 7, offsetX: 1, offsetY: 0 }]), /trim/);
+    assert.equal(b.call('texture', 'original', 'Item_Invalid'), null);
+    ui.dispose();
+    assert.equal(destroyed, 1);
+});
+
+test('dynamic icon preparation refuses missing resolver and disposed resource owners', async () => {
+    const ui = uiFixture();
+
+    await assert.rejects(ui.ensureItemTextures([]), /resolver unavailable/);
+    ui.dispose();
+    await assert.rejects(ui.ensureItemTextures([]), /disposed/);
+});
+
+test('source translation substitutions retain exact catalog values and context scroll height and stacking are resident', () => {
+    const ui = uiFixture();
+    const b = ui.bindings;
+    const root = b.call('new', 'source', {});
+    const other = b.call('new', 'other', {});
+
+    b.call('add', 'source', root);
+    b.call('add', 'other', other);
+    b.call('element', 'source', root, 'setScrollHeight', 125);
+    assert.equal(b.call('element', 'source', root, 'getScrollHeight'), 125);
+    assert.equal(b.call('element', 'source', root, 'getIsVisible'), true);
+    assert.throws(() => b.call('element', 'source', root, 'setScrollHeight', -1), /negative/);
+    const order = [];
+
+    ui.setCallbacks(root, {
+        /** Observe original root ordering. */
+        render: () => {
+            order.push('source');
+        },
+    });
+    ui.setCallbacks(other, {
+        /** Observe original sibling ordering. */
+        render: () => {
+            order.push('other');
+        },
+    });
+    b.call('element', 'source', root, 'bringToTop');
+    ui.render();
+    assert.deepEqual(order, ['other', 'source']);
+    ui.dispose();
+
+    const textUI = createGameUI();
+
+    textUI.initialize({ textures: [{ path: 'atlas', width: 32, height: 16 }], font: { descriptor, atlasPath: 'atlas' }, translations: { instruction: 'Press %1; repeat %1.', 'Authored.Item': 'Authored source name' }, settings });
+    assert.equal(textUI.bindings.call('text', 'source', 'instruction', 'K'), 'Press K; repeat K.');
+    assert.equal(textUI.bindings.call('itemName', 'source', 'Authored.Item'), 'Authored source name');
+    assert.throws(() => textUI.bindings.call('itemName', 'source', 'Absent.Item'), /translation/);
+    textUI.dispose();
 });

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createEngine } from '../src/engine.js';
 import { createSaveStore, validateSave } from '../src/saves.js';
+import { completeActions, importPickupSquares } from './queue-test-helpers.js';
 
 /**
  * Sign a synthetic backup using the public file format, not store internals.
@@ -33,6 +34,7 @@ async function fixture() {
     engine.worldImportCell(0, 0, cells);
     engine.command({ type: 'moveTo', x: 24.5, y: 18.5 });
     engine.step(0.1);
+    importPickupSquares(engine, engine.snapshot().x, engine.snapshot().y);
     const payload = {
         format: 'pz-web-save', formatVersion: 1, id: 'test-save', revision: 1,
         engine: { abiVersion: 1, state: { version: 1, values: engine.saveState().values.slice(0, 10) } },
@@ -63,11 +65,11 @@ function encode(value) {
 }
 
 /**
- * Remove optional body exports or trap their native reader in the real module.
+ * Remove optional body/hand exports or trap their native reader in the real module.
  * Like engine.test.js's legacyModule fixture, only WASM sections are changed.
  *
  * @param {Uint8Array} bytes - Compiled engine module.
- * @param {'pre-body' | 'trap'} mode - Native capability or capture failure.
+ * @param {'pre-body' | 'trap' | 'pre-hand' | 'hand-trap'} mode - Native capability or capture failure.
  * @returns {Uint8Array} Independent native module fixture.
  */
 function bodyModule(bytes, mode) {
@@ -112,12 +114,13 @@ function bodyModule(bytes, mode) {
                 const kind = bytes[offset++];
                 const target = unsigned();
 
-                if (name === 'body_part_value' && kind === 0) {
+                if (name === (mode === 'hand-trap' ? 'hand_item_get' : 'body_part_value') && kind === 0) {
                     bodyReader = target;
                 }
 
-                if (mode !== 'pre-body' || !(name.startsWith('body_')
-                    || name === 'thermal_action_modifier' || name === 'set_injury_severity')) {
+                if ((mode !== 'pre-body' || !(name.startsWith('body_')
+                    || name === 'thermal_action_modifier' || name === 'set_injury_severity'))
+                && (mode !== 'pre-hand' || !name.startsWith('hand_item'))) {
                     entries.push(bytes.subarray(entry, offset));
                 }
             }
@@ -125,11 +128,11 @@ function bodyModule(bytes, mode) {
             const payload = [...encode(entries.length), ...entries.flatMap((entry) => [...entry])];
 
             output.push(id, ...encode(payload.length), ...payload);
-        } else if (id === 10 && mode === 'trap') {
+        } else if (id === 10 && (mode === 'trap' || mode === 'hand-trap')) {
             const count = unsigned();
             const payload = [...encode(count)];
 
-            assert.notEqual(bodyReader, undefined, 'fixture requires the native body reader export');
+            assert.notEqual(bodyReader, undefined, 'fixture requires the native capture reader export');
 
             /* createEngine instantiates without imports, so export function
                indices identify the corresponding code bodies directly. */
@@ -266,6 +269,7 @@ test('portable inventory preserves f32 pickup eligibility when pickup order diff
 
     for (const id of [ids[2], ids[0], ids[1]]) {
         engine.command({ type: 'pickup', id });
+        completeActions(engine);
     }
 
     const before = engine.inventoryState().capacityWeight;
@@ -276,8 +280,11 @@ test('portable inventory preserves f32 pickup eligibility when pickup order diff
     const restored = await store.restore(JSON.parse(await exported.text()));
 
     assert.equal(restored.engine.inventoryState().capacityWeight, before);
+    importPickupSquares(restored.engine, restored.engine.snapshot().x, restored.engine.snapshot().y);
     engine.command({ type: 'pickup', id: ids[3] });
+    completeActions(engine);
     restored.engine.command({ type: 'pickup', id: ids[3] });
+    completeActions(restored.engine);
     assert.equal(restored.engine.inventoryState().capacityWeight, engine.inventoryState().capacityWeight);
 });
 
@@ -293,6 +300,8 @@ test('portable inventory restores stable worn IDs and damaged condition without 
     const spawned = engine.command({ type: 'spawnItem', fullType: 'Synthetic.Sandals', x: actor.x, y: actor.y });
 
     engine.command({ type: 'pickup', id: spawned.id });
+    completeActions(engine);
+    engine.command({ type: 'moveTo', x: 24.5, y: 18.5 });
     engine.command({ type: 'wear', id: spawned.id });
     engine.command({ type: 'setCondition', id: spawned.id, condition: 1 });
     const cells = record.world.cells.map((cell) => ({
@@ -324,6 +333,7 @@ test('portable save restores tagged native handwear without a stored actor glove
     const id = engine.command({ type: 'spawnItem', fullType: 'Synthetic.Gloves', x: actor.x, y: actor.y }).id;
 
     engine.command({ type: 'pickup', id });
+    completeActions(engine);
     engine.command({ type: 'wear', id });
     assert.equal(engine.isWearingAwkwardGloves(), true);
     const cells = record.world.cells.map((cell) => ({
@@ -395,6 +405,8 @@ async function doorFixture() {
                 x, y, z: 0, roomId: x === 10 && y === 10 ? 7 : -1,
                 outside: !(x === 10 && y === 10), solid: false, solidTrans: false,
                 tree: false, independentWalls: 0, vehicleObstructed: false,
+                reachWalls: { north: false, west: false },
+                solidFloor: true,
             });
         }
     }
@@ -412,7 +424,9 @@ test('portable door state preserves unlocked closure and RNG after matching sour
     const { engine, store, rows, squares, cells } = await doorFixture();
 
     engine.toggleDoor(rows[0].id);
+    completeActions(engine);
     engine.toggleDoor(rows[0].id);
+    completeActions(engine);
     const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
 
     assert.equal(exported.formatVersion, 2);
@@ -430,6 +444,7 @@ test('portable door state preserves unlocked closure and RNG after matching sour
     assert.deepEqual(restored.engine.saveDoorState(), engine.saveDoorState());
     assert.throws(() => restored.engine.command({ type: 'walk', x: 0, y: -1 }), /blocked/u);
     restored.engine.toggleDoor(rows[0].id);
+    completeActions(restored.engine);
     restored.engine.command({ type: 'walk', x: 0, y: -1 });
     restored.engine.step(0.1);
     assert.ok(restored.engine.snapshot().y < 10.5, 'restored native portal changes actual movement');
@@ -645,4 +660,168 @@ test('native body capture traps propagate through save and live export instead o
     }));
 
     assert.deepEqual(engine.saveState(), before);
+});
+
+test('portable queue payload stages native progress after source geometry and rejects corrupt bytes atomically', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.command({ type: 'cancel' });
+    engine.registerItemDefinition({
+        fullType: 'Synthetic.Queue', bodyLocation: null,
+        conditionMax: 1, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0,
+        weight: 1,
+    }, { owner: 'test' });
+    const actor = engine.snapshot();
+    const id = engine.command({ type: 'spawnItem', fullType: 'Synthetic.Queue', x: actor.x, y: actor.y }).id;
+
+    engine.sourceTiming.setTrait('base:dextrous', true);
+    engine.actions.requestPickup(id);
+    engine.frameStep(1 / 60);
+    const state = engine.actions.getState();
+    const cells = record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: new Uint8Array(Buffer.from(cell.bytes, 'base64')),
+    }));
+    const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+
+    assert.equal(exported.queue.version, 1);
+    assert.equal(typeof exported.queue.bytes, 'string');
+    const restored = await store.restore(exported);
+
+    assert.equal(restored.engine.actions.getState().current, null, 'store does not restore actions before source identities');
+    importPickupSquares(restored.engine, actor.x, actor.y);
+    restored.engine.loadDoorState(restored.doorState);
+    restored.engine.loadQueueState(restored.queueState);
+    assert.deepEqual(restored.engine.actions.getState(), state);
+    const corrupt = restored.queueState.slice();
+
+    corrupt[0] ^= 255;
+    assert.throws(() => restored.engine.loadQueueState(corrupt));
+    assert.deepEqual(restored.engine.actions.getState(), state);
+    assert.equal(engine.items()[0].location, 'ground');
+    completeActions(restored.engine);
+    assert.equal(restored.engine.items()[0].id, id);
+    assert.equal(restored.engine.items()[0].location, 'inventory');
+    engine.sourceActions.setSaveHook(() => {
+        throw new Error('opaque source closure cannot be resumed');
+    });
+    await assert.rejects(() => store.exportLive(engine, { cells }), /opaque source closure/u);
+    assert.deepEqual(engine.actions.getState(), state);
+});
+
+test('portable queue source owners are canonical exact records and cannot claim SDK work', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.command({ type: 'cancel' });
+    const cells = record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: new Uint8Array(Buffer.from(cell.bytes, 'base64')),
+    }));
+    const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+
+    assert.deepEqual(exported.queue.sourceOwners, []);
+    const payload = structuredClone(exported);
+
+    delete payload.integrity;
+    payload.queue.sourceOwners = [{ actionId: 1, ownerId: 'pz-base-game' }, { actionId: 1, ownerId: 'other' }];
+    const duplicate = await signed(payload);
+
+    await assert.rejects(() => validateSave(duplicate), /owner mapping/u);
+    const accepted = engine.actions.requestWalk({ x: 7, y: 5, z: 0 });
+    const before = engine.actions.getState();
+
+    engine.sourceActions.setOwnerExport(() => [{ actionId: accepted.actionId, ownerId: 'pz-base-game' }]);
+    await assert.rejects(() => store.exportLive(engine, { cells }), /every native Lua action/u);
+    assert.deepEqual(engine.actions.getState(), before);
+});
+
+test('portable held refs restore MAX pairs before source code and malformed payloads keep the live session', async () => {
+    const { engine, record, store } = await fixture();
+    const definition = {
+        fullType: 'Base.HeldSave', conditionMax: 10, bodyLocation: null, stackLimit: 1,
+        removeOnBroken: true, conditionLowerChanceOneIn: 0, weight: 10, tags: [],
+    };
+
+    engine.registerItemDefinition(definition, { owner: 'base' });
+    const x = engine.snapshot().x;
+    const y = engine.snapshot().y;
+
+    engine.importItems([{
+        id: 0xFF_FF_FF_FF, fullType: definition.fullType, location: 'inventory',
+        x, y, condition: 10, count: 1, bodyLocation: null, weight: 10, actualWeight: 10,
+    }]);
+    engine.setHandItem('primary', 0xFF_FF_FF_FF);
+    engine.setHandItem('secondary', 0xFF_FF_FF_FF);
+    const exported = JSON.parse(await (await store.exportLive(engine, {
+        cells: [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }],
+        modState: record.modState,
+    })).text());
+    const restored = await store.restore(exported);
+
+    assert.deepEqual(exported.handState, { version: 1, primary: 0xFF_FF_FF_FF, secondary: 0xFF_FF_FF_FF });
+    assert.deepEqual(restored.engine.saveHandState(), engine.saveHandState());
+    assert.equal(restored.engine.inventoryState().capacityWeight, 3);
+    assert.equal(restored.engine.saveState().values.length, 12);
+    assert.deepEqual(restored.record.modState, record.modState);
+    const observed = [];
+
+    const observerErrors = [];
+
+    restored.engine.observeHandItems((event) => observed.push(event), (cause) => observerErrors.push(cause));
+    restored.engine.setHandItem('primary', 0xFF_FF_FF_FF);
+    assert.deepEqual(observed, [], 'source reassigning restored refs cannot replay OnEquip');
+    assert.deepEqual(observerErrors, []);
+    const tampered = structuredClone(exported);
+
+    tampered.handState.primary = null;
+    await assert.rejects(store.restore(tampered), /integrity/u);
+
+    /**
+     * Rejects one malformed pair without changing the live session.
+     *
+     * @param {object|null} handState - Candidate malformed held state.
+     * @returns {Promise<void>} Completes the rejection and live-state assertion.
+     */
+    const rejectHandState = async (handState) => {
+        const invalid = structuredClone(exported);
+
+        delete invalid.integrity;
+        invalid.handState = handState;
+        await assert.rejects(store.restore(await signed(invalid)), /hand/iu);
+        assert.deepEqual(engine.saveHandState(), exported.handState);
+    };
+
+    await rejectHandState(null);
+    await rejectHandState({});
+    await rejectHandState({ ...exported.handState, version: 2 });
+    await rejectHandState({ ...exported.handState, extra: true });
+    await rejectHandState({ ...exported.handState, primary: -1 });
+    await rejectHandState({ ...exported.handState, primary: 0x1_00_00_00_00 });
+    await rejectHandState({ ...exported.handState, secondary: 7 });
+
+    const absent = structuredClone(exported);
+
+    delete absent.integrity;
+    delete absent.handState;
+    assert.deepEqual((await store.restore(await signed(absent))).engine.getHandItems(), { primary: null, secondary: null });
+    assert.deepEqual((await store.restore(record)).engine.getHandItems(), { primary: null, secondary: null });
+});
+
+test('actual pre-hand ABI1 omits held state while native held-reader traps cannot be hidden', async () => {
+    const bytes = await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url));
+    const legacyBytes = bodyModule(bytes, 'pre-hand');
+    const legacy = await createEngine(legacyBytes);
+    const legacyStore = createSaveStore({ engineSource: legacyBytes, appVersion: 'test' });
+    const legacyRecord = JSON.parse(await (await legacyStore.exportLive(legacy)).text());
+
+    assert.equal(legacy.canSaveHandState(), false);
+    assert.equal(Object.hasOwn(legacyRecord, 'handState'), false);
+    assert.equal(Object.hasOwn((await legacyStore.restore(legacyRecord)).record, 'handState'), false);
+    assert.throws(() => legacy.getHandItems(), /unsupported/u);
+    const trapBytes = bodyModule(bytes, 'hand-trap');
+    const trap = await createEngine(trapBytes);
+    const trapStore = createSaveStore({ engineSource: trapBytes, appVersion: 'test' });
+
+    assert.equal(trap.canSaveHandState(), true);
+    assert.throws(() => trap.saveHandState(), WebAssembly.RuntimeError);
+    await assert.rejects(trapStore.exportLive(trap), WebAssembly.RuntimeError);
+    assert.throws(() => trapStore.save(trap), WebAssembly.RuntimeError);
 });

@@ -12,6 +12,20 @@ The optional external helper is `node scripts/provision-content.mjs --source INS
 
 The M1 picker-based evidence and contracts below are historical, not the current user workflow or M2 acceptance. Directory autoload is M2 work; this decision records no fresh browser proof and does not lower the full-game destination.
 
+## 2026-10-14 — Source-native queued actions and restoration
+
+One WASM queue owns walk/door/grab/get-up rows, stable action/group/item identities and timing. Original Lua actions remain resident under their exact initiating owner and run unchanged start/update/perform/stop callbacks; completion authorizes the native item/door mutation. Removing a FIFO row is not necessarily object retirement: an in-flight same-ID STOP reply still needs its resident source action.
+
+Public `actions.requestPickup(id)`, `requestDoor(stableId)` and `requestWalk({x,y,z})` return `{accepted,actionId,state}`, never completed-item/door state. `items.pickup` and `world.toggleDoor` use the same admission contract and precommit hooks. Compatible pickups can append groups to an existing Lua-origin action and return its ID. Original menu behavior is not rewritten to match SDK append: `createMenu` refuses speed 0, and source grab selection calls `luautils.walkAdj` without retaining the previous queue.
+
+The page advances one logical native frame per RAF, starting with elapsed 0; it does not drain a timed queue in a fixed-step catch-up loop. Public `time.set('multiplier',0)` freezes source timing without STOP. Manual pause/Escape and existing blur/visibility safety cancellation stop queued work; the automatic 30-second save freezes the session without cancellation.
+
+Optional integrity-covered version-1 `queue` stores native bytes and exact Lua action-to-owner mappings without changing envelope/actor format 2 or ABI 1. Restore stages entities/source geometry before the queue, hydrates genuine supported action classes, and binds supported original continuations after player startup but before publication/first tick. Missing owners, malformed state, unsupported actions and arbitrary nonportable closures refuse rather than inventing callbacks or discarding progress. Original restoration lifecycle details remain in COMPATIBILITY.md.
+
+Lua source-menu open/clear calls are void: discard `sourceMenuMirror`'s HTMLElement return before it reaches Wasmoon, while retaining the JavaScript UI API, callbacks and ownership. Forwarding that DOM graph caused the resolved door-context fault; the opaque-DOM original-source regression failed before/passed after, with no read-only review findings.
+
+Current browser acceptance includes original grabs/current+future groups with exact autosave/reload/completion, veto/FIFO, genuine original door/get-up/audio, 26-item groups20+6, Escape STOP and closed-edge refusal. The group transition retains the same started action/history, resets progress and uses the next group's raw duration. Actual correctly signed malformed-queue import preserved current/previous records and live state; Core-only layout, zero-argument OnPostSave commit ordering and owned STOP-failure safety are proven in STATUS.md. The smoke performed no save after the owned failure. All 13 full-game gates remain open. Engine/Lua share canonical 26-member `MOODLE_TYPES`; `normalItemIcon` follows genuine explicit-Icon/first-IconsForTexture initialization, not unimplemented visual/RNG variants.
+
 ## 2026-10-12 — Historical M1 integrated proof
 
 Historical scope: a technical prototype, not a playable port or fidelity claim. The full destination remains M0–M5 in ROADMAP.md. This increment imported real PNG gameplay imagery, rendered it through WebGPU, owned movement/action state in WASM, and loaded an ES-module mod that changed movement speed.

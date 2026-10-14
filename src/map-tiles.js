@@ -39,8 +39,9 @@ const INDEX_END = 12 + 1_024 * 8;
 /** @typedef {{size:number,slice:(start:number,end:number)=>{arrayBuffer:()=>Promise<ArrayBuffer>}}} MapSource */
 /** @typedef {{x:number,y:number,z:number,spriteName:string,roomId:number,order:number}} TilePlacement */
 /** @typedef {{id:number,name:string,z:number,rects:Array<{x:number,y:number,width:number,height:number}>}} MapRoom */
+/** @typedef {{id:number,roomIds:Array<number>}} MapBuilding */
 /** @typedef {{chunkX:number,chunkY:number,x:number,y:number,offset:number,byteLength:number,present:boolean}} MapChunk */
-/** @typedef {{cellX:number,cellY:number,cellSize:number,chunkSize:number,chunksPerAxis:number,minLevel:number,maxLevel:number,tileNames:Array<string>,rooms:Array<MapRoom>,chunks:Array<MapChunk>,readChunk:(chunkX:number,chunkY:number)=>Promise<TilePlacement[]>}} MapCell */
+/** @typedef {{cellX:number,cellY:number,cellSize:number,chunkSize:number,chunksPerAxis:number,minLevel:number,maxLevel:number,tileNames:Array<string>,rooms:Array<MapRoom>,buildings:Array<MapBuilding>,chunks:Array<MapChunk>,readChunk:(chunkX:number,chunkY:number)=>Promise<TilePlacement[]>}} MapCell */
 
 /**
  * Reject non-Blob-like sources before parsing.
@@ -285,9 +286,12 @@ export async function openMapCell({ cellX, cellY, header, lotpack }) {
     }
 
     const buildingCount = await count(h, 'buildings', MAX_NAMES);
+    const buildings = [];
+    const assignedRooms = new Set();
 
     for (let index = 0; index < buildingCount; index += 1) {
         const buildingRooms = await count(h, 'building rooms', roomCount);
+        const roomIds = [];
 
         for (let room = 0; room < buildingRooms; room += 1) {
             const id = await h.integer();
@@ -295,7 +299,16 @@ export async function openMapCell({ cellX, cellY, header, lotpack }) {
             if (id < 0 || id >= roomCount) {
                 throw new Error(`Invalid building room reference ${id}`);
             }
+
+            if (assignedRooms.has(id)) {
+                throw new Error(`Duplicate building room reference ${id}`);
+            }
+
+            assignedRooms.add(id);
+            roomIds.push(id);
         }
+
+        buildings.push(Object.freeze({ id: index, roomIds: Object.freeze(roomIds) }));
     }
 
     // Zombie intensities are not tile geometry.
@@ -434,6 +447,6 @@ export async function openMapCell({ cellX, cellY, header, lotpack }) {
         return placements;
     }
 
-    return Object.freeze({ cellX, cellY, cellSize: CELL_SIZE, chunkSize: CHUNK_SIZE, chunksPerAxis: CHUNKS_PER_AXIS, minLevel, maxLevel, tileNames: Object.freeze(tileNames), rooms: Object.freeze(rooms), chunks: Object.freeze(chunks), readChunk });
+    return Object.freeze({ cellX, cellY, cellSize: CELL_SIZE, chunkSize: CHUNK_SIZE, chunksPerAxis: CHUNKS_PER_AXIS, minLevel, maxLevel, tileNames: Object.freeze(tileNames), rooms: Object.freeze(rooms), buildings: Object.freeze(buildings), chunks: Object.freeze(chunks), readChunk });
 }
 /* eslint-enable no-await-in-loop */

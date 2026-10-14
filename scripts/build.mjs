@@ -27,6 +27,8 @@ const applicationFiles = [
     { source: 'src/lua-runtime.js', target: 'dist/src/lua-runtime.js' },
     { source: 'src/lua-requires.js', target: 'dist/src/lua-requires.js' },
     { source: 'src/native-mod-loader.js', target: 'dist/src/native-mod-loader.js' },
+    { source: 'src/native-world-context.js', target: 'dist/src/native-world-context.js' },
+    { source: 'src/source-files.js', target: 'dist/src/source-files.js' },
     { source: 'src/native-game-resources.js', target: 'dist/src/native-game-resources.js' },
     { source: 'src/item-definitions.js', target: 'dist/src/item-definitions.js' },
     { source: 'src/fbx.js', target: 'dist/src/fbx.js' },

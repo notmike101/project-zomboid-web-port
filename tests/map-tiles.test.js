@@ -36,14 +36,15 @@ function line(value) {
  * @param {number} [options.max] - Highest level.
  * @param {number} [options.version] - Header version.
  * @param {number} [options.width] - Chunk width.
+ * @param {number[][]} [options.buildings] - Cell-local room memberships.
  * @returns {Buffer} Complete header.
  */
-function header({ names = ['floor_0', 'wall_1'], min = -1, max = 1, version = 1, width = 8 } = {}) {
+function header({ names = ['floor_0', 'wall_1'], min = -1, max = 1, version = 1, width = 8, buildings = [[0]] } = {}) {
     return Buffer.concat([
         Buffer.from('LOTH'), int(version), int(names.length), ...names.map(line),
         int(width), int(8), int(min), int(max), int(1),
         line('test room'), int(0), int(1), int(2), int(3), int(4), int(5), int(0),
-        int(1), int(1), int(0), Buffer.alloc(1_024),
+        int(buildings.length), ...buildings.flatMap((roomIds) => [int(roomIds.length), ...roomIds.map(int)]), Buffer.alloc(1_024),
     ]);
 }
 
@@ -135,6 +136,22 @@ test('x-major chunks and squares preserve negative z, cross-level skip runs, sta
     ]);
     assert.deepEqual(await cell.readChunk(3, 1), []);
     assert.deepEqual(cell.rooms[0], { id: 0, name: 'test room', z: 0, rects: [{ x: 514, y: -765, width: 4, height: 5 }] });
+});
+
+// Dropping memberships, inventing an empty building, or accepting duplicate/missing rooms fails this check.
+test('preserves immutable actual building memberships and distinguishes a genuine zero-building header', async () => {
+    const bytes = pack(new Map());
+    const map = await open(bytes);
+
+    assert.deepEqual(map.buildings, [{ id: 0, roomIds: [0] }]);
+    assert.throws(() => map.buildings[0].roomIds.push(0), TypeError);
+    assert.throws(() => {
+        map.buildings[0].id = 7;
+    }, TypeError);
+    assert.throws(() => map.buildings.push({ id: 1, roomIds: [] }), TypeError);
+    assert.deepEqual((await open(bytes, header({ buildings: [] }))).buildings, []);
+    await assert.rejects(open(bytes, header({ buildings: [[1]] })), /building room reference/iu);
+    await assert.rejects(open(bytes, header({ buildings: [[0], [0]] })), /duplicate.*building room/iu);
 });
 
 // Catches eager body reads and accidental whole-file buffering.

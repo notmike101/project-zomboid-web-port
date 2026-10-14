@@ -25,8 +25,10 @@
 
 use std::cell::RefCell;
 
+mod actions;
 mod body;
 mod doors;
+mod timing;
 
 /// Engine ABI version; the host refuses any other value.
 const API_VERSION: u32 = 1;
@@ -977,6 +979,8 @@ pub extern "C" fn reset() {
     ITEMS.with(|items| items.borrow_mut().reset());
     moodle_reset();
     body::reset();
+    timing::reset();
+    actions::full_reset();
 }
 
 /// Sets movement speed in world units per second; only [0.1, 10] is accepted.
@@ -1001,6 +1005,13 @@ pub extern "C" fn set_speed(speed: f64) -> i32 {
 /// clamped. A destination equal to the current position is already reached.
 #[unsafe(no_mangle)]
 pub extern "C" fn move_to(x: f64, y: f64) -> i32 {
+    let status = move_to_internal(x, y);
+    if status == OK {
+        return actions::movement_requested();
+    }
+    status
+}
+fn move_to_internal(x: f64, y: f64) -> i32 {
     if !x.is_finite() || !y.is_finite() {
         return NONFINITE;
     }
@@ -1082,40 +1093,58 @@ pub extern "C" fn walk(x: f64, y: f64) -> i32 {
             return BLOCKED;
         }
     }
+    let queue_status = actions::movement_requested();
     clear_world_path();
     mutate(|engine| {
         engine.heading_x = unit_x;
         engine.heading_y = unit_y;
         engine.action = ACTION_WALKING;
-        OK
-    })
+    });
+    queue_status
 }
 /// Cancels any destination or heading, leaving the current position intact.
 #[unsafe(no_mangle)]
 pub extern "C" fn cancel() {
+    // ABI1 is deliberately void. Source-aware callers precheck queue_clear's
+    // typed result and still invoke this hard primitive cancellation in finally.
+    // This is the sole compatibility boundary that cannot return callback errors.
+    let _ = actions::cancel_queue();
     clear_world_path();
     mutate(|engine| engine.cancel());
 }
-/// Advances the simulation by `dt` seconds. Only (0, 0.1] is accepted; the
-/// tick counter moves only on an accepted step.
+/// Advances one logical source frame; movement time accepts [0, 0.1].
 #[unsafe(no_mangle)]
 pub extern "C" fn step(dt: f64) -> i32 {
     if !dt.is_finite() {
         return NONFINITE;
     }
-    if dt <= 0.0 {
+    if !(0.0..=MAX_STEP_SECONDS).contains(&dt) {
         return OUT_OF_RANGE;
     }
-    if dt > MAX_STEP_SECONDS {
+    advance_frame(dt, dt)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn frame_step(raw_elapsed_seconds: f64) -> i32 {
+    if !raw_elapsed_seconds.is_finite() {
+        return NONFINITE;
+    }
+    if raw_elapsed_seconds < 0.0 {
         return OUT_OF_RANGE;
     }
+    advance_frame(
+        raw_elapsed_seconds.min(MAX_STEP_SECONDS),
+        raw_elapsed_seconds,
+    )
+}
+fn advance_frame(movement: f64, raw: f64) -> i32 {
+    timing::frame(raw);
     mutate(|engine| {
         // ponytail: wraps after ~2.3 years at 60 Hz; reset() re-zeroes it.
         engine.tick = engine.tick.wrapping_add(1);
-        engine.advance(dt as f32);
+        engine.advance(movement as f32);
         MOODLES.with(|state| state.borrow_mut().advance(engine.health));
-        OK
-    })
+    });
+    actions::frame()
 }
 
 #[unsafe(no_mangle)]
@@ -1249,6 +1278,7 @@ pub extern "C" fn world_import_chunk(
             // A replaced cell invalidates any prior route. Never leave a
             // destination active with an empty path (an illegal direct leg).
             mutate(|engine| engine.cancel());
+            actions::invalidate();
         } else {
             world.staging = Some((cell_x, cell_y, index + 1, cell));
         }
@@ -1261,6 +1291,7 @@ pub extern "C" fn world_import_chunk(
 /// use reset() to also restore the initial actor state.
 #[unsafe(no_mangle)]
 pub extern "C" fn world_reset() {
+    actions::invalidate();
     WORLD.with(|world| {
         let mut world = world.borrow_mut();
         world.cells.clear();
@@ -1434,6 +1465,7 @@ pub extern "C" fn state_load(values: *const f64) -> i32 {
         world.path = path;
         world.path_index = 0;
     });
+    actions::invalidate();
     mutate(|engine| {
         engine.x = x as f32;
         engine.y = y as f32;
@@ -1495,6 +1527,9 @@ struct Items {
     staged: Vec<Item>,
     importing: bool,
     last_id: u32,
+    hands_slot: u32,
+    transaction_hands_slot: u32,
+    held: [u32; 2],
 }
 
 impl Items {
@@ -1509,6 +1544,9 @@ impl Items {
             staged: Vec::with_capacity(MAX_ITEMS),
             importing: false,
             last_id: 0,
+            hands_slot: 0,
+            transaction_hands_slot: 0,
+            held: [0; 2],
         }
     }
 
@@ -1522,6 +1560,9 @@ impl Items {
         self.staged.clear();
         self.importing = false;
         self.last_id = 0;
+        self.hands_slot = 0;
+        self.transaction_hands_slot = 0;
+        self.held = [0; 2];
     }
 
     fn valid(&self, item: &Item) -> bool {
@@ -1544,19 +1585,88 @@ impl Items {
             && (item.location == 1 || item_position_valid(item.x, item.y))
     }
 
+    fn valid_held(&self, id: u32) -> bool {
+        id == 0
+            || self
+                .live
+                .iter()
+                .any(|item| item.id == id && item.location == 1 && self.valid(item))
+    }
+
+    fn clear_held(&mut self, id: u32) {
+        for held in &mut self.held {
+            if *held == id {
+                *held = 0;
+            }
+        }
+    }
+
     fn capacity_weight(&self) -> f32 {
         // Live row order preserves native inventory insertion order on pickup.
         self.live
             .iter()
             .filter(|item| item.location == 1)
             .fold(0.0, |sum, item| {
-                sum + if item.slot == 0 {
+                sum + if item.slot == 0 && !self.held.contains(&item.id) {
                     item.actual_weight
                 } else {
                     item.actual_weight * 0.3
                 }
             })
     }
+}
+
+/// Exact f64 IDs avoid signed i32 aliases at the JS/WASM boundary; zero is nil.
+#[unsafe(no_mangle)]
+pub extern "C" fn hand_item_get(slot: u32) -> f64 {
+    ITEMS.with(|items| {
+        items
+            .borrow()
+            .held
+            .get(slot as usize)
+            .copied()
+            .map(f64::from)
+            .unwrap_or(-1.0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn hand_item_set(slot: u32, id: u32) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if slot > 1 || items.importing || items.transaction_owner != 0 || !items.valid_held(id) {
+            return OUT_OF_RANGE;
+        }
+        items.held[slot as usize] = id;
+        OK
+    })
+}
+
+/// Silent all-or-nothing restore, after definitions and complete live items.
+#[unsafe(no_mangle)]
+pub extern "C" fn hand_items_restore(primary: u32, secondary: u32) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if items.importing
+            || items.transaction_owner != 0
+            || !items.valid_held(primary)
+            || !items.valid_held(secondary)
+        {
+            return OUT_OF_RANGE;
+        }
+        items.held = [primary, secondary];
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn source_hands_slot_set(slot: u32) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        // The private host supplies its canonical named-slot interner token;
+        // that registry token outlives definition rollback just as in JS.
+        items.hands_slot = slot;
+        OK
+    })
 }
 
 thread_local! {
@@ -1716,6 +1826,7 @@ pub extern "C" fn item_definition_begin(owner: u32) -> i32 {
         }
         items.transaction_owner = owner;
         items.transaction_start = items.definitions.len();
+        items.transaction_hands_slot = items.hands_slot;
         items.journal.clear();
         OK
     })
@@ -1747,6 +1858,8 @@ pub extern "C" fn item_definition_rollback(owner: u32) -> i32 {
         let start = items.transaction_start;
         items.definitions.truncate(start);
         items.transaction_owner = 0;
+        items.hands_slot = items.transaction_hands_slot;
+        actions::invalidate();
         OK
     })
 }
@@ -1769,6 +1882,23 @@ pub extern "C" fn item_count() -> u32 {
 }
 
 /// Scratch: id, definition ordinal, location, x, y, condition, count, worn slot, weight, actualWeight.
+fn write_item(item: &Item) {
+    SCRATCH.with(|scratch| {
+        scratch.borrow_mut()[..10].copy_from_slice(&[
+            item.id as f64,
+            item.definition as f64,
+            item.location as f64,
+            item.x,
+            item.y,
+            item.condition as f64,
+            item.count as f64,
+            item.slot as f64,
+            item.weight as f64,
+            item.actual_weight as f64,
+        ]);
+    });
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn item_read(index: u32) -> i32 {
     ITEMS.with(|items| {
@@ -1776,22 +1906,55 @@ pub extern "C" fn item_read(index: u32) -> i32 {
         let Some(item) = items.live.get(index as usize) else {
             return OUT_OF_RANGE;
         };
-        SCRATCH.with(|scratch| {
-            let mut scratch = scratch.borrow_mut();
-            scratch[..10].copy_from_slice(&[
-                item.id as f64,
-                item.definition as f64,
-                item.location as f64,
-                item.x,
-                item.y,
-                item.condition as f64,
-                item.count as f64,
-                item.slot as f64,
-                item.weight as f64,
-                item.actual_weight as f64,
-            ]);
-        });
+        write_item(item);
         OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_read_id(id: u32) -> i32 {
+    ITEMS.with(|items| {
+        let items = items.borrow();
+        let Some(item) = items.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        write_item(item);
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn source_world_item_count(x: i32, y: i32, z: i32) -> u32 {
+    ITEMS.with(|items| {
+        items
+            .borrow()
+            .live
+            .iter()
+            .filter(|item| {
+                z == 0
+                    && item.location == 0
+                    && item.x.floor() == x as f64
+                    && item.y.floor() == y as f64
+            })
+            .count() as u32
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn source_world_item_get(x: i32, y: i32, z: i32, index: u32) -> f64 {
+    ITEMS.with(|items| {
+        items
+            .borrow()
+            .live
+            .iter()
+            .filter(|item| {
+                z == 0
+                    && item.location == 0
+                    && item.x.floor() == x as f64
+                    && item.y.floor() == y as f64
+            })
+            .nth(index as usize)
+            .map_or(OUT_OF_RANGE as f64, |item| item.id as f64)
     })
 }
 
@@ -1841,22 +2004,7 @@ pub extern "C" fn item_spawn(definition: u32, x: f64, y: f64, count: u32, condit
 
 #[unsafe(no_mangle)]
 pub extern "C" fn item_pickup(id: u32) -> i32 {
-    let actor = ENGINE.with(|engine| *engine.borrow());
-    change_item(id, |items, index| {
-        let item = items.live[index];
-        // Project adjacency radius 1.5 tiles; not a native interaction claim.
-        if item.location != 0
-            || (item.x - actor.x as f64).hypot(item.y - actor.y as f64) > 1.5
-            || floating_point_correction(items.capacity_weight()) + item.actual_weight
-                > INVENTORY_CAPACITY
-        {
-            return OUT_OF_RANGE;
-        }
-        let mut item = items.live.remove(index);
-        item.location = 1;
-        items.live.push(item);
-        OK
-    })
+    actions::queue_request_pickup(id)
 }
 
 fn change_item(id: u32, change: impl FnOnce(&mut Items, usize) -> i32) -> i32 {
@@ -1933,6 +2081,7 @@ pub extern "C" fn item_drop(id: u32, x: f64, y: f64) -> i32 {
         item.slot = 0;
         item.x = x;
         item.y = y;
+        items.clear_held(id);
         OK
     })
 }
@@ -1946,6 +2095,7 @@ pub extern "C" fn item_set_condition(id: u32, condition: i32) -> i32 {
         }
         if condition == 0 && definition.remove_on_broken {
             items.live.remove(index);
+            items.clear_held(id);
         } else {
             items.live[index].condition = condition;
         }
@@ -2070,7 +2220,9 @@ pub extern "C" fn item_import_commit() -> i32 {
         std::mem::swap(live, staged);
         items.staged.clear();
         items.importing = false;
+        items.held = [0; 2];
         mutate(|engine| engine.next_item_id = engine.next_item_id.max(next));
+        actions::invalidate();
         OK
     })
 }
@@ -2096,6 +2248,7 @@ pub extern "C" fn set_health(health: f64) -> i32 {
     mutate(|engine| engine.health = health);
     if health == 0.0 {
         MOODLES.with(|state| state.borrow_mut().pain_level = 0);
+        actions::invalidate();
     }
     OK
 }
@@ -2105,6 +2258,58 @@ mod tests {
     use super::*;
 
     const DT: f64 = 1.0 / 60.0;
+
+    #[test]
+    fn held_items_preserve_full_ids_validate_pairs_and_clear_removed_refs() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 10, 1, 1, 1, 1, 0, 10.0, 0),
+            OK
+        );
+        assert_eq!(item_import_begin(), OK);
+        assert_eq!(
+            item_import_stage(u32::MAX, 0, 1, 5.0, 5.0, 10, 1, 0, 10.0, 10.0),
+            OK
+        );
+        assert_eq!(
+            item_import_stage(1, 0, 0, 5.0, 5.0, 10, 1, 0, 10.0, 10.0),
+            OK
+        );
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(hand_item_set(0, u32::MAX), OK);
+        assert_eq!(hand_item_set(1, u32::MAX), OK);
+        assert_eq!(hand_item_get(0), u32::MAX as f64);
+        assert_eq!(hand_item_set(0, u32::MAX), OK);
+        assert_eq!(hand_item_set(2, 0), OUT_OF_RANGE);
+        assert_eq!(hand_items_restore(0, 1), OUT_OF_RANGE);
+        assert_eq!(hand_item_get(0), u32::MAX as f64);
+        assert_eq!(hand_item_get(1), u32::MAX as f64);
+        assert_eq!(item_definition_begin(1), OK);
+        assert_eq!(hand_item_set(0, 0), OUT_OF_RANGE);
+        assert_eq!(hand_items_restore(0, 0), OUT_OF_RANGE);
+        assert_eq!(item_definition_rollback(1), OK);
+        assert_eq!(hand_item_get(0), u32::MAX as f64);
+        assert_eq!(ITEMS.with(|items| items.borrow().capacity_weight()), 3.0);
+        assert_eq!(item_drop(u32::MAX, f64::NAN, 5.0), NONFINITE);
+        assert_eq!(hand_item_get(0), u32::MAX as f64);
+        assert_eq!(item_drop(u32::MAX, 5.0, 5.0), OK);
+        assert_eq!(hand_item_get(0), 0.0);
+        assert_eq!(hand_item_get(1), 0.0);
+        assert_eq!(hand_items_restore(u32::MAX, 0), OUT_OF_RANGE);
+        assert_eq!(item_import_begin(), OK);
+        assert_eq!(
+            item_import_stage(u32::MAX, 0, 1, 5.0, 5.0, 10, 1, 0, 10.0, 10.0),
+            OK
+        );
+        assert_eq!(hand_item_set(0, 0), OUT_OF_RANGE);
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(hand_items_restore(u32::MAX, u32::MAX), OK);
+        assert_eq!(item_set_condition(u32::MAX, 0), OK);
+        assert_eq!(hand_item_get(0), 0.0);
+        assert_eq!(hand_item_get(1), 0.0);
+        reset();
+        assert_eq!(hand_item_get(0), 0.0);
+    }
 
     fn near(actual: f32, expected: f32) -> bool {
         (actual - expected).abs() < 1.0e-4
@@ -2300,7 +2505,6 @@ mod tests {
         assert_eq!(set_speed(0.05), OUT_OF_RANGE);
         assert_eq!(set_speed(10.5), OUT_OF_RANGE);
         assert_eq!(set_speed(f64::NAN), NONFINITE);
-        assert_eq!(step(0.0), OUT_OF_RANGE);
         assert_eq!(step(-DT), OUT_OF_RANGE);
         assert_eq!(step(0.11), OUT_OF_RANGE);
         assert_eq!(step(f64::NAN), NONFINITE);
@@ -2312,11 +2516,12 @@ mod tests {
     }
 
     #[test]
-    fn step_window_is_half_open_and_bounded_above() {
+    fn step_window_includes_zero_and_is_bounded_above() {
         reset();
+        assert_eq!(step(0.0), OK);
         assert_eq!(step(1.0e-9), OK);
         assert_eq!(step(MAX_STEP_SECONDS), OK);
-        assert_eq!(tick(), 2);
+        assert_eq!(tick(), 3);
     }
 
     #[test]

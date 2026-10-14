@@ -1,5 +1,7 @@
-// Semantic original-game UI on the existing canvas. No DOM or alternate renderer.
+// Original-game canvas widgets, with accessibility-only DOM semantics for source menus.
 const SMALL = 'Small';
+// Identifiers never alias elements in a replacement UI session.
+let nextUIElementID = 1;
 
 /**
  * Normalized, straight-alpha UI tint.
@@ -14,7 +16,7 @@ const SMALL = 'Small';
 /**
  * Imported UI image owned by one initialized session.
  *
- * @typedef {{path:string,width:number,height:number,texture?:GPUTexture,destroy?:()=>void}} UITexture
+ * @typedef {{path:string,aliases?:string[],width:number,height:number,widthOrig?:number,heightOrig?:number,offsetX?:number,offsetY?:number,texture?:GPUTexture,destroy?:()=>void}} UITexture
  */
 /**
  * Bitmap glyph placement and advance from the original descriptor.
@@ -32,14 +34,14 @@ const SMALL = 'Small';
  * @typedef {{moodleSize:number,fontSizeReal:number,lockFPS:number,gray:UIColor,goodHighlight:UIColor,badHighlight:UIColor}} UISettings
  */
 /**
- * Lua lifecycle and input hooks; truthy input results consume the event.
+ * Lua lifecycle and input hooks; nil input uses the element flag and explicit false declines.
  *
  * @typedef {{update?:()=>void,prerender?:()=>void,render?:()=>void,input?:(name:string,...args:number[])=>unknown}} UICallbacks
  */
 /**
  * Session-local semantic element and its layout/input state.
  *
- * @typedef {{id:number,owner:string,x:number,y:number,width:number,height:number,scrollX:number,scrollY:number,visible:boolean,enabled:boolean,removed:boolean,parent:number|null,children:number[],callbacks:UICallbacks,anchorLeft:boolean,anchorRight:boolean,anchorTop:boolean,anchorBottom:boolean,wantKeyEvents:boolean,consumeMouseEvents:boolean,wantExtraMouseEvents:boolean,forceCursorVisible:boolean,alwaysOnTop:boolean,stencil:UIRect|null,stencilSuspended?:boolean}} UIElement
+ * @typedef {{id:number,owner:string,x:number,y:number,width:number,height:number,scrollHeight:number,scrollX:number,scrollY:number,visible:boolean,enabled:boolean,removed:boolean,parent:number|null,children:number[],callbacks:UICallbacks,anchorLeft:boolean,anchorRight:boolean,anchorTop:boolean,anchorBottom:boolean,wantKeyEvents:boolean,consumeMouseEvents:boolean,wantExtraMouseEvents:boolean,forceCursorVisible:boolean,alwaysOnTop:boolean,stencil:UIRect|null,stencilSuspended?:boolean}} UIElement
  */
 /**
  * One clipped, tinted textured or solid quad for immediate GPU submission.
@@ -78,6 +80,48 @@ function extent(value, name) {
 }
 
 /**
+ * Validate actual image aliases and optional native packed-sprite trim.
+ *
+ * @param {UITexture[]} entries - Newly uploaded images.
+ * @param {Map<string,UITexture>} previous - Existing owned alias map.
+ * @returns {Map<string,UITexture>} Independent map; ownership transfers only when committed.
+ */
+function textureMap(entries, previous) {
+    const loaded = new Map(previous);
+
+    for (const t of entries) {
+        if (!t || typeof t.path !== 'string' || (t.aliases !== undefined && !Array.isArray(t.aliases))) {
+            throw new Error('Invalid UI texture aliases');
+        }
+
+        extent(t.width, 'texture width');
+        extent(t.height, 'texture height');
+        const widthOrig = extent(t.widthOrig ?? t.width, 'original texture width');
+        const heightOrig = extent(t.heightOrig ?? t.height, 'original texture height');
+        const offsetX = finite(t.offsetX ?? 0, 'texture offset X');
+        const offsetY = finite(t.offsetY ?? 0, 'texture offset Y');
+
+        if (offsetX < 0 || offsetY < 0 || offsetX + t.width > widthOrig || offsetY + t.height > heightOrig) {
+            throw new Error('Invalid original texture trim geometry');
+        }
+
+        const aliases = new Set([t.path, ...(t.aliases ?? [])]);
+
+        const prepared = Object.freeze({ ...t, aliases: Object.freeze([...aliases]), widthOrig, heightOrig, offsetX, offsetY });
+
+        for (const path of aliases) {
+            if (typeof path !== 'string' || !path || loaded.has(path)) {
+                throw new Error('Duplicate/invalid UI texture path');
+            }
+
+            loaded.set(path, prepared);
+        }
+    }
+
+    return loaded;
+}
+
+/**
  * Validate and copy normalized RGBA components.
  *
  * @param {UIColor} value - Candidate color.
@@ -103,6 +147,52 @@ function intersection(a, b) {
     const y = Math.max(a.y, b.y);
 
     return { x, y, width: Math.max(0, Math.min(a.x + a.width, b.x + b.width) - x), height: Math.max(0, Math.min(a.y + a.height, b.y + b.height) - y) };
+}
+
+/**
+ * Measure text and optionally visit glyphs using advances and pair kerning.
+ *
+ * @param {UIFont} font - Chosen source font.
+ * @param {string} text - Bounded text containing supported font glyphs.
+ * @param {(glyph:UIGlyph,x:number,y:number)=>void} [draw] - Receives each glyph at its pen position.
+ * @returns {{width:number,height:number}} Text extent in font pixels.
+ */
+function layout(font, text, draw) {
+    if (typeof text !== 'string' || text.length > 65_536) {
+        throw new TypeError('UI text must be a bounded string');
+    }
+
+    let x = 0;
+    let y = 0;
+    let max = 0;
+    let previous;
+
+    for (const char of text.replaceAll('\r\n', '\n')) {
+        if (char === '\n') {
+            max = Math.max(max, x);
+            x = 0;
+            y += font.lineHeight;
+            previous = undefined;
+            continue;
+        }
+
+        const id = char.codePointAt(0);
+        const glyph = font.glyphs.get(id);
+
+        if (!glyph) {
+            throw new Error(`Unsupported font glyph U+${id.toString(16)}`);
+        }
+
+        if (previous !== undefined) {
+            x += font.kernings.get(`${previous}:${id}`) ?? 0;
+        }
+
+        draw?.(glyph, x, y);
+        x += glyph.xadvance;
+        previous = id;
+    }
+
+    return { width: Math.max(max, x), height: y + font.lineHeight };
 }
 
 /**
@@ -238,23 +328,25 @@ function parseBitmapFont(text) {
  * Own one isolated Lua UI session. Resource ownership transfers only after initialize succeeds.
  * Commands are reused each render; consumers must submit them before the next render.
  *
- * @param {{viewport?:()=>{width:number,height:number},mouse?:()=>{x:number,y:number},onDispose?:()=>void}} [options] - Host canvas bounds/input and ownership release.
+ * @param {{viewport?:()=>{width:number,height:number},mouse?:()=>{x:number,y:number},document?:Document,focusTarget?:HTMLElement,onDispose?:()=>void}} [options] - Canvas bounds/input, semantic DOM host and ownership release.
  * @returns {object} Semantic tree, native bindings, input, draw collection and disposal.
  */
 function createGameUI(options = {}) {
     const elements = new Map();
     const roots = [];
     const commands = [];
-    let nextID = 1;
+    const playerUI = { playerInventory: [null, null], playerInventoryTooltip: [null, null] };
     let textures = new Map();
     let indexedTextures = new Set();
-    let font;
-    let atlas;
+    let fonts = new Map();
     let translations;
     let settings;
     let disposed = false;
     let viewport = null;
     let mouse = { x: -1, y: -1 };
+    let sourceMenu = null;
+    let loadItemTextures = null;
+    let itemPreparation = Promise.resolve();
 
     /**
      * Reject operations after this session has released its resources.
@@ -271,7 +363,7 @@ function createGameUI(options = {}) {
     function ready() {
         live();
 
-        if (!font) {
+        if (!fonts.size) {
             throw new Error('Unsupported UI capability: resources are not initialized');
         }
     }
@@ -377,60 +469,16 @@ function createGameUI(options = {}) {
     }
 
     /**
-     * Measure text and optionally visit glyphs using advances and pair kerning.
+     * Resolve an explicitly loaded original font, defaulting to Small.
      *
-     * @param {string} text - Bounded text containing supported font glyphs.
-     * @param {(glyph:UIGlyph,x:number,y:number)=>void} [draw] - Receives each glyph at its pen position.
-     * @returns {{width:number,height:number}} Text extent in font pixels.
-     */
-    function layout(text, draw) {
-        if (typeof text !== 'string' || text.length > 65_536) {
-            throw new TypeError('UI text must be a bounded string');
-        }
-
-        let x = 0;
-        let y = 0;
-        let max = 0;
-        let previous;
-
-        for (const char of text.replaceAll('\r\n', '\n')) {
-            if (char === '\n') {
-                max = Math.max(max, x);
-                x = 0;
-                y += font.lineHeight;
-                previous = undefined;
-                continue;
-            }
-
-            const id = char.codePointAt(0);
-            const glyph = font.glyphs.get(id);
-
-            if (!glyph) {
-                throw new Error(`Unsupported font glyph U+${id.toString(16)}`);
-            }
-
-            if (previous !== undefined) {
-                x += font.kernings.get(`${previous}:${id}`) ?? 0;
-            }
-
-            draw?.(glyph, x, y);
-            x += glyph.xadvance;
-            previous = id;
-        }
-
-        return { width: Math.max(max, x), height: y + font.lineHeight };
-    }
-
-    /**
-     * Resolve the supported Small font after resource initialization.
-     *
-     * @param {string|null|undefined} token - Small, or an omitted/default font selector.
-     * @returns {UIFont} Initialized bitmap font.
+     * @param {string|null|undefined} token - Original font enum name.
+     * @returns {UIFont & {atlas:UITexture}} Initialized bitmap font and atlas.
      */
     function getFont(token) {
         ready();
+        const font = fonts.get(token ?? SMALL);
 
-        if (token !== SMALL && token !== null && token !== undefined) {
+        if (!font) {
             throw new Error(`Unsupported font ${token}`);
         }
 
@@ -484,6 +532,26 @@ function createGameUI(options = {}) {
     }
 
     /**
+     * Native renderi converts absolute positions and trim dimensions toward zero.
+     *
+     * @param {UIElement} e - Drawing element.
+     * @param {UITexture} texture - Actual source texture.
+     * @param {number} x - Relative origin X.
+     * @param {number} y - Relative origin Y.
+     * @param {number} width - Trimmed draw width.
+     * @param {number} height - Trimmed draw height.
+     * @param {...number} color - Native normalized RGBA.
+     */
+    function integerQuad(e, texture, x, y, width, height, ...color) {
+        const p = position(e);
+
+        quad(e, texture,
+            Math.trunc(p.x + e.scrollX + finite(x, 'draw X')) - p.x - e.scrollX,
+            Math.trunc(p.y + e.scrollY + finite(y, 'draw Y')) - p.y - e.scrollY,
+            Math.trunc(finite(width, 'draw width')), Math.trunc(finite(height, 'draw height')), ...color);
+    }
+
+    /**
      * Look up an element owned by this live session.
      *
      * @param {number} id - Session-local identifier.
@@ -498,6 +566,58 @@ function createGameUI(options = {}) {
         }
 
         return e;
+    }
+
+    /**
+     * Resolve an actual, attached-or-new UIElement for the calling player UI owner.
+     *
+     * @param {number|null|undefined} id - Actual native identifier, or Lua nil.
+     * @param {string} owner - Calling package identifier.
+     * @returns {UIElement|null} Authenticated registry reference without copying.
+     */
+    function playerElement(id, owner) {
+        if (id === null || id === undefined) {
+            return null;
+        }
+
+        if (!Number.isSafeInteger(id) || id <= 0) {
+            throw new TypeError('Player UI requires an actual UI element identifier');
+        }
+
+        const e = element(id);
+
+        if (e.owner !== owner) {
+            throw new Error('Player UI element belongs to another owner');
+        }
+
+        for (let parent = e; parent; parent = parent.parent ? element(parent.parent) : null) {
+            if (parent.removed) {
+                throw new Error('Player UI element is removed');
+            }
+        }
+
+        return e;
+    }
+
+    /**
+     * Release player references before detaching an element or its descendants.
+     *
+     * @param {UIElement} e - Registry element being removed.
+     */
+    function clearPlayerElement(e) {
+        for (const pair of [playerUI.playerInventory, playerUI.playerInventoryTooltip]) {
+            if (pair[0] === e) {
+                pair[0] = null;
+            }
+
+            if (pair[1] === e) {
+                pair[1] = null;
+            }
+        }
+
+        for (const id of e.children) {
+            clearPlayerElement(element(id));
+        }
     }
 
     /**
@@ -543,7 +663,7 @@ function createGameUI(options = {}) {
      */
     function method(id, name, ...args) {
         const e = element(id);
-        const property = { X: 'x', Y: 'y', Width: 'width', Height: 'height', XScroll: 'scrollX', YScroll: 'scrollY', AnchorLeft: 'anchorLeft', AnchorRight: 'anchorRight', AnchorTop: 'anchorTop', AnchorBottom: 'anchorBottom', Visible: 'visible', Enabled: 'enabled', WantKeyEvents: 'wantKeyEvents', ConsumeMouseEvents: 'consumeMouseEvents', WantExtraMouseEvents: 'wantExtraMouseEvents', ForceCursorVisible: 'forceCursorVisible', AlwaysOnTop: 'alwaysOnTop' };
+        const property = { X: 'x', Y: 'y', Width: 'width', Height: 'height', ScrollHeight: 'scrollHeight', XScroll: 'scrollX', YScroll: 'scrollY', AnchorLeft: 'anchorLeft', AnchorRight: 'anchorRight', AnchorTop: 'anchorTop', AnchorBottom: 'anchorBottom', Visible: 'visible', Enabled: 'enabled', WantKeyEvents: 'wantKeyEvents', ConsumeMouseEvents: 'consumeMouseEvents', WantExtraMouseEvents: 'wantExtraMouseEvents', ForceCursorVisible: 'forceCursorVisible', AlwaysOnTop: 'alwaysOnTop' };
         const suffix = name.slice(3);
         const key = property[suffix];
 
@@ -552,9 +672,9 @@ function createGameUI(options = {}) {
         }
 
         if (key && name.startsWith('set')) {
-            const value = ['x', 'y', 'width', 'height', 'scrollX', 'scrollY'].includes(key) ? finite(args[0], name) : Boolean(args[0]);
+            const value = ['x', 'y', 'width', 'height', 'scrollHeight', 'scrollX', 'scrollY'].includes(key) ? finite(args[0], name) : Boolean(args[0]);
 
-            if ((key === 'width' || key === 'height') && value < 0) {
+            if ((key === 'width' || key === 'height' || key === 'scrollHeight') && value < 0) {
                 throw new RangeError('UI size cannot be negative');
             }
 
@@ -572,7 +692,7 @@ function createGameUI(options = {}) {
         switch (name) {
             case 'getAbsoluteX': return position(e).x;
             case 'getAbsoluteY': return position(e).y;
-            case 'isVisible': return active(e);
+            case 'getIsVisible': case 'isVisible': return active(e);
             case 'isEnabled': return e.enabled;
             case 'isMouseOver': {
                 const m = options.mouse?.() ?? mouse;
@@ -630,9 +750,21 @@ function createGameUI(options = {}) {
                 const child = element(args[0]);
 
                 if (child.parent === id) {
+                    clearPlayerElement(child);
                     e.children.splice(e.children.indexOf(child.id), 1);
                     child.parent = null;
                     child.removed = true;
+                }
+
+                return;
+            }
+            case 'bringToTop': {
+                const siblings = e.parent ? element(e.parent).children : roots;
+                const index = siblings.indexOf(id);
+
+                if (index !== -1) {
+                    siblings.splice(index, 1);
+                    siblings.push(id);
                 }
 
                 return;
@@ -656,7 +788,22 @@ function createGameUI(options = {}) {
                     throw new Error('Uniform draw requires a texture');
                 }
 
-                return quad(e, t, x, y, t.width * scale, t.height * scale, r, g, b, a);
+                return integerQuad(e, t, x + t.offsetX * scale, y + t.offsetY * scale, t.width * scale, t.height * scale, r, g, b, a);
+            }
+            case 'DrawTextureScaledAspect': {
+                const [t, x, y, width, height, r, g, b, a] = args;
+
+                if (!t) {
+                    throw new Error('Aspect draw requires an original texture');
+                }
+
+                finite(width, 'aspect width');
+                finite(height, 'aspect height');
+                const scale = Math.min(width / t.widthOrig, height / t.heightOrig);
+                const drawWidth = t.width * scale;
+                const drawHeight = t.height * scale;
+
+                return integerQuad(e, t, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight, r, g, b, a);
             }
             case 'DrawTexture': {
                 const [t, x, y, a] = args;
@@ -665,7 +812,7 @@ function createGameUI(options = {}) {
                     throw new Error('Unscaled draw requires a texture');
                 }
 
-                return quad(e, t, x, y, t.width, t.height, 1, 1, 1, a);
+                return integerQuad(e, t, x + t.offsetX, y + t.offsetY, t.width, t.height, 1, 1, 1, a);
             }
             case 'DrawTextureColor': {
                 const [t, x, y, r, g, b, a] = args;
@@ -674,13 +821,13 @@ function createGameUI(options = {}) {
                     throw new Error('Unscaled draw requires a texture');
                 }
 
-                return quad(e, t, x, y, t.width, t.height, r, g, b, a);
+                return integerQuad(e, t, x + t.offsetX, y + t.offsetY, t.width, t.height, r, g, b, a);
             }
             case 'DrawTextRight': case 'DrawTextCentre': case 'DrawText': {
                 const [token, text, x, y, r, g, b, a] = args;
 
-                getFont(token);
-                const metrics = layout(text);
+                const font = getFont(token);
+                const metrics = layout(font, text);
                 let alignment = 0;
 
                 if (name === 'DrawTextRight') {
@@ -691,9 +838,9 @@ function createGameUI(options = {}) {
 
                 const start = x - alignment;
 
-                layout(text, (glyph, gx, gy) => {
+                layout(font, text, (glyph, gx, gy) => {
                     if (glyph.width && glyph.height) {
-                        quad(e, atlas, start + gx + glyph.xoffset, y + gy + glyph.yoffset, glyph.width, glyph.height, r, g, b, a, { x: glyph.x / font.width, y: glyph.y / font.height, width: glyph.width / font.width, height: glyph.height / font.height });
+                        quad(e, font.atlas, start + gx + glyph.xoffset, y + gy + glyph.yoffset, glyph.width, glyph.height, r, g, b, a, { x: glyph.x / font.width, y: glyph.y / font.height, width: glyph.width / font.width, height: glyph.height / font.height });
                     }
                 });
 
@@ -705,13 +852,287 @@ function createGameUI(options = {}) {
     }
 
     /**
+     * Withdraw the semantic menu and its resident callbacks, restoring only owned focus.
+     */
+    function clearSourceMenu() {
+        const previous = sourceMenu;
+
+        if (!previous) {
+            return;
+        }
+
+        sourceMenu = null;
+        const restore = previous.root.contains(previous.document.activeElement);
+
+        previous.root.remove();
+        previous.select = null;
+        previous.onClose = null;
+        previous.onError = null;
+
+        if (restore) {
+            const target = previous.focus?.isConnected ? previous.focus : options.focusTarget;
+
+            if (target?.isConnected) {
+                target.focus();
+            }
+        }
+    }
+
+    /**
+     * Mirror only actual original source options; the resident callback owns all actions.
+     *
+     * @param {Array<{name:string,disabled:boolean,children?:Array}>|null} tree - Current visible source option tree, or null to close.
+     * @param {(path:number[])=>unknown} [select] - Guarded original Lua selection by zero-based path.
+     * @param {{owner?:string,onClose?:()=>unknown,onError?:(error:unknown)=>void}} [callbacks] - Resident owner, native close and synchronous authoritative error feedback.
+     * @returns {HTMLElement|undefined} Accessibility-only menu root, if open.
+     */
+    function sourceMenuMirror(tree, select, callbacks = {}) {
+        if (tree === null) {
+            clearSourceMenu();
+
+            return;
+        }
+
+        live();
+        const document = options.document ?? globalThis.document;
+
+        if (!document?.body || typeof select !== 'function' || typeof callbacks.onError !== 'function' || typeof callbacks.onClose !== 'function') {
+            throw new Error('Source menu requires a DOM host and resident selection, close and error callbacks');
+        }
+
+        let count = 0;
+
+        /**
+         * Pin a bounded independent snapshot while preserving exact labels and option indices.
+         *
+         * @param {Array} nodes - Source options at this level.
+         * @param {number} depth - Current submenu depth.
+         * @returns {Array} Validated, detached nodes.
+         */
+        function snapshot(nodes, depth) {
+            if (!Array.isArray(nodes) || depth > 16) {
+                throw new Error('Invalid source menu tree/depth');
+            }
+
+            return nodes.map((node) => {
+                if (++count > 4_096 || !node || typeof node.name !== 'string' || node.name.length > 4_096 || typeof node.disabled !== 'boolean') {
+                    throw new Error('Invalid source menu option');
+                }
+
+                return { name: node.name, disabled: node.disabled, expanded: node.expanded === true, children: snapshot(node.children ?? [], depth + 1) };
+            });
+        }
+
+        const pinned = snapshot(tree, 0);
+
+        clearSourceMenu();
+        const root = document.createElement('div');
+        const state = { root, document, owner: callbacks.owner, focus: document.activeElement, select, onClose: callbacks.onClose, onError: callbacks.onError, pending: false, submenus: new Map() };
+
+        root.className = 'sr-only';
+        root.dataset.sourceContextMenu = '';
+        sourceMenu = state;
+
+        /**
+         * Route synchronous and asynchronous resident failures to authoritative host feedback.
+         *
+         * @param {((path:number[])=>unknown)|(()=>unknown)} callback - Current guarded source selection or close callback.
+         * @param {...number[]} args - Original zero-based selection path, if selecting.
+         */
+        function invoke(callback, ...args) {
+            if (sourceMenu !== state || (callback === state.select && state.pending)) {
+                return;
+            }
+
+            const report = state.onError;
+
+            state.pending = true;
+
+            try {
+                const result = callback(...args);
+
+                void Promise.resolve(result).then(
+                    () => {
+                        state.pending = false;
+                    },
+                    (error) => {
+                        state.pending = false;
+                        report(error);
+                    },
+                );
+            } catch (error) {
+                state.pending = false;
+                report(error);
+            }
+        }
+
+        /**
+         * Build nested menu roles and native keyboard behavior without visible replacement UI.
+         *
+         * @param {HTMLElement} menu - Host menu container.
+         * @param {Array} nodes - Snapshot options at this level.
+         * @param {number[]} path - Source index prefix.
+         * @param {string} label - Accessible source menu label.
+         * @param {HTMLElement|null} parent - Parent menuitem for submenu navigation.
+         * @returns {HTMLElement[]} Focusable items at this level.
+         */
+        function build(menu, nodes, path, label, parent) {
+            menu.setAttribute('role', 'menu');
+            menu.setAttribute('aria-label', label);
+            const items = [];
+
+            for (const [index, node] of nodes.entries()) {
+                const row = document.createElement('div');
+                const item = document.createElement('div');
+                const itemPath = [...path, index];
+
+                row.setAttribute('role', 'none');
+                item.setAttribute('role', 'menuitem');
+                item.setAttribute('aria-label', node.name);
+                item.setAttribute('aria-disabled', String(node.disabled));
+                item.textContent = node.name;
+                item.tabIndex = -1;
+                row.append(item);
+                menu.append(row);
+                items.push(item);
+                item.addEventListener('focus', () => {
+                    for (const peer of items) {
+                        peer.tabIndex = peer === item ? 0 : -1;
+
+                        if (peer !== item && peer.parentNode.children[1]) {
+                            peer.parentNode.children[1].hidden = true;
+                            peer.setAttribute('aria-expanded', 'false');
+                        }
+                    }
+                });
+                let submenu = null;
+                let childItems = [];
+
+                if (node.children.length) {
+                    submenu = document.createElement('div');
+                    submenu.hidden = !node.expanded;
+                    item.setAttribute('aria-haspopup', 'menu');
+                    item.setAttribute('aria-expanded', String(node.expanded));
+                    state.submenus.set(itemPath.join('/'), { item, submenu });
+                    row.append(submenu);
+                    childItems = build(submenu, node.children, itemPath, node.name, item);
+                }
+
+                /** Reveal the real option submenu and move semantic focus into it. */
+                function expand() {
+                    if (node.disabled || !submenu) {
+                        return;
+                    }
+
+                    submenu.hidden = false;
+                    item.setAttribute('aria-expanded', 'true');
+                    (childItems.find((child) => child.getAttribute('aria-disabled') !== 'true') ?? childItems[0])?.focus();
+                }
+
+                /** Select only the original option at this pinned path. */
+                function activate() {
+                    if (sourceMenu !== state || node.disabled) {
+                        return;
+                    }
+
+                    if (submenu) {
+                        expand();
+                    } else {
+                        invoke(state.select, itemPath);
+                    }
+                }
+
+                item.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    item.focus();
+                    activate();
+                });
+                item.addEventListener('keydown', (event) => {
+                    if (sourceMenu !== state) {
+                        return;
+                    }
+
+                    switch (event.key) {
+                        case 'ArrowDown':
+                            items[(index + 1) % items.length].focus();
+                            break;
+                        case 'ArrowUp':
+                            items[(index + items.length - 1) % items.length].focus();
+                            break;
+                        case 'Home':
+                            items[0].focus();
+                            break;
+                        case 'End':
+                            items.at(-1).focus();
+                            break;
+                        case 'ArrowRight':
+                            expand();
+                            break;
+                        case 'Enter': case ' ':
+                            activate();
+                            break;
+                        case 'ArrowLeft': if (parent) {
+                            menu.hidden = true;
+                            parent.setAttribute('aria-expanded', 'false');
+                            parent.focus();
+                        }
+
+                            break;
+                        case 'Escape': case 'Tab': {
+                            invoke(state.onClose);
+
+                            if (sourceMenu === state) {
+                                clearSourceMenu();
+                            }
+
+                            event.stopPropagation();
+
+                            if (event.key === 'Escape') {
+                                event.preventDefault();
+                            }
+
+                            return;
+                        }
+
+                        default: return;
+                    }
+
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+            }
+
+            return items;
+        }
+
+        const items = build(root, pinned, [], 'World context menu', null);
+
+        document.body.append(root);
+        const first = items.find((item) => item.getAttribute('aria-disabled') !== 'true') ?? items[0];
+
+        if (first) {
+            first.tabIndex = 0;
+            first.focus();
+        }
+
+        return root;
+    }
+
+    /**
      * Remove one owner's elements and draw commands while preserving foreign children.
      *
      * @param {string} owner - Package identifier to detach.
      */
     function cleanup(owner) {
+        if (sourceMenu?.owner === owner) {
+            clearSourceMenu();
+        }
+
         for (const [id, e] of elements) {
             if (e.owner === owner) {
+                clearPlayerElement(e);
+
                 if (e.parent && elements.has(e.parent)) {
                     method(e.parent, 'RemoveChild', id);
                 }
@@ -761,11 +1182,34 @@ function createGameUI(options = {}) {
             ready();
             switch (operation) {
                 case 'new': {
-                    const id = nextID++;
+                    const id = nextUIElementID++;
 
-                    elements.set(id, { id, owner, x: 0, y: 0, width: 0, height: 0, scrollX: 0, scrollY: 0, visible: true, enabled: true, removed: false, parent: null, children: [], callbacks: args[0] ?? {}, anchorLeft: true, anchorTop: true, anchorRight: false, anchorBottom: false, wantKeyEvents: false, consumeMouseEvents: false, wantExtraMouseEvents: false, forceCursorVisible: false, alwaysOnTop: false, stencil: null });
+                    elements.set(id, { id, owner, x: 0, y: 0, width: 0, height: 0, scrollHeight: 0, scrollX: 0, scrollY: 0, visible: true, enabled: true, removed: false, parent: null, children: [], callbacks: args[0] ?? {}, anchorLeft: true, anchorTop: true, anchorRight: false, anchorBottom: false, alwaysOnTop: false, wantKeyEvents: false, consumeMouseEvents: false, wantExtraMouseEvents: false, forceCursorVisible: false, stencil: null });
 
                     return id;
+                }
+                case 'playerInventory':
+                case 'playerInventoryTooltip': {
+                    if (args.length !== 3) {
+                        throw new TypeError('Player UI setter requires three arguments');
+                    }
+
+                    if (args[0] !== 0) {
+                        throw new RangeError('Only player viewport zero is supported');
+                    }
+
+                    const first = playerElement(args[1], owner);
+                    const second = playerElement(args[2], owner);
+                    const pair = playerUI[operation];
+
+                    if (pair.some((e) => e && e.owner !== owner)) {
+                        throw new Error('Player UI pair belongs to another owner');
+                    }
+
+                    pair[0] = first;
+                    pair[1] = second;
+
+                    return;
                 }
                 case 'element': return method(...args);
                 case 'add': {
@@ -785,6 +1229,8 @@ function createGameUI(options = {}) {
                 }
                 case 'remove': {
                     const e = element(args[0]);
+
+                    clearPlayerElement(e);
                     const index = roots.indexOf(e.id);
 
                     if (index !== -1) {
@@ -804,18 +1250,19 @@ function createGameUI(options = {}) {
 
                     return texture ?? null;
                 }
-                case 'measureX': getFont(args[0]);
-
-                    return layout(args[1]).width;
-                case 'measureY': getFont(args[0]);
-
-                    return layout(args[1]).height;
+                case 'measureX': return layout(getFont(args[0]), args[1]).width;
+                case 'measureY': return layout(getFont(args[0]), args[1]).height;
                 case 'fontHeight': return getFont(args[0]).lineHeight;
-                case 'text': if (!Object.hasOwn(translations, args[0])) {
+                case 'fontSize': return getFont(args[0]).size;
+                case 'text': case 'itemName': if (!Object.hasOwn(translations, args[0])) {
                     throw new Error(`Unsupported translation key: ${args[0]}`);
                 }
 
-                    return translations[args[0]];
+                    if (args.length > 2) {
+                        throw new Error('Unsupported translation substitution beyond verified %1');
+                    }
+
+                    return args.length === 2 ? translations[args[0]].replaceAll('%1', () => String(args[1])) : translations[args[0]];
                 case 'textOrNull': return translations[args[0]] ?? null;
                 case 'viewport': return { ...view() };
                 case 'mouse': return { ...(options.mouse?.() ?? mouse) };
@@ -832,37 +1279,117 @@ function createGameUI(options = {}) {
 
     return Object.freeze({
         bindings,
+        sourceMenuMirror,
+        /**
+         * Mirror a genuine Lua submenu's native visibility without selecting or showing it.
+         *
+         * @param {number[]} path - Zero-based parent option path.
+         * @param {boolean} visible - Current native visibility.
+         */
+        sourceMenuVisibility(path, visible) {
+            if (!Array.isArray(path) || !path.length || path.length > 16
+                || path.some((index) => !Number.isSafeInteger(index) || index < 0) || typeof visible !== 'boolean') {
+                throw new TypeError('Invalid source submenu visibility');
+            }
+
+            const entry = sourceMenu?.submenus.get(path.join('/'));
+
+            if (entry) {
+                entry.submenu.hidden = !visible;
+                entry.item.setAttribute('aria-expanded', String(visible));
+            }
+        },
+        /**
+         * Test residency without treating an indexed but unuploaded image as genuinely absent.
+         *
+         * @param {string} path - Original alias.
+         * @returns {boolean} Whether an owned image is already uploaded.
+         */
+        hasTexture(path) {
+            live();
+
+            return textures.has(path);
+        },
+        /**
+         * Commit newly uploaded images atomically without replacing resident source widgets.
+         *
+         * @param {UITexture[]} entries - Actual uploaded source resources.
+         */
+        addTextures(entries) {
+            ready();
+            textures = textureMap(entries, textures);
+
+            for (const entry of entries) {
+                for (const path of [entry.path, ...(entry.aliases ?? [])]) {
+                    indexedTextures.add(path);
+                }
+            }
+        },
+        /**
+         * Prepare genuine icons for definitions registered after original startup.
+         *
+         * @param {object[]} definitions - Current actual source-backed item definitions.
+         * @returns {Promise<void>} Completed owned upload or attributable resource failure.
+         */
+        ensureItemTextures(definitions) {
+            const pending = itemPreparation.then(async () => {
+                ready();
+
+                if (typeof loadItemTextures !== 'function') {
+                    throw new TypeError('Unsupported UI capability: original item texture resolver unavailable');
+                }
+
+                await loadItemTextures(definitions);
+                live();
+            });
+
+            // Keep later requests usable after a reported failure; the returned request still rejects.
+            itemPreparation = pending.catch(() => undefined);
+
+            return pending;
+        },
         /**
          * Validate resources before transferring texture ownership to this session.
          *
-         * @param {{textures:UITexture[],indexedTextures?:string[]|Set<string>,font:{descriptor:string,atlasPath:string},translations:Record<string,string>,settings:UISettings}} resources - Original font/images, validated indexed aliases (including unpreloaded paths), exact translation keys and explicit port settings.
+         * @param {{textures:UITexture[],indexedTextures?:string[]|Set<string>,fonts?:Record<string,{descriptor:string,atlasPath:string}>,fontAliases?:Record<string,string>,font?:{descriptor:string,atlasPath:string},translations:Record<string,string>,settings:UISettings,loadItemTextures?:(definitions:object[])=>Promise<void>}} resources - Original fonts/images, verified enum aliases, icon resolver, exact translations and port settings.
          */
         initialize(resources) {
-            /* textures: [{path,width,height,texture?,destroy?}], font: {descriptor,atlasPath}.
-               Settings are explicit port choices, not claims of original engine defaults. */
+            // Ordinary Lua UI may supply Small alone; original source menus supply all three.
             live();
 
             if (elements.size) {
                 throw new Error('Cannot replace resources of a live UI session');
             }
 
-            const parsed = parseBitmapFont(resources.font.descriptor);
-            const loaded = new Map();
+            const descriptors = resources.fonts ?? { Small: resources.font };
+            const parsedFonts = new Map();
+            const loaded = textureMap(resources.textures, new Map());
 
-            for (const t of resources.textures) {
-                if (typeof t.path !== 'string' || loaded.has(t.path)) {
-                    throw new Error('Duplicate/invalid UI texture path');
+            for (const [name, entry] of Object.entries(descriptors)) {
+                if (!['Small', 'Medium', 'Large'].includes(name) || !entry) {
+                    throw new Error(`Unsupported font resource ${name}`);
                 }
 
-                extent(t.width, 'texture width');
-                extent(t.height, 'texture height');
-                loaded.set(t.path, Object.freeze({ ...t }));
+                const parsed = parseBitmapFont(entry.descriptor);
+                const page = loaded.get(entry.atlasPath);
+
+                if (!page || page.width !== parsed.width || page.height !== parsed.height) {
+                    throw new Error(`BMFont ${name} atlas missing or dimensions disagree`);
+                }
+
+                parsedFonts.set(name, Object.freeze({ ...parsed, atlas: page }));
             }
 
-            const page = loaded.get(resources.font.atlasPath);
+            if (!parsedFonts.has(SMALL)) {
+                throw new Error('Original Small font resource required');
+            }
 
-            if (!page || page.width !== parsed.width || page.height !== parsed.height) {
-                throw new Error('BMFont atlas missing or dimensions disagree');
+            for (const [alias, target] of Object.entries(resources.fontAliases ?? {})) {
+                if (alias !== 'NewSmall' || target !== SMALL) {
+                    throw new Error(`Unsupported original font alias ${alias}`);
+                }
+
+                parsedFonts.set(alias, parsedFonts.get(target));
             }
 
             if (!resources.translations || Object.values(resources.translations).some((v) => typeof v !== 'string')) {
@@ -878,16 +1405,16 @@ function createGameUI(options = {}) {
             const validated = { ...config, gray: rgba(config.gray), goodHighlight: rgba(config.goodHighlight), badHighlight: rgba(config.badHighlight) };
             const indexed = new Set(resources.indexedTextures ?? []);
 
-            for (const t of textures.values()) {
+            for (const t of new Set(textures.values())) {
                 t.destroy?.();
             }
 
             textures = loaded;
             indexedTextures = indexed;
-            font = parsed;
-            atlas = page;
+            fonts = parsedFonts;
             translations = { ...resources.translations };
             settings = validated;
+            loadItemTextures = resources.loadItemTextures ?? null;
         },
         /**
          * Replace an element's lifecycle and input hooks.
@@ -965,8 +1492,32 @@ function createGameUI(options = {}) {
             live();
             mouse = { x: finite(x, 'mouse x'), y: finite(y, 'mouse y') };
 
-            if (!['onMouseDown', 'onMouseUp', 'onMouseMove', 'onMouseWheel', 'onMouseDoubleClick'].includes(name)) {
+            if (!['onMouseDown', 'onMouseUp', 'onMouseMove', 'onMouseWheel', 'onMouseDoubleClick', 'onRightMouseDown', 'onRightMouseUp'].includes(name)) {
                 throw new Error(`Unsupported UI input ${name}`);
+            }
+
+            const outsideName = name === 'onMouseWheel' || name === 'onMouseDoubleClick' ? null : `${name}Outside`;
+
+            /**
+             * Notify visible descendants even though an outside callback cannot consume input.
+             *
+             * @param {number} id - Subtree outside the pointer.
+             */
+            function outside(id) {
+                const e = element(id);
+
+                if (!active(e) || !outsideName) {
+                    return;
+                }
+
+                const p = position(e);
+                const values = name === 'onMouseMove' ? args : [x - p.x - e.scrollX, y - p.y - e.scrollY, ...args];
+
+                e.callbacks.input?.(outsideName, ...values);
+
+                for (const child of [...e.children].reverse()) {
+                    outside(child);
+                }
             }
 
             /**
@@ -982,14 +1533,16 @@ function createGameUI(options = {}) {
                     return false;
                 }
 
+                if (!method(id, 'isPointOver', x, y)) {
+                    outside(id);
+
+                    return false;
+                }
+
                 for (const child of [...e.children].reverse()) {
                     if (hit(child)) {
                         return true;
                     }
-                }
-
-                if (!method(id, 'isPointOver', x, y)) {
-                    return false;
                 }
 
                 if ((name === 'onMouseWheel' || name === 'onMouseDoubleClick') && !e.wantExtraMouseEvents) {
@@ -1000,10 +1553,26 @@ function createGameUI(options = {}) {
                 const values = name === 'onMouseMove' || name === 'onMouseWheel' ? args : [x - p.x - e.scrollX, y - p.y - e.scrollY, ...args];
                 const result = e.callbacks.input?.(name, ...values);
 
-                return Boolean(result || e.consumeMouseEvents);
+                return result === null || result === undefined ? e.consumeMouseEvents : Boolean(result);
             }
 
-            return ordered().reverse().some(hit);
+            let consumed = false;
+
+            for (const id of ordered().reverse()) {
+                if (consumed) {
+                    if (name !== 'onMouseMove') {
+                        break;
+                    }
+
+                    if (!method(id, 'isPointOver', x, y)) {
+                        outside(id);
+                    }
+                } else {
+                    consumed = hit(id);
+                }
+            }
+
+            return consumed;
         },
         /**
          * Route a key event to active enabled elements requesting key input.
@@ -1100,18 +1669,22 @@ function createGameUI(options = {}) {
                 return;
             }
 
+            clearSourceMenu();
+            playerUI.playerInventory.fill(null);
+            playerUI.playerInventoryTooltip.fill(null);
             disposed = true;
             elements.clear();
             roots.length = 0;
             commands.length = 0;
 
-            for (const t of textures.values()) {
+            for (const t of new Set(textures.values())) {
                 t.destroy?.();
             }
 
             textures.clear();
             indexedTextures.clear();
-            font = null;
+            fonts.clear();
+            loadItemTextures = null;
             options.onDispose?.();
         },
     });

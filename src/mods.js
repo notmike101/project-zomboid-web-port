@@ -29,9 +29,10 @@ const WORLD_MAX = 10;
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 10;
 const MAX_SAVE_BYTES = 256 * 1_024;
-const ACTION_TYPES = new Set(['moveTo', 'walk', 'cancel', 'toggleDoor', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setWeight', 'setActualWeight', 'setHealth', 'setCharacterStat', 'setMoodleInputs', 'setBodyPart', 'setInjurySeverity']);
+const ACTION_TYPES = new Set(['moveTo', 'walk', 'requestWalk', 'cancel', 'toggleDoor', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setWeight', 'setActualWeight', 'setHandItem', 'setHealth', 'setCharacterStat', 'setMoodleInputs', 'setBodyPart', 'setInjurySeverity']);
 /** Reserved internal attribution id for page input; a mod cannot claim it. */
 const RESERVED_ID = 'host';
+const CORE_ID = 'pz-base-game';
 
 /**
  * Detached engine state handed to mods. `action`: 0 idle, 1 destination, 2 walking.
@@ -73,7 +74,7 @@ const RESERVED_ID = 'host';
 /**
  * One internal hook registration.
  *
- * @typedef {{ modId: string, entry: ModEntry, kind: string, callback: BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener|import('../types/mod-api').ModCharacterDeathListener, priority: number, order: number }} HookRegistration
+ * @typedef {{ modId: string, entry: ModEntry, kind: string, callback: BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener|import('../types/mod-api').ModCharacterDeathListener|import('../types/mod-api').ModHandItemChangedListener, priority: number, order: number }} HookRegistration
  */
 /**
  * One loaded mod.
@@ -85,10 +86,15 @@ const RESERVED_ID = 'host';
  *
  * @typedef {{
  *   api: ModApi,
+ *   coreApi: ModApi,
  *   load: (url: string|URL) => Promise<{ id: string, version: string, name: string }>,
+ *   unload: (id: string) => void,
  *   dispose: () => void,
  *   command: (action: ModAction) => ModCommandResult,
  *   step: (seconds: number) => void,
+ *   frameStep: (seconds: number) => void,
+ *   sourcePreflight: (action: ModAction, ownerId: string) => ModAction|null,
+ *   sourceSetHandItem: (slot: 'primary'|'secondary', itemId: number|null, ownerId: string) => ModCommandResult,
  *   diagnostics: () => ModDiagnostics
  * }} ModHost
  */
@@ -97,6 +103,7 @@ const RESERVED_ID = 'host';
  *
  * @typedef {{
  *   modApi: string,
+ *   core: {id:string,active:boolean,hooks:number},
  *   mods: { id: string, name: string, version: string, apiVersion: string, url: string, hooks: number }[],
  *   hookCount: number,
  *   counts: { commands: number, committed: number, cancelled: number, modified: number, modSubmitted: number },
@@ -267,6 +274,13 @@ export function createModHost(engine, options = {}) {
     let ticking = false;
     /** @type {ModEntry} Owner of the host-side `api` handle; always live while the host exists. */
     const hostEntry = { id: RESERVED_ID, manifest: { id: RESERVED_ID, version: '0.0.0', apiVersion: MOD_API_VERSION, name: 'host' }, url: '', cleanup: undefined, active: true };
+    /** @type {ModEntry} Protected original-game owner, separate from installed user packages. */
+    const coreEntry = {
+        id: CORE_ID, manifest: {
+            id: CORE_ID, version: '0.0.0', apiVersion: MOD_API_VERSION,
+            name: 'Original game',
+        }, url: '', cleanup: undefined, active: true,
+    };
 
     /**
      * Builds an attributed error; the same fields appear on every host failure.
@@ -463,7 +477,7 @@ export function createModHost(engine, options = {}) {
      *
      * @param {ModEntry} entry - Registration owner.
      * @param {string} kind - Callback phase.
-     * @param {BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener|import('../types/mod-api').ModCharacterDeathListener} callback - Synchronous mod callback.
+     * @param {BeforeActionHook|import('../types/mod-api').BeforeWorldImportHook|import('../types/mod-api').ModTickListener|import('../types/mod-api').ModCharacterDeathListener|import('../types/mod-api').ModHandItemChangedListener} callback - Synchronous mod callback.
      * @param {{priority?: number}} [options] - Optional finite priority.
      * @returns {() => boolean} Registration withdrawal.
      */
@@ -512,6 +526,16 @@ export function createModHost(engine, options = {}) {
 
         return undefined;
     }
+
+    const releaseHandObserver = engine.canSaveHandState?.()
+        ? capability('observeHandItems')((event) => {
+                for (const hook of orderedHooks('onHandItemChanged')) {
+                    if (hook.entry.active && hooks.includes(hook)) {
+                        notify(hook, { ...event }, false);
+                    }
+                }
+            }, (cause) => record(CORE_ID, 'onHandItemChanged', cause))
+        : undefined;
 
     /**
      * Validates fully, resolves detached precommit hooks, then imports once.
@@ -568,10 +592,11 @@ export function createModHost(engine, options = {}) {
     /**
      * Emits only after one engine step has really committed; recursive steps fail.
      *
-     * @param {number} seconds - Finite engine delta in (0,0.1].
+     * @param {number} seconds - Finite engine delta in [0,0.1], or raw RAF elapsed.
+     * @param {'step'|'frameStep'} method - Explicit native clock entry point.
      * @returns {void}
      */
-    function step(seconds) {
+    function advance(seconds, method) {
         return attributed(hostEntry, 'tick', () => {
             if (dispatching || ticking) {
                 throw new Error('cannot step while callbacks are resolving');
@@ -579,7 +604,7 @@ export function createModHost(engine, options = {}) {
 
             ticking = true;
             try {
-                capability('step')(seconds);
+                capability(method)(seconds);
                 const snapshot = { ...engine.snapshot() };
 
                 for (const hook of orderedHooks('onTick')) {
@@ -593,6 +618,52 @@ export function createModHost(engine, options = {}) {
                 ticking = false;
             }
         });
+    }
+
+    /**
+     * Advance an explicit logical step through attributed tick hooks.
+     *
+     * @param {number} seconds - Explicit [0,.1] logical step.
+     * @returns {void} Advances simulation and notifies live tick hooks.
+     */
+    function step(seconds) {
+        return advance(seconds, 'step');
+    }
+
+    /**
+     * Advance raw frame elapsed time through attributed tick hooks.
+     *
+     * @param {number} seconds - Raw nonnegative RAF elapsed.
+     * @returns {void} Advances simulation and notifies live tick hooks.
+     */
+    function frameStep(seconds) {
+        return advance(seconds, 'frameStep');
+    }
+
+    /**
+     * Require the engine's real optional queued-action capability.
+     *
+     * @returns {import('../types/mod-api').ModQueuedActions} Real native queue.
+     */
+    function queueCapability() {
+        if (!engine.actions) {
+            throw new Error('actions are unsupported by this engine');
+        }
+
+        return engine.actions;
+    }
+
+    /**
+     * Require the engine's real optional original-action timing capability.
+     *
+     * @returns {import('../types/mod-api').ModSourceTiming} Real native source timing.
+     */
+    function timingCapability() {
+        if (!engine.sourceTiming) {
+            throw new Error('source timing is unsupported by this engine');
+        }
+
+        return engine.sourceTiming;
     }
 
     /**
@@ -679,6 +750,16 @@ export function createModHost(engine, options = {}) {
 
             return value;
         };
+
+        if (type === 'requestWalk') {
+            queueCapability();
+
+            return {
+                type, x: integer(candidate.x, 'x', -2_147_483_648, 2_147_483_647),
+                y: integer(candidate.y, 'y', -2_147_483_648, 2_147_483_647),
+                z: integer(candidate.z, 'z', -2_147_483_648, 2_147_483_647),
+            };
+        }
 
         if (type === 'setBodyPart' || type === 'setInjurySeverity') {
             const parts = capability('bodyParts')();
@@ -767,6 +848,20 @@ export function createModHost(engine, options = {}) {
         }
 
         capability('items');
+
+        if (type === 'setHandItem') {
+            capability('getHandItems');
+            capability('setHandItem');
+
+            if (candidate.slot !== 'primary' && candidate.slot !== 'secondary') {
+                throw modError(modId, 'action', 'hand slot must be primary or secondary');
+            }
+
+            return {
+                type, slot: candidate.slot,
+                itemId: candidate.itemId === null ? null : integer(candidate.itemId, 'hand item ID', 1, 0xFF_FF_FF_FF),
+            };
+        }
 
         if (type === 'spawnItem') {
             const command = {
@@ -908,6 +1003,21 @@ export function createModHost(engine, options = {}) {
         };
 
         /**
+         * Return immutable admission metadata from the shared action pipeline.
+         *
+         * @param {ModAction} action - Request routed through acceptance hooks.
+         * @returns {import('../types/mod-api').ModQueueAcceptance} Accepted, never completed.
+         */
+        const queuedRequest = (action) => {
+            const result = mutate(action);
+
+            return Object.freeze({
+                accepted: result.accepted ?? false, actionId: result.actionId ?? null,
+                state: result.state ?? access('actions', () => queueCapability().getState()),
+            });
+        };
+
+        /**
          * Binds local cues without permitting another registration namespace.
          *
          * @param {string} id - Exact bounded local or qualified identity.
@@ -1044,7 +1154,7 @@ export function createModHost(engine, options = {}) {
                         throw new RangeError('item id must be a positive uint32');
                     }
 
-                    return capability('items')().find((item) => item.id === id) ?? null;
+                    return capability('getItem')(id);
                 }),
                 /**
                  * Reads authoritative equipment at an exact body-location identity.
@@ -1076,12 +1186,12 @@ export function createModHost(engine, options = {}) {
                  */
                 spawn: (input) => mutate({ ...input, type: 'spawnItem' }),
                 /**
-                 * Picks up through precommit hooks.
+                 * Requests source-timed pickup through acceptance hooks.
                  *
                  * @param {number} id - Positive uint32 item identity.
-                 * @returns {ModCommandResult} Attributed pickup outcome.
+                 * @returns {import('../types/mod-api').ModQueueAcceptance} Immutable acceptance, not transfer completion.
                  */
-                pickup: (id) => mutate({ type: 'pickup', id }),
+                pickup: (id) => queuedRequest({ type: 'pickup', id }),
                 /**
                  * Equips through precommit hooks.
                  *
@@ -1131,6 +1241,35 @@ export function createModHost(engine, options = {}) {
                 setActualWeight: (id, actualWeight) => mutate({ type: 'setActualWeight', id, actualWeight }),
             },
             character: {
+                /**
+                 * Reads actual native stable held references.
+                 *
+                 * @returns {import('../types/mod-api').ModHandItems} Current held pair.
+                 */
+                getHandItems: () => access('character', () => capability('getHandItems')()),
+                /**
+                 * Commits one held slot through shared attributed precommit hooks.
+                 *
+                 * @param {'primary'|'secondary'} slot - Exact held slot.
+                 * @param {number|null} itemId - Full uint32 live inventory identity, or clear.
+                 * @returns {ModCommandResult} Shared attributed precommit outcome.
+                 */
+                setHandItem: (slot, itemId) => mutate({ type: 'setHandItem', slot, itemId }),
+                /**
+                 * Read an original action-timing trait from native state.
+                 *
+                 * @param {string} id - Supported original trait identity.
+                 * @returns {boolean} Whether the native trait is enabled.
+                 */
+                hasTrait: (id) => access('character', () => timingCapability().hasTrait(id)),
+                /**
+                 * Set an original action-timing trait in native state.
+                 *
+                 * @param {string} id - Supported original trait identity.
+                 * @param {boolean} enabled - Requested trait state.
+                 * @returns {void} Updates the real native trait.
+                 */
+                setTrait: (id, enabled) => access('character', () => timingCapability().setTrait(id, enabled)),
                 /**
                  * Query actual native handwear, never detached metadata or a player shadow flag.
                  *
@@ -1255,6 +1394,35 @@ export function createModHost(engine, options = {}) {
                     writeRecord(entry, document);
                 }),
             },
+            time: {
+                /**
+                 * Read the original action timing state from the engine.
+                 *
+                 * @returns {import('../types/mod-api').ModSourceTimingState} Detached native timing state.
+                 */
+                getState: () => access('time', () => timingCapability().getState()),
+                /**
+                 * Update a supported original action timing field.
+                 *
+                 * @param {import('../types/mod-api').ModTimingField} field - Native timing field to update.
+                 * @param {number|boolean} value - Field-appropriate native timing value.
+                 * @returns {void} Updates native timing.
+                 */
+                set: (field, value) => access('time', () => timingCapability().set(field, value)),
+                /**
+                 * Read the native original-action game mode.
+                 *
+                 * @returns {string} Current native mode identity.
+                 */
+                getGameMode: () => access('time', () => timingCapability().getGameMode()),
+                /**
+                 * Set the native original-action game mode.
+                 *
+                 * @param {string} mode - Supported native mode identity.
+                 * @returns {void} Updates the native game mode.
+                 */
+                setGameMode: (mode) => access('time', () => timingCapability().setGameMode(mode)),
+            },
             audio: {
                 /**
                  * Async decode consumes the original buffer; no unnecessary source-byte clone.
@@ -1332,6 +1500,44 @@ export function createModHost(engine, options = {}) {
             },
             actions: {
                 /**
+                 * Read the real native queued-action state.
+                 *
+                 * @returns {import('../types/mod-api').ModQueueState} Detached current and pending actions.
+                 */
+                getState: () => access('actions', () => queueCapability().getState()),
+                /**
+                 * Request a pickup through owner-attributed acceptance hooks.
+                 *
+                 * @param {number} id - Positive uint32 ground-item identity.
+                 * @returns {import('../types/mod-api').ModQueueAcceptance} Admission metadata, not pickup completion.
+                 */
+                requestPickup: (id) => queuedRequest({ type: 'pickup', id }),
+                /**
+                 * Request a door toggle through owner-attributed acceptance hooks.
+                 *
+                 * @param {string} id - Stable native door identity.
+                 * @returns {import('../types/mod-api').ModQueueAcceptance} Admission metadata, not toggle completion.
+                 */
+                requestDoor: (id) => queuedRequest({ type: 'toggleDoor', id }),
+                /**
+                 * Request a walk through owner-attributed acceptance hooks.
+                 *
+                 * @param {import('../types/mod-api').ModWorldCoordinates} target - Finite world destination.
+                 * @returns {import('../types/mod-api').ModQueueAcceptance} Admission metadata, not movement completion.
+                 */
+                requestWalk: (target) => queuedRequest({ ...target, type: 'requestWalk' }),
+                /**
+                 * Cancel native queued work through the attributed action pipeline.
+                 *
+                 * @returns {import('../types/mod-api').ModQueueState} Native state after successful cancellation.
+                 */
+                cancel: () => {
+                    access('actions', () => queueCapability().getState());
+                    mutate({ type: 'cancel' });
+
+                    return access('actions', () => queueCapability().getState());
+                },
+                /**
                  * Submits a command through the same synchronous pipeline as host input:
                  * every live beforeAction hook resolves, then the engine commits once.
                  * Submitting while hooks are resolving is rejected.
@@ -1385,13 +1591,13 @@ export function createModHost(engine, options = {}) {
                  */
                 isBlockedTo: (from, to) => access('world', () => capability('isBlockedTo')(from, to)),
                 /**
-                 * Toggles through the shared synchronous precommit command path.
+                 * Requests a source-timed door action through shared acceptance hooks.
                  *
                  * @param {string} id - Exact nonempty stable identity, at most 256 characters.
-                 * @returns {ModCommandResult} Cancelled on hook veto; otherwise authoritative committed state.
+                 * @returns {import('../types/mod-api').ModQueueAcceptance} False acceptance on veto; successful request completes on a later frame.
                  * @throws {Error} ModError/action for unsupported, invalid, activation or reentrant mutation.
                  */
-                toggleDoor: (id) => mutate({ type: 'toggleDoor', id }),
+                toggleDoor: (id) => queuedRequest({ type: 'toggleDoor', id }),
                 /**
                  * Reads authoritative navigation at an absolute tile.
                  *
@@ -1481,6 +1687,18 @@ export function createModHost(engine, options = {}) {
                     alive();
 
                     return register(entry, 'onCharacterDeath', callback, options);
+                },
+                /**
+                 * Registers an actual committed held-transition listener.
+                 *
+                 * @param {import('../types/mod-api').ModHandItemChangedListener} callback - Committed-transition listener.
+                 * @param {{priority?:number}} [options] - Listener ordering.
+                 * @returns {()=>boolean} Registration withdrawal.
+                 */
+                onHandItemChanged(callback, options) {
+                    alive();
+
+                    return register(entry, 'onHandItemChanged', callback, options);
                 },
             },
             hooks: {
@@ -1630,7 +1848,7 @@ export function createModHost(engine, options = {}) {
             throw fail(id, 'manifest', 'manifest.name must be a non-empty string');
         }
 
-        if (id === RESERVED_ID || id === 'base') {
+        if (id === RESERVED_ID || id === 'base' || id === CORE_ID) {
             throw fail(id, 'manifest', `'${id}' is a reserved host/source owner and cannot be used as a mod id`);
         }
 
@@ -1703,42 +1921,58 @@ export function createModHost(engine, options = {}) {
     }
 
     /**
-     * Unloads every mod: cleanup runs in reverse load order while the mod's API
-     * handle is still live (that is how a mod undoes its own effects), then its
-     * handle becomes inert and its hooks are withdrawn. Cleanup is synchronous;
-     * a cleanup that returns a value is reported and not awaited. A throwing
-     * cleanup is attributed but never leaves the mod loaded; a cleanup that
-     * returns a rejected promise is recorded as `cleanup.late`. The host stays
-     * usable for further `load()` calls, and host-registered hooks are withdrawn.
+     * Unloads one user package while its cleanup retains a live owned handle.
+     * The protected original-game owner is disposed only with the session.
      *
+     * @param {string} id - Loaded user package identity.
      * @returns {void}
      */
+    function unload(id) {
+        if (id === CORE_ID || id === RESERVED_ID) {
+            throw modError(id, 'api', 'protected session owners cannot be unloaded as user mods');
+        }
+
+        const entry = mods.get(id);
+
+        if (!entry) {
+            throw modError(id, 'api', 'mod is not loaded');
+        }
+
+        let result;
+
+        try {
+            if (entry.cleanup) {
+                result = entry.cleanup();
+            }
+        } catch (cause) {
+            record(entry.id, 'cleanup', cause);
+        } finally {
+            entry.active = false;
+            mods.delete(entry.id);
+            dropHooks(entry);
+            releaseAudio(entry);
+        }
+
+        if (result !== undefined && result !== null) {
+            record(entry.id, 'cleanup', new Error('cleanup must be synchronous; the returned value was ignored'));
+            observeRejection(entry.id, 'cleanup.late', result);
+        }
+    }
+
+    /** Dispose user packages and the protected original owner with this session. */
     function dispose() {
         for (const entry of [...mods.values()].reverse()) {
-            let result;
-
-            try {
-                if (entry.cleanup) {
-                    result = entry.cleanup();
-                }
-            } catch (cause) {
-                record(entry.id, 'cleanup', cause);
-            } finally {
-                entry.active = false;
-                mods.delete(entry.id);
-                dropHooks(entry);
-                releaseAudio(entry);
-            }
-
-            if (result !== undefined && result !== null) {
-                record(entry.id, 'cleanup', new Error('cleanup must be synchronous; the returned value was ignored'));
-                observeRejection(entry.id, 'cleanup.late', result);
+            if (mods.has(entry.id)) {
+                unload(entry.id);
             }
         }
 
         hooks.length = 0;
+        releaseHandObserver?.();
         registrations = 0;
         releaseAudio(hostEntry);
+        coreEntry.active = false;
+        releaseAudio(coreEntry);
     }
 
     /**
@@ -1757,14 +1991,15 @@ export function createModHost(engine, options = {}) {
      *
      * @param {ModAction} action - Structured command.
      * @param {string} submitterId - `'host'` for page input, or the submitting mod's id.
-     * @returns {ModCommandResult} Detached outcome: submitter, whether it
+     * @param {boolean} [commit=true] - False only for private original context admission.
+     * @returns {ModCommandResult & {action?: ModAction}} Detached outcome: submitter, whether it
      * committed, who modified it, who cancelled it, and the resulting engine state.
      * @throws {Error} Named `ModError` attributed to the submitter for a malformed
      * action, or for a submission attempted while hooks are resolving (a hook
      * must return a replacement action or `false` instead of submitting). Hook
      * exceptions, rejected promises and invalid replacements are recorded, not thrown.
      */
-    function submitAction(action, submitterId) {
+    function submitAction(action, submitterId, commit = true) {
         let submitted;
 
         try {
@@ -1777,8 +2012,8 @@ export function createModHost(engine, options = {}) {
             throw modError(submitterId, 'action', cause instanceof Error ? cause.message : String(cause), cause);
         }
 
-        if (submitted.type === 'toggleDoor' && mods.get(submitterId)?.activating) {
-            throw modError(submitterId, 'action', 'door mutation is forbidden during synchronous activate');
+        if ((submitted.type === 'toggleDoor' || submitted.type === 'setHandItem') && mods.get(submitterId)?.activating) {
+            throw modError(submitterId, 'action', 'equipment and door mutation is forbidden during synchronous activate');
         }
 
         if (dispatching) {
@@ -1787,12 +2022,18 @@ export function createModHost(engine, options = {}) {
 
         counts.commands += 1;
 
-        if (submitterId !== RESERVED_ID) {
+        if (submitterId !== RESERVED_ID && submitterId !== CORE_ID) {
             counts.modSubmitted += 1;
         }
 
         if (submitted.type === 'cancel') {
-            const snapshot = engine.command(submitted);
+            let snapshot;
+
+            try {
+                snapshot = engine.command(submitted);
+            } catch (cause) {
+                throw fail(submitterId, 'action', cause instanceof Error ? cause.message : String(cause), cause);
+            }
 
             counts.committed += 1;
 
@@ -1860,21 +2101,41 @@ export function createModHost(engine, options = {}) {
             dispatching = false;
         }
 
+        if ((submitted.type === 'setHandItem' || current.type === 'setHandItem') && submitterId !== RESERVED_ID
+            && !(submitterId === CORE_ID ? coreEntry : mods.get(submitterId))?.active) {
+            throw modError(submitterId, 'api', 'equipment owner became inactive during hooks');
+        }
+
         if (cancelledBy !== undefined) {
             counts.cancelled += 1;
 
             return { committed: false, cancelled: true, submittedBy: submitterId, modifiedBy, cancelledBy, snapshot: engine.snapshot() };
         }
 
-        if (current.type === 'toggleDoor' && mods.get(submitterId)?.activating) {
-            throw modError(submitterId, 'action', 'door mutation is forbidden during synchronous activate');
+        if (!commit) {
+            return {
+                committed: false, cancelled: false, submittedBy: submitterId,
+                modifiedBy, snapshot: engine.snapshot(), action: detach(current),
+            };
+        }
+
+        if ((current.type === 'toggleDoor' || current.type === 'setHandItem') && mods.get(submitterId)?.activating) {
+            throw modError(submitterId, 'action', 'equipment and door mutation is forbidden during synchronous activate');
         }
 
         const wasDead = current.type === 'setHealth' ? capability('isDead')() : engine.snapshot().dead;
         let snapshot;
+        let admission;
 
         try {
-            snapshot = engine.command(current);
+            const result = engine.command(current);
+
+            if ('accepted' in result) {
+                admission = result;
+                snapshot = engine.snapshot();
+            } else {
+                snapshot = result;
+            }
         } catch (cause) {
             throw fail(submitterId, 'action', cause instanceof Error ? cause.message : String(cause), cause);
         }
@@ -1898,7 +2159,10 @@ export function createModHost(engine, options = {}) {
             }
         }
 
-        return { committed: true, cancelled: false, submittedBy: submitterId, modifiedBy, snapshot };
+        return {
+            committed: admission === undefined, cancelled: false, submittedBy: submitterId,
+            modifiedBy, snapshot, ...(admission ?? {}),
+        };
     }
 
     /**
@@ -1920,6 +2184,10 @@ export function createModHost(engine, options = {}) {
     function diagnostics() {
         return {
             modApi: MOD_API_VERSION,
+            core: {
+                id: CORE_ID, active: coreEntry.active,
+                hooks: hooks.filter((hook) => hook.entry === coreEntry).length,
+            },
             mods: [...mods.values()].map((entry) => ({
                 id: entry.id,
                 name: entry.manifest.name,
@@ -1934,9 +2202,55 @@ export function createModHost(engine, options = {}) {
         };
     }
 
+    /**
+     * Resolve one owner-bound original context request without enqueueing SDK work.
+     *
+     * @param {ModAction} action - Actual stable source context target.
+     * @param {string} ownerId - Stable active SDK package identity.
+     * @returns {ModAction|null} Hook-selected request or veto.
+     */
+    function sourcePreflight(action, ownerId) {
+        const entry = ownerId === CORE_ID ? coreEntry : mods.get(ownerId);
+
+        if (!entry?.active) {
+            throw modError(ownerId, 'api', 'source context owner is not active');
+        }
+
+        if (action.type !== 'pickup' && action.type !== 'toggleDoor') {
+            throw modError(ownerId, 'action', 'unsupported source context request');
+        }
+
+        const result = submitAction(action, ownerId, false);
+
+        if (!entry.active) {
+            throw modError(ownerId, 'api', 'source context owner became inactive during hooks');
+        }
+
+        return result.cancelled ? null : result.action;
+    }
+
+    /**
+     * Commits a source-owned held mutation through the shared SDK hooks.
+     *
+     * @param {'primary'|'secondary'} slot - Actual held slot.
+     * @param {number|null} itemId - Stable inventory ID or clear.
+     * @param {string} ownerId - Live original-source owner.
+     * @returns {ModCommandResult} Same SDK mutation/hooks and real committed notifications.
+     */
+    function sourceSetHandItem(slot, itemId, ownerId) {
+        const entry = ownerId === CORE_ID ? coreEntry : mods.get(ownerId);
+
+        if (!entry?.active) {
+            throw modError(ownerId, 'api', 'source equipment owner is not active');
+        }
+
+        return submitAction({ type: 'setHandItem', slot, itemId }, ownerId);
+    }
+
+    const coreApi = createHandle(coreEntry);
     const api = createHandle(hostEntry);
 
-    return { api, load, dispose, command, step, diagnostics };
+    return { api, coreApi, load, unload, dispose, command, step, frameStep, diagnostics, sourcePreflight, sourceSetHandItem };
 }
 
 export { MOD_API_VERSION };

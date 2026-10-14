@@ -307,11 +307,11 @@ function nativePackageFiles(descriptor) {
  * @returns {Promise<object[]>} Startup seeds followed by require-only dependencies, installed once by module name.
  */
 async function engineSources(descriptors, content, additionalSources = []) {
-    const ownModules = new Set(descriptors.flatMap((entry) => entry.sources.map((item) => item.path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, ''))));
+    const ownModules = new Set(descriptors.flatMap((entry) => entry.sources.map((item) => item.path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, '').toLowerCase())));
     const available = new Map();
 
     for (const { path } of content.manifest.files.filter((item) => LUA_PATH.test(item.path))) {
-        const name = path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, '');
+        const name = path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, '').toLowerCase();
         const paths = available.get(name) ?? [];
 
         paths.push(path);
@@ -333,7 +333,7 @@ async function engineSources(descriptors, content, additionalSources = []) {
             throw new TypeError('Engine startup sources require original media/lua paths and Lua text');
         }
 
-        const name = item.path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, '');
+        const name = item.path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, '').toLowerCase();
         const previous = supplied.get(name);
 
         if (ownModules.has(name) || (previous && previous.path !== item.path)) {
@@ -366,9 +366,10 @@ async function engineSources(descriptors, content, additionalSources = []) {
     }
 
     for (let index = 0; index < queue.length; index++) {
-        // ponytail: literal require graph only; dynamic engine module names fail truthfully until async VM require/resume exists.
+        // ponytail: literal require graph only; dynamic module names are not statically fetched.
         for (const moduleName of literalLuaRequires(queue[index])) {
-            const name = moduleName.replaceAll('\\', '/').replace(/\.lua$/u, '');
+            // Native ZomboidFileSystem.getAbsolutePath folds the whole exact lookup key, not path suffixes.
+            const name = moduleName.replaceAll('\\', '/').replace(/\.lua$/u, '').toLowerCase();
 
             if (visited.has(name)) {
                 continue;
@@ -404,10 +405,12 @@ async function engineSources(descriptors, content, additionalSources = []) {
 
 /**
  * Prepare a fresh VM and all cross-package require ownership before any activation.
+ * Source rows hydrate before package scripts; the caller must completeSourceRestore
+ * after genuine player startup events and before publishing/ticking the candidate.
  *
  * @param {object[]} descriptors - Enabled or previously running native packages.
  * @param {object} content - Private directory.
- * @param {{staged?:boolean,ui?:object,moodleTypes?:{[name:string]:string},engineSources?:{path:string,source:string,execute?:boolean}[]}} [options] - Candidate resources and ordered original startup seeds; execute defaults true.
+ * @param {{staged?:boolean,ui?:object,sourceFiles?:object,engineSources?:{path:string,source:string,execute?:boolean}[]}} [options] - Candidate resources/core files and ordered original startup seeds; execute defaults true.
  * @returns {Promise<object|undefined>} New VM, or no VM when no native code is enabled.
  */
 async function prepareNativeSession(descriptors, content, options = {}) {
@@ -415,7 +418,7 @@ async function prepareNativeSession(descriptors, content, options = {}) {
         throw new Error('Close the prior native VM before preparing a session');
     }
 
-    if (!descriptors.length) {
+    if (!descriptors.length && !options.coreApi) {
         bindNativeSession(undefined, []);
 
         return undefined;
@@ -456,7 +459,10 @@ async function prepareNativeSession(descriptors, content, options = {}) {
     const sources = await engineSources(descriptors, content, options.engineSources);
     const session = await createLuaSession({
         ui: options.ui,
-        moodleTypes: options.moodleTypes,
+        sourceFiles: options.sourceFiles,
+        sourceActions: options.sourceActions,
+        sourceTiming: options.sourceTiming,
+        sourceWorldContext: options.sourceWorldContext,
         engineStartup: sources.filter((item) => item.execute !== false).map(({ path }) => ({ id: 'engine-lua', path })),
     });
 
@@ -467,6 +473,14 @@ async function prepareNativeSession(descriptors, content, options = {}) {
 
         for (const entry of descriptors) {
             session.preload(entry);
+        }
+
+        if (options.coreApi) {
+            session.activatePackage({ id: 'pz-base-game', nativeId: 'ProjectZomboid', api: options.coreApi, sources: [] });
+        }
+
+        if (options.queueRestore) {
+            session.restoreSourceActions(options.queueRestore.state, options.queueRestore.sourceOwners, options.queueRestore.declaredOwners);
         }
     } catch (cause) {
         session.close({ discardSaveData: true });

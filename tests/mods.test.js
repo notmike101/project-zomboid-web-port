@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createEngine } from '../src/engine.js';
 import { createModHost, MOD_API_VERSION } from '../src/mods.js';
+import { completeActions, importPickupSquares } from './queue-test-helpers.js';
 
 const wasmUrl = new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url);
 const sampleUrl = new URL('../mods/accessible-walking/main.js', import.meta.url).href;
@@ -63,6 +64,48 @@ async function newEngine() {
     } catch (cause) {
         throw new Error(`tests need engine/target/wasm32-unknown-unknown/release/pz_engine.wasm; run npm run build first (${cause.message})`);
     }
+}
+
+/**
+ * Stage a reachable actual native Source queue with no remaining STOP-event token.
+ * This exercises the private native protocol, not an original Lua callback claim.
+ *
+ * @param {object} engine - Real compiled WASM engine.
+ * @returns {number} Untransferred ground-item identity.
+ */
+function stageExhaustedSourceStop(engine) {
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    importPickupSquares(engine);
+    const itemId = engine.command({ type: 'spawnItem', fullType: footwear.fullType, x: 5, y: 5 }).id;
+
+    engine.command({ type: 'walk', x: 1, y: 0 });
+    const queue = engine.sourceActions;
+    const actionId = queue.newAction(3, 1, itemId, 5, 5, 0, 20);
+    const groupId = queue.groupNew(actionId, 20);
+
+    queue.groupItemInsert(groupId, 0, itemId);
+    queue.groupInsert(actionId, 0, groupId);
+    queue.insert(0, actionId);
+    queue.start(actionId, 20, 1);
+
+    for (const [kind, result] of [[1, 1], [2, 0], [3, 0]]) {
+        const event = queue.eventRead();
+
+        assert.equal(event.actionId, actionId);
+        assert.equal(event.event, kind);
+        queue.eventReply(actionId, kind, event.token, result);
+    }
+
+    assert.equal(queue.eventRead(), null);
+    assert.equal(engine.actions.getState().current.started, true);
+    const bytes = engine.saveQueueState();
+
+    // Native PZQ1 next_token is byte24; MAX is reachable after the final legal token's reply.
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setUint32(24, 0xFF_FF_FF_FF, true);
+    engine.loadQueueState(bytes);
+    assert.equal(engine.snapshot().action, 2, 'queue restore retains the unrelated manual heading');
+
+    return itemId;
 }
 
 /**
@@ -880,7 +923,7 @@ test('post-step ticks use committed detached snapshots and skip withdrawn listen
     assert.deepEqual(calls, ['first:1', `second:1:${engine.snapshot().x}`]);
     assert.ok(engine.snapshot().x > 5);
     assert.equal(withdraw(), false);
-    assert.throws(() => host.step(0), { stage: 'tick' });
+    assert.throws(() => host.step(-STEP), { stage: 'tick' });
     assert.equal(calls.length, 2, 'refused steps do not emit ticks');
     host.dispose();
     host.step(STEP);
@@ -987,6 +1030,7 @@ export function activate(api) {
         const id = api.items.spawn({ fullType, x: 5, y: 5 }).snapshot.id;
 
         api.items.pickup(id);
+        completeActions(engine);
 
         return id;
     });
@@ -1051,10 +1095,12 @@ export function activate(api) {
     const before = engine.items();
     const unveto = host.api.hooks.beforeAction((action) => action.type === 'pickup' ? false : undefined);
 
-    assert.equal(api.items.pickup(id).cancelled, true);
+    assert.equal(api.items.pickup(id).accepted, false);
     assert.deepEqual(engine.items(), before);
     unveto();
     api.items.pickup(id);
+    assert.equal(api.items.get(id).location, 'ground', 'accepted request has not transferred yet');
+    completeActions(engine);
     api.items.wear(id);
     assert.equal(api.items.worn('Shoes').id, id);
     api.items.setCondition(id, 0);
@@ -1089,6 +1135,7 @@ export function activate(api) {
     const id = api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 }).snapshot.id;
 
     api.items.pickup(id);
+    completeActions(engine);
     const unveto = host.api.hooks.beforeAction((action) => action.type === 'setWeight' || action.type === 'setActualWeight' ? false : undefined);
 
     assert.equal(api.items.setWeight(id, 9).cancelled, true);
@@ -1112,6 +1159,7 @@ export function activate(api) {
 
     api.items.pickup(id);
     api.items.pickup(second);
+    completeActions(engine);
     api.items.setActualWeight(id, 3.402_823_466_385_288_6e38);
     api.items.setActualWeight(second, 3.402_823_466_385_288_6e38);
     assert.equal(api.items.inventoryState().capacityWeight, Infinity, 'native aggregate overflow is observable, not an invented per-inventory ceiling');
@@ -1131,6 +1179,7 @@ export function activate(api) {
     const id = api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 }).snapshot.id;
 
     api.items.pickup(id);
+    completeActions(engine);
     let calls = 0;
 
     host.api.hooks.beforeAction(() => {
@@ -1641,6 +1690,8 @@ function importClosedDoor(engine) {
             squares.push({
                 x, y, z: 0, roomId: -1, outside: true, solid: false,
                 solidTrans: false, tree: false, independentWalls: 0, vehicleObstructed: false,
+                reachWalls: { north: false, west: false },
+                solidFloor: true,
             });
         }
     }
@@ -1683,14 +1734,15 @@ export function activate(api) { fx.api = api; assert.equal(api.world.getDoors()[
     });
     const veto = api.world.toggleDoor(id);
 
-    assert.deepEqual([veto.committed, veto.cancelled, veto.submittedBy, veto.cancelledBy],
-        [false, true, 'fx-door-owner', 'host']);
+    assert.deepEqual([veto.accepted, veto.actionId], [false, null]);
     assert.deepEqual(engine.saveDoorState(), before);
     assert.throws(() => engine.command({ type: 'walk', x: 0, y: -1 }), /blocked/u);
     unveto();
     const opening = api.world.toggleDoor(id);
 
-    assert.deepEqual([opening.committed, opening.cancelled, opening.submittedBy], [true, false, 'fx-door-owner']);
+    assert.equal(opening.accepted, true);
+    assert.equal(api.world.getDoors()[0].open, false, 'request admission is not door completion');
+    completeActions(engine);
     assert.equal(api.world.getDoors()[0].open, true);
     assert.equal(engine.saveDoorState().revision, before.revision + 1);
     host.command({ type: 'walk', x: 0, y: -1 });
@@ -1699,14 +1751,15 @@ export function activate(api) { fx.api = api; assert.equal(api.world.getDoors()[
     host.command({ type: 'cancel' });
     await host.load(moduleUrl(`${manifestSource('fx-door-other')}
 export function activate(api) { fx.api = api; }`));
-    assert.equal(fx.api.world.toggleDoor(id).submittedBy, 'fx-door-other');
+    assert.equal(fx.api.world.toggleDoor(id).accepted, true);
+    completeActions(engine);
     assert.equal(engine.doors()[0].open, false);
     const replace = host.api.hooks.beforeAction((action) => action.type === 'toggleDoor'
         ? { type: 'walk', x: 1, y: 0 }
         : undefined);
     const changed = fx.api.world.toggleDoor(id);
 
-    assert.deepEqual(changed.modifiedBy, ['host']);
+    assert.equal(changed.accepted, false, 'hook replacement submitted movement, not a queued door');
     assert.equal(engine.doors()[0].open, false, 'hook replacement commits movement, not the original door action');
     assert.equal(engine.snapshot().action, 2);
     replace();
@@ -1960,4 +2013,365 @@ export function activate(api) { fx.api = api; api.movement.setSpeed(2); }`));
     });
     assert.equal(host.command({ type: 'walk', x: 1, y: 0 }).committed, true);
     assert.equal(engine.bodyParts()[0].pain, 0);
+});
+
+test('public source timing and queued actions use real native state and acceptance hooks exactly once', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    await host.load(moduleUrl(`${manifestSource('fx-queue-time')}
+export function activate(api) {
+  fx.api = api;
+  api.items.definitions.register(${JSON.stringify(footwear)});
+}`));
+    const api = fx.api;
+
+    api.character.setTrait('base:dextrous', true);
+    api.time.set('slowHalf', true);
+    api.time.setGameMode('LastStand');
+    assert.equal(engine.sourceTiming.hasTrait('base:dextrous'), true);
+    assert.equal(api.time.getState().gameMode, 'LastStand');
+    assert.ok(Object.isFrozen(api.time.getState().traits));
+    assert.throws(() => api.character.hasTrait('base:unknown'), { stage: 'character' });
+    assert.equal(api.sourceActions, undefined, 'native mutation authority is not a mod namespace');
+    const id = api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 }).snapshot.id;
+    let admissions = 0;
+
+    host.api.hooks.beforeAction((action) => {
+        if (action.type === 'pickup') {
+            admissions += 1;
+        }
+    });
+    const result = api.actions.requestPickup(id);
+
+    assert.equal(result.accepted, true);
+    assert.equal(api.items.get(id).location, 'ground');
+    assert.ok(Object.isFrozen(result.state.current));
+    assert.equal(admissions, 1);
+    completeActions(engine);
+    assert.equal(api.items.get(id).location, 'inventory');
+    assert.equal(admissions, 1, 'completion never resubmits the command hooks');
+    const seconds = [];
+
+    api.events.onTick((event) => {
+        seconds.push(event.seconds);
+    });
+    host.step(0);
+    host.frameStep(0.5);
+    assert.deepEqual(seconds, [0, 0.5]);
+    assert.equal(api.time.getState().fpsMultiplier, 5);
+    host.dispose();
+    assert.throws(() => api.character.setTrait('base:dextrous', false), { stage: 'api' });
+    assert.throws(() => api.time.getState(), { stage: 'api' });
+    assert.throws(() => api.actions.getState(), { stage: 'api' });
+});
+
+test('protected original core preflight resolves ordinary hooks without a second SDK enqueue', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    const first = engine.command({ type: 'spawnItem', fullType: 'Fixture.Shoes', x: 5, y: 5 }).id;
+    const second = engine.command({ type: 'spawnItem', fullType: 'Fixture.Shoes', x: 5, y: 5 }).id;
+
+    engine.sourceActions.setContextResolver((action, owner) => host.sourcePreflight(action, owner));
+    let calls = 0;
+    const unmodify = host.api.hooks.beforeAction((action) => {
+        calls += 1;
+        assert.throws(() => engine.sourceActions.resolveContextAction(action, 'pz-base-game'), { stage: 'action' });
+
+        return { type: 'pickup', id: second };
+    });
+    const result = engine.sourceActions.resolveContextAction({ type: 'pickup', id: first }, 'pz-base-game');
+
+    assert.deepEqual(result, { type: 'pickup', id: second });
+    assert.equal(calls, 1);
+    assert.deepEqual(engine.actions.getState(), { current: null, pending: [] }, 'source hook resolution cannot create SDK work');
+    assert.ok(engine.items().every((item) => item.location === 'ground'));
+    assert.deepEqual(host.diagnostics().mods, [], 'core is not represented as an installed user mod');
+    assert.equal(host.diagnostics().core.id, 'pz-base-game');
+    assert.equal(host.diagnostics().counts.modSubmitted, 0);
+    unmodify();
+    host.api.hooks.beforeAction(() => false);
+    assert.equal(engine.sourceActions.resolveContextAction({ type: 'pickup', id: first }, 'pz-base-game'), null);
+    assert.throws(() => host.sourcePreflight({ type: 'pickup', id: first }, 'missing-package'), { stage: 'api' });
+    await assert.rejects(() => host.load(moduleUrl(`${manifestSource('pz-base-game')}
+export function activate() {}`)), { stage: 'manifest' });
+    const core = host.coreApi;
+
+    core.character.setTrait('base:dextrous', true);
+    assert.equal(engine.sourceTiming.hasTrait('base:dextrous'), true);
+    await host.load(sampleUrl);
+    host.unload('accessible-walking');
+    assert.equal(core.character.hasTrait('base:dextrous'), true, 'unloading a user addon keeps the original owner live');
+    assert.throws(() => host.unload('pz-base-game'), { stage: 'api' });
+    host.dispose();
+    assert.throws(() => core.character.hasTrait('base:dextrous'), { stage: 'api' });
+    assert.throws(() => host.sourcePreflight({ type: 'pickup', id: first }, 'pz-base-game'), { stage: 'api' });
+});
+
+test('source context hooks cannot publish admission after disposing its protected owner', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    const id = engine.command({ type: 'spawnItem', fullType: 'Fixture.Shoes', x: 5, y: 5 }).id;
+
+    host.api.hooks.beforeAction(() => {
+        host.dispose();
+    });
+    assert.throws(() => host.sourcePreflight({ type: 'pickup', id }, 'pz-base-game'), { stage: 'api' });
+    assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
+    assert.equal(engine.items()[0].location, 'ground');
+});
+
+test('both public action cancellation surfaces have identical real native movement effects', async () => {
+    await Promise.all([{ type: 'walk', x: 1, y: 0 }, { type: 'moveTo', x: 9, y: 7 }].map(async (action) => {
+        const [direct, sdk] = await Promise.all([newEngine(), newEngine()]);
+        const host = createModHost(sdk);
+
+        direct.command(action);
+        host.command(action);
+        assert.deepEqual(direct.actions.cancel(), host.api.actions.cancel());
+        direct.step(STEP);
+        host.step(STEP);
+        assert.deepEqual(direct.snapshot(), sdk.snapshot());
+        assert.deepEqual([sdk.snapshot().x, sdk.snapshot().y, sdk.snapshot().action], [5, 5, 0]);
+        host.dispose();
+    }));
+});
+
+test('actual typed native cancellation refusal retains SDK owner and cause while hard-stopping movement', async (t) => {
+    /**
+     * Exercise one cancellation owner without overlapping shared module fixture state.
+     *
+     * @param {string} owner - Host or loaded-mod cancellation owner.
+     * @returns {Promise<void>} Completes the real native refusal assertions.
+     */
+    const runCase = async (owner) => {
+        const engine = await newEngine();
+        const nativeCauses = [];
+        // Observe the real native throw for identity only: do not replace its result, error or side effects.
+        const observedEngine = {
+            ...engine,
+            /**
+             * Observe the exact native failure without replacing its outcome.
+             *
+             * @param {import('../types/mod-api').ModAction} action - Actual native command.
+             * @returns {object} Unmodified native command result on success.
+             */
+            command(action) {
+                try {
+                    return engine.command(action);
+                } catch (cause) {
+                    nativeCauses.push(cause);
+                    throw cause;
+                }
+            },
+        };
+        const host = createModHost(observedEngine);
+
+        t.after(() => host.dispose());
+        fx.seen = [];
+        await host.load(moduleUrl(`${manifestSource('fx-cancel-refusal')}
+export function activate(api) {
+  fx.api = api;
+  api.hooks.beforeAction((action) => { fx.seen.push(action.type); return false; });
+}`));
+        const modApi = fx.api;
+        const itemId = stageExhaustedSourceStop(engine);
+        const before = host.diagnostics().counts;
+        let failure;
+
+        assert.throws(() => {
+            if (owner === 'host') {
+                host.command({ type: 'cancel' });
+            } else {
+                modApi.actions.cancel();
+            }
+        }, (error) => {
+            failure = error;
+            assert.equal(error.name, 'ModError');
+            assert.equal(error.modId, owner);
+            assert.equal(error.stage, 'action');
+            assert.equal(nativeCauses.length, 1);
+            assert.equal(error.cause, nativeCauses[0], 'the SDK retains the exact real native error object');
+            assert.ok(error.cause instanceof RangeError);
+            assert.match(error.cause.message, /cancel/u);
+
+            return true;
+        });
+        const diagnostics = host.diagnostics();
+
+        assert.deepEqual(diagnostics.errors.at(-1), { modId: owner, stage: 'action', message: failure.message });
+        assert.equal(diagnostics.counts.committed, before.committed, 'a refused cancel is not counted as committed');
+        assert.equal(diagnostics.counts.commands, before.commands + 1);
+        assert.deepEqual(fx.seen, [], 'cancellation still bypasses every veto hook');
+        assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
+        assert.equal(engine.sourceActions.eventRead(), null);
+        assert.equal(engine.items().find((item) => item.id === itemId).location, 'ground');
+        const stopped = engine.snapshot();
+
+        assert.equal(stopped.action, 0, 'the ABI1 primitive finally still hard-cancels on typed refusal');
+        engine.step(STEP);
+        assert.deepEqual([engine.snapshot().x, engine.snapshot().y, engine.snapshot().action],
+            [stopped.x, stopped.y, 0]);
+    };
+
+    await runCase('host');
+    await runCase('fx-cancel-refusal');
+});
+
+test('held SDK and source mutations share vetoes and attributed actual postcommit notifications', async (t) => {
+    const engine = await newEngine();
+
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    engine.importItems([{
+        id: 0xFF_FF_FF_FF, fullType: footwear.fullType, location: 'inventory',
+        x: 5, y: 5, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 10, actualWeight: 10,
+    }]);
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    fx.result = [];
+    await host.load(moduleUrl(`${manifestSource('fx-held')}
+export function activate(api) {
+  fx.api = api;
+  assert.throws(() => api.character.setHandItem('primary', 0xFFFFFFFF), /synchronous activate/);
+  api.events.onHandItemChanged((event) => {
+    fx.result.push({ ...event, actual: api.character.getHandItems() });
+    throw new Error('held observer failed after commit');
+  });
+}`));
+    const api = fx.api;
+    const unveto = host.api.hooks.beforeAction((action) => action.type === 'setHandItem' ? false : undefined);
+
+    assert.equal(api.character.setHandItem('primary', 0xFF_FF_FF_FF).cancelled, true);
+    assert.equal(host.sourceSetHandItem('primary', 0xFF_FF_FF_FF, 'fx-held').cancelled, true);
+    assert.deepEqual(fx.result, []);
+    assert.deepEqual(api.character.getHandItems(), { primary: null, secondary: null });
+    unveto();
+    assert.equal(host.sourceSetHandItem('primary', 0xFF_FF_FF_FF, 'fx-held').committed, true);
+    api.character.setHandItem('secondary', 0xFF_FF_FF_FF);
+    api.character.setHandItem('primary', 0xFF_FF_FF_FF);
+    assert.equal(fx.result.length, 2);
+    assert.deepEqual(fx.result[0], {
+        slot: 'primary', playerIndex: 0, itemId: 0xFF_FF_FF_FF,
+        actual: { primary: 0xFF_FF_FF_FF, secondary: null },
+    });
+    assert.throws(() => api.character.setHandItem('primary', -1), (error) => error.modId === 'fx-held');
+    api.items.wear(0xFF_FF_FF_FF);
+    assert.equal(fx.result.length, 2, 'wearing is not an OnEquip hand transition');
+    api.items.drop(0xFF_FF_FF_FF, 5, 5);
+    assert.equal(fx.result.length, 4);
+    assert.deepEqual(fx.result.slice(2).map(({ slot, itemId }) => ({ slot, itemId })),
+        [{ slot: 'primary', itemId: null }, { slot: 'secondary', itemId: null }]);
+    assert.ok(host.diagnostics().errors.every((error) => error.modId === 'fx-held'));
+    assert.equal(host.diagnostics().errors.filter((error) => error.stage === 'onHandItemChanged').length, 4);
+    assert.deepEqual(engine.getHandItems(), { primary: null, secondary: null });
+    host.unload('fx-held');
+    assert.throws(() => host.sourceSetHandItem('primary', null, 'fx-held'), /not active/u);
+});
+
+test('throwing private equipment observer cannot veto committed host notifications and reentrant pair clears stay ordered', async (t) => {
+    const engine = await newEngine();
+
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    engine.importItems([1, 2].map((id) => ({
+        id, fullType: footwear.fullType, location: 'inventory',
+        x: 5, y: 5, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
+    })));
+    const nativeObserverFailure = new Error('private observer failed');
+    const privateErrors = [];
+
+    engine.observeHandItems(() => {
+        throw nativeObserverFailure;
+    }, (cause) => privateErrors.push(cause));
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    const seen = [];
+
+    host.coreApi.events.onHandItemChanged((event) => {
+        seen.push(event);
+
+        if (event.slot === 'primary' && event.itemId === null) {
+            host.coreApi.character.setHandItem('secondary', 2);
+        }
+    });
+    host.api.character.setHandItem('primary', 1);
+    host.api.character.setHandItem('secondary', 1);
+    assert.equal(privateErrors.length, 2);
+    seen.length = 0;
+    const result = host.api.items.drop(1, 5, 5);
+
+    assert.equal(result.committed, true, 'private callback failure cannot turn native success into action rejection');
+    assert.deepEqual(seen, [
+        { slot: 'primary', playerIndex: 0, itemId: null },
+        { slot: 'secondary', playerIndex: 0, itemId: null },
+        { slot: 'secondary', playerIndex: 0, itemId: 2 },
+    ]);
+    assert.deepEqual(engine.getHandItems(), { primary: null, secondary: 2 });
+    assert.equal(privateErrors.length, 5);
+    assert.ok(privateErrors.every((cause) => cause === nativeObserverFailure));
+    assert.equal(host.diagnostics().errors.length, 0);
+});
+
+test('source equipment owner unload refuses hook-rewritten native mutations before commit', async (t) => {
+    const engine = await newEngine();
+
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    engine.importItems([{
+        id: 1, fullType: footwear.fullType, location: 'inventory',
+        x: 5, y: 5, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
+    }]);
+    engine.setHandItem('primary', 1);
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-held-rewrite')}
+export function activate() {}`));
+    const events = [];
+
+    host.coreApi.events.onHandItemChanged((event) => {
+        events.push(event);
+    });
+    host.api.hooks.beforeAction((action) => {
+        if (action.type === 'setHandItem') {
+            host.unload('fx-held-rewrite');
+
+            return { type: 'drop', id: 1, x: 5, y: 5 };
+        }
+    });
+    assert.throws(() => host.sourceSetHandItem('primary', null, 'fx-held-rewrite'),
+        (error) => error.modId === 'fx-held-rewrite' && error.stage === 'api');
+    assert.deepEqual(engine.getHandItems(), { primary: 1, secondary: null });
+    assert.equal(engine.items()[0].location, 'inventory');
+    assert.deepEqual(events, []);
+    assert.equal(host.diagnostics().counts.committed, 0);
+});
+
+test('source equipment remains committed when its owner is unloaded by a postcommit observer', async (t) => {
+    const engine = await newEngine();
+
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    engine.importItems([{
+        id: 1, fullType: footwear.fullType, location: 'inventory',
+        x: 5, y: 5, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
+    }]);
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-held-postcommit')}
+export function activate() {}`));
+    host.coreApi.events.onHandItemChanged(() => {
+        host.unload('fx-held-postcommit');
+    });
+    const result = host.sourceSetHandItem('primary', 1, 'fx-held-postcommit');
+
+    assert.equal(result.committed, true);
+    assert.deepEqual(engine.getHandItems(), { primary: 1, secondary: null });
+    assert.equal(host.diagnostics().counts.committed, 1);
+    assert.equal(host.diagnostics().mods.length, 0);
+    assert.equal(host.diagnostics().errors.length, 0);
 });

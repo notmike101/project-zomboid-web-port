@@ -72,6 +72,39 @@ function decodeCell(encoded) {
 }
 
 /**
+ * Decode portable queue bytes without JSON-coercing native float bits.
+ *
+ * @param {object} queue - Versioned queue payload.
+ * @returns {Uint8Array} Detached, canonical portable bytes.
+ */
+function decodeQueue(queue) {
+    if (!queue || queue.version !== 1 || Object.keys(queue).length !== 3
+        || !Array.isArray(queue.sourceOwners) || queue.sourceOwners.length > 128
+        || typeof queue.bytes !== 'string' || queue.bytes.length > 1_398_104) {
+        throw new TypeError('Invalid saved source queue encoding.');
+    }
+
+    const ids = new Set();
+
+    for (const owner of queue.sourceOwners) {
+        if (!owner || Object.keys(owner).length !== 2 || !integer(owner.actionId, 1, 2_147_483_647)
+            || ids.has(owner.actionId) || typeof owner.ownerId !== 'string' || !owner.ownerId) {
+            throw new TypeError('Invalid saved source action owner mapping.');
+        }
+
+        ids.add(owner.actionId);
+    }
+
+    const text = atob(queue.bytes);
+
+    if (!text.length || text.length > 1_048_576 || btoa(text) !== queue.bytes) {
+        throw new TypeError('Invalid saved source queue bytes.');
+    }
+
+    return Uint8Array.from(text, (character) => character.charCodeAt(0));
+}
+
+/**
  * Extend an authenticated legacy payload without mutating its world or mod data.
  *
  * @param {object} payload - Detached, integrity-verified version-one payload.
@@ -156,6 +189,26 @@ function validateInventory(record) {
  * @returns {boolean} Whether the scalar is an integer within the bounds.
  */
 const integer = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
+
+/**
+ * Validates an authenticated held pair against saved inventory identities.
+ *
+ * @param {object} state - Authenticated optional held pair.
+ * @param {object[]} items - Fully validated stable inventory rows.
+ */
+function validateHandState(state, items) {
+    if (!state || typeof state !== 'object' || Array.isArray(state) || state.version !== 1
+        || Object.keys(state).length !== 3 || !['version', 'primary', 'secondary'].every((key) => Object.hasOwn(state, key))) {
+        throw new TypeError('Invalid saved hand state.');
+    }
+
+    for (const id of [state.primary, state.secondary]) {
+        if (id !== null && (!integer(id, 1, 0xFF_FF_FF_FF)
+            || !items.some((item) => item.id === id && item.location === 'inventory'))) {
+            throw new TypeError('Invalid saved hand inventory reference.');
+        }
+    }
+}
 
 /**
  * Validate portable door metadata without pretending a source-free engine can restore it.
@@ -255,13 +308,25 @@ async function validateSave(record) {
         validateDoorState(copy.doorState);
     }
 
+    if (Object.hasOwn(copy, 'queue')) {
+        decodeQueue(copy.queue);
+    }
+
     if (copy.formatVersion === 1) {
+        if (Object.hasOwn(copy, 'handState')) {
+            validateHandState(copy.handState, []);
+        }
+
         const migrated = migrateLegacySave(payload);
 
         return { ...migrated, integrity: await digest(migrated) };
     }
 
     validateInventory(copy);
+
+    if (Object.hasOwn(copy, 'handState')) {
+        validateHandState(copy.handState, copy.items);
+    }
 
     return copy;
 }
@@ -364,6 +429,10 @@ function createSaveStore({ engineSource, appVersion }) {
 
         engine.importItems(validated.items);
 
+        if (Object.hasOwn(validated, 'handState')) {
+            engine.loadHandState(validated.handState);
+        }
+
         engine.loadState(validated.engine.state);
 
         if (Object.hasOwn(validated, 'moodleState')) {
@@ -374,9 +443,22 @@ function createSaveStore({ engineSource, appVersion }) {
             engine.loadBodyState(validated.bodyState);
         }
 
+        // Source geometry/door identities are restored by the session before queue publication.
+        const queueState = Object.hasOwn(validated, 'queue') ? decodeQueue(validated.queue) : undefined;
+
+        if (queueState && !engine.canSaveQueueState()) {
+            throw new Error('Saved source queue is unsupported by this engine module.');
+        }
+
+        if (queueState && !Object.hasOwn(validated, 'doorState')) {
+            engine.loadQueueState(queueState);
+            engine.sourceActions.validateSourceOwners(validated.queue.sourceOwners);
+        }
+
         return {
             engine, record: validated,
             ...(Object.hasOwn(validated, 'doorState') ? { doorState: structuredClone(validated.doorState) } : {}),
+            ...(queueState ? { queueState, sourceOwners: structuredClone(validated.queue.sourceOwners) } : {}),
         };
     }
 
@@ -401,6 +483,17 @@ function createSaveStore({ engineSource, appVersion }) {
             ...(typeof engine.saveBodyState === 'function'
                 && (typeof engine.canSaveBodyState !== 'function' || engine.canSaveBodyState())
                 ? { bodyState: engine.saveBodyState() }
+                : {}),
+            ...(typeof engine.canSaveHandState === 'function' && engine.canSaveHandState()
+                ? { handState: engine.saveHandState() }
+                : {}),
+            ...(typeof engine.canSaveQueueState === 'function' && engine.canSaveQueueState()
+                ? {
+                        queue: {
+                            version: 1, bytes: encodeCell(engine.saveQueueState()),
+                            sourceOwners: engine.sourceActions.exportSourceOwners(),
+                        },
+                    }
                 : {}),
             world: {
                 cells: (captured.cells ?? []).map((cell) => ({

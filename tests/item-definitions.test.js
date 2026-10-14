@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createEngine } from '../src/engine.js';
-import { parseItemDefinitions, parseModelDefinitions, parseClothingDefinition } from '../src/item-definitions.js';
+import { normalItemIcon, parseItemDefinitions, parseModelDefinitions, parseClothingDefinition } from '../src/item-definitions.js';
 import { seedOriginalWearables } from '../src/native-game-resources.js';
+import { completeActions } from './queue-test-helpers.js';
 
 test('script structure preserves source order, provenance and unknown quoted fields without defaults', () => {
     const provenance = { path: 'authored.txt', build: 'synthetic' };
@@ -34,6 +35,28 @@ test('script structure preserves source order, provenance and unknown quoted fie
     assert.equal(records[0].provenance.path, 'authored.txt');
     records[0].provenance.path = 'detached';
     assert.equal(records[1].provenance.path, 'authored.txt');
+});
+
+test('script normal texture uses explicit Icon or the first IconsForTexture without inventing missing metadata', () => {
+    const [explicit, indexed, absent] = parseItemDefinitions(`module Fixture {
+        item Explicit { IconsForTexture = First;Second, Icon = Chosen, }
+        item Indexed { IconsForTexture = " First ; Second ", }
+        item Absent { ClothingItem = MissingVisual, }
+    }`, 'icons.txt');
+
+    assert.equal(normalItemIcon(explicit), 'Chosen');
+    assert.equal(normalItemIcon(indexed), 'First');
+    assert.equal(normalItemIcon(absent), null);
+
+    for (const rawFields of [
+        [{ name: 'Icon', value: '../Other' }, { name: 'IconsForTexture', value: 'First;Second' }],
+        [{ name: 'IconsForTexture', value: '' }],
+        [{ name: 'IconsForTexture', value: ';Second' }],
+        [{ name: 'IconsForTexture', value: 'other/path;Second' }],
+        [{ name: 'IconsForTexture', value: 7 }],
+    ]) {
+        assert.throws(() => normalItemIcon({ fullType: 'Fixture.BadIcon', rawFields }), /Invalid original.*Icon/u);
+    }
 });
 
 test('source Tags become detached canonical resource IDs without adding missing gameplay fields', () => {
@@ -127,6 +150,7 @@ test('original wearable seeding applies script constructor defaults only at regi
 
         assert.equal(subject.items().find((item) => item.id === id).condition, 10);
         subject.command({ type: 'pickup', id });
+        completeActions(subject);
         subject.command({ type: 'wear', id });
         assert.equal(subject.isWearingAwkwardGloves(), tags.includes('base:awkwardgloves'));
     }

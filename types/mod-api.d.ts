@@ -36,6 +36,7 @@ export interface ModSnapshot {
 export type ModAction =
   | { type: 'moveTo'; x: number; y: number }
   | { type: 'walk'; x: number; y: number }
+  | ({ type: 'requestWalk' } & ModWorldCoordinates)
   | { type: 'cancel' }
   | { type: 'toggleDoor'; id: string }
   | ({ type: 'spawnItem' } & ModItemSpawn)
@@ -44,11 +45,82 @@ export type ModAction =
   | { type: 'setCondition'; id: number; condition: number }
   | { type: 'setWeight'; id: number; weight: number }
   | { type: 'setActualWeight'; id: number; actualWeight: number }
+  | { type: 'setHandItem'; slot: 'primary' | 'secondary'; itemId: number | null }
   | { type: 'setHealth'; health: number }
   | { type: 'setCharacterStat'; name: string; value: number }
   | { type: 'setMoodleInputs'; inputs: Record<string, number | boolean> }
   | { type: 'setBodyPart'; part: ModBodyPartId; values: Partial<ModBodyPartValues> }
   | { type: 'setInjurySeverity'; severity: ModInjurySeverity };
+
+export interface ModQueuedAction {
+  readonly id: number;
+  readonly kind: 'walk' | 'door' | 'grab' | 'getUp';
+  readonly origin: 'sdk' | 'lua';
+  readonly target: Readonly<{ id: number | string; x: number; y: number; z: number }>;
+  readonly rawTime: number;
+  readonly maxTime: number;
+  readonly currentTime: number;
+  readonly lastTime: number;
+  readonly prevLastTime: number;
+  readonly delta: number;
+  readonly started: boolean;
+  readonly groups: readonly Readonly<{ id: number; rawTime: number; fullType: string | null; itemIds: readonly number[] }>[];
+}
+export interface ModQueueState {
+  readonly current: ModQueuedAction | null;
+  readonly pending: readonly ModQueuedAction[];
+}
+export interface ModQueueAcceptance {
+  readonly accepted: boolean;
+  readonly actionId: number | null;
+  readonly state: ModQueueState;
+}
+export interface ModQueuedActions {
+  getState(): ModQueueState;
+  requestPickup(itemId: number): ModQueueAcceptance;
+  requestDoor(doorId: string): ModQueueAcceptance;
+  requestWalk(target: ModWorldCoordinates): ModQueueAcceptance;
+  cancel(): ModQueueState;
+}
+export type ModTimingField = 'multiplier' | 'bias' | 'perObject' | 'slowHalf' | 'slowQuarter' | 'slowEighth' | 'instant';
+export interface ModSourceTimingState {
+  readonly multiplier: number;
+  readonly bias: number;
+  readonly perObject: number;
+  readonly fpsMultiplier: number;
+  readonly elapsedSeconds: number;
+  readonly slowMultiplier: number;
+  readonly gameMultiplier: number;
+  readonly slowHalf: boolean;
+  readonly slowQuarter: boolean;
+  readonly slowEighth: boolean;
+  readonly instant: boolean;
+  readonly gameMode: string;
+  readonly traits: Readonly<{ 'base:dextrous': boolean; 'base:allthumbs': boolean }>;
+}
+export interface ModSourceTiming {
+  getState(): ModSourceTimingState;
+  set(field: ModTimingField, value: number | boolean): void;
+  hasTrait(id: string): boolean;
+  setTrait(id: string, enabled: boolean): void;
+  getGameMode(): string;
+  setGameMode(mode: string): void;
+}
+
+/** Stable inventory refs; wearing gloves is independent of held items. */
+export interface ModHandItems {
+  primary: number | null;
+  secondary: number | null;
+}
+export interface ModHandItemChanged {
+  slot: 'primary' | 'secondary';
+  playerIndex: 0;
+  itemId: number | null;
+}
+export type ModHandItemChangedListener = (event: ModHandItemChanged) => void;
+export interface ModHandState extends ModHandItems {
+  version: 1;
+}
 
 /** Omitted count/condition are resolved by WASM's real definition, not the SDK. */
 export interface ModItemSpawn {
@@ -128,6 +200,38 @@ export interface ModWorldSquare {
   /** Native source predicate using current square flags and actual adjacent window/hoppable edges. */
   canStand: boolean;
 }
+
+/** Private immutable import facts for source getWallExcludingList; absent means unknown. */
+export interface ModSourceReachWalls {
+  readonly north: boolean;
+  readonly west: boolean;
+}
+export interface ModSquareSourceMetadata extends ModWorldCoordinates {
+  roomId: number;
+  outside: boolean;
+  solid: boolean;
+  solidTrans: boolean;
+  tree: boolean;
+  vehicleObstructed: boolean;
+  solidFloor?: boolean;
+  independentWalls: number;
+  windows?: number;
+  doorWalls?: number;
+  hoppableEdges?: number;
+  windowEdges?: number;
+  interactionProperties?: Readonly<Record<string, boolean>>;
+  reachWalls?: ModSourceReachWalls;
+}
+/** Host-only source door import, never a mutable queue/save field. */
+export type ModDoorSourceMetadata = Omit<ModDoor, 'revision' | 'toggled' | 'hoppable' | 'customLock'> & {
+  hoppable?: boolean;
+  customLock?: boolean;
+  standEdges?: readonly number[];
+  squareFlags?: readonly number[];
+  interactionProperties?: readonly Readonly<Record<string, boolean>>[];
+  reachWalls?: readonly ModSourceReachWalls[];
+  curtainCapabilities?: readonly boolean[];
+};
 
 /** Opaque original source IDs in real engine order; no guessed neutral registry. */
 export interface ModMoodle {
@@ -382,6 +486,11 @@ export interface ModApi {
      * `false` instead of submitting.
      */
     submit(action: ModAction): ModCommandResult;
+    getState(): ModQueueState;
+    requestPickup(itemId: number): ModQueueAcceptance;
+    requestDoor(doorId: string): ModQueueAcceptance;
+    requestWalk(target: ModWorldCoordinates): ModQueueAcceptance;
+    cancel(): ModQueueState;
   };
   /** Real optional engine capabilities; unsupported queries throw ModError/items. */
   items: {
@@ -402,7 +511,7 @@ export interface ModApi {
     inventoryState(): ModInventoryState;
     /** All mutations use actions.submit's shared synchronous hook path. */
     spawn(input: ModItemSpawn): ModCommandResult;
-    pickup(id: number): ModCommandResult;
+    pickup(id: number): ModQueueAcceptance;
     wear(id: number): ModCommandResult;
     unequip(id: number): ModCommandResult;
     drop(id: number, x: number, y: number): ModCommandResult;
@@ -414,6 +523,11 @@ export interface ModApi {
   };
   /** Actual engine health; no authoritative SDK shadow or invented moodle rules. */
   character: {
+    getHandItems(): ModHandItems;
+    /** Shared item hooks, actual native mutation; no notification on same assignment/veto. */
+    setHandItem(slot: 'primary' | 'secondary', itemId: number | null): ModCommandResult;
+    hasTrait(id: string): boolean;
+    setTrait(id: string, enabled: boolean): void;
     getHealth(): number;
     isDead(): boolean;
     /** Derives from the actual item worn on base:hands and its native definition tag. */
@@ -435,6 +549,7 @@ export interface ModApi {
     setBodyPart(part: ModBodyPartId, values: Partial<ModBodyPartValues>): ModCommandResult;
     setInjurySeverity(severity: ModInjurySeverity): ModCommandResult;
   };
+  time: Omit<ModSourceTiming, 'hasTrait' | 'setTrait'>;
   /** Persist original UI options inside this mod's saveData.nativeUIOptions map.
    * Exact nonempty IDs of at most 128 characters; strict cloned JSON under the
    * existing complete-namespace 256 KiB cap and schema guard. Other fields,
@@ -456,7 +571,7 @@ export interface ModApi {
     /** Exact nonempty stable id, at most 256 characters; no namespace normalization.
      * Uses actions.submit hooks before WASM mutation and returns cancelled on veto.
      * Forbidden during synchronous activate; malformed/unsupported/reentrant calls throw ModError/action. */
-    toggleDoor(id: string): ModCommandResult;
+    toggleDoor(id: string): ModQueueAcceptance;
     /** Absolute int32 tiles; unsigned bits 1 solid, 2 south wall, 4 east wall,
      * 8 floor, 16 water, 32 room. 0xFFFFFFFF means unloaded. */
     getNavFlags(tileX: number, tileY: number): number;
@@ -489,6 +604,7 @@ export interface ModApi {
   events: {
     onTick(callback: ModTickListener, options?: { priority?: number }): () => boolean;
     onCharacterDeath(callback: ModCharacterDeathListener, options?: { priority?: number }): () => boolean;
+    onHandItemChanged(callback: ModHandItemChangedListener, options?: { priority?: number }): () => boolean;
   };
   /** Hook registration. */
   hooks: {
@@ -506,6 +622,10 @@ export interface ModApi {
 
 /** Outcome of one committed, modified or cancelled command. */
 export interface ModCommandResult {
+  /** Queue admission is not a completed mutation. Only queued commands carry these fields. */
+  accepted?: boolean;
+  actionId?: number | null;
+  state?: ModQueueState;
   /** True when the engine received a command. */
   committed: boolean;
   /** True when a hook vetoed the command; then nothing was committed. */
@@ -574,6 +694,7 @@ export interface ModCounts {
 /** Detached host evidence. */
 export interface ModDiagnostics {
   modApi: string;
+  core: { id: 'pz-base-game'; active: boolean; hooks: number };
   mods: ModReport[];
   hookCount: number;
   counts: ModCounts;
@@ -584,10 +705,13 @@ export interface ModDiagnostics {
 /** The engine surface the host needs; `src/engine.js` supplies it. */
 export interface ModEngine {
   snapshot(): ModSnapshot;
-  command(action: ModAction): ModCommandSnapshot;
+  command(action: ModAction): ModCommandSnapshot | ModQueueAcceptance;
   setSpeed(speed: number): void;
   /** Optional: older engine handles still support original movement calls. */
   step?(seconds: number): void;
+  frameStep?(seconds: number): void;
+  actions?: ModQueuedActions;
+  sourceTiming?: ModSourceTiming;
   worldBounds?(): ModWorldBounds;
   navFlags?(x: number, y: number): number;
   getSquare?(x: number, y: number, z: number): ModWorldSquare | null;
@@ -595,7 +719,7 @@ export interface ModEngine {
   worldImportCell?(cx: number, cy: number, bytes: Uint8Array | DataView): void;
   /** Optional actual native-door wrapper. Validation checks availability without toggling. */
   doors?(): ModDoor[];
-  toggleDoor?(id: string): ModCommandSnapshot;
+  toggleDoor?(id: string): ModQueueAcceptance;
   /** Optional authoritative item/character extensions; never required for movement activation. */
   itemDefinitions?(): ModItemDefinition[];
   registerItemDefinition?(input: ModItemDefinitionInput, options: { owner: string; override?: boolean }): ModItemDefinition;
@@ -605,10 +729,18 @@ export interface ModEngine {
   /** Host-only registration seal, intentionally absent from ModApi. */
   freezeItemDefinitions?(): void;
   items?(): ModItem[];
+  /** Detached live stable-ID read; unknown valid uint32 identities return null. */
+  getItem?(id: number): ModItem | null;
   importItems?(records: ModItem[]): void;
   wornItem?(bodyLocation: string): ModItem | null;
   inventoryState?(): ModInventoryState;
   isWearingAwkwardGloves?(): boolean;
+  getHandItems?(): ModHandItems;
+  setHandItem?(slot: 'primary' | 'secondary', itemId: number | null): void;
+  observeHandItems?(callback: ModHandItemChangedListener, onError: (cause: unknown) => void): () => boolean;
+  canSaveHandState?(): boolean;
+  saveHandState?(): ModHandState;
+  loadHandState?(state: ModHandState): void;
   getHealth?(): number;
   isDead?(): boolean;
   moodles?(): ModMoodle[];
@@ -629,6 +761,8 @@ export interface ModEngine {
 
 /** Host surface returned by `createModHost`. */
 export interface ModHost {
+  /** Protected original-game handle; never a user-installable or disableable package. */
+  coreApi: ModApi;
   /** Host-owned handle with the same surface mods receive, for parity checks. */
   api: ModApi;
   /**
@@ -639,6 +773,8 @@ export interface ModHost {
    * policy or a sandbox.
    */
   load(url: string | URL): Promise<ModIdentity>;
+  /** Unloads one user package without disposing the protected original-game owner. */
+  unload(id: string): void;
   /** Unloads every mod: cleanup runs in reverse load order, handles go inert. */
   dispose(): void;
   /**
@@ -651,8 +787,14 @@ export interface ModHost {
   /** Advances one real engine step, then dispatches detached onTick evidence.
    * Refused or recursive steps emit no event; absent capability throws ModError/tick. */
   step(seconds: number): void;
+  /** One raw-elapsed RAF logic frame; only movement is capped to .1 seconds. */
+  frameStep(seconds: number): void;
   /** Detached host evidence. */
   diagnostics(): ModDiagnostics;
+  /** Host-only original context admission; validates hooks but never enqueues SDK work. */
+  sourcePreflight(action: ModAction, ownerId: string): ModAction | null;
+  /** Host-only original equipment mutation with live owner guards and shared item hooks. */
+  sourceSetHandItem(slot: 'primary' | 'secondary', itemId: number | null, ownerId: string): ModCommandResult;
 }
 
 /** Public mod API version; a manifest must name exactly this value. */

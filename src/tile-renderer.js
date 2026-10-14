@@ -973,11 +973,11 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
          *
          * @param {GPURenderPassEncoder} pass - Shared character depth pass.
          * @param {{projection:Float32Array,camera:{x:number,y:number},tilePixels:number,width:number,height:number}} context - Shared isometric view.
-         * @returns {void} Encodes resident original tile quads.
+         * @returns {boolean} True after a prepared, error-free world window encoded real source tile draws.
          */
         render(pass, { projection, camera, tilePixels, width, height }) {
             if (destroyed) {
-                return;
+                return false;
             }
 
             try {
@@ -1011,6 +1011,8 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
                     renderedInstances += run.count;
                 }
             }
+
+            return renderedInstances > 0 && completedKey !== '' && errors.size === 0;
         },
         /**
          * Report missing names, incomplete page admission and actual cache state.

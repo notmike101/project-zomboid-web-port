@@ -107,9 +107,16 @@
  *
  * @typedef {object} Engine
  * @property {function(): Snapshot} snapshot Reads detached state.
- * @property {function(EngineCommand): Snapshot} command Submits one command.
+ * @property {function(EngineCommand): (Snapshot|import('../types/mod-api').ModQueueAcceptance)} command Submits one command or timed admission.
  * @property {function(number): void} setSpeed Changes speed inside [0.1, 10].
- * @property {function(number): void} step Advances one frame inside (0, 0.1].
+ * @property {function(number): void} step Advances one logical frame inside [0, 0.1].
+ * @property {function(number): void} frameStep Advances one frame using uncapped source elapsed time.
+ * @property {import('../types/mod-api').ModQueuedActions} actions Native timed FIFO.
+ * @property {import('../types/mod-api').ModSourceTiming} sourceTiming Native clock and supported traits.
+ * @property {object} sourceActions Private source callback adapter; never exposed to mods.
+ * @property {function(): boolean} canSaveQueueState Actual native portable queue capability.
+ * @property {function(): Uint8Array} saveQueueState Portable native queue bytes.
+ * @property {function(Uint8Array): void} loadQueueState Atomic native queue restore.
  * @property {function(): void} reset Restores the initial state.
  * @property {function(number, number, Uint8Array | DataView): void} worldImportCell
  *   Validates a complete cell before importing it; available on extended ABI1.
@@ -127,10 +134,17 @@
  * @property {function(string): void} rollbackItemDefinitionRegistration Restores first-touch rows and metadata.
  * @property {function(): void} freezeItemDefinitions Internally seals definition registration.
  * @property {function(): object[]} items Reads detached stable-ID item records.
+ * @property {function(number): object|null} getItem Reads one detached live stable-ID item record.
  * @property {function(object[]): void} importItems Atomically replaces item records with explicit IDs.
  * @property {function(): {capacityWeight: number, capacity: number, maxWeight: number}} inventoryState Reads detached native flat-player carry state.
  * @property {function(string): object|null} wornItem Reads the item worn at an exact body location.
  * @property {function(): boolean} isWearingAwkwardGloves Reads native tagged hands equipment.
+ * @property {function(): import('../types/mod-api').ModHandItems} getHandItems Actual stable held refs.
+ * @property {function('primary'|'secondary', number|null): void} setHandItem Commit one real held slot.
+ * @property {function(import('../types/mod-api').ModHandItemChangedListener, function(unknown):void): function():boolean} observeHandItems Private committed-transition observer and owner error sink.
+ * @property {function(): boolean} canSaveHandState Actual optional native held support.
+ * @property {function(): import('../types/mod-api').ModHandState} saveHandState Detached portable held pair.
+ * @property {function(import('../types/mod-api').ModHandState): void} loadHandState Silent atomic held pair restore.
  * @property {function(): number} getHealth Reads the project scalar, not native survival state.
  * @property {function(): boolean} isDead Reports whether that scalar is zero.
  * @property {function(): {id:string,level:number}[]} moodles Original ordered level queries.
@@ -157,12 +171,41 @@
 /** Engine ABI version this host supports; anything else is refused. */
 const ENGINE_API_VERSION = 1;
 
-const MOODLE_IDS = Object.freeze([
-    'endurance', 'tired', 'hungry', 'panic', 'sick', 'bored', 'unhappy', 'bleeding',
-    'wet', 'hasacold', 'angry', 'stress', 'thirst', 'injured', 'pain', 'heavyload',
-    'drunk', 'dead', 'zombie', 'hyperthermia', 'hypothermia', 'windchill', 'cantsprint',
-    'uncomfortable', 'noxioussmell', 'foodeaten',
-].map((name) => `base:${name}`));
+/**
+ * Build 42.21.0 MoodleType fields in Registry.values() registration order.
+ * Static original JAR SHA-256 e1a69eb743ede60b213a0fe7f8b83d4fcab773036d256cc4543a336f3b058a33:
+ * MoodleType.registerBase -> RegistryReset.createLocation -> ResourceLocation.of
+ * supplies base and English-lowercases the registered path, without adding underscores.
+ */
+const MOODLE_TYPES = Object.freeze({
+    ENDURANCE: 'base:endurance',
+    TIRED: 'base:tired',
+    HUNGRY: 'base:hungry',
+    PANIC: 'base:panic',
+    SICK: 'base:sick',
+    BORED: 'base:bored',
+    UNHAPPY: 'base:unhappy',
+    BLEEDING: 'base:bleeding',
+    WET: 'base:wet',
+    HAS_A_COLD: 'base:hasacold',
+    ANGRY: 'base:angry',
+    STRESS: 'base:stress',
+    THIRST: 'base:thirst',
+    INJURED: 'base:injured',
+    PAIN: 'base:pain',
+    HEAVY_LOAD: 'base:heavyload',
+    DRUNK: 'base:drunk',
+    DEAD: 'base:dead',
+    ZOMBIE: 'base:zombie',
+    HYPERTHERMIA: 'base:hyperthermia',
+    HYPOTHERMIA: 'base:hypothermia',
+    WINDCHILL: 'base:windchill',
+    CANT_SPRINT: 'base:cantsprint',
+    UNCOMFORTABLE: 'base:uncomfortable',
+    NOXIOUS_SMELL: 'base:noxioussmell',
+    FOOD_EATEN: 'base:foodeaten',
+});
+const MOODLE_IDS = Object.freeze(Object.values(MOODLE_TYPES));
 const MOODLE_INPUT_NAMES = Object.freeze([
     'endurance', 'fatigue', 'hunger', 'panic', 'sickness', 'boredom', 'unhappiness',
     'wetness', 'anger', 'stress', 'nicotineWithdrawal', 'thirst', 'pain', 'intoxication',
@@ -272,6 +315,23 @@ function requireAccepted(code, label) {
     if (code !== 0) {
         throw new RangeError(`${label}: engine refused the command (${REASONS.get(code) ?? `status ${code}`}).`);
     }
+}
+
+/**
+ * Validate a value-returning native export independently of zero-only mutation statuses.
+ *
+ * @param {number} value - Native integer data or a negative refusal.
+ * @param {string} label - Operation context.
+ * @param {number} min - Inclusive data minimum.
+ * @param {number} max - Inclusive data maximum.
+ * @returns {number} Validated data.
+ */
+function requireResult(value, label, min, max) {
+    if (value < 0) {
+        requireAccepted(value, label);
+    }
+
+    return requireInteger(value, label, min, max);
 }
 
 /**
@@ -623,10 +683,14 @@ async function createEngine(source) {
      * the current position ends idle rather than pretending to travel.
      *
      * @param {EngineCommand} action - Command to submit.
-     * @returns {Snapshot} State after the command.
+     * @returns {Snapshot|import('../types/mod-api').ModQueueAcceptance} Immediate state or queued admission, never completed pickup/door state.
      */
     function command(action) {
         let spawnedId;
+
+        const heldBefore = handObservers.size > 0 && (action?.type === 'drop' || action?.type === 'setCondition')
+            ? getHandItems()
+            : null;
 
         switch (action?.type) {
             case 'moveTo': {
@@ -644,11 +708,20 @@ async function createEngine(source) {
                 break;
             }
             case 'cancel':
-                api.cancel();
+                // ABI1 cancel is void: surface queue failure, but always stop primitive movement.
+                try {
+                    if (typeof api.queue_capability === 'function') {
+                        queueCall('cancel', 'queue_clear');
+                    }
+                } finally {
+                    api.cancel();
+                }
+
                 break;
             case 'toggleDoor':
-                toggleDoor(action.id);
-                break;
+                return toggleDoor(action.id);
+            case 'requestWalk':
+                return actions.requestWalk(action);
             case 'spawnItem': {
                 requireOptional('spawnItem', ['item_spawn', 'item_last_id']);
                 const ordinal = definitionOrdinal(action.fullType);
@@ -663,7 +736,11 @@ async function createEngine(source) {
                 spawnedId = api.item_last_id() >>> 0;
                 break;
             }
+            case 'setHandItem':
+                setHandItem(action.slot, action.itemId);
+                break;
             case 'pickup':
+                return actions.requestPickup(action.id);
             case 'wear':
             case 'unequip': {
                 const name = `item_${action.type}`;
@@ -734,6 +811,10 @@ async function createEngine(source) {
                 throw new TypeError(`Unknown engine command: ${String(action?.type)}.`);
         }
 
+        if (heldBefore) {
+            notifyHandItems(heldBefore);
+        }
+
         return spawnedId === undefined ? snapshot() : { ...snapshot(), id: spawnedId };
     }
 
@@ -749,11 +830,9 @@ async function createEngine(source) {
     }
 
     /**
-     * Advances the simulation by one frame. The host owns the clock and must
-     * cap elapsed time at 0.1 s; the engine refuses anything larger, which is
-     * what keeps a hidden or paused tab from banking catch-up work.
+     * Advances one explicit logical frame, including the zero-time boundary.
      *
-     * @param {number} seconds - Elapsed frame time in (0, 0.1].
+     * @param {number} seconds - Elapsed frame time in [0, 0.1].
      */
     function step(seconds) {
         requireCoordinate(seconds, 'step seconds');
@@ -761,9 +840,27 @@ async function createEngine(source) {
     }
 
     /**
+     * Advance one RAF logic frame; native movement alone caps elapsed to .1.
+     *
+     * @param {number} seconds - Finite nonnegative raw elapsed seconds.
+     */
+    function frameStep(seconds) {
+        requireCoordinate(seconds, 'frameStep seconds');
+
+        if (seconds < 0) {
+            throw new RangeError('frameStep seconds must be nonnegative.');
+        }
+
+        requireOptional('frameStep', ['frame_step']);
+        requireAccepted(api.frame_step(seconds), 'frameStep');
+    }
+
+    /**
      * Restores position (5, 5), speed 1.5, the idle action and a zero tick.
      */
     function reset() {
+        const heldBefore = handObservers.size > 0 ? getHandItems() : null;
+
         api.reset();
         doorIds = [null];
         doorOrdinals.clear();
@@ -774,6 +871,10 @@ async function createEngine(source) {
         slotIds.clear();
         slotNames.length = 1;
         definitionTransaction = null;
+
+        if (heldBefore) {
+            notifyHandItems(heldBefore);
+        }
     }
 
     /**
@@ -971,6 +1072,24 @@ async function createEngine(source) {
     }
 
     /**
+     * Encode exact immutable source getWallExcludingList facts, not collision masks.
+     *
+     * @param {object} walls - Known source north/west facts.
+     * @param {string} label - Validation context.
+     * @returns {number} Source reach north2/west4 mask.
+     */
+    function reachMask(walls, label) {
+        requireMoodleObject(walls, label);
+
+        if (Object.keys(walls).length !== 2 || !Object.hasOwn(walls, 'north') || !Object.hasOwn(walls, 'west')
+            || typeof walls.north !== 'boolean' || typeof walls.west !== 'boolean') {
+            throw new TypeError(`${label} requires exactly boolean north and west fields.`);
+        }
+
+        return Number(walls.north) * 2 + Number(walls.west) * 4;
+    }
+
+    /**
      * Imports source geometry and explicit state atomically. Native constructors
      * may initialize new-world locks with a saved port-owned seed; restores never
      * generate locks. Vehicle flags are valid only for the explicit zero-vehicle
@@ -986,6 +1105,9 @@ async function createEngine(source) {
      * actual blocked-window state and cached stair tops, independently of old masks.
      * Door interactionProperties supplies four current-sprite snapshots in the same
      * state order as standEdges; absent snapshots mean empty source properties.
+     * Optional reachWalls is a strictly known north/west pair for squares, and four
+     * pairs in the same sprite order for doors. Missing facts remain unknown natively.
+     * These extra immutable stagers do not reuse the twelve-row reserved word.
      *
      * @param {object[]} rows - Stable CLOSED-placement identities and source flags.
      * @param {object} options - Native geometry and generation configuration.
@@ -1013,6 +1135,8 @@ async function createEngine(source) {
         const ids = [null];
         const ordinals = new Map();
         const interactionRows = [];
+        const reachRows = [];
+        const curtainRows = [];
         const numeric = rows.map((row, index) => {
             requireMoodleObject(row, 'Door row');
             const x = requireInteger(row.x, 'door x', -25_600, 25_855);
@@ -1043,6 +1167,36 @@ async function createEngine(source) {
             interactionRows.push(Array.from({ length: 4 }, (_, state) => row.interactionProperties === undefined
                 ? 0
                 : interactionMask(row.interactionProperties[state], `door interactionProperties[${state}]`, true)));
+
+            if (row.reachWalls !== undefined && (!Array.isArray(row.reachWalls) || row.reachWalls.length !== 4)) {
+                throw new TypeError('door reachWalls requires four source north/west objects.');
+            }
+
+            reachRows.push(row.reachWalls === undefined
+                ? null
+                : Array.from({ length: 4 }, (_, state) => reachMask(row.reachWalls[state], `door reachWalls[${state}]`)));
+
+            if (row.curtainCapabilities !== undefined && (!Array.isArray(row.curtainCapabilities) || row.curtainCapabilities.length !== 4)) {
+                throw new TypeError('door curtainCapabilities requires four source booleans.');
+            }
+
+            let curtainMask = null;
+
+            if (row.curtainCapabilities !== undefined) {
+                curtainMask = 0;
+
+                for (let state = 0; state < 4; state += 1) {
+                    const eligible = row.curtainCapabilities[state];
+
+                    if (typeof eligible !== 'boolean') {
+                        throw new TypeError('door curtainCapabilities requires strict booleans.');
+                    }
+
+                    curtainMask |= Number(eligible) << state;
+                }
+            }
+
+            curtainRows.push(curtainMask);
 
             if (row.standEdges !== undefined
                 && (!Array.isArray(row.standEdges) || row.standEdges.length !== 4)) {
@@ -1080,6 +1234,7 @@ async function createEngine(source) {
                 doorMask(row.independentWalls, 'independentWalls'), doubleDoor, garageDoor, spriteFacts];
         });
         const squareIds = new Set();
+        const squareReachRows = [];
         const squareRows = squares.map((row) => {
             requireMoodleObject(row, 'Door square');
             const x = requireInteger(row.x, 'square x', -25_600, 25_855);
@@ -1092,6 +1247,7 @@ async function createEngine(source) {
             }
 
             squareIds.add(id);
+            squareReachRows.push(row.reachWalls === undefined ? null : reachMask(row.reachWalls, 'square reachWalls'));
 
             return [x, y, z, requireInteger(row.roomId, 'square roomId', -1, Number.MAX_SAFE_INTEGER),
                 doorFlags(row, squareBooleanNames), doorMask(row.independentWalls, 'square independentWalls'),
@@ -1101,6 +1257,14 @@ async function createEngine(source) {
                 row.interactionProperties === undefined ? 0 : interactionMask(row.interactionProperties, 'square interactionProperties')];
         });
 
+        if (reachRows.some((row) => row !== null) || squareReachRows.some((row) => row !== null)) {
+            requireOptional('importDoors reachWalls', ['door_import_reach_properties', 'door_square_reach_stage']);
+        }
+
+        if (curtainRows.some((mask) => mask !== null)) {
+            requireOptional('importDoors curtainCapabilities', ['door_import_curtain_eligibility']);
+        }
+
         scratch('importDoors');
         requireAccepted(api.door_import_begin(seed, lockedHouses, Number(initializeLocks)), 'importDoors');
         try {
@@ -1109,11 +1273,23 @@ async function createEngine(source) {
                 requireAccepted(api.door_import_stage(), 'importDoors row');
                 requireAccepted(api.door_import_interaction_properties(row[0], ...interactionRows[index]),
                     'importDoors interactionProperties');
+
+                if (reachRows[index] !== null) {
+                    requireAccepted(api.door_import_reach_properties(row[0], ...reachRows[index]), 'importDoors door reachWalls');
+                }
+
+                if (curtainRows[index] !== null) {
+                    requireAccepted(api.door_import_curtain_eligibility(row[0], curtainRows[index]), 'importDoors curtainCapabilities');
+                }
             }
 
-            for (const row of squareRows) {
+            for (const [index, row] of squareRows.entries()) {
                 doorWords(row, 'importDoors');
                 requireAccepted(api.door_square_stage(), 'importDoors square');
+
+                if (squareReachRows[index] !== null) {
+                    requireAccepted(api.door_square_reach_stage(row[0], row[1], row[2], squareReachRows[index]), 'importDoors square reachWalls');
+                }
             }
 
             requireAccepted(api.door_import_commit(), 'importDoors commit');
@@ -1234,13 +1410,13 @@ async function createEngine(source) {
     }
 
     /**
-     * Submits an authoritative same-level adjacent door interaction.
+     * Requests an authoritative source-adjacent queued door interaction.
      *
      * @param {string} id - Exact stable public placement.
-     * @returns {Snapshot} Detached actor snapshot; refusal changes nothing.
+     * @returns {import('../types/mod-api').ModQueueAcceptance} Queued admission; refusal changes nothing.
      */
     function toggleDoor(id) {
-        requireOptional('toggleDoor', ['door_toggle']);
+        requireOptional('toggleDoor', ['queue_request_door', 'queue_capability']);
         requireName(id, 'door id');
         const ordinal = doorOrdinals.get(id);
 
@@ -1248,9 +1424,7 @@ async function createEngine(source) {
             throw new RangeError(`Unknown door identity: ${id}.`);
         }
 
-        requireAccepted(api.door_toggle(ordinal), 'toggleDoor');
-
-        return snapshot();
+        return acceptance(queueCall('requestDoor', 'queue_request_door', ordinal));
     }
 
     /**
@@ -1399,6 +1573,11 @@ async function createEngine(source) {
     function registerItemDefinition(definition, { owner, override = false } = {}) {
         requireOptional('registerItemDefinition', ['item_definition_register', 'item_definition_read', 'inventory_state_read']);
         scratch('registerItemDefinition');
+        const nativeHands = typeof api.queue_capability === 'function' && api.queue_capability() === 1;
+
+        if (nativeHands) {
+            requireOptional('registerItemDefinition hands registry', ['source_hands_slot_set']);
+        }
 
         if (definition === null || typeof definition !== 'object' || Array.isArray(definition)) {
             throw new TypeError('Item definition must be an object.');
@@ -1444,6 +1623,10 @@ async function createEngine(source) {
         requireAccepted(api.item_definition_register(ordinal, ownerId, conditionMax, slot,
             stackLimit, Number(definition.removeOnBroken), chance, Number(override), weight,
             Number(metadata.tags.includes('base:awkwardgloves'))), 'registerItemDefinition');
+
+        if (nativeHands) {
+            requireAccepted(api.source_hands_slot_set(slotIds.get('base:hands') ?? 0), 'registerItemDefinition hands registry');
+        }
 
         if (definitionTransaction && ordinal < definitionTransaction.start
             && !definitionTransaction.journal.has(ordinal)) {
@@ -1532,23 +1715,53 @@ async function createEngine(source) {
 
         return Array.from({ length: api.item_count() >>> 0 }, (_, index) => {
             requireAccepted(api.item_read(index), 'items');
-            const view = scratch('items');
-            const ordinal = view.getFloat64(8, true);
 
-            if (!definitionMetadata[ordinal]) {
-                throw new Error('Item definition metadata is unavailable.');
-            }
-
-            return {
-                id: view.getFloat64(0, true),
-                fullType: definitionMetadata[ordinal].fullType,
-                location: view.getFloat64(16, true) === 0 ? 'ground' : 'inventory',
-                x: view.getFloat64(24, true), y: view.getFloat64(32, true),
-                condition: view.getFloat64(40, true), count: view.getFloat64(48, true),
-                bodyLocation: slotNames[view.getFloat64(56, true)],
-                weight: view.getFloat64(64, true), actualWeight: view.getFloat64(72, true),
-            };
+            return readItemRecord();
         });
+    }
+
+    /**
+     * Decode the shared native item scratch immediately; never retain its memory view.
+     *
+     * @returns {object} Detached current item fields.
+     */
+    function readItemRecord() {
+        const view = scratch('items');
+        const ordinal = view.getFloat64(8, true);
+
+        if (!definitionMetadata[ordinal]) {
+            throw new Error('Item definition metadata is unavailable.');
+        }
+
+        return {
+            id: view.getFloat64(0, true),
+            fullType: definitionMetadata[ordinal].fullType,
+            location: view.getFloat64(16, true) === 0 ? 'ground' : 'inventory',
+            x: view.getFloat64(24, true), y: view.getFloat64(32, true),
+            condition: view.getFloat64(40, true), count: view.getFloat64(48, true),
+            bodyLocation: slotNames[view.getFloat64(56, true)],
+            weight: view.getFloat64(64, true), actualWeight: view.getFloat64(72, true),
+        };
+    }
+
+    /**
+     * Read one stable identity without copying every native item.
+     *
+     * @param {number} id - Positive uint32 identity.
+     * @returns {object|null} Detached live record, or absence.
+     */
+    function getItem(id) {
+        requireInteger(id, 'item id', 1, 0xFF_FF_FF_FF);
+        requireOptional('getItem', ['item_read_id']);
+        const status = api.item_read_id(id);
+
+        if (status === -2) {
+            return null;
+        }
+
+        requireAccepted(status, 'getItem');
+
+        return readItemRecord();
     }
 
     /**
@@ -1566,6 +1779,152 @@ async function createEngine(source) {
             capacity: view.getFloat64(8, true),
             maxWeight: view.getFloat64(16, true),
         };
+    }
+
+    /** @type {Set<{callback:import('../types/mod-api').ModHandItemChangedListener,onError:function(unknown):void}>} */
+    const handObservers = new Set();
+    /** @type {import('../types/mod-api').ModHandItemChanged[]} */
+    const pendingHandEvents = [];
+    let notifyingHands = false;
+
+    /**
+     * Checks actual optional held-state native support.
+     *
+     * @returns {boolean} Whether native held state can be saved and restored.
+     */
+    function canSaveHandState() {
+        return ['hand_item_get', 'hand_item_set', 'hand_items_restore'].every((name) => typeof api[name] === 'function');
+    }
+
+    /**
+     * Reads detached stable live inventory references.
+     *
+     * @returns {{primary:number|null,secondary:number|null}} Current held pair.
+     */
+    function getHandItems() {
+        requireOptional('getHandItems', ['hand_item_get']);
+        const primary = requireInteger(api.hand_item_get(0), 'native primary item ID', 0, 0xFF_FF_FF_FF);
+        const secondary = requireInteger(api.hand_item_get(1), 'native secondary item ID', 0, 0xFF_FF_FF_FF);
+
+        return { primary: primary || null, secondary: secondary || null };
+    }
+
+    /**
+     * Delivers committed held transitions in order, including reentrant commits.
+     *
+     * @param {{primary:number|null,secondary:number|null}} before - Actual precommit refs.
+     */
+    function notifyHandItems(before) {
+        const after = getHandItems();
+
+        /** @type {('primary'|'secondary')[]} */
+        const slots = ['primary', 'secondary'];
+
+        for (const slot of slots) {
+            if (before[slot] !== after[slot]) {
+                pendingHandEvents.push({ slot, playerIndex: 0, itemId: after[slot] });
+            }
+        }
+
+        if (notifyingHands) {
+            return;
+        }
+
+        notifyingHands = true;
+        try {
+            // Append reentrant commits behind the complete already-committed pair.
+            for (const event of pendingHandEvents) {
+                for (const observer of [...handObservers]) {
+                    if (!handObservers.has(observer)) {
+                        continue;
+                    }
+
+                    try {
+                        observer.callback({ ...event });
+                    } catch (cause) {
+                        observer.onError(cause);
+                    }
+                }
+            }
+        } finally {
+            pendingHandEvents.length = 0;
+            notifyingHands = false;
+        }
+    }
+
+    /**
+     * Registers a private synchronous committed-transition observer.
+     *
+     * @param {import('../types/mod-api').ModHandItemChangedListener} callback - Committed-transition observer.
+     * @param {function(unknown):void} onError - Owner attribution sink; must not throw.
+     * @returns {function():boolean} Withdraw the observer.
+     */
+    function observeHandItems(callback, onError) {
+        requireOptional('observeHandItems', ['hand_item_get', 'hand_item_set']);
+
+        if (typeof callback !== 'function' || typeof onError !== 'function') {
+            throw new TypeError('observeHandItems requires a callback and owner error sink.');
+        }
+
+        const observer = { callback, onError };
+
+        handObservers.add(observer);
+
+        return () => handObservers.delete(observer);
+    }
+
+    /**
+     * Commits one real held slot and notifies registered observers.
+     *
+     * @param {'primary'|'secondary'} slot - Exact held slot.
+     * @param {number|null} itemId - Full uint32 stable inventory identity, or clear.
+     */
+    function setHandItem(slot, itemId) {
+        requireOptional('setHandItem', ['hand_item_set', 'hand_item_get']);
+
+        if (slot !== 'primary' && slot !== 'secondary') {
+            throw new TypeError('Hand slot must be primary or secondary.');
+        }
+
+        const id = itemId === null ? 0 : requireInteger(itemId, 'hand item ID', 1, 0xFF_FF_FF_FF);
+        const before = handObservers.size > 0 ? getHandItems() : null;
+
+        requireAccepted(api.hand_item_set(slot === 'primary' ? 0 : 1, id), 'setHandItem');
+
+        if (before) {
+            notifyHandItems(before);
+        }
+    }
+
+    /**
+     * Captures mutable-only portable held state.
+     *
+     * @returns {{version:1,primary:number|null,secondary:number|null}} Portable held pair.
+     */
+    function saveHandState() {
+        requireOptional('saveHandState', ['hand_item_get', 'hand_items_restore']);
+
+        return { version: 1, ...getHandItems() };
+    }
+
+    /**
+     * Restores a strict complete held pair silently and atomically.
+     *
+     * @param {object} state - Strict complete pair.
+     */
+    function loadHandState(state) {
+        requireOptional('loadHandState', ['hand_items_restore']);
+        requireMoodleObject(state, 'Hand state');
+
+        if (state.version !== 1 || Object.keys(state).length !== 3
+            || !['version', 'primary', 'secondary'].every((key) => Object.hasOwn(state, key))) {
+            throw new TypeError('Invalid hand state shape.');
+        }
+
+        const primary = state.primary === null ? 0 : requireInteger(state.primary, 'primary hand item ID', 1, 0xFF_FF_FF_FF);
+        const secondary = state.secondary === null ? 0 : requireInteger(state.secondary, 'secondary hand item ID', 1, 0xFF_FF_FF_FF);
+
+        requireAccepted(api.hand_items_restore(primary, secondary), 'loadHandState');
     }
 
     /**
@@ -2019,16 +2378,932 @@ async function createEngine(source) {
         }
     }
 
+    /**
+     * Read dedicated extension scratch, never the actor's twelve words.
+     *
+     * @param {string} prefix - Native scratch namespace.
+     * @param {number} size - Exact ABI byte count.
+     * @returns {DataView} Fresh bounded view.
+     */
+    function extensionScratch(prefix, size) {
+        requireOptional(prefix, [`${prefix}_scratch_ptr`, `${prefix}_scratch_size`]);
+        const ptr = api[`${prefix}_scratch_ptr`]() >>> 0;
+        const length = api[`${prefix}_scratch_size`]() >>> 0;
+        const buffer = api.memory?.buffer;
+
+        if (!buffer || length !== size || ptr % 8 || ptr + length > buffer.byteLength) {
+            throw new Error(`${prefix}: invalid dedicated scratch buffer.`);
+        }
+
+        return new DataView(buffer, ptr, length);
+    }
+
+    const queueResultLimits = new Map([
+        ['queue_action_new', [1, 2_147_483_647]],
+        ['queue_length', [0, 128]], ['queue_get', [1, 2_147_483_647]], ['queue_current', [0, 2_147_483_647]],
+        ['queue_request_pickup', [1, 2_147_483_647]], ['queue_request_door', [1, 2_147_483_647]],
+        ['queue_request_walk', [1, 2_147_483_647]], ['queue_remove', [1, 2_147_483_647]], ['queue_lookup', [0, 128]],
+        ['queue_group_new', [1, 2_147_483_647]], ['queue_group_length', [0, 512]],
+        ['queue_group_get', [1, 2_147_483_647]], ['queue_group_remove', [1, 2_147_483_647]],
+        ['queue_group_item_length', [0, 20]], ['queue_group_item_get', [1, 4_294_967_295]],
+        ['queue_group_item_remove', [1, 4_294_967_295]], ['queue_event_read', [0, 1]],
+        ['queue_save_size', [1, 1_048_576]], ['queue_save_read', [0, 4_096]],
+        ['source_retrigger_get', [0, 2_147_483_647]], ['source_path_result', [0, 2]],
+        ['source_door_could_be_open', [0, 1]],
+        ['source_world_item_count', [0, 4_096]], ['source_world_item_get', [1, 4_294_967_295]],
+        ['source_square_door_count', [0, 65_536]], ['source_square_door_get', [1, 4_294_967_295]],
+    ]);
+
+    /**
+     * Invoke a queue operation without hiding refusal.
+     *
+     * @param {string} method - Diagnostic label.
+     * @param {string} name - Native export.
+     * @param {...number} args - Exact ABI arguments.
+     * @returns {number} Native result.
+     */
+    function queueCall(method, name, ...args) {
+        requireOptional(method, ['queue_capability', name]);
+
+        if (api.queue_capability() !== 1) {
+            throw new Error(`${method}: unsupported queue version.`);
+        }
+
+        const result = api[name](...args);
+        const limits = queueResultLimits.get(name);
+
+        if (limits) {
+            requireResult(result, method, limits[0], limits[1]);
+        } else {
+            requireAccepted(result, method);
+        }
+
+        return result;
+    }
+
+    /**
+     * Read a detached native action row, including private lifecycle metadata.
+     *
+     * @param {number} id - Stable action ID.
+     * @returns {Omit<import('../types/mod-api').ModQueuedAction, 'groups'> & {targetId: number, flags: number, portable: boolean, groupCount: number}} Detached native row.
+     */
+    function actionRead(id) {
+        queueCall('actionRead', 'queue_action_read', requireInteger(id, 'action id', 1, 0x7F_FF_FF_FF));
+        const view = extensionScratch('queue', 4_096);
+        const row = Array.from({ length: 16 }, (_, index) => view.getFloat64(index * 8, true));
+        const flags = row[13];
+
+        return {
+            id: row[0], kind: ['walk', 'door', 'grab', 'getUp'][row[1] - 1], origin: ['sdk', 'lua'][row[2]],
+            target: Object.freeze({
+                id: row[1] === 2 || (row[1] === 4 && row[3] !== 0xFF_FF_FF_FF)
+                    ? doorIds[row[3]]
+                    : row[3], x: row[4], y: row[5], z: row[6],
+            }),
+            targetId: row[3],
+            rawTime: row[7], maxTime: row[8], currentTime: row[9], lastTime: row[10],
+            prevLastTime: row[11], delta: row[12], started: (flags & 1) !== 0,
+            flags, portable: row[15] !== 0, groupCount: row[14],
+        };
+    }
+
+    /**
+     * Read a detached native group and its ordered item identities.
+     *
+     * @param {number} id - Stable group ID.
+     * @returns {{id: number, actionId: number, rawTime: number, itemCount: number, fullType: string|null, itemIds: readonly number[]}} Detached native group.
+     */
+    function groupRead(id) {
+        queueCall('groupRead', 'queue_group_read', id);
+        const view = extensionScratch('queue', 4_096);
+        const row = Array.from({ length: 4 }, (_, index) => view.getFloat64(index * 8, true));
+
+        requireInteger(row[3], 'group item count', 0, 20);
+        const itemIds = Array.from({ length: row[3] }, (_, index) => queueCall('groupItemGet', 'queue_group_item_get', id, index));
+        const first = itemIds.length ? getItem(itemIds[0]) : null;
+
+        return Object.freeze({
+            id: row[0], actionId: row[1], rawTime: row[2], itemCount: row[3],
+            fullType: first?.fullType ?? null, itemIds: Object.freeze(itemIds),
+        });
+    }
+
+    /**
+     * Read the current action and pending FIFO as detached immutable records.
+     *
+     * @returns {import('../types/mod-api').ModQueueState} Immutable canonical FIFO.
+     */
+    function queueState() {
+        const currentId = queueCall('current', 'queue_current');
+        const count = requireInteger(queueCall('length', 'queue_length'), 'queue length', 0, 128);
+        const ids = Array.from({ length: count }, (_, index) => queueCall('get', 'queue_get', index));
+
+        if (currentId && !ids.includes(currentId)) {
+            ids.unshift(currentId);
+        }
+
+        const records = ids.map((id) => {
+            const row = actionRead(id);
+            const groups = Array.from({ length: row.groupCount }, (_, groupIndex) => {
+                const group = groupRead(queueCall('groupGet', 'queue_group_get', row.id, groupIndex));
+
+                return Object.freeze({ id: group.id, rawTime: group.rawTime, fullType: group.fullType, itemIds: group.itemIds });
+            });
+            const record = {
+                id: row.id, kind: row.kind, origin: row.origin, target: row.target,
+                rawTime: row.rawTime, maxTime: row.maxTime, currentTime: row.currentTime,
+                lastTime: row.lastTime, prevLastTime: row.prevLastTime, delta: row.delta, started: row.started,
+            };
+
+            return Object.freeze({ ...record, groups: Object.freeze(groups) });
+        });
+
+        return Object.freeze({
+            current: records.find((row) => row.id === currentId) ?? null,
+            pending: Object.freeze(records.filter((row) => row.id !== currentId)),
+        });
+    }
+
+    /**
+     * Describe accepted queue admission without claiming completion.
+     *
+     * @param {number} actionId - Accepted stable ID.
+     * @returns {import('../types/mod-api').ModQueueAcceptance} Admission and current queue state.
+     */
+    function acceptance(actionId) {
+        if (actionId <= 0) {
+            throw new Error('Native queue did not return an accepted action identity.');
+        }
+
+        return Object.freeze({ accepted: true, actionId, state: queueState() });
+    }
+
+    const actions = Object.freeze({
+        getState: queueState,
+        /**
+         * Admit a pickup for a stable native item identity.
+         *
+         * @param {number} id - Positive uint32 item ID.
+         * @returns {import('../types/mod-api').ModQueueAcceptance} Accepted admission and queue state.
+         */
+        requestPickup: (id) => acceptance(queueCall('requestPickup', 'queue_request_pickup',
+            requireInteger(id, 'item id', 1, 0xFF_FF_FF_FF))),
+        requestDoor: toggleDoor,
+        /**
+         * Admit a walk to an exact source-square coordinate.
+         *
+         * @param {import('../types/mod-api').ModWorldCoordinates} root0 - Destination square.
+         * @param {number} root0.x - Signed int32 destination x.
+         * @param {number} root0.y - Signed int32 destination y.
+         * @param {number} root0.z - Signed int32 destination elevation.
+         * @returns {import('../types/mod-api').ModQueueAcceptance} Accepted admission and queue state.
+         */
+        requestWalk: ({ x, y, z }) => acceptance(queueCall('requestWalk', 'queue_request_walk',
+            requireInteger(x, 'walk x', -0x80_00_00_00, 0x7F_FF_FF_FF),
+            requireInteger(y, 'walk y', -0x80_00_00_00, 0x7F_FF_FF_FF),
+            requireInteger(z, 'walk z', -0x80_00_00_00, 0x7F_FF_FF_FF))),
+        /**
+         * Cancel queued work and primitive movement immediately.
+         *
+         * @returns {import('../types/mod-api').ModQueueState} Queue state after cancellation.
+         */
+        cancel: () => {
+            queueState();
+            command({ type: 'cancel' });
+
+            return queueState();
+        },
+    });
+
+    const timingFields = ['multiplier', 'bias', 'perObject', 'slowHalf', 'slowQuarter', 'slowEighth', 'instant'];
+    const traitIds = ['base:dextrous', 'base:allthumbs'];
+
+    /**
+     * Resolve a supported canonical trait to its native ordinal.
+     *
+     * @param {string} id - Canonical supported trait.
+     * @returns {number} Native ordinal.
+     */
+    function traitIndex(id) {
+        const index = traitIds.indexOf(id);
+
+        if (index === -1) {
+            throw new RangeError(`Unsupported source trait: ${String(id)}.`);
+        }
+
+        return index;
+    }
+
+    /**
+     * Decode the exact native UTF8 game mode.
+     *
+     * @returns {string} Exact native game mode.
+     */
+    function getGameMode() {
+        requireOptional('getGameMode', ['source_timing_read', 'source_mode_get_byte']);
+        requireAccepted(api.source_timing_read(), 'getGameMode');
+        const count = extensionScratch('source_timing', 128).getFloat64(96, true);
+
+        requireInteger(count, 'mode byte count', 0, 128);
+
+        return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from({ length: count }, (_, index) => {
+            const byte = api.source_mode_get_byte(index);
+
+            return requireResult(byte, 'getGameMode', 0, 255);
+        }));
+    }
+
+    const sourceTiming = Object.freeze({
+        /**
+         * Read detached native clock fields, mode and supported traits.
+         *
+         * @returns {import('../types/mod-api').ModSourceTimingState} Immutable source timing state.
+         */
+        getState: () => {
+            requireOptional('sourceTiming', ['source_timing_read']);
+            requireAccepted(api.source_timing_read(), 'sourceTiming');
+            const view = extensionScratch('source_timing', 128);
+            const row = Array.from({ length: 16 }, (_, index) => view.getFloat64(index * 8, true));
+
+            return Object.freeze({
+                multiplier: row[0], bias: row[1], perObject: row[2],
+                fpsMultiplier: row[3], elapsedSeconds: row[4], slowMultiplier: row[5],
+                slowHalf: row[6] !== 0, slowQuarter: row[7] !== 0, slowEighth: row[8] !== 0,
+                instant: row[9] !== 0, gameMode: getGameMode(), gameMultiplier: row[13],
+                traits: Object.freeze({ 'base:dextrous': row[10] !== 0, 'base:allthumbs': row[11] !== 0 }),
+            });
+        },
+        /**
+         * Set one supported native clock field without coercing flag types.
+         *
+         * @param {import('../types/mod-api').ModTimingField} field - Supported timing selector.
+         * @param {number|boolean} value - Numeric clock scalar or strict boolean flag.
+         */
+        set: (field, value) => {
+            const index = timingFields.indexOf(field);
+
+            if (index === -1) {
+                throw new RangeError(`Unsupported source timing field: ${String(field)}.`);
+            }
+
+            if (index >= 3 && typeof value !== 'boolean') {
+                throw new TypeError(`${field} must be boolean.`);
+            }
+
+            if (index < 3) {
+                requireCoordinate(value, field);
+            }
+
+            requireOptional('sourceTiming.set', ['source_timing_set']);
+            requireAccepted(api.source_timing_set(index, index >= 3 ? Number(value) : value), 'sourceTiming.set');
+        },
+        /**
+         * Read one supported native source trait.
+         *
+         * @param {string} id - Canonical supported trait identity.
+         * @returns {boolean} Whether the actor has the trait.
+         */
+        hasTrait: (id) => {
+            requireOptional('hasTrait', ['source_trait_get']);
+            const value = api.source_trait_get(traitIndex(id));
+
+            requireResult(value, 'hasTrait', 0, 1);
+
+            return value !== 0;
+        },
+        /**
+         * Set one supported native source trait.
+         *
+         * @param {string} id - Canonical supported trait identity.
+         * @param {boolean} enabled - Strict native trait flag.
+         */
+        setTrait: (id, enabled) => {
+            if (typeof enabled !== 'boolean') {
+                throw new TypeError('trait enabled must be boolean.');
+            }
+
+            requireOptional('setTrait', ['source_trait_set']);
+            requireAccepted(api.source_trait_set(traitIndex(id), Number(enabled)), 'setTrait');
+        },
+        getGameMode,
+        /**
+         * Store an exact well-formed game mode within the native UTF8 limit.
+         *
+         * @param {string} mode - Game mode of at most 128 UTF8 bytes.
+         */
+        setGameMode: (mode) => {
+            if (typeof mode !== 'string') {
+                throw new TypeError('game mode must be a string.');
+            }
+
+            if (!mode.isWellFormed()) {
+                throw new TypeError('game mode must have an exact UTF8 representation.');
+            }
+
+            const bytes = new TextEncoder().encode(mode);
+
+            if (bytes.length > 128) {
+                throw new RangeError('game mode exceeds 128 UTF8 bytes.');
+            }
+
+            requireOptional('setGameMode', ['source_mode_begin', 'source_mode_byte', 'source_mode_commit']);
+            requireAccepted(api.source_mode_begin(bytes.length), 'setGameMode begin');
+
+            for (const [index, byte] of bytes.entries()) {
+                requireAccepted(api.source_mode_byte(index, byte), 'setGameMode byte');
+            }
+
+            requireAccepted(api.source_mode_commit(), 'setGameMode commit');
+        },
+    });
+
+    let dispatchingSource = false;
+    let sourceSaveHook;
+    let savingQueue = false;
+    let sourceOwnerExport;
+    let sourceContextResolver;
+
+    /**
+     * Query a native directional source-square relation.
+     *
+     * @param {string} name - Native relation export.
+     * @param {import('../types/mod-api').ModWorldCoordinates} from - Calling square.
+     * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Target square or null.
+     * @returns {boolean} Real native source relation.
+     */
+    function sourceRelation(name, from, to) {
+        requireOptional(name, [name]);
+        const source = squareCoordinates(from, name);
+        const target = to === null ? [0, 0, 0] : squareCoordinates(to, name);
+        const result = api[name](...source, ...target, Number(to !== null));
+
+        requireResult(result, name, 0, 1);
+
+        return result === 1;
+    }
+
+    /**
+     * Validate detached owner identity against every retained native Lua FIFO entry.
+     *
+     * @param {{actionId: number, ownerId: string}[]} owners - Stable source package mapping.
+     * @returns {{actionId: number, ownerId: string}[]} Validated detached mapping.
+     */
+    function validateSourceOwners(owners) {
+        const state = queueState();
+        const ids = new Set([state.current, ...state.pending].filter((row) => row?.origin === 'lua').map((row) => row.id));
+
+        if (!Array.isArray(owners) || owners.length !== ids.size || owners.length > 128) {
+            throw new Error('Source owner export must describe every native Lua action exactly.');
+        }
+
+        return owners.map((row) => {
+            if (!row || !ids.delete(row.actionId) || typeof row.ownerId !== 'string' || !row.ownerId
+                || Object.keys(row).length !== 2) {
+                throw new Error('Invalid source action owner identity.');
+            }
+
+            return { actionId: row.actionId, ownerId: row.ownerId };
+        });
+    }
+
+    const sourceActions = {
+        actionRead, groupRead,
+        /**
+         * Query the native slot, including detached source actions awaiting a final event reply.
+         *
+         * @param {number} id - Positive signed int32 action ID.
+         * @returns {boolean} Whether the genuine action record is still resident.
+         */
+        actionExists: (id) => {
+            requireInteger(id, 'action id', 1, 2_147_483_647);
+            requireOptional('actionExists', ['queue_capability', 'queue_action_read']);
+
+            if (api.queue_capability() !== 1) {
+                throw new Error('actionExists: unsupported native queue capability.');
+            }
+
+            const status = api.queue_action_read(id);
+
+            // queue_action_read returns OUT_OF_RANGE only when this validated ID has no slot.
+            if (status === -2) {
+                return false;
+            }
+
+            requireResult(status, 'actionExists', 0, 0);
+            const view = extensionScratch('queue', 4_096);
+            const kind = view.getFloat64(8, true);
+            const origin = view.getFloat64(16, true);
+
+            if (view.getFloat64(0, true) !== id || !Number.isInteger(origin) || origin < 0 || origin > 1
+                || !Number.isInteger(kind) || kind < 1 || kind > 4) {
+                throw new Error('actionExists: invalid native action record.');
+            }
+
+            return true;
+        },
+        /**
+         * Read the native source duration for a stable action.
+         *
+         * @param {number} id - Positive signed int32 action ID.
+         * @returns {number} Native source duration.
+         */
+        sourceTime: (id) => {
+            queueCall('sourceTime', 'queue_source_time_read', requireInteger(id, 'action id', 1, 2_147_483_647));
+
+            return extensionScratch('queue', 4_096).getFloat64(0, true);
+        },
+        /**
+         * Install or clear synchronous source preparation for queue capture.
+         *
+         * @param {(function(): void)|null} callback - Save preparation hook, or null to clear it.
+         */
+        setSaveHook: (callback) => {
+            if (callback !== null && typeof callback !== 'function') {
+                throw new TypeError('Source save hook must be a function or null.');
+            }
+
+            sourceSaveHook = callback;
+        },
+        /**
+         * Install or clear the detached source action owner exporter.
+         *
+         * @param {(function(): {actionId: number, ownerId: string}[])|null} callback - Complete owner exporter, or null to clear it.
+         */
+        setOwnerExport: (callback) => {
+            if (callback !== null && typeof callback !== 'function') {
+                throw new TypeError('Source owner export must be a function or null.');
+            }
+
+            sourceOwnerExport = callback;
+        },
+        /**
+         * Export and validate every retained native Lua action owner.
+         *
+         * @returns {{actionId: number, ownerId: string}[]} Detached validated owner mapping.
+         */
+        exportSourceOwners: () => validateSourceOwners(sourceOwnerExport ? sourceOwnerExport() : []),
+        validateSourceOwners,
+        /**
+         * Install or clear synchronous source context preflight resolution.
+         *
+         * @param {(function(import('../types/mod-api').ModAction, string): (import('../types/mod-api').ModAction|null))|null} callback - Action resolver, or null to clear it.
+         */
+        setContextResolver: (callback) => {
+            if (callback !== null && typeof callback !== 'function') {
+                throw new TypeError('Source context resolver must be a function or null.');
+            }
+
+            sourceContextResolver = callback;
+        },
+        /**
+         * Resolve an owned source context action through its preflight hooks.
+         *
+         * @param {import('../types/mod-api').ModAction} action - Requested context action.
+         * @param {string} ownerId - Active source package API identity.
+         * @returns {import('../types/mod-api').ModAction|null} Approved action, or null on veto.
+         */
+        resolveContextAction: (action, ownerId) => {
+            if (!sourceContextResolver) {
+                throw new Error('Source context action resolution is unavailable.');
+            }
+
+            return sourceContextResolver(action, ownerId);
+        },
+        /**
+         * Resolve a known stable door identity to its native ordinal.
+         *
+         * @param {string} id - Stable door identity.
+         * @returns {number} Native door ordinal.
+         */
+        doorOrdinal: (id) => {
+            const value = doorOrdinals.get(id);
+
+            if (value === undefined) {
+                throw new RangeError(`Unknown door identity: ${id}.`);
+            }
+
+            return value;
+        },
+        /**
+         * Resolve a known native door ordinal to its stable identity.
+         *
+         * @param {number} ordinal - Native door ordinal.
+         * @returns {string} Stable door identity.
+         */
+        doorId: (ordinal) => {
+            const id = doorIds[ordinal];
+
+            if (!id) {
+                throw new RangeError(`Unknown native door: ${ordinal}.`);
+            }
+
+            return id;
+        },
+        /**
+         * Read native curtain state without inventing unavailable eligibility.
+         *
+         * @param {string} id - Stable door identity.
+         * @returns {{has: boolean, open: boolean, inside: boolean, canAdd: boolean|null}} Immutable native curtain state.
+         */
+        doorCurtainState: (id) => {
+            queueCall('doorCurtainState', 'source_door_curtain_read', sourceActions.doorOrdinal(requireName(id, 'door id')));
+            const view = extensionScratch('queue', 4_096);
+            const row = Array.from({ length: 4 }, (_, index) => view.getFloat64(index * 8, true));
+
+            for (const flag of row.slice(0, 3)) {
+                requireInteger(flag, 'native curtain state flag', 0, 1);
+            }
+
+            if (row[3] !== -2) {
+                requireInteger(row[3], 'native curtain eligibility', 0, 1);
+            }
+
+            return Object.freeze({
+                has: row[0] !== 0, open: row[1] !== 0, inside: row[2] !== 0,
+                canAdd: row[3] === -2 ? null : row[3] !== 0,
+            });
+        },
+        /**
+         * Query the actual native menu policy for a known door.
+         *
+         * @param {string} id - Stable door identity.
+         * @returns {boolean} Whether source policy allows the door menu entry.
+         */
+        doorCouldBeOpen: (id) => {
+            const result = queueCall('doorCouldBeOpen', 'source_door_could_be_open',
+                sourceActions.doorOrdinal(requireName(id, 'door id')));
+
+            return requireResult(result, 'doorCouldBeOpen', 0, 1) === 1;
+        },
+        /**
+         * Cancel native source path work.
+         */
+        cancelPath: () => {
+            requireOptional('cancelPath', ['source_path_cancel']);
+            requireAccepted(api.source_path_cancel(), 'cancelPath');
+        },
+        /**
+         * Read the bounded native path result for a walk action.
+         *
+         * @param {number} id - Positive signed int32 walk action ID.
+         * @returns {number} Native path result in [0, 2].
+         */
+        pathResult: (id) => {
+            const result = queueCall('pathResult', 'source_path_result',
+                requireInteger(id, 'walk action id', 1, 2_147_483_647));
+
+            return requireInteger(result, 'native path result', 0, 2);
+        },
+        /**
+         * Face a finite world position through the native source actor.
+         *
+         * @param {number} x - Finite target x.
+         * @param {number} y - Finite target y.
+         */
+        face: (x, y) => {
+            requireOptional('face', ['source_face']);
+            requireAccepted(api.source_face(requireCoordinate(x, 'face x'), requireCoordinate(y, 'face y')), 'face');
+        },
+        /**
+         * Query the native source wall relation between squares.
+         *
+         * @param {import('../types/mod-api').ModWorldCoordinates} from - Calling square.
+         * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Target square or null.
+         * @returns {boolean} Native directional wall relation.
+         */
+        isWallTo: (from, to) => sourceRelation('square_wall_to', from, to),
+        /**
+         * Query native source reachability using immutable wall facts.
+         *
+         * @param {import('../types/mod-api').ModWorldCoordinates} from - Calling square.
+         * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Target square or null.
+         * @returns {boolean} Native directional reachability relation.
+         */
+        canReachTo: (from, to) => sourceRelation('square_can_reach_to', from, to),
+        /**
+         * Read the native source actor sitting flag.
+         *
+         * @returns {boolean} Whether the actor is sitting.
+         */
+        isSitting: () => {
+            requireOptional('isSitting', ['source_is_sitting']);
+
+            return requireResult(api.source_is_sitting(), 'isSitting', 0, 1) !== 0;
+        },
+        /**
+         * Read the action identity retained for source retriggering.
+         *
+         * @returns {number} Stable action ID, or zero when absent.
+         */
+        retriggerGet: () => queueCall('retriggerGet', 'source_retrigger_get'),
+        /**
+         * Set or clear the native source retrigger action identity.
+         *
+         * @param {number} id - Nonnegative signed int32 action ID; zero clears it.
+         * @returns {number} Accepted native operation result.
+         */
+        retriggerSet: (id) => queueCall('retriggerSet', 'source_retrigger_set',
+            requireInteger(id, 'retrigger action id', 0, 2_147_483_647)),
+        /**
+         * Find a native adjacent square for a coordinate or known door.
+         *
+         * @param {import('../types/mod-api').ModWorldCoordinates} root0 - Source target square.
+         * @param {number} root0.x - Signed int32 target x.
+         * @param {number} root0.y - Signed int32 target y.
+         * @param {number} root0.z - Signed int32 target elevation.
+         * @param {string|null} [doorId=null] - Stable door identity, or null for square adjacency.
+         * @returns {Readonly<import('../types/mod-api').ModWorldCoordinates>|null} Adjacent square, or null when none exists.
+         */
+        findAdjacent: ({ x, y, z }, doorId = null) => {
+            requireOptional('findAdjacent', ['source_adjacent_read']);
+            const target = doorId === null ? 0 : sourceActions.doorOrdinal(doorId);
+            const found = api.source_adjacent_read(doorId === null ? 1 : 2, target,
+                requireInteger(x, 'adjacent x', -2_147_483_648, 2_147_483_647),
+                requireInteger(y, 'adjacent y', -2_147_483_648, 2_147_483_647),
+                requireInteger(z, 'adjacent z', -2_147_483_648, 2_147_483_647));
+
+            requireResult(found, 'findAdjacent', 0, 1);
+
+            if (!found) {
+                return null;
+            }
+
+            const view = extensionScratch('queue', 4_096);
+
+            return Object.freeze({ x: view.getFloat64(0, true), y: view.getFloat64(8, true), z: view.getFloat64(16, true) });
+        },
+        /**
+         * Query native carry capacity for a stable item.
+         *
+         * @param {number} id - Positive uint32 item ID.
+         * @returns {boolean} Whether the native inventory has room for the item.
+         */
+        itemHasRoom: (id) => {
+            requireOptional('itemHasRoom', ['source_item_has_room']);
+            const result = api.source_item_has_room(requireInteger(id, 'item id', 1, 4_294_967_295));
+
+            requireResult(result, 'itemHasRoom', 0, 1);
+
+            return result === 1;
+        },
+        /**
+         * Read one supported native source-square property.
+         *
+         * @param {number} x - Signed int32 square x.
+         * @param {number} y - Signed int32 square y.
+         * @param {number} z - Signed int32 square elevation.
+         * @param {number} index - Supported source property ordinal in [0, 1].
+         * @returns {boolean} Native property flag.
+         */
+        squareHas: (x, y, z, index) => {
+            requireOptional('squareHas', ['source_square_has']);
+            const result = api.source_square_has(
+                requireInteger(x, 'square x', -2_147_483_648, 2_147_483_647),
+                requireInteger(y, 'square y', -2_147_483_648, 2_147_483_647),
+                requireInteger(z, 'square z', -2_147_483_648, 2_147_483_647),
+                requireInteger(index, 'source property index', 0, 1));
+
+            requireResult(result, 'squareHas', 0, 1);
+
+            return result === 1;
+        },
+        /**
+         * Read one pending native source lifecycle event.
+         *
+         * @returns {{actionId: number, event: number, generation: number, token: number}|null} Immutable event with kind in [1, 7], or null when absent.
+         */
+        eventRead: () => {
+            const present = queueCall('eventRead', 'queue_event_read');
+
+            if (!present) {
+                return null;
+            }
+
+            const view = extensionScratch('queue', 4_096);
+
+            return Object.freeze({
+                actionId: view.getFloat64(0, true),
+                event: requireInteger(view.getFloat64(8, true), 'native source event kind', 1, 7),
+                generation: view.getFloat64(16, true), token: view.getFloat64(24, true),
+            });
+        },
+        /**
+         * Dispatch bounded native lifecycle transitions to a synchronous owner.
+         *
+         * @param {function({actionId: number, event: number, generation: number, token: number}): (number|boolean|null|undefined)} callback - Synchronous lifecycle handler and native reply result.
+         */
+        dispatch: (callback) => {
+            if (dispatchingSource) {
+                throw new Error('Source action dispatch is reentrant.');
+            }
+
+            dispatchingSource = true;
+            try {
+                // ponytail: 128 records × seven lifecycle transitions; refuse a broken callback loop.
+                for (let count = 0; count < 896; count += 1) {
+                    const event = sourceActions.eventRead();
+
+                    if (!event) {
+                        return;
+                    }
+
+                    let result;
+
+                    try {
+                        result = callback(event);
+
+                        if (result?.then) {
+                            throw new TypeError('Source action callbacks must be synchronous.');
+                        }
+                    } catch (cause) {
+                        sourceActions.eventReply(event.actionId, event.event, event.token, -4);
+                        throw cause;
+                    }
+
+                    sourceActions.eventReply(event.actionId, event.event, event.token,
+                        typeof result === 'boolean' ? Number(result) : result ?? 0);
+                }
+
+                throw new Error('Source action event transition limit exceeded.');
+            } finally {
+                dispatchingSource = false;
+            }
+        },
+    };
+
+    for (const [method, name] of Object.entries({
+        newAction: 'queue_action_new', actionSet: 'queue_action_set', length: 'queue_length',
+        discard: 'queue_action_discard',
+        get: 'queue_get', current: 'queue_current', insert: 'queue_insert', remove: 'queue_remove',
+        clear: 'queue_clear', lookup: 'queue_lookup', groupNew: 'queue_group_new',
+        groupLength: 'queue_group_length', groupGet: 'queue_group_get', groupInsert: 'queue_group_insert',
+        groupRemove: 'queue_group_remove', groupItemLength: 'queue_group_item_length',
+        groupItemGet: 'queue_group_item_get', groupItemInsert: 'queue_group_item_insert',
+        groupItemRemove: 'queue_group_item_remove', start: 'queue_start', eventReply: 'queue_event_reply',
+        commitItem: 'queue_commit_item', commitDoor: 'queue_commit_door',
+        worldItemCount: 'source_world_item_count', worldItemGet: 'source_world_item_get',
+        squareDoorCount: 'source_square_door_count', squareDoorGet: 'source_square_door_get',
+    })) {
+        const squareQuery = name.startsWith('source_world_item_') || name.startsWith('source_square_door_');
+
+        /**
+         * Validate exact numeric ABI arguments before invoking a private queue operation.
+         *
+         * @param {...number} args - Exact native arguments, preserving raw floating-point time/value fields.
+         * @returns {number} Accepted native operation result.
+         */
+        sourceActions[method] = (...args) => {
+            requireOptional(method, [name]);
+
+            if (args.length !== api[name].length) {
+                throw new TypeError(`${method} requires ${api[name].length} arguments.`);
+            }
+
+            let rawIndex = -1;
+
+            switch (method) {
+                case 'newAction':
+                    rawIndex = 6;
+                    break;
+                case 'actionSet':
+                    rawIndex = 2;
+                    break;
+                case 'groupNew':
+                case 'start':
+                    rawIndex = 1;
+                    break;
+                default:
+                    break;
+            }
+
+            for (const [index, value] of args.entries()) {
+                if (index === rawIndex) {
+                    if (typeof value !== 'number') {
+                        throw new TypeError(`${method} time/value must be numeric.`);
+                    }
+                } else {
+                    const signed = (method === 'newAction' && index >= 3 && index <= 5)
+                        || (squareQuery && index < 3)
+                        || (method === 'eventReply' && index === 3);
+
+                    requireInteger(value, `${method} argument ${index}`, signed ? -2_147_483_648 : 0,
+                        signed ? 2_147_483_647 : 4_294_967_295);
+                }
+            }
+
+            return queueCall(method, name, ...args);
+        };
+    }
+
+    Object.freeze(sourceActions);
+
+    /**
+     * Probe actual native portable queue capability rather than wrapper presence.
+     *
+     * @returns {boolean} Whether the native portable queue exports are supported.
+     */
+    function canSaveQueueState() {
+        if (typeof api.queue_capability !== 'function') {
+            return false;
+        }
+
+        if (api.queue_capability() !== 1) {
+            throw new Error('Unsupported native queue save version.');
+        }
+
+        requireOptional('queue save', ['queue_save_size', 'queue_save_read', 'queue_restore_begin',
+            'queue_restore_write', 'queue_restore_commit', 'queue_restore_abort']);
+
+        return true;
+    }
+
+    /**
+     * Capture a portable native queue after synchronous source preparation.
+     *
+     * @returns {Uint8Array} Detached portable native bytes preserving float bit patterns.
+     */
+    function saveQueueState() {
+        if (!canSaveQueueState()) {
+            throw new Error('saveQueueState is unsupported by this engine module.');
+        }
+
+        if (savingQueue || dispatchingSource) {
+            throw new Error('Cannot save a queue during callback dispatch or another capture.');
+        }
+
+        savingQueue = true;
+        try {
+            const prepared = sourceSaveHook?.();
+
+            if (prepared?.then) {
+                throw new TypeError('Source queue save preparation must be synchronous.');
+            }
+
+            const size = queueCall('saveQueueState', 'queue_save_size');
+
+            requireInteger(size, 'queue byte count', 1, 1_048_576);
+            const bytes = new Uint8Array(size);
+
+            for (let offset = 0; offset < size; offset += 4_096) {
+                const count = queueCall('saveQueueState read', 'queue_save_read', offset);
+
+                if (count !== Math.min(4_096, size - offset)) {
+                    throw new Error('Invalid native queue save chunk.');
+                }
+
+                const view = extensionScratch('queue', 4_096);
+
+                bytes.set(new Uint8Array(view.buffer, view.byteOffset, count), offset);
+            }
+
+            return bytes;
+        } finally {
+            savingQueue = false;
+        }
+    }
+
+    /**
+     * Restore complete portable native queue bytes atomically.
+     *
+     * @param {Uint8Array} bytes - Complete portable native queue.
+     */
+    function loadQueueState(bytes) {
+        if (!canSaveQueueState()) {
+            throw new Error('loadQueueState is unsupported by this engine module.');
+        }
+
+        if (!(bytes instanceof Uint8Array) || bytes.length < 1 || bytes.length > 1_048_576) {
+            throw new TypeError('Queue restore requires 1..1048576 bytes.');
+        }
+
+        queueCall('loadQueueState begin', 'queue_restore_begin', bytes.length);
+        try {
+            for (let offset = 0; offset < bytes.length; offset += 4_096) {
+                const count = Math.min(4_096, bytes.length - offset);
+                const view = extensionScratch('queue', 4_096);
+
+                new Uint8Array(view.buffer, view.byteOffset, count).set(bytes.subarray(offset, offset + count));
+                queueCall('loadQueueState write', 'queue_restore_write', offset, count);
+            }
+
+            queueCall('loadQueueState commit', 'queue_restore_commit');
+        } finally {
+            queueCall('loadQueueState abort', 'queue_restore_abort');
+        }
+    }
+
     return Object.freeze({
-        snapshot, command, setSpeed, step, reset,
+        snapshot, command, setSpeed, step, frameStep, reset, actions, sourceActions, sourceTiming,
+        canSaveQueueState, saveQueueState, loadQueueState,
         worldImportCell, navFlags, worldBounds, saveState, loadState, worldReset,
         registerItemDefinition, itemDefinitions, beginItemDefinitionRegistration,
         commitItemDefinitionRegistration, rollbackItemDefinitionRegistration, freezeItemDefinitions,
-        items, inventoryState, importItems, wornItem, isWearingAwkwardGloves, getHealth, isDead,
+        items, getItem, inventoryState, importItems, wornItem, isWearingAwkwardGloves, getHealth, isDead,
+        getHandItems, setHandItem, observeHandItems, canSaveHandState, saveHandState, loadHandState,
         moodles, moodleInputLimits, saveMoodleState, loadMoodleState, resetMoodleState,
         importDoors, getSquare, isBlockedTo, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,
         bodyParts, bodyPartInputLimits, thermalActionModifier, canSaveBodyState, saveBodyState, loadBodyState,
     });
 }
 
-export { ENGINE_API_VERSION, createEngine, validateNavigationCell };
+export { ENGINE_API_VERSION, MOODLE_TYPES, createEngine, validateNavigationCell };

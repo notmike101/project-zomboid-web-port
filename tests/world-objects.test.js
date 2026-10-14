@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { createEngine } from '../src/engine.js';
 import { openMapCell } from '../src/map-tiles.js';
 import { createTileRegistry } from '../src/tile-definitions.js';
+import { completeActions } from './queue-test-helpers.js';
 
 /**
  * Encode one synthetic signed field.
@@ -61,15 +62,16 @@ function registry(tiles) {
  * @param {string[]} [options.names] - Catalogue.
  * @param {number[]} [options.records] - Chunk records.
  * @param {object[]} [options.rooms] - LOTH rectangles.
+ * @param {number[][]} [options.buildings] - LOTH room memberships.
  * @param {number} [options.cellX] - Cell x.
  * @param {number} [options.cellY] - Cell y.
  * @returns {Promise<import('../src/map-tiles.js').MapCell>} Real lazy map cell.
  */
-function cell({ names = ['synthetic_0'], records = [2, -1, 0], rooms = [], cellX = 0, cellY = 0 } = {}) {
+function cell({ names = ['synthetic_0'], records = [2, -1, 0], rooms = [], buildings = [], cellX = 0, cellY = 0 } = {}) {
     const header = Buffer.concat([
         Buffer.from('LOTH'), int(1), int(names.length), ...names.map(line), int(8), int(8), int(0), int(0), int(rooms.length),
         ...rooms.flatMap(({ z = 0, rects }) => [line('synthetic room'), int(z), int(rects.length), ...rects.flatMap((rect) => rect.map(int)), int(0)]),
-        int(0), Buffer.alloc(1_024),
+        int(buildings.length), ...buildings.flatMap((roomIds) => [int(roomIds.length), ...roomIds.map(int)]), Buffer.alloc(1_024),
     ]);
     const table = Buffer.alloc(8_192);
 
@@ -141,6 +143,67 @@ test('projects independent walls and canonical opposite rooms from LOTH without 
     ]);
     assert.deepEqual([...tiles].map(([name, sprite]) => [name, sprite.tileType, [...sprite.properties]]), before);
     assert.deepEqual(await projectWorldObjects([map], tiles), projected);
+});
+
+// Treating sparse raw IDs as dense indices or conflating local building IDs across cells breaks the relationship.
+test('projects real ordered building members through sparse room ids with distinct cross-cell identity', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([[]]);
+    const first = await cell({
+        records: [-1, 64],
+        rooms: [{ rects: [[0, 0, 1, 1]] }, { rects: [[0, 1, 1, 1]] }, { rects: [[0, 2, 1, 1]] }],
+        buildings: [[1, 0]],
+    });
+    const second = await cell({
+        records: [-1, 64], cellX: 1,
+        rooms: [{ rects: [[0, 0, 1, 1]] }], buildings: [[0]],
+    });
+
+    assert.deepEqual(first.buildings, [{ id: 0, roomIds: [1, 0] }]);
+    const sparse = {
+        ...first,
+        rooms: first.rooms.map((room, index) => ({ ...room, id: [42, 7, 99][index] })),
+        buildings: [{ id: 0, roomIds: [7, 42] }],
+    };
+    const projection = await projectWorldObjects([second, sparse], tiles);
+
+    assert.deepEqual(projection.buildings, [
+        { id: 0, originalBuildingId: 0, cellX: 0, cellY: 0, roomIds: [1, 0] },
+        { id: 1, originalBuildingId: 0, cellX: 1, cellY: 0, roomIds: [3] },
+    ]);
+    assert.deepEqual(projection.rooms.map(({ id, originalRoomId, buildingId }) => ({ id, originalRoomId, buildingId })), [
+        { id: 0, originalRoomId: 42, buildingId: 0 },
+        { id: 1, originalRoomId: 7, buildingId: 0 },
+        { id: 2, originalRoomId: 99, buildingId: null },
+        { id: 3, originalRoomId: 0, buildingId: 1 },
+    ]);
+    assert.equal(projection.squares.find(({ x, y }) => x === 0 && y === 1).roomId, 1);
+    assert.equal(projection.squares.find(({ x, y }) => x === 256 && y === 0).roomId, 3);
+    assert.deepEqual(await projectWorldObjects([sparse, second], tiles), projection);
+    sparse.buildings[0].roomIds.reverse();
+    sparse.rooms[0].name = 'changed after projection';
+    assert.deepEqual(projection.buildings[0].roomIds, [1, 0]);
+    assert.equal(projection.rooms[0].name, 'synthetic room');
+    assert.throws(() => projection.buildings[0].roomIds.push(2), TypeError);
+    assert.throws(() => {
+        projection.rooms[0].buildingId = 1;
+    }, TypeError);
+});
+
+// No building is authoritative metadata; missing metadata and corrupt memberships must never become an empty fallback.
+test('keeps genuine no-building rooms while refusing unknown or corrupt building metadata', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([[]]);
+    const map = await cell({ records: [-1, 64], rooms: [{ rects: [[0, 0, 1, 1]] }] });
+    const projection = await projectWorldObjects([map], tiles);
+
+    assert.deepEqual(projection.buildings, []);
+    assert.equal(projection.rooms[0].buildingId, null);
+    await assert.rejects(projectWorldObjects([{ ...map, buildings: undefined }], tiles), /building metadata.*unavailable/iu);
+    await assert.rejects(projectWorldObjects([{ ...map, buildings: [{ id: 0, roomIds: [1] }] }], tiles), /building room reference/iu);
+    await assert.rejects(projectWorldObjects([{ ...map, buildings: [{ id: 0, roomIds: [0, 0] }] }], tiles), /duplicate.*building room/iu);
+    await assert.rejects(projectWorldObjects([{ ...map, buildings: [{ id: 0, roomIds: [0] }, { id: 1, roomIds: [0] }] }], tiles), /duplicate.*building room/iu);
+    await assert.rejects(projectWorldObjects([{ ...map, buildings: [{ id: 0, roomIds: [] }, { id: 0, roomIds: [] }] }], tiles), /building identity/iu);
 });
 
 // Inventing a west frame edge from both uppercase flags makes the real native square west of that object standable.
@@ -479,18 +542,26 @@ test('native square facts follow actual closed and open source door sprites', as
     const projection = await projectWorldObjects([map], tiles);
     const door = projection.doors[0];
 
-    subject.importDoors(projection.doors, { squares: projection.squares });
+    const standing = projection.squares.filter((square) => square.x !== 0 || square.y !== 0);
+
+    standing.push({
+        x: 0, y: 0, z: 0, roomId: -1, outside: true, solid: false, solidTrans: false,
+        tree: false, independentWalls: 0, vehicleObstructed: false, solidFloor: true,
+    });
+    subject.importDoors(projection.doors, { squares: standing });
     const closed = subject.getSquare(0, 1, 0);
 
     assert.deepEqual({ solid: closed.solid, solidFloor: closed.solidFloor, canStand: closed.canStand },
         { solid: true, solidFloor: true, canStand: false });
     subject.loadState({ version: 2, values: [0.5, 0.5, 1.5, 0.5, 0.5, 0, 0, 0, 0, 1, 100, 1] });
     subject.toggleDoor(door.id);
+    completeActions(subject);
     const open = subject.getSquare(0, 1, 0);
 
     assert.deepEqual({ solid: open.solid, solidFloor: open.solidFloor, canStand: open.canStand },
         { solid: false, solidFloor: false, canStand: false });
     subject.toggleDoor(door.id);
+    completeActions(subject);
     const toggledClosed = subject.getSquare(0, 1, 0);
 
     assert.deepEqual({ solid: toggledClosed.solid, solidFloor: toggledClosed.solidFloor, canStand: toggledClosed.canStand },
@@ -915,12 +986,20 @@ test('blocked-square source door properties switch with native current sprite in
 
     assert.deepEqual(projection.doors[0].interactionProperties.map((props) => props.collideW === true), [true, false, true, false]);
     assert.notEqual(projection.squares.find((row) => row.x === 0 && row.y === 1).interactionProperties.collideW, true);
-    subject.importDoors(projection.doors, { squares: [...projection.squares, extraSquare] });
+    const standing = projection.squares.filter((square) => square.x !== 0 || square.y !== 0);
+
+    standing.push({
+        x: 0, y: 0, z: 0, roomId: -1, outside: true, solid: false, solidTrans: false,
+        tree: false, independentWalls: 0, vehicleObstructed: false, solidFloor: true,
+    });
+    subject.importDoors(projection.doors, { squares: [...standing, extraSquare] });
     assert.equal(subject.isBlockedTo(from, west), true);
     subject.loadState({ version: 2, values: [0.5, 0.5, 1.5, 0.5, 0.5, 0, 0, 0, 0, 1, 100, 1] });
     subject.toggleDoor(projection.doors[0].id);
+    completeActions(subject);
     assert.equal(subject.isBlockedTo(from, west), false, 'open door is unblocked and its actual open sprite has no west wall');
     subject.toggleDoor(projection.doors[0].id);
+    completeActions(subject);
     assert.equal(subject.isBlockedTo(from, west), true);
 });
 
@@ -986,4 +1065,173 @@ test('actual window facing and blocked state survive unrelated current sprite re
     assert.equal(props.blockedWindowN, true, 'setSprite does not destroy or open the surviving actual IsoWindow');
     subject.importDoors(replaced.doors, { squares: replaced.squares });
     assert.equal(subject.isBlockedTo(from, { x: 1, y: 0, z: 0 }), true);
+});
+
+// Reach walls are surviving-object cut/Wall flags, not raw collision or ignored overlay placements.
+test('reach wall facts preserve property presence while excluding door walls, southeast walls and discarded objects', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([
+        [['cutN', '']],
+        [['WallW', 'false']],
+        [['cutN', 'false'], ['DoorWallN', '']],
+        [['WallW', ''], ['DoorWallW', 'false']],
+        [['cutN', ''], ['WallSE', 'false']],
+        [['collideN', 'false']],
+        [['cutN', 'false'], ['blueprint', 'false']],
+        [['cutN', ''], ['FloorOverlay', 'false']],
+        [['cutN', ''], ['solidfloor', 'false'], ['diamondFloor', 'false']],
+        [['solidfloor', 'false'], ['diamondFloor', 'false']],
+    ]);
+    const map = await cell({
+        names: Array.from({ length: 10 }, (_, index) => `synthetic_${index}`),
+        records: [...Array.from({ length: 8 }, (_, index) => [2, -1, index]).flat(), 3, -1, 8, 9, -1, 55],
+    });
+    const projection = await projectWorldObjects([map], tiles);
+
+    assert.deepEqual(projection.squares.slice(0, 9).map((square) => square.reachWalls), [
+        { north: true, west: false }, { north: false, west: true },
+        { north: false, west: false }, { north: false, west: false },
+        { north: false, west: false }, { north: false, west: false },
+        { north: true, west: false }, { north: false, west: false },
+        { north: false, west: false },
+    ]);
+    assert.deepEqual(projection.squares[9].reachWalls, { north: false, west: false }, 'loaded empty square is known empty');
+    assert.throws(() => {
+        projection.squares[0].reachWalls.north = false;
+    }, TypeError);
+    await assert.rejects(projectWorldObjects([map], new Map()), /unknown original sprite/iu);
+});
+
+// Four independent real partners, including initially-open special doors, must not share constructor facts.
+test('door reach wall snapshots use actual four current sprites separately from non-door square facts', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = Array.from({ length: 11 }, () => []);
+
+    tiles[0] = [['doorN', 'false'], ['DoubleDoor', '1'], ['cutN', '']];
+    tiles[4] = [['doorW', 'false'], ['DoubleDoor', '6'], ['cutW', 'false']];
+    tiles[5] = [['doorW', 'false'], ['DoubleDoor', '5'], ['cutN', ''], ['DoorWallN', 'false']];
+    tiles[6] = [['doorN', 'false'], ['DoubleDoor', '2'], ['cutN', 'false'], ['DoorWallN', '']];
+    tiles[7] = [['doorN', 'false'], ['DoubleDoor', '2'], ['cutW', ''], ['blueprint', 'false']];
+    tiles[10] = [['doorN', 'false'], ['DoubleDoor', '6'], ['cutN', ''], ['WallSE', 'false']];
+    const map = await cell({ names: ['synthetic_0', 'synthetic_10'], records: [2, -1, 0, 2, -1, 1, -1, 62] });
+    const projected = await projectWorldObjects([map], registry(tiles));
+
+    assert.deepEqual(projected.doors.map((door) => door.reachWalls), [
+        [{ north: true, west: false }, { north: false, west: true }, { north: true, west: false }, { north: false, west: false }],
+        [{ north: false, west: false }, { north: false, west: false }, { north: false, west: true }, { north: false, west: false }],
+    ]);
+    assert.deepEqual(projected.squares.slice(0, 2).map((square) => square.reachWalls),
+        [{ north: false, west: false }, { north: false, west: false }], 'base excludes all actual doors');
+    assert.throws(() => {
+        projected.doors[0].reachWalls[0].north = false;
+    }, TypeError);
+    assert.throws(() => projected.doors[0].reachWalls.push({ north: false, west: false }), TypeError);
+});
+
+// Capability follows each current sprite's actual flags but always uses the constructor's fixed closed-sprite sound.
+test('curtain capability snapshots distinguish transparency, garage presence and fixed closed-sprite sound across open states', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const cases = [
+        {
+            label: 'default WoodDoor and textual false transparency',
+            tiles: [[['doorN', 'false'], ['doorTrans', 'false']], [], [['doorTrans', '']]],
+            placed: 0, expected: [true, true, true, true],
+        },
+        {
+            label: 'current sprite transparency is not copied from closed',
+            tiles: [[['doorN', 'false'], ['doorTrans', '']], [], []],
+            placed: 0, expected: [true, false, true, false],
+        },
+        {
+            label: 'garage property presence excludes both real panels',
+            tiles: [
+                [['doorN', 'false'], ['GarageDoor', '1'], ['doorTrans', '']], [], [], [], [], [], [], [],
+                [['doorN', 'false'], ['GarageDoor', '4'], ['doorTrans', 'false']],
+            ],
+            placed: 0, expected: [false, false, false, false],
+        },
+        {
+            label: 'mixed-case SlidingGlassDoor sound on closed excludes an initially open door',
+            tiles: [
+                [['doorN', 'false'], ['doorTrans', ''], ['DoorSound', 'sLiDiNgGlAsSdOoR']], [],
+                [['doorTrans', ''], ['DoorSound', 'WoodDoor']],
+            ],
+            placed: 2, expected: [false, false, false, false],
+        },
+        {
+            label: 'open SlidingGlassDoor sound cannot replace fixed closed WoodDoor sound',
+            tiles: [
+                [['doorN', 'false'], ['doorTrans', ''], ['DoorSound', 'WoodDoor']], [],
+                [['doorTrans', ''], ['DoorSound', 'SlidingGlassDoor']],
+            ],
+            placed: 2, expected: [true, true, true, true],
+        },
+        {
+            label: 'opaque current sprites remain ineligible even with default sound',
+            tiles: [[['doorN', 'false']], [], []],
+            placed: 0, expected: [false, false, false, false],
+        },
+        {
+            label: 'special toggled current partner changes capability without changing constructor sound',
+            tiles: [
+                [['doorN', 'false'], ['DoubleDoor', '1'], ['doorTrans', ''], ['DoorSound', 'WoodDoor']], [], [], [],
+                [['doorW', 'false'], ['DoubleDoor', '6'], ['doorTrans', 'false'], ['DoorSound', 'SlidingGlassDoor']],
+                [['doorW', 'false'], ['DoubleDoor', '5'], ['doorTrans', ''], ['GarageDoor', '1']],
+            ],
+            placed: 0, expected: [true, true, true, false],
+        },
+    ];
+    const results = await Promise.all(cases.map(async ({ tiles, placed, expected, label }) => {
+        const map = await cell({ names: [`synthetic_${placed}`], records: [2, -1, 0, -1, 63] });
+        const projection = await projectWorldObjects([map], registry(tiles));
+
+        return { projection, expected, label };
+    }));
+
+    for (const { projection, expected, label } of results) {
+        assert.deepEqual(projection.doors[0].curtainCapabilities, expected, label);
+        assert.throws(() => {
+            projection.doors[0].curtainCapabilities[0] = false;
+        }, TypeError);
+    }
+});
+
+// Shared window property copies do not rewrite the source sprite's cached cut fields.
+test('reach walls retain cached cuts across later shared window mutation and real smashed or glass current sprites', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([
+        [['windowN', 'false'], ['cutW', 'false'], ['OpenTileOffset', '1'], ['SmashedTileOffset', '2'], ['GlassRemovedOffset', '3']],
+        [], [], [['cutW', 'false']],
+    ]);
+    const earlier = await cell({ names: ['synthetic_1'], records: [-1, 1, 2, -1, 0, -1, 62] });
+    const later = await cell({
+        cellX: 1, names: ['synthetic_0', 'synthetic_2', 'synthetic_3'],
+        records: [2, -1, 0, 2, -1, 1, 2, -1, 2, -1, 61],
+    });
+    const projection = await projectWorldObjects([later, earlier], tiles);
+    const earlierSquare = projection.squares.find(({ x, y }) => x === 0 && y === 1);
+
+    assert.equal(earlierSquare.interactionProperties.windowN, true, 'later constructor really copied current properties onto the earlier generic sprite');
+    assert.deepEqual(earlierSquare.reachWalls, { north: false, west: false }, 'copied cutN property is not a cached cut field');
+    assert.deepEqual(projection.squares.filter(({ x, y }) => x === 256 && y <= 2).map(({ reachWalls }) => reachWalls), [
+        { north: false, west: true }, { north: false, west: false }, { north: false, west: true },
+    ]);
+    assert.notEqual(projection.squares.find(({ x, y }) => x === 256 && y === 1).interactionProperties.blockedWindowN, true,
+        'the smashed partner is the actual destroyed current sprite');
+    assert.notEqual(projection.squares.find(({ x, y }) => x === 256 && y === 2).interactionProperties.blockedWindowN, true,
+        'the glass-removed partner is the actual destroyed current sprite');
+
+    const doorTiles = registry([
+        [['doorN', 'false']], [], [],
+        [['windowN', 'false'], ['OpenTileOffset', '-1']],
+    ]);
+    const doorCell = await cell({ records: [2, -1, 0, -1, 63] });
+    const windowCell = await cell({ cellX: 1, names: ['synthetic_3'], records: [2, -1, 0, -1, 63] });
+    const doorProjection = await projectWorldObjects([windowCell, doorCell], doorTiles);
+
+    assert.equal(doorProjection.doors[0].interactionProperties[1].windowN, true, 'later window really mutates the retained open-door partner properties');
+    assert.deepEqual(doorProjection.doors[0].reachWalls, [
+        { north: false, west: false }, { north: false, west: false },
+        { north: false, west: false }, { north: false, west: false },
+    ], 'all four door snapshots use cached cuts rather than copied cut properties');
 });

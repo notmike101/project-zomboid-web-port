@@ -482,6 +482,44 @@ test('bootstrap require closure merges identical records without fetching or ins
     await assert.rejects(() => engineSources(descriptors, content, [startup, { ...startup, path: 'media/lua/client/Startup.lua' }]), /ambiguous/ui);
 });
 
+test('literal closure follows native case-insensitive exact paths without inventing suffix aliases', async () => {
+    const content = directory({
+        'mods/A/mod.info': 'id=A',
+        'mods/A/media/lua/client/a.lua': 'require "body/entry"; require "BODY/ENTRY.lua"',
+        'media/lua/shared/Body/Entry.lua': `
+            -- require "Unused"
+            local text = "require 'Unused'"
+            require --[[ original-style trivia ]] ("ISUI/MissingSibling")
+            require 'Vehicles/ISUI/Vehicle'
+        `,
+        'media/lua/client/Vehicles/ISUI/MissingSibling.lua': 'error("not an exact required path")',
+        'media/lua/client/Vehicles/ISUI/Vehicle.lua': 'return require [[timedactions\\leaf.lua]]',
+        'media/lua/shared/TimedActions/Leaf.lua': 'require "BODY/ENTRY"; return 7',
+        'media/lua/client/Unused.lua': 'error("unreachable")',
+    });
+    const descriptors = await discoverNativePackages(content);
+    const sources = await engineSources(descriptors, content);
+
+    assert.deepEqual(sources.map(({ path, execute }) => ({ path, execute })), [
+        { path: 'media/lua/shared/Body/Entry.lua', execute: false },
+        { path: 'media/lua/client/Vehicles/ISUI/Vehicle.lua', execute: false },
+        { path: 'media/lua/shared/TimedActions/Leaf.lua', execute: false },
+    ]);
+    assert.deepEqual(await engineSources(descriptors, content, sources), sources);
+});
+
+test('case-only engine path collisions are refused rather than selecting a manifest entry', async () => {
+    const content = directory({
+        'mods/A/mod.info': 'id=A',
+        'mods/A/media/lua/client/a.lua': 'require "helper"',
+        'media/lua/shared/Helper.lua': 'return 1',
+        'media/lua/shared/helper.lua': 'return 2',
+    });
+    const descriptors = await discoverNativePackages(content);
+
+    await assert.rejects(engineSources(descriptors, content), /Ambiguous engine Lua require name/u);
+});
+
 test('ordered engine startup runs once through the initiating real package API before native globals are consumed', async () => {
     const content = directory({
         'mods/A/mod.info': 'id=A',
@@ -611,29 +649,19 @@ test('failed engine startup discards only staged VM and retains initiating API/s
     }
 });
 
-test('native session forwards independently authored registry constant mappings without guessing IDs', async () => {
+test('native session shares original MoodleType constants with the actual character domain', async () => {
     const content = directory({
         'mods/A/mod.info': 'id=A',
-        'mods/A/media/lua/client/a.lua': 'assert(MoodleType.FOOD_EATEN == "authored-food"); assert(getPlayer():getMoodles():getMoodleLevel(MoodleType.FOOD_EATEN) == 2)',
+        'mods/A/media/lua/client/a.lua': 'assert(MoodleType.FOOD_EATEN == "base:foodeaten"); assert(getPlayer():getMoodles():getMoodleLevel(MoodleType.UNHAPPY) == 3)',
     });
     const descriptors = await discoverNativePackages(content);
     const engine = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
     const host = createModHost(engine);
 
     try {
-        await prepareNativeSession(descriptors, content, { moodleTypes: { FOOD_EATEN: 'authored-food' } });
-        activateNativePackage(descriptors[0].id, {
-            ...host.api,
-            character: {
-                ...host.api.character,
-                /**
-                 * Supply the authored registry entry queried through the native bridge.
-                 *
-                 * @returns {{id:string,level:number}[]} Detached authoritative registry levels.
-                 */
-                moodles: () => [{ id: 'authored-food', level: 2 }],
-            },
-        });
+        engine.command({ type: 'setCharacterStat', name: 'unhappiness', value: 80 });
+        await prepareNativeSession(descriptors, content);
+        activateNativePackage(descriptors[0].id, host.api);
     } finally {
         closeNativeSession({ discardSaveData: true });
         host.dispose();

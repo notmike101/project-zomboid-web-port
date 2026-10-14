@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { parsePngHeader, worldFromCanvas } from '../src/renderer.js';
+import { canvasContentBox, parsePngHeader, worldFromCanvas } from '../src/renderer.js';
 
 const SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
 const IHDR_LENGTH_OFFSET = 8;
@@ -143,4 +143,33 @@ test('pointer mapping uses the border-excluding, scale-normalised content box', 
     assert.deepEqual(worldFromCanvas(canvas, 584, 654), { x: 5, y: 10 });
     // The letterbox band clamps onto the plane instead of reporting coordinates outside it.
     assert.deepEqual(worldFromCanvas(canvas, 100, 50), { x: 0, y: 0 });
+});
+
+test('shared UI content coordinates exclude unequal borders and CSS axis scales independently of DPR', () => {
+    const canvas = {
+        clientWidth: 400, clientHeight: 240, clientLeft: 10, clientTop: 20,
+        offsetWidth: 420, offsetHeight: 280, width: 800, height: 480,
+        /**
+         * Measure the actual scaled visual border box.
+         *
+         * @returns {{left: number, top: number, width: number, height: number}} Actual scaled visual border box.
+         */
+        getBoundingClientRect: () => ({ left: 100, top: 50, width: 630, height: 560 }),
+    };
+    const content = canvasContentBox(canvas);
+
+    assert.deepEqual(content, { left: 115, top: 90, width: 400, height: 240, scaleX: 1.5, scaleY: 2 });
+    const logicalPoint = { x: 15.5, y: 15.5 };
+    const clientPoint = {
+        x: content.left + logicalPoint.x * content.scaleX,
+        y: content.top + logicalPoint.y * content.scaleY,
+    };
+
+    assert.deepEqual({
+        x: (clientPoint.x - content.left) / content.scaleX,
+        y: (clientPoint.y - content.top) / content.scaleY,
+    }, logicalPoint, 'a point beyond a 15px source radius stays beyond it on both axes');
+    canvas.width = 400;
+    canvas.height = 240;
+    assert.deepEqual(canvasContentBox(canvas), content, 'physical drawing-buffer density does not compress logical UI pixels');
 });

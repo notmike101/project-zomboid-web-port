@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 import { createEngine } from '../src/engine.js';
+import { assertDoorRefused, completeActions, completeQueueRequest, importPickupSquares } from './queue-test-helpers.js';
 
 /**
  * Detached engine state, exactly as snapshot() returns it.
@@ -77,6 +78,18 @@ function runUntilIdle(subject, limit = 2_000) {
     return subject.snapshot();
 }
 
+test('zero explicit step advances one logic frame and raw RAF elapsed preserves source FPS', async () => {
+    const subject = await engine();
+
+    subject.step(0);
+    assert.equal(subject.snapshot().tick, 1);
+    assert.equal(subject.sourceTiming.getState().fpsMultiplier, 1);
+    subject.frameStep(0.5);
+    assert.equal(subject.snapshot().tick, 2);
+    assert.equal(subject.sourceTiming.getState().fpsMultiplier, 5);
+    assert.equal(subject.sourceTiming.getState().elapsedSeconds, 0.5);
+    assert.throws(() => subject.frameStep(-1));
+});
 test('initial state matches the integration contract', async () => {
     const snapshot = (await engine()).snapshot();
 
@@ -243,7 +256,6 @@ test('refused numbers never mutate state', async () => {
         () => subject.setSpeed(0),
         () => subject.setSpeed(0.05),
         () => subject.setSpeed(10.5),
-        () => subject.step(0),
         () => subject.step(-STEP),
         () => subject.step(0.11),
         () => subject.command({ type: 'moveTo', x: 10.000_000_1, y: 5 }),
@@ -553,7 +565,33 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
     subject.command({ type: 'moveTo', x: 6, y: 5 });
     assert.equal(runUntilIdle(subject).x, 6);
 
+    for (const action of [{ type: 'walk', x: 1, y: 0 }, { type: 'moveTo', x: 9, y: 7 }]) {
+        const before = subject.snapshot();
+
+        subject.command(action);
+        subject.command({ type: 'cancel' });
+        subject.step(STEP);
+        assert.deepEqual([subject.snapshot().x, subject.snapshot().y, subject.snapshot().action],
+            [before.x, before.y, IDLE], 'the real legacy void cancellation does not invent a queue capability');
+    }
+
+    assert.equal(subject.canSaveQueueState(), false);
+
     for (const attempt of [
+        () => subject.frameStep(STEP),
+        () => subject.actions.getState(),
+        () => subject.actions.requestPickup(1),
+        () => subject.actions.requestDoor('door:10:10:0:0'),
+        () => subject.actions.requestWalk({ x: 6, y: 5, z: 0 }),
+        () => subject.actions.cancel(),
+        () => subject.sourceTiming.getState(),
+        () => subject.sourceTiming.set('multiplier', 1),
+        () => subject.sourceTiming.hasTrait('base:dextrous'),
+        () => subject.sourceTiming.setTrait('base:dextrous', true),
+        () => subject.sourceTiming.getGameMode(),
+        () => subject.sourceTiming.setGameMode('Sandbox'),
+        () => subject.saveQueueState(),
+        () => subject.loadQueueState(new Uint8Array([1])),
         () => subject.worldImportCell(0, 0, cellBytes()),
         () => subject.navFlags(0, 0),
         () => subject.worldBounds(),
@@ -567,6 +605,7 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.rollbackItemDefinitionRegistration('base'),
         () => subject.freezeItemDefinitions(),
         () => subject.items(),
+        () => subject.getItem(1),
         () => subject.importItems([]),
         () => subject.inventoryState(),
         () => subject.wornItem('base:shoes'),
@@ -849,6 +888,56 @@ function shoe(fullType = 'Base.Shoe', extra = {}) {
     };
 }
 
+test('native direct item reads and square collections retain live ownership and full uint32 identity', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe(), { owner: 'base' });
+    subject.worldImportCell(-1, 0, cellBytes());
+    subject.worldImportCell(0, 0, cellBytes());
+    const spawned = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: -1.5, y: 5.5 }).id;
+    const records = subject.items();
+
+    records[0].id = 0xFF_FF_FF_FF;
+    subject.importItems(records);
+    const id = records[0].id;
+    const read = subject.getItem(id);
+
+    assert.equal(subject.getItem(spawned), null);
+    assert.deepEqual(read, records[0]);
+    read.x = 999;
+    assert.equal(subject.getItem(id).x, -1.5);
+    assert.equal(subject.sourceActions.worldItemCount(-2, 5, 0), 1);
+    assert.equal(subject.sourceActions.worldItemGet(-2, 5, 0, 0), id);
+    assert.equal(subject.sourceActions.worldItemCount(-1, 5, 0), 0);
+    assert.equal(subject.sourceActions.worldItemCount(-2, 5, 1), 0);
+    assert.throws(() => subject.sourceActions.worldItemGet(-2, 5, 0, 1), RangeError);
+    assert.throws(() => subject.sourceActions.worldItemGet(-2, 5, 0, -1), RangeError);
+
+    for (const invalid of [0, -1, 0x1_00_00_00_00]) {
+        assert.throws(() => subject.getItem(invalid), RangeError);
+    }
+
+    for (const invalid of [1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        assert.throws(() => subject.getItem(invalid), TypeError);
+    }
+
+    subject.importItems([{ ...records[0], location: 'inventory' }]);
+    subject.command({ type: 'drop', id, x: 6.5, y: 5.5 });
+    assert.equal(subject.sourceActions.worldItemCount(-2, 5, 0), 0);
+    assert.equal(subject.sourceActions.worldItemGet(6, 5, 0, 0), id);
+    assert.equal(subject.getItem(id).x, 6.5);
+    subject.importItems([{ ...records[0], location: 'inventory' }]);
+    assert.equal(subject.sourceActions.worldItemCount(6, 5, 0), 0);
+    assert.equal(subject.getItem(id).location, 'inventory');
+    subject.importItems([]);
+    assert.equal(subject.getItem(id), null);
+    subject.importItems(records);
+    assert.equal(subject.getItem(id).location, 'ground');
+    subject.reset();
+    assert.equal(subject.getItem(id), null);
+    assert.equal(subject.sourceActions.worldItemCount(-2, 5, 0), 0);
+});
+
 test('native item pickup refuses source weight51 without treating maxWeight8 as capacity', async () => {
     const subject = await engine();
 
@@ -857,7 +946,8 @@ test('native item pickup refuses source weight51 without treating maxWeight8 as 
     const before = subject.items();
     const actor = subject.saveState();
 
-    assert.throws(() => subject.command({ type: 'pickup', id }), RangeError);
+    assert.throws(() => subject.command({ type: 'pickup', id }), /blocked/u);
+    assert.deepEqual(subject.actions.getState(), { current: null, pending: [] });
     assert.deepEqual(subject.items(), before);
     assert.deepEqual(subject.saveState(), actor);
     assert.deepEqual(subject.inventoryState(), { capacityWeight: 0, capacity: 50, maxWeight: 8 });
@@ -866,7 +956,7 @@ test('native item pickup refuses source weight51 without treating maxWeight8 as 
 
     assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 51, 0), 0);
     assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
-    assert.notEqual(api.item_pickup(1), 0, 'the native shared pickup must enforce capacity');
+    assert.ok(api.item_pickup(api.item_last_id()) < 0, 'native admission must refuse capacity, not return a queue ID');
 });
 
 test('native inventory capacity ignores count and applies worn reduction before pickup', async () => {
@@ -879,13 +969,22 @@ test('native inventory capacity ignores count and applies worn reduction before 
     const second = subject.command({ type: 'spawnItem', fullType: 'Base.One', x: 5, y: 5 }).id;
 
     subject.command({ type: 'pickup', id: load });
+    completeActions(subject);
     assert.equal(subject.inventoryState().capacityWeight, 49);
     subject.command({ type: 'pickup', id: first });
+    completeActions(subject);
     assert.equal(subject.inventoryState().capacityWeight, 50);
-    assert.throws(() => subject.command({ type: 'pickup', id: second }), RangeError);
+    const full = subject.items();
+    const actor = subject.saveState();
+
+    assert.throws(() => subject.command({ type: 'pickup', id: second }), /blocked/u);
+    assert.deepEqual(subject.items(), full);
+    assert.deepEqual(subject.saveState(), actor);
+    assert.deepEqual(subject.actions.getState(), { current: null, pending: [] });
     subject.command({ type: 'wear', id: load });
     assert.ok(near(subject.inventoryState().capacityWeight, 15.7));
     subject.command({ type: 'pickup', id: second });
+    completeActions(subject);
     assert.ok(near(subject.inventoryState().capacityWeight, 16.7));
     subject.command({ type: 'unequip', id: load });
     assert.equal(subject.inventoryState().capacityWeight, 51, 'unequip is not a pickup capacity check');
@@ -909,14 +1008,20 @@ test('native pickup rounds current f32 weight to nearest hundredth rather than c
         const small = subject.command({ type: 'spawnItem', fullType: 'Base.Small', x: 5, y: 5 }).id;
 
         subject.command({ type: 'pickup', id: load });
+        completeActions(subject);
 
         if (accepted) {
             subject.command({ type: 'pickup', id: small });
+            completeActions(subject);
             assert.equal(subject.items()[1].location, 'inventory');
         } else {
             const before = subject.items();
 
-            assert.throws(() => subject.command({ type: 'pickup', id: small }), RangeError);
+            const actor = subject.saveState();
+
+            assert.throws(() => subject.command({ type: 'pickup', id: small }), /blocked/u);
+            assert.deepEqual(subject.saveState(), actor);
+            assert.deepEqual(subject.actions.getState(), { current: null, pending: [] });
             assert.deepEqual(subject.items(), before);
         }
     }));
@@ -929,6 +1034,7 @@ test('native live base and actual weights remain independent across definition o
     const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
 
     subject.command({ type: 'pickup', id });
+    completeActions(subject);
     subject.command({ type: 'setWeight', id, weight: 80.5 });
     assert.equal(subject.items()[0].weight, 80.5);
     assert.equal(subject.items()[0].actualWeight, 1.25);
@@ -953,6 +1059,7 @@ test('native live base and actual weights remain independent across definition o
 
     for (const orderedId of ids.toReversed()) {
         ordered.command({ type: 'pickup', id: orderedId });
+        completeActions(ordered);
     }
 
     for (const [orderedId, actualWeight] of [[ids[0], 16_777_216], [ids[1], 1], [ids[2], 1]]) {
@@ -985,6 +1092,7 @@ test('native item weight restore and definition rollback refuse malformed overfl
     const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
 
     subject.command({ type: 'pickup', id });
+    completeActions(subject);
     subject.command({ type: 'wear', id });
     assert.equal(subject.isWearingAwkwardGloves(), true);
     subject.beginItemDefinitionRegistration('mod');
@@ -1104,13 +1212,18 @@ test('equipment replacement and broken-item policy preserve stable IDs and movem
     subject.registerItemDefinition(shoe(), { owner: 'base' });
     subject.registerItemDefinition(shoe('Base.Disposable', { removeOnBroken: true }), { owner: 'base' });
     subject.freezeItemDefinitions();
-    subject.command({ type: 'moveTo', x: 9, y: 7 });
-    const before = subject.saveState().values.slice(0, 10);
     const first = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
     const second = subject.command({ type: 'spawnItem', fullType: 'Base.Disposable', x: 5, y: 5 }).id;
 
     for (const id of [first, second]) {
         subject.command({ type: 'pickup', id });
+        completeActions(subject);
+    }
+
+    subject.command({ type: 'moveTo', x: 9, y: 7 });
+    const before = subject.saveState().values.slice(0, 10);
+
+    for (const id of [first, second]) {
         subject.command({ type: 'wear', id });
     }
 
@@ -1150,6 +1263,7 @@ test('awkward-glove timing follows the actual tagged item worn on hands', async 
 
     for (const id of [tagged, plain, shoeId]) {
         subject.command({ type: 'pickup', id });
+        completeActions(subject);
     }
 
     subject.command({ type: 'wear', id: tagged });
@@ -1176,6 +1290,7 @@ test('item tags normalize detached resource IDs and reject malformed new rows an
     const id = subject.command({ type: 'spawnItem', fullType: 'Base.Glove', x: 5, y: 5 }).id;
 
     subject.command({ type: 'pickup', id });
+    completeActions(subject);
     assert.equal(subject.isWearingAwkwardGloves(), false);
     subject.command({ type: 'wear', id });
     const before = subject.itemDefinitions();
@@ -1203,8 +1318,19 @@ test('native awkward-glove ingress rejects nonboolean flags without changing def
 
     assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1, 1), 0);
     assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
-    assert.equal(api.item_pickup(1), 0);
-    assert.equal(api.item_wear(1), 0);
+    const id = api.item_last_id();
+    const accepted = api.item_pickup(id);
+
+    assert.ok(accepted > 0, 'pickup returns a stable queue action ID, not a mutation status');
+    assert.equal(api.queue_action_read(accepted), 0);
+    assert.equal(new DataView(api.memory.buffer).getFloat64(api.queue_scratch_ptr() + 24, true), id);
+
+    for (let frame = 0; frame < 10_000 && api.queue_length() !== 0; frame += 1) {
+        assert.equal(api.frame_step(STEP), 0);
+    }
+
+    assert.equal(api.queue_length(), 0, 'actual native pickup must finish before equipment ingress');
+    assert.equal(api.item_wear(id), 0);
     assert.equal(api.item_wearing_awkward_gloves(0), 0);
     assert.equal(api.item_wearing_awkward_gloves(1), 1);
     assert.notEqual(api.item_definition_register(0, 2, 30, 1, 1, 0, 20, 1, 1, 2), 0);
@@ -1284,7 +1410,7 @@ test('saved counters continue stable IDs and scalar health without a legacy acto
     assert.equal(restored.getHealth(), 100);
 });
 
-test('item boundaries refuse malformed values and enforce capacity, world membership and project pickup radius', async () => {
+test('item boundaries refuse malformed values and pickup resolves real source adjacency and queued travel', async () => {
     const subject = await engine();
 
     for (const extra of [{ conditionMax: 0 }, { stackLimit: 0 }, { removeOnBroken: 1 },
@@ -1296,16 +1422,16 @@ test('item boundaries refuse malformed values and enforce capacity, world member
 
     subject.registerItemDefinition(shoe(), { owner: 'base' });
     subject.worldImportCell(0, 0, cellBytes((x, y) => (x === 6 && y === 5 ? 1 : 0)));
+    importPickupSquares(subject, 5, 5, [{ x: 6, y: 5 }]);
     const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
 
     subject.command({ type: 'pickup', id });
+    completeActions(subject);
     subject.command({ type: 'drop', id, x: 6, y: 5 });
-    subject.command({ type: 'pickup', id });
-    subject.command({ type: 'drop', id, x: 8, y: 5 });
     const before = subject.items();
     const state = subject.saveState();
 
-    for (const action of [{ type: 'pickup', id }, { type: 'wear', id },
+    for (const action of [{ type: 'wear', id },
         { type: 'drop', id, x: 256, y: 5 }, { type: 'setCondition', id, condition: 31 },
         { type: 'setCondition', id: 4_294_967_296, condition: 1 },
         { type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5, count: 2 },
@@ -1314,6 +1440,32 @@ test('item boundaries refuse malformed values and enforce capacity, world member
         assert.deepEqual(subject.items(), before);
         assert.deepEqual(subject.saveState(), state);
     }
+
+    subject.command({ type: 'pickup', id });
+    assert.deepEqual(subject.items(), before, 'admission is not an immediate transfer');
+    completeActions(subject);
+    assert.equal(subject.items()[0].location, 'inventory', 'a solid item tile still has a reachable adjacent actor square');
+    subject.command({ type: 'drop', id, x: 7, y: 7 });
+    const ground = subject.items();
+
+    subject.command({ type: 'pickup', id });
+    assert.equal(subject.actions.getState().current.kind, 'walk', 'far pickup queues genuine travel before transfer');
+    assert.deepEqual(subject.items(), ground);
+    completeActions(subject);
+    assert.equal(subject.items()[0].location, 'inventory');
+    assert.ok(subject.snapshot().x !== 5 || subject.snapshot().y !== 5);
+    subject.command({ type: 'drop', id, x: 3, y: 3 });
+    importPickupSquares(subject, 5, 5, [
+        { x: 3, y: 3 }, { x: 4, y: 3 }, { x: 3, y: 4 }, { x: 4, y: 4 },
+    ]);
+    const sealedItems = subject.items();
+    const sealedActor = subject.saveState();
+
+    assert.equal(subject.sourceActions.findAdjacent({ x: 3, y: 3, z: 0 }), null);
+    assert.throws(() => subject.command({ type: 'pickup', id }), /blocked/u);
+    assert.deepEqual(subject.items(), sealedItems);
+    assert.deepEqual(subject.saveState(), sealedActor);
+    assert.deepEqual(subject.actions.getState(), { current: null, pending: [] });
 });
 
 test('numeric WASM staging cannot publish a valid prefix after a later invalid record', async () => {
@@ -1375,20 +1527,39 @@ test('the final uint32 ID is usable once and equipment commands leave a live hea
     const subject = await engine();
 
     subject.registerItemDefinition(shoe('Base.Shoe', { removeOnBroken: true }), { owner: 'base' });
-    subject.command({ type: 'walk', x: 1, y: 1 });
     const state = subject.saveState();
 
     state.values[11] = 4_294_967_295;
     subject.loadState(state);
-    const prefix = subject.saveState().values.slice(0, 10);
     const id = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
 
     assert.equal(id, 4_294_967_295);
     subject.command({ type: 'pickup', id });
+    const queued = subject.actions.getState();
+
+    assert.equal(queued.current.target.id, id);
+    assert.deepEqual(queued.current.groups[0].itemIds, [id]);
+    const portable = subject.saveQueueState();
+
+    subject.actions.cancel();
+    subject.loadQueueState(portable);
+    assert.deepEqual(subject.actions.getState(), queued, 'portable queue retains the full uint32 target and group member');
+    completeActions(subject);
+    subject.command({ type: 'walk', x: 1, y: 1 });
+    const firstHeading = subject.saveState().values.slice(0, 10);
+
     subject.command({ type: 'wear', id });
     subject.command({ type: 'unequip', id });
     subject.command({ type: 'drop', id, x: 5, y: 5 });
+    assert.deepEqual(subject.saveState().values.slice(0, 10), firstHeading, 'wear, unequip and drop preserve the live heading');
+    subject.command({ type: 'cancel' });
     subject.command({ type: 'pickup', id });
+    completeActions(subject);
+    subject.command({ type: 'walk', x: 1, y: 1 });
+    const prefix = subject.saveState().values.slice(0, 10);
+
+    subject.command({ type: 'wear', id });
+    subject.command({ type: 'unequip', id });
     subject.command({ type: 'wear', id });
     subject.command({ type: 'setCondition', id, condition: 0 });
     assert.deepEqual(subject.items(), []);
@@ -1560,7 +1731,7 @@ test('moodle timers advance only on accepted steps and continue through detached
     }
 
     assert.deepEqual(subject.saveMoodleState(), saved);
-    assert.throws(() => subject.step(0));
+    assert.throws(() => subject.step(-STEP));
     assert.deepEqual(subject.saveMoodleState(), saved);
     const restored = await engine();
 
@@ -1761,6 +1932,7 @@ function nativeDoor(extra = {}) {
         open: false, locked: false, lockedByKey: false, forceLocked: false,
         keyId: -1, roomId: -1, oppositeRoomId: -1, attachedE: false,
         attachedS: false, barricaded: false, independentWalls: 0,
+        reachWalls: Array.from({ length: 4 }, () => ({ north: false, west: false })),
         doubleDoor: 0, garageDoor: 0, interiorSide: false, ...extra,
     };
 }
@@ -1777,8 +1949,9 @@ function doorSquares(extra = {}) {
     for (let y = 7; y <= 14; y += 1) {
         for (let x = 7; x <= 14; x += 1) {
             rows.push({
-                x, y, z: 0, roomId: -1, outside: true, solid: false,
+                x, y, z: 0, roomId: -1, outside: true, solid: false, solidFloor: true,
                 solidTrans: false, tree: false, independentWalls: 0,
+                reachWalls: { north: false, west: false },
                 vehicleObstructed: false, ...(extra[`${x}:${y}`] ?? {}),
             });
         }
@@ -1839,6 +2012,7 @@ test('native source-square standability keeps floor and adjacent-edge precedence
 
     subject.importDoors([], {
         squares: doorSquares({
+            '7:7': { solidFloor: false },
             '8:8': { solidFloor: true },
             '10:8': { solid: true, solidFloor: true, windows: 2 },
             '11:8': { solidTrans: true, hoppableEdges: 2 },
@@ -1925,29 +2099,29 @@ test('native source-square standability keeps floor and adjacent-edge precedence
     subject.importDoors([door], { squares });
     doorSpawn(subject, 10.5, 10.5);
     assert.equal(subject.getSquare(10, 9, 0).canStand, true, 'current closed-door sprite supplies its edge');
-    subject.toggleDoor(door.id);
+    completeQueueRequest(subject, subject.toggleDoor(door.id));
     assert.equal(subject.getSquare(10, 9, 0).canStand, false, 'opening uses the actual replacement sprite edge');
-    subject.toggleDoor(door.id);
+    completeQueueRequest(subject, subject.toggleDoor(door.id));
     assert.equal(subject.getSquare(10, 9, 0).canStand, false, 'toggled closed art is not initial closed art');
     assert.equal(subject.getSquare(9, 10, 0).canStand, true, 'toggled closed art supplies its west edge');
     const saved = subject.saveDoorState();
 
-    subject.toggleDoor(door.id);
+    completeQueueRequest(subject, subject.toggleDoor(door.id));
     subject.loadDoorState(saved);
     assert.deepEqual(subject.saveDoorState(), saved, 'stand metadata does not enter mutable portable state');
     assert.equal(subject.getSquare(9, 10, 0).canStand, true, 'restore rebuilds the current edge union');
 
     subject.importDoors([nativeDoor({ open: true, standEdges: [0, 4, 0, 2] })], { squares });
     assert.equal(subject.getSquare(9, 10, 0).canStand, true, 'initial open art selects the second mask');
-    subject.toggleDoor(door.id);
+    completeQueueRequest(subject, subject.toggleDoor(door.id));
     assert.equal(subject.getSquare(9, 10, 0).canStand, false);
-    subject.toggleDoor(door.id);
+    completeQueueRequest(subject, subject.toggleDoor(door.id));
     assert.equal(subject.getSquare(10, 9, 0).canStand, true, 'toggled open art selects the fourth mask');
 
     subject.importDoors([nativeDoor({ doubleDoor: 2, standEdges: [0, 0, 0, 4], squareFlags: [2, 0, 0, 32] })], {
         squares: doorSquares({ '8:11': { solidTrans: true }, '9:10': { solidTrans: true } }),
     });
-    subject.toggleDoor(door.id);
+    completeQueueRequest(subject, subject.toggleDoor(door.id));
     assert.equal(subject.getSquare(8, 11, 0).canStand, true, 'moved panel owns edges at its actual position');
     assert.equal(subject.getSquare(9, 10, 0).canStand, false, 'closed origin does not keep a moved edge');
     assert.equal(subject.getSquare(9, 11, 0).solidFloor, true, 'current source facts move with the panel');
@@ -1955,19 +2129,19 @@ test('native source-square standability keeps floor and adjacent-edge precedence
 
     const sourceDoor = nativeDoor({ squareFlags: [34, 8, 4, 32], standEdges: [0, 0, 2, 0] });
 
-    subject.importDoors([sourceDoor], { squares: doorSquares() });
+    subject.importDoors([sourceDoor], { squares: doorSquares({ '10:10': { solidFloor: false } }) });
     assert.deepEqual(subject.getSquare(10, 10, 0), {
         x: 10, y: 10, z: 0, roomId: -1, outside: true, solid: true, solidTrans: false,
         tree: false, vehicleObstructed: false, solidFloor: true, canStand: false,
     }, 'initial closed source solid wins over its floor');
-    subject.toggleDoor(door.id);
+    completeQueueRequest(subject, subject.toggleDoor(door.id));
     assert.deepEqual(subject.getSquare(10, 10, 0), {
         x: 10, y: 10, z: 0, roomId: -1, outside: true, solid: false, solidTrans: false,
         tree: false, vehicleObstructed: false, solidFloor: true, canStand: true,
     }, 'toggle changes source query facts without self-obstructing on its old solid flag');
     const sourceSave = subject.saveDoorState();
 
-    subject.toggleDoor(door.id);
+    completeQueueRequest(subject, subject.toggleDoor(door.id));
     assert.equal(subject.getSquare(10, 10, 0).solidTrans, true);
     assert.equal(subject.getSquare(10, 10, 0).solidFloor, false);
     assert.equal(subject.getSquare(10, 10, 0).canStand, true, 'merged solidtrans facts use the current edge');
@@ -1975,7 +2149,9 @@ test('native source-square standability keeps floor and adjacent-edge precedence
     assert.deepEqual(subject.saveDoorState(), sourceSave);
     assert.equal(subject.getSquare(10, 10, 0).solidTrans, false, 'restored sprite facts replace the old union');
 
-    subject.importDoors([nativeDoor({ ...sourceDoor, open: true })], { squares: doorSquares() });
+    subject.importDoors([nativeDoor({ ...sourceDoor, open: true })], {
+        squares: doorSquares({ '10:10': { solidFloor: false } }),
+    });
     assert.equal(subject.getSquare(10, 10, 0).tree, true, 'initial open source tree is not frozen');
     assert.equal(subject.getSquare(10, 10, 0).solidFloor, false);
     assert.equal(subject.getSquare(10, 10, 0).canStand, false, 'tree alone does not supply a floor or edge');
@@ -2045,7 +2221,7 @@ test('native doors close the original portal in both directions without corner c
     assert.throws(() => subject.command({ type: 'walk', x: -1, y: -1 }), /blocked/u);
     doorSpawn(subject, 10.5, 9.5);
     assert.throws(() => subject.command({ type: 'walk', x: 0, y: 1 }), /blocked/u);
-    subject.toggleDoor(nativeDoor().id);
+    completeQueueRequest(subject, subject.toggleDoor(nativeDoor().id));
     subject.command({ type: 'walk', x: 0, y: 1 });
     subject.step(0.1);
     assert.ok(subject.snapshot().y > 9.5);
@@ -2103,7 +2279,6 @@ test('native door refusals leave lock state actor state and revision untouched',
         [nativeDoor(), doorSquares({ '10:10': { solid: true } }), [10.5, 9.5]],
         [nativeDoor(), doorSquares({ '10:10': { solidTrans: true } }), [10.5, 9.5]],
         [nativeDoor(), doorSquares({ '10:10': { tree: true } }), [10.5, 9.5]],
-        [nativeDoor(), doorSquares(), [13.5, 13.5]],
         [nativeDoor({ id: 'door:10:10:1:0', z: 1 }), doorSquares(), [10.5, 10.5]],
     ]) {
         subject.importDoors([door], { squares });
@@ -2111,9 +2286,10 @@ test('native door refusals leave lock state actor state and revision untouched',
         const before = subject.saveDoorState();
         const actor = subject.saveState();
 
-        assert.throws(() => subject.toggleDoor(door.id), RangeError);
+        assertDoorRefused(subject, door.id);
         assert.deepEqual(subject.saveDoorState(), before);
-        assert.deepEqual(subject.saveState(), actor);
+        assert.deepEqual(subject.saveState().values.filter((_, index) => index !== 8),
+            actor.values.filter((_, index) => index !== 8), 'failed door work does not mutate actor fields; logical frames still tick');
     }
 });
 
@@ -2129,16 +2305,23 @@ test('native inside unlocking requires the exact adjacent room and respects forc
     subject.worldImportCell(0, 0, cellBytes());
     subject.importDoors([door], { squares });
     doorSpawn(subject, 11.5, 10.5);
-    assert.throws(() => subject.toggleDoor(door.id), RangeError);
+    const approach = subject.actions.requestDoor(door.id);
+
+    assert.equal(approach.accepted, true);
+    assert.equal(subject.doors()[0].open, false, 'wrong-room actor cannot unlock at admission');
+    assert.equal(subject.actions.getState().current.kind, 'walk');
+    completeActions(subject);
+    assert.equal(subject.doors()[0].open, true, 'actual adjacent walk reaches an allowed source room before unlocking');
+    subject.importDoors([door], { squares });
     doorSpawn(subject, 10.5, 9.5);
-    subject.command({ type: 'toggleDoor', id: door.id });
+    completeQueueRequest(subject, subject.command({ type: 'toggleDoor', id: door.id }));
     assert.equal(subject.doors()[0].open, true);
     assert.equal(subject.doors()[0].locked, false);
     assert.equal(subject.doors()[0].lockedByKey, false);
     subject.importDoors([{ ...door, forceLocked: true }], { squares });
     const before = subject.saveDoorState();
 
-    assert.throws(() => subject.toggleDoor(door.id), RangeError);
+    assertDoorRefused(subject, door.id);
     assert.deepEqual(subject.saveDoorState(), before);
 });
 
@@ -2192,9 +2375,9 @@ test('native door saved closure and lock state restore without RNG or identity r
 
     const locked = subject.saveDoorState();
 
-    subject.toggleDoor(rows[0].id);
+    completeQueueRequest(subject, subject.toggleDoor(rows[0].id));
     assert.equal(subject.saveDoorState().revision, locked.revision + 1);
-    subject.toggleDoor(rows[0].id);
+    completeQueueRequest(subject, subject.toggleDoor(rows[0].id));
     assert.equal(subject.doors()[0].locked, false);
     const closed = subject.saveDoorState();
 
@@ -2215,7 +2398,7 @@ test('native door changes invalidate already planned routes before crossing', as
     subject.importDoors([nativeDoor({ open: true })], { squares: doorSquares() });
     doorSpawn(subject, 10.5, 10.5);
     subject.command({ type: 'moveTo', x: 10.5, y: 8.5 });
-    subject.toggleDoor(nativeDoor().id);
+    completeQueueRequest(subject, subject.toggleDoor(nativeDoor().id));
     runUntilIdle(subject);
     assert.ok(subject.snapshot().y >= 10, 'stale direct route crossed a closed portal');
 });
@@ -2230,11 +2413,11 @@ test('native double panels move together and garage panels retain their original
     subject.worldImportCell(0, 0, cellBytes());
     subject.importDoors(rows, { squares: doorSquares() });
     doorSpawn(subject, 10.5, 10.5);
-    subject.toggleDoor(rows[0].id);
+    completeQueueRequest(subject, subject.toggleDoor(rows[0].id));
     assert.deepEqual(subject.doors().map(({ open, x, y }) => [open, x, y]),
         [[true, 10, 10], [true, 10, 11], [true, 13, 11], [true, 13, 10]]);
     assert.ok(subject.doors().every(({ toggled }) => toggled === true));
-    subject.toggleDoor(rows[0].id);
+    completeQueueRequest(subject, subject.toggleDoor(rows[0].id));
     assert.deepEqual(subject.doors().map(({ open, x, y }) => [open, x, y]),
         [[false, 10, 10], [false, 11, 10], [false, 12, 10], [false, 13, 10]]);
     assert.ok(subject.doors().every(({ toggled }) => toggled === true));
@@ -2243,7 +2426,7 @@ test('native double panels move together and garage panels retain their original
     }));
 
     subject.importDoors(garage, { squares: doorSquares() });
-    subject.toggleDoor(garage[1].id);
+    completeQueueRequest(subject, subject.toggleDoor(garage[1].id));
     assert.ok(subject.doors().every(({ open }) => open));
     assert.ok(subject.doors().every(({ toggled }) => toggled === true));
     subject.command({ type: 'walk', x: 0, y: -1 });
@@ -2297,7 +2480,7 @@ test('native new-world door constructors own seeded probabilities and force/open
     assert.deepEqual(repeat.saveDoorState(), initialized, 'restore must not invoke constructor RNG');
 });
 
-test('native special-panel obstruction and unrelated reach blockers refuse atomically', async () => {
+test('native special-panel obstruction and unavailable source adjacency refuse atomically while legal alternate sides walk', async () => {
     const subject = await engine();
 
     subject.worldImportCell(0, 0, cellBytes());
@@ -2309,7 +2492,7 @@ test('native special-panel obstruction and unrelated reach blockers refuse atomi
     doorSpawn(subject, 10.5, 10.5);
     let before = subject.saveDoorState();
 
-    assert.throws(() => subject.toggleDoor(doubles[0].id), RangeError);
+    assertDoorRefused(subject, doubles[0].id);
     assert.deepEqual(subject.saveDoorState(), before);
     const garage = [1, 2, 3].map((garageDoor) => nativeDoor({
         id: `door:${9 + garageDoor}:10:0:0`, x: 9 + garageDoor, garageDoor, open: true,
@@ -2317,17 +2500,39 @@ test('native special-panel obstruction and unrelated reach blockers refuse atomi
 
     subject.importDoors(garage, { squares: doorSquares({ '12:10': { vehicleObstructed: true } }) });
     before = subject.saveDoorState();
-    assert.throws(() => subject.toggleDoor(garage[0].id), RangeError);
+    assertDoorRefused(subject, garage[0].id);
     assert.deepEqual(subject.saveDoorState(), before);
     subject.importDoors([nativeDoor()], { squares: doorSquares({ '10:10': { independentWalls: 4 } }) });
     doorSpawn(subject, 9.5, 10.5);
     before = subject.saveDoorState();
-    assert.throws(() => subject.toggleDoor(nativeDoor().id), RangeError);
+    const adjacent = subject.sourceActions.findAdjacent({ x: 10, y: 10, z: 0 }, nativeDoor().id);
+    const approach = subject.actions.requestDoor(nativeDoor().id);
+
+    assert.equal(approach.accepted, true);
+    assert.equal(subject.actions.getState().current.kind, 'walk');
+    assert.deepEqual(subject.saveDoorState(), before, 'alternate-side admission does not mutate the door');
+    completeActions(subject);
+    assert.equal(subject.doors()[0].open, true, 'a wall on one side does not discard the genuine reachable door side');
+    assert.equal(Math.floor(subject.snapshot().x), adjacent.x);
+    assert.equal(Math.floor(subject.snapshot().y), adjacent.y);
+    subject.importDoors([nativeDoor()], {
+        squares: doorSquares({
+            '10:10': { solid: true, independentWalls: 4 },
+            '10:9': { solid: true }, '9:9': { solid: true }, '11:9': { solid: true },
+            '9:11': { solid: true }, '11:11': { solid: true },
+        }),
+    });
+    doorSpawn(subject, 9.5, 10.5);
+    before = subject.saveDoorState();
+
+    assert.equal(subject.sourceActions.findAdjacent({ x: 10, y: 10, z: 0 }, nativeDoor().id), null,
+        'both source door sides and every diagonal fallback are genuinely unavailable');
+    assertDoorRefused(subject, nativeDoor().id);
     assert.deepEqual(subject.saveDoorState(), before);
     subject.importDoors([nativeDoor({ locked: true, lockedByKey: true, hoppable: true })],
         { squares: doorSquares() });
     doorSpawn(subject, 10.5, 10.5);
-    subject.toggleDoor(nativeDoor().id);
+    completeQueueRequest(subject, subject.toggleDoor(nativeDoor().id));
     assert.equal(subject.doors()[0].locked, false);
     assert.equal(subject.doors()[0].lockedByKey, false);
 });
@@ -2384,7 +2589,7 @@ test('native barricaded open doors block original facing edges but not render wi
         doorSpawn(subject, 10.5, 10.5);
         const before = subject.saveDoorState();
 
-        assert.throws(() => subject.toggleDoor(door.id), RangeError);
+        assertDoorRefused(subject, door.id);
         assert.deepEqual(subject.saveDoorState(), before);
     }
 });
@@ -2401,8 +2606,8 @@ test('native door render history survives toggling back and portable restoration
         doorSpawn(instance, 10.5, 10.5);
     }
 
-    subject.toggleDoor(rows[0].id);
-    subject.toggleDoor(rows[0].id);
+    completeQueueRequest(subject, subject.toggleDoor(rows[0].id));
+    completeQueueRequest(subject, subject.toggleDoor(rows[0].id));
     assert.deepEqual(subject.doors().map(({ open, toggled }) => [open, toggled]),
         [[false, true], [false, false]], 'native art family is per door, not inferred from current open/revision');
     const saved = subject.saveDoorState();
@@ -2422,8 +2627,17 @@ test('native door render history survives toggling back and portable restoration
 
     const before = restored.saveDoorState();
 
-    assert.throws(() => restored.toggleDoor(rows[1].id), RangeError);
-    assert.deepEqual(restored.saveDoorState(), before);
+    const approach = restored.actions.requestDoor(rows[1].id);
+
+    assert.equal(approach.accepted, true);
+    assert.equal(restored.actions.getState().current.kind, 'walk');
+    assert.deepEqual(restored.saveDoorState(), before, 'far-door admission cannot manufacture successful render history');
+    completeActions(restored);
+    assert.deepEqual(restored.doors().map(({ open, toggled }) => [open, toggled]), [[false, true], [true, true]]);
+    restored.importDoors([rows[0], { ...rows[1], barricaded: true }], { squares });
+    restored.loadDoorState(saved);
+    assertDoorRefused(restored, rows[1].id);
+    assert.deepEqual(restored.saveDoorState(), saved, 'a genuine native blocker retains restored per-door history');
     restored.importDoors(rows.map((row) => ({ ...row, toggled: true })), { squares });
     assert.ok(restored.doors().every(({ toggled }) => toggled === false),
         'source imports cannot spoof native successful-toggle history');
@@ -2597,4 +2811,386 @@ test('direct native body transactions validate all words before publishing and r
     native.reset();
     assert.equal(native.body_part_value(0, 16), 0);
     assert.equal(native.body_injury_severity(), 1);
+});
+
+test('source trait and live slow motion govern queued stable-ID pickup completion', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+    subject.importDoors([], { squares: doorSquares({ '10:10': { solidFloor: true } }) });
+    doorSpawn(subject, 10.5, 10.5);
+    subject.registerItemDefinition(shoe('Base.QueueItem', { weight: 1 }), { owner: 'base' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.QueueItem', x: 10.5, y: 10.5 }).id;
+
+    subject.sourceTiming.setTrait('base:dextrous', true);
+    subject.sourceTiming.set('slowHalf', true);
+    const accepted = subject.command({ type: 'pickup', id });
+
+    assert.equal(accepted.accepted, true);
+    assert.equal(subject.items().find((item) => item.id === id).location, 'ground');
+    assert.equal(subject.actions.getState().current.maxTime, 24, 'Dextrous halves the source 48-unit request');
+
+    for (let frame = 0; frame < 30; frame += 1) {
+        subject.frameStep(STEP);
+    }
+
+    assert.equal(subject.items().find((item) => item.id === id).location, 'ground');
+    assert.ok(Math.abs(subject.actions.getState().current.currentTime - 12) < 0.000_1);
+    subject.sourceTiming.set('slowHalf', false);
+
+    for (let frame = 0; frame < 16; frame += 1) {
+        subject.frameStep(STEP);
+    }
+
+    assert.equal(subject.items().find((item) => item.id === id).location, 'inventory');
+    assert.deepEqual(subject.actions.getState().pending, []);
+    assert.equal(subject.actions.getState().current, null);
+});
+
+test('native grouped pickup retains first duration, twenty-item boundaries, partial capacity prefix and immutable views', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.Grouped', { weight: 1 }), { owner: 'base' });
+    const ids = Array.from({ length: 21 }, () => subject.command({ type: 'spawnItem', fullType: 'Base.Grouped', x: 5, y: 5 }).id);
+
+    subject.actions.requestPickup(ids[0]);
+    subject.command({ type: 'setActualWeight', id: ids[1], actualWeight: 2 });
+
+    for (const id of ids.slice(1)) {
+        subject.actions.requestPickup(id);
+    }
+
+    const state = subject.actions.getState();
+
+    assert.equal(state.current.groups.length, 2);
+    assert.deepEqual(state.current.groups.map((group) => group.itemIds.length), [20, 1]);
+    assert.equal(state.current.groups[0].rawTime, 48, 'later heavier item does not replace first group time');
+    assert.ok(Object.isFrozen(state) && Object.isFrozen(state.current) && Object.isFrozen(state.current.groups[0].itemIds));
+    assert.equal(subject.items().filter((item) => item.location === 'inventory').length, 0);
+    completeActions(subject);
+    assert.equal(subject.items().filter((item) => item.location === 'inventory').length, 21);
+    assert.equal(subject.inventoryState().capacityWeight, 22);
+
+    const extra = Array.from({ length: 3 }, () => subject.command({ type: 'spawnItem', fullType: 'Base.Grouped', x: 5, y: 5 }).id);
+
+    subject.command({ type: 'setActualWeight', id: extra[0], actualWeight: 20 });
+    subject.command({ type: 'setActualWeight', id: extra[1], actualWeight: 20 });
+
+    for (const id of extra) {
+        subject.actions.requestPickup(id);
+    }
+
+    completeActions(subject);
+    assert.deepEqual(extra.map((id) => subject.items().find((item) => item.id === id).location),
+        ['inventory', 'ground', 'ground'], 'source prefix stops at first invalid carry item');
+});
+
+test('native queue portable bytes resume stable IDs, live timing and progress and bad staging is atomic', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.Queued'), { owner: 'base' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.Queued', x: 5, y: 5 }).id;
+
+    subject.sourceTiming.setTrait('base:allthumbs', true);
+    subject.sourceTiming.set('slowQuarter', true);
+    subject.sourceTiming.setGameMode('LastStand');
+    subject.actions.requestPickup(id);
+    subject.frameStep(STEP);
+    const before = subject.actions.getState();
+    const bytes = subject.saveQueueState();
+    const restored = await engine();
+
+    restored.registerItemDefinition(shoe('Base.Queued'), { owner: 'base' });
+    restored.importItems(subject.items());
+    restored.loadState(subject.saveState());
+    restored.loadQueueState(bytes);
+    assert.deepEqual(restored.actions.getState(), before);
+    assert.deepEqual(restored.sourceTiming.getState(), subject.sourceTiming.getState());
+    const corrupt = bytes.slice();
+
+    corrupt[0] ^= 255;
+    assert.throws(() => restored.loadQueueState(corrupt));
+    assert.deepEqual(restored.saveQueueState(), bytes);
+    completeActions(subject);
+    completeActions(restored);
+    assert.deepEqual(restored.items(), subject.items());
+    const next = restored.command({ type: 'spawnItem', fullType: 'Base.Queued', x: 5, y: 5 }).id;
+
+    restored.actions.requestPickup(next);
+    restored.actions.cancel();
+    assert.equal(restored.items().find((item) => item.id === next).location, 'ground');
+    assert.deepEqual(restored.actions.getState(), { current: null, pending: [] });
+});
+
+test('queued progress preserves source NaN bits without JSON null and explicit cancellation retains ground item', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.FloatQueue'), { owner: 'base' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Base.FloatQueue', x: 5, y: 5 }).id;
+    const accepted = subject.actions.requestPickup(id);
+
+    subject.sourceActions.actionSet(accepted.actionId, 1, Number.NaN);
+    assert.ok(Number.isNaN(subject.actions.getState().current.currentTime));
+    const bytes = subject.saveQueueState();
+
+    subject.loadQueueState(bytes);
+    assert.ok(Number.isNaN(subject.actions.getState().current.currentTime));
+    assert.deepEqual(subject.saveQueueState(), bytes);
+    subject.command({ type: 'cancel' });
+    assert.equal(subject.items()[0].location, 'ground');
+    assert.equal(subject.actions.getState().current, null);
+    assert.throws(() => subject.sourceTiming.hasTrait('base:unknown'), /Unsupported source trait/u);
+    assert.throws(() => subject.sourceTiming.set('unknown', 1), /Unsupported source timing/u);
+});
+
+test('queued SDK door request walks to native source adjacency before actual toggle', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+    subject.importDoors([nativeDoor()], { squares: doorSquares() });
+    doorSpawn(subject, 13.5, 13.5);
+    const accepted = subject.actions.requestDoor(nativeDoor().id);
+
+    assert.equal(accepted.accepted, true);
+    assert.equal(subject.actions.getState().current.kind, 'walk');
+    assert.equal(subject.doors()[0].open, false);
+    completeActions(subject);
+    assert.equal(subject.doors()[0].open, true);
+    assert.ok(Math.abs(subject.snapshot().x - 10.5) < 0.001);
+    assert.ok(subject.snapshot().y === 10.5 || subject.snapshot().y === 9.5);
+    assert.deepEqual(subject.actions.getState(), { current: null, pending: [] });
+});
+
+test('native source mode staging preserves exact UTF8 and refuses malformed host strings without mutation', async () => {
+    const subject = await engine();
+
+    subject.sourceTiming.setGameMode('Sandbox 日本語');
+    assert.equal(subject.sourceTiming.getGameMode(), 'Sandbox 日本語');
+    const before = subject.saveQueueState();
+
+    assert.throws(() => subject.sourceTiming.setGameMode('\uD800'), /UTF8/u);
+    assert.throws(() => subject.sourceTiming.setGameMode('語'.repeat(43)), /128/u);
+    assert.deepEqual(subject.saveQueueState(), before);
+});
+
+test('queued source pickup modifiers use the actual canonical hands slot and AllThumbs-or-gloves once', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.TaggedShoe', { tags: ['base:awkwardgloves'] }), { owner: 'base' });
+    subject.registerItemDefinition(shoe('Base.AwkwardHands', { bodyLocation: 'base:hands', tags: ['base:awkwardgloves'] }), { owner: 'base' });
+    subject.registerItemDefinition(shoe('Base.Transfer'), { owner: 'base' });
+    const footwear = subject.command({ type: 'spawnItem', fullType: 'Base.TaggedShoe', x: 5, y: 5 }).id;
+
+    subject.actions.requestPickup(footwear);
+    completeActions(subject);
+    subject.command({ type: 'wear', id: footwear });
+    const target = subject.command({ type: 'spawnItem', fullType: 'Base.Transfer', x: 5, y: 5 }).id;
+
+    subject.actions.requestPickup(target);
+    assert.equal(subject.actions.getState().current.maxTime, 48, 'a tagged shoe cannot act as awkward handwear');
+    subject.actions.cancel();
+    const gloves = subject.command({ type: 'spawnItem', fullType: 'Base.AwkwardHands', x: 5, y: 5 }).id;
+
+    subject.actions.requestPickup(gloves);
+    completeActions(subject);
+    subject.command({ type: 'wear', id: gloves });
+    subject.actions.requestPickup(target);
+    assert.equal(subject.actions.getState().current.maxTime, 96);
+    subject.actions.cancel();
+    subject.sourceTiming.setTrait('base:allthumbs', true);
+    subject.actions.requestPickup(target);
+    assert.equal(subject.actions.getState().current.maxTime, 96, 'AllThumbs and gloves are OR, not stacked multipliers');
+    subject.actions.cancel();
+    subject.sourceTiming.setTrait('base:dextrous', true);
+    subject.actions.requestPickup(target);
+    assert.equal(subject.actions.getState().current.maxTime, 48, 'Dextrous applies separately from the shared OR factor');
+});
+
+test('native source canReach combines immutable object-wall facts with its final wall relation', async () => {
+    const subject = await engine();
+    const from = { x: 10, y: 10, z: 0 };
+    const east = { x: 11, y: 10, z: 0 };
+
+    subject.worldImportCell(0, 0, cellBytes());
+    subject.importDoors([], {
+        squares: doorSquares({
+            '11:10': { interactionProperties: { collideW: true }, reachWalls: { north: false, west: false } },
+        }),
+    });
+    assert.equal(subject.isBlockedTo(from, east), true);
+    assert.equal(subject.sourceActions.canReachTo(from, east), false,
+        'source canReachTo still applies its final isWallTo rejection after the object-wall checks');
+    subject.importDoors([], {
+        squares: doorSquares({
+            '11:10': { reachWalls: { north: false, west: true } },
+        }),
+    });
+    assert.equal(subject.isBlockedTo(from, east), false);
+    assert.equal(subject.sourceActions.canReachTo(from, east), false, 'a qualifying raw source wall need not have collideW');
+    subject.importDoors([], {
+        squares: doorSquares({
+            '11:10': {
+                interactionProperties: { collideW: true, windowW: true },
+                reachWalls: { north: false, west: false },
+            },
+        }),
+    });
+    assert.equal(subject.isBlockedTo(from, east), false);
+    assert.equal(subject.sourceActions.canReachTo(from, east), true,
+        'a genuine window property exempts a collision wall without inventing an actual blocked window');
+    assert.equal(subject.sourceActions.canReachTo(from, from), true);
+    assert.equal(subject.sourceActions.canReachTo(from, { x: 12, y: 10, z: 0 }), false, 'source reach remains adjacent');
+    const before = subject.getSquare(10, 10, 0);
+
+    assert.throws(() => subject.importDoors([], {
+        squares: doorSquares({
+            '11:10': { reachWalls: { north: false, west: 1 } },
+        }),
+    }), /boolean north and west/u);
+    assert.deepEqual(subject.getSquare(10, 10, 0), before);
+    const unknown = doorSquares();
+
+    for (const square of unknown) {
+        delete square.reachWalls;
+    }
+
+    subject.importDoors([], { squares: unknown });
+    assert.throws(() => subject.sourceActions.canReachTo(from, east), /can_reach/u, 'missing source reach facts refuse rather than fabricate false');
+});
+
+test('private curtain bridge distinguishes genuine own constructor fields from missing eligibility metadata', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+    subject.importDoors([nativeDoor()], { squares: doorSquares() });
+    assert.deepEqual(subject.sourceActions.doorCurtainState(nativeDoor().id),
+        { has: false, open: false, inside: false, canAdd: null });
+    subject.importDoors([nativeDoor({ curtainCapabilities: [true, false, false, true] })], { squares: doorSquares() });
+    assert.deepEqual(subject.sourceActions.doorCurtainState(nativeDoor().id),
+        { has: false, open: false, inside: false, canAdd: true });
+    doorSpawn(subject, 10.5, 10.5);
+    completeQueueRequest(subject, subject.actions.requestDoor(nativeDoor().id));
+    assert.equal(subject.sourceActions.doorCurtainState(nativeDoor().id).canAdd, true, 'toggled open uses its real fourth source snapshot');
+    completeQueueRequest(subject, subject.actions.requestDoor(nativeDoor().id));
+    assert.equal(subject.sourceActions.doorCurtainState(nativeDoor().id).canAdd, false, 'toggled closed uses its real third source snapshot');
+    const before = subject.saveDoorState();
+
+    assert.throws(() => subject.importDoors([nativeDoor({ curtainCapabilities: [true, 1, false, false] })],
+        { squares: doorSquares() }), /strict booleans/u);
+    assert.deepEqual(subject.saveDoorState(), before);
+    assert.throws(() => subject.sourceActions.doorCurtainState('door:99:99:0:0'), /Unknown door/u);
+    assert.equal(Object.hasOwn(before.doors[0], 'curtainCapabilities'), false, 'immutable blueprint metadata is not mutable save state');
+});
+
+test('public engine action cancellation stops primitive headings and destinations without waiting for queue-owned work', async () => {
+    await Promise.all([{ type: 'walk', x: 1, y: 0 }, { type: 'moveTo', x: 9, y: 7 }].map(async (action) => {
+        const subject = await engine();
+
+        subject.command(action);
+        assert.equal(subject.actions.getState().current, null);
+        const state = subject.actions.cancel();
+
+        assert.deepEqual(state, { current: null, pending: [] });
+        subject.step(STEP);
+        assert.deepEqual([subject.snapshot().x, subject.snapshot().y, subject.snapshot().action], [5, 5, IDLE]);
+    }));
+
+    const source = await engine();
+
+    source.command({ type: 'walk', x: 1, y: 0 });
+    source.sourceActions.clear();
+    source.step(STEP);
+    assert.ok(source.snapshot().x > 5, 'private source queue clear deliberately does not cancel unrelated primitive movement');
+});
+
+test('private source couldBeOpen routes actual native menu policy rather than queued commit feasibility', async () => {
+    const subject = await engine();
+    const id = nativeDoor().id;
+
+    subject.worldImportCell(0, 0, cellBytes());
+    subject.importDoors([nativeDoor({ locked: true })], { squares: doorSquares() });
+    doorSpawn(subject, 10.5, 10.5);
+    assert.equal(subject.sourceActions.doorCouldBeOpen(id), true, 'ordinary locking alone does not disable the original menu');
+    assertDoorRefused(subject, id);
+    assert.equal(subject.doors()[0].open, false, 'menu eligibility does not authorize a locked native commit');
+    subject.importDoors([nativeDoor({ barricaded: true })], { squares: doorSquares() });
+    assert.equal(subject.sourceActions.doorCouldBeOpen(id), false, 'the actual native barricade disables the menu');
+    subject.importDoors([nativeDoor({ lockedByKey: true, keyId: 7 })], { squares: doorSquares() });
+    assert.throws(() => subject.sourceActions.doorCouldBeOpen(id), /doorCouldBeOpen/u,
+        'unsupported outside key or cheat authority is not fabricated as a boolean');
+    assert.throws(() => subject.sourceActions.doorCouldBeOpen('door:99:99:0:0'), /Unknown door/u);
+});
+
+test('real held item pair preserves MAX IDs, exact carry state and silent atomic restore', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Base.Held', { removeOnBroken: true }), { owner: 'base' });
+    subject.importItems([
+        {
+            id: 0xFF_FF_FF_FF, fullType: 'Base.Held', location: 'inventory', x: 5, y: 5,
+            condition: 10, count: 1, bodyLocation: null, weight: 10, actualWeight: 10,
+        },
+        {
+            id: 1, fullType: 'Base.Held', location: 'ground', x: 5, y: 5,
+            condition: 10, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
+        },
+    ]);
+    const events = [];
+    const observerErrors = [];
+    const off = subject.observeHandItems((event) => events.push(event), (cause) => observerErrors.push(cause));
+
+    subject.setHandItem('primary', 0xFF_FF_FF_FF);
+    subject.setHandItem('secondary', 0xFF_FF_FF_FF);
+    subject.setHandItem('primary', 0xFF_FF_FF_FF);
+    assert.deepEqual(subject.getHandItems(), { primary: 0xFF_FF_FF_FF, secondary: 0xFF_FF_FF_FF });
+    assert.equal(subject.inventoryState().capacityWeight, 3);
+    assert.equal(subject.wornItem('base:shoes'), null);
+    assert.equal(events.length, 2);
+    const saved = subject.saveHandState();
+
+    for (const bad of [{ ...saved, version: 2 }, { ...saved, secondary: 1 }, { ...saved, extra: true },
+        { ...saved, primary: -1 }, { ...saved, primary: undefined }]) {
+        assert.throws(() => subject.loadHandState(bad));
+        assert.deepEqual(subject.saveHandState(), saved);
+    }
+
+    assert.throws(() => subject.setHandItem('primary', 1));
+    assert.throws(() => subject.setHandItem('worn', null));
+    assert.throws(() => subject.setHandItem('secondary', 0x1_00_00_00_00));
+    assert.throws(() => subject.command({ type: 'drop', id: 0xFF_FF_FF_FF, x: Number.NaN, y: 5 }));
+    assert.equal(events.length, 2);
+    subject.loadHandState({ version: 1, primary: null, secondary: null });
+    subject.loadHandState(saved);
+    assert.equal(events.length, 2, 'restores never replay equipment events');
+    subject.command({ type: 'drop', id: 0xFF_FF_FF_FF, x: 5, y: 5 });
+    assert.deepEqual(events.slice(2), [
+        { slot: 'primary', playerIndex: 0, itemId: null },
+        { slot: 'secondary', playerIndex: 0, itemId: null },
+    ]);
+    assert.deepEqual(subject.getHandItems(), { primary: null, secondary: null });
+    const records = subject.items();
+
+    records[0].location = 'inventory';
+    subject.importItems(records);
+    subject.loadHandState(saved);
+    subject.command({ type: 'setCondition', id: 0xFF_FF_FF_FF, condition: 0 });
+    assert.deepEqual(subject.getHandItems(), { primary: null, secondary: null });
+    assert.equal(subject.items().some((item) => item.id === 0xFF_FF_FF_FF), false);
+    assert.deepEqual(events.slice(4), [
+        { slot: 'primary', playerIndex: 0, itemId: null },
+        { slot: 'secondary', playerIndex: 0, itemId: null },
+    ]);
+    subject.importItems([records[0]]);
+    subject.loadHandState(saved);
+    subject.worldReset();
+    assert.deepEqual(subject.saveHandState(), saved, 'world-only reset preserves inventory and held refs');
+    assert.equal(events.length, 6);
+    subject.reset();
+    assert.deepEqual(subject.getHandItems(), { primary: null, secondary: null });
+    assert.deepEqual(events.slice(6), [
+        { slot: 'primary', playerIndex: 0, itemId: null },
+        { slot: 'secondary', playerIndex: 0, itemId: null },
+    ]);
+    off();
+    assert.deepEqual(observerErrors, []);
 });

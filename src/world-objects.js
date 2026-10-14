@@ -24,6 +24,12 @@ const EARLY_OTHER_TYPES = new Set(['lightswitch', 'curtainN', 'curtainS', 'curta
 const FURNITURE_CONTAINERS = new Set(['barbecue', 'barbecuepropane', 'fireplace', 'clothingdryer', 'clothingwasher', 'woodstove', 'microwave']);
 const CAMPING_SPRITES = new Set(['camping_01_04', 'camping_01_05', 'camping_01_06']);
 const STOVE_CONTAINERS = new Set(['stove', 'toaster', 'coffeemaker']);
+const REACH_WALLS = Object.freeze([
+    Object.freeze({ north: false, west: false }),
+    Object.freeze({ north: true, west: false }),
+    Object.freeze({ north: false, west: true }),
+    Object.freeze({ north: true, west: true }),
+]);
 
 /**
  * Resolve exact original roles, preserving the actual manifest's portable casing.
@@ -141,25 +147,26 @@ function specialPart(properties, key, count) {
  * Detect conflicts even in empty rectangles before publishing any projection.
  *
  * @param {object[]} cells - Sorted original cells.
- * @returns {{rooms:object[],rectangles:Map<object,object[]>}} Source room mapping.
+ * @returns {{rooms:object[],buildings:object[],rectangles:Map<object,object[]>}} Source room/building mapping.
  */
 function projectRooms(cells) {
     const rooms = [];
+    const buildings = [];
     const rectangles = new Map();
 
     for (const cell of cells) {
         const rects = [];
-        const ids = new Set();
+        const ids = new Map();
 
         for (const room of cell.rooms) {
             if (!Number.isSafeInteger(room.id) || room.id < 0 || ids.has(room.id) || !Number.isInteger(room.z) || !Array.isArray(room.rects)) {
                 throw new TypeError('Invalid original LOTH room identity');
             }
 
-            ids.add(room.id);
             const id = rooms.length;
 
-            rooms.push({ id, originalRoomId: room.id, cellX: cell.cellX, cellY: cell.cellY, z: room.z, name: room.name });
+            ids.set(room.id, id);
+            rooms.push({ id, originalRoomId: room.id, cellX: cell.cellX, cellY: cell.cellY, z: room.z, name: room.name, buildingId: null });
 
             for (const rect of room.rects) {
                 const { x, y, width, height } = rect;
@@ -187,10 +194,45 @@ function projectRooms(cells) {
             }
         }
 
+        if (!Array.isArray(cell.buildings)) {
+            throw new TypeError(`Original LOTH building metadata unavailable at cell ${cell.cellX},${cell.cellY}`);
+        }
+
+        const buildingIds = new Set();
+        const assignedRooms = new Set();
+
+        for (const building of cell.buildings) {
+            if (!Number.isSafeInteger(building.id) || building.id < 0 || buildingIds.has(building.id) || !Array.isArray(building.roomIds)) {
+                throw new TypeError('Invalid original LOTH building identity');
+            }
+
+            buildingIds.add(building.id);
+            const id = buildings.length;
+            const roomIds = [];
+
+            for (const originalRoomId of building.roomIds) {
+                if (!ids.has(originalRoomId)) {
+                    throw new Error(`Invalid original LOTH building room reference ${originalRoomId}`);
+                }
+
+                if (assignedRooms.has(originalRoomId)) {
+                    throw new Error(`Duplicate original LOTH building room reference ${originalRoomId}`);
+                }
+
+                assignedRooms.add(originalRoomId);
+                const roomId = ids.get(originalRoomId);
+
+                rooms[roomId].buildingId = id;
+                roomIds.push(roomId);
+            }
+
+            buildings.push(Object.freeze({ id, originalBuildingId: building.id, cellX: cell.cellX, cellY: cell.cellY, roomIds: Object.freeze(roomIds) }));
+        }
+
         rectangles.set(cell, rects);
     }
 
-    return { rooms, rectangles };
+    return { rooms: Object.freeze(rooms.map((room) => Object.freeze(room))), buildings: Object.freeze(buildings), rectangles };
 }
 
 /**
@@ -412,6 +454,24 @@ function addInteractionProperties(target, sprite) {
     }
 
     return target;
+}
+
+/**
+ * Read actual current-object cached cuts and current wall properties, independently of RecalcProperties.
+ * Blueprint objects still participate; southeast walls and door-wall axes do not.
+ *
+ * @param {object} sprite - Final surviving shared current sprite.
+ * @returns {number} North bit 1 and west bit 2.
+ */
+function reachWallMask(sprite) {
+    const props = sprite.properties;
+
+    if (props.has('WallSE')) {
+        return 0;
+    }
+
+    return (((sprite.cutMask & 2) || props.has('WallN')) && !props.has('DoorWallN') ? 1 : 0)
+        | (((sprite.cutMask & 4) || props.has('WallW')) && !props.has('DoorWallW') ? 2 : 0);
 }
 
 /**
@@ -750,6 +810,10 @@ function projectDoor(object, square, doors, doorVisuals, doorIds) {
     const props = sprite.properties;
     const initialClosed = open ? closed : sprite;
     const initialOpen = open ? sprite : openSprite;
+    // getSoundPrefix reads the constructor's closedSprite, never the currently open/toggled sprite.
+    const closedProperties = closed.properties;
+    const soundPrefix = closedProperties.has('DoorSound') ? closedProperties.get('DoorSound') : 'WoodDoor';
+    const slidingGlass = soundPrefix.length === 16 && soundPrefix.toUpperCase() === 'SLIDINGGLASSDOOR';
     const part = doubleDoor - 1;
     const closedX = int32(placement.x + (open && doubleDoor ? (north ? DOUBLE_NORTH_DX : DOUBLE_WEST_DX)[part] : 0), 'closed door x');
     const closedY = int32(placement.y + (open && doubleDoor ? (north ? DOUBLE_NORTH_DY : DOUBLE_WEST_DY)[part] : 0), 'closed door y');
@@ -761,6 +825,9 @@ function projectDoor(object, square, doors, doorVisuals, doorIds) {
 
     doorIds.add(id);
     doors.push({ id, x: closedX, y: closedY, z: placement.z, order: placement.order, north, open, locked: false, lockedByKey: false, forceLocked: props.has('forceLocked'), keyId: -1, roomId: -1, oppositeRoomId: -1, attachedE: toggledOpen.properties.has('attachedE'), attachedS: toggledOpen.properties.has('attachedS'), barricaded: false, independentWalls: 0, doubleDoor, garageDoor, interiorSide: props.has('InteriorSide'), hoppable: closed.properties.has('HoppableN') || closed.properties.has('HoppableW'), standEdges: [standEdges(initialClosed), standEdges(initialOpen), standEdges(toggledClosed), standEdges(toggledOpen)], squareFlags: [doorSquareFlags(initialClosed, square), doorSquareFlags(initialOpen, square), doorSquareFlags(toggledClosed, square), doorSquareFlags(toggledOpen, square)], interactionProperties: [initialClosed, initialOpen, toggledClosed, toggledOpen].map((current) => addInteractionProperties({}, current)), customLock: false });
+    doors[doors.length - 1].reachWalls = Object.freeze([initialClosed, initialOpen, toggledClosed, toggledOpen].map((current) => REACH_WALLS[reachWallMask(current)]));
+    doors[doors.length - 1].curtainCapabilities = Object.freeze([initialClosed, initialOpen, toggledClosed, toggledOpen].map((current) =>
+        !current.properties.has('GarageDoor') && !slidingGlass && current.properties.has('doorTrans')));
     doorVisuals.push({ id, x: closedX, y: closedY, z: placement.z, order: placement.order, sourceX: placement.x, sourceY: placement.y, sourceSpriteName: placement.spriteName, closedSpriteName: closed.name, openSpriteName: openSprite.name, closedSpriteId: closed.id, openSpriteId: openSprite.id, closedSheetIndex: closed.tileSheetIndex, openSheetIndex: openSprite.tileSheetIndex, toggledClosedSpriteName: toggledClosed.name, toggledOpenSpriteName: toggledOpen.name });
 }
 
@@ -776,6 +843,7 @@ function projectDoor(object, square, doors, doorVisuals, doorIds) {
  */
 function projectSquareObjects(square, objects, doors, doorVisuals, doorIds) {
     let slope;
+    let reachWalls = 0;
 
     square.interactionProperties = {};
 
@@ -789,6 +857,7 @@ function projectSquareObjects(square, objects, doors, doorVisuals, doorIds) {
         }
 
         addInteractionProperties(square.interactionProperties, sprite);
+        reachWalls |= reachWallMask(sprite);
 
         // hasBlockedWindow searches actual objects, even blueprint/non-special windows.
         if (kind === 'window' && !destroyed && !open) {
@@ -815,6 +884,8 @@ function projectSquareObjects(square, objects, doors, doorVisuals, doorIds) {
             slope = props.get('SlopedSurfaceDirection');
         }
     }
+
+    square.reachWalls = REACH_WALLS[reachWalls];
 
     if (slope !== undefined) {
         applySlopeFloor(square, slope);
@@ -884,7 +955,7 @@ async function projectWorldObjects(cells, registry) {
         chunkStarts.set(cell, new Map());
     }
 
-    const { rooms, rectangles } = projectRooms(ordered);
+    const { rooms, buildings, rectangles } = projectRooms(ordered);
 
     for (const cell of ordered) {
         const starts = chunkStarts.get(cell);
@@ -910,7 +981,7 @@ async function projectWorldObjects(cells, registry) {
                     const roomId = roomAt(rects, x + dx, y + dy, z);
 
                     // Coverage: the current WASM world has no vehicle objects; this is not a native-map vehicle census.
-                    squares.push({ x: x + dx, y: y + dy, z, roomId, outside: roomId === -1, solid: false, solidTrans: false, tree: false, solidFloor: false, hoppableEdges: 0, windowEdges: 0, independentWalls: 0, windows: 0, doorWalls: 0, vehicleObstructed: false });
+                    squares.push({ x: x + dx, y: y + dy, z, roomId, outside: roomId === -1, solid: false, solidTrans: false, tree: false, solidFloor: false, hoppableEdges: 0, windowEdges: 0, independentWalls: 0, windows: 0, doorWalls: 0, vehicleObstructed: false, reachWalls: REACH_WALLS[0] });
                 }
             }
 
@@ -975,7 +1046,7 @@ async function projectWorldObjects(cells, registry) {
         door.independentWalls = square.independentWalls;
     }
 
-    return { doors, squares, doorVisuals, rooms, coverage: { vehicles: 'absent-from-current-wasm-world', barricades: 'not-spawned-by-original-map-loader' } };
+    return { doors, squares, doorVisuals, rooms, buildings, coverage: { vehicles: 'absent-from-current-wasm-world', barricades: 'not-spawned-by-original-map-loader' } };
 }
 
 export { loadNativeTileRegistry, nativeTileSources, projectWorldObjects };

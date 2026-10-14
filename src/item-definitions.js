@@ -435,4 +435,35 @@ function parseClothingDefinition(text, provenance) {
     return result;
 }
 
-export { parseClothingDefinition, parseItemDefinitions, parseModelDefinitions };
+/**
+ * Resolve the original script's normal texture before per-item visual selection.
+ * Item.onLoad keeps an explicit Icon or initializes from IconsForTexture[0].
+ *
+ * @param {object} definition - Detached original raw script metadata.
+ * @returns {string|null} Proven normal icon name, or absent metadata.
+ */
+function normalItemIcon(definition) {
+    const icon = definition.rawFields?.findLast((field) => field.name.toLowerCase() === 'icon');
+    const choices = definition.rawFields?.findLast((field) => field.name.toLowerCase() === 'iconsfortexture');
+    let value = icon?.value;
+
+    if (!icon && choices) {
+        if (typeof choices.value !== 'string') {
+            throw new TypeError(`Invalid original IconsForTexture field for ${definition.fullType}`);
+        }
+
+        value = choices.value.split(';', 1)[0].trim();
+    }
+
+    if (!icon && !choices) {
+        return null;
+    }
+
+    if (typeof value !== 'string' || !/^[A-Za-z0-9_.-]{1,256}$/u.test(value) || value.includes('..')) {
+        throw new Error(`Invalid original Icon field for ${definition.fullType}`);
+    }
+
+    return value;
+}
+
+export { normalItemIcon, parseClothingDefinition, parseItemDefinitions, parseModelDefinitions };

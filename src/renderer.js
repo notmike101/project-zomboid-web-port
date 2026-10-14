@@ -231,6 +231,19 @@ struct CharacterVertex {
  */
 
 /**
+ * Read-only live view supplied synchronously at the source world-render event boundaries.
+ * The same object is reused; consumers retaining a frame must copy the required scalars.
+ *
+ * @typedef {object} WorldRenderView
+ * @property {{readonly x: number, readonly y: number}} camera Current isometric ground camera.
+ * @property {number} width Current drawing-buffer width in physical pixels.
+ * @property {number} height Current drawing-buffer height in physical pixels.
+ * @property {number} tilePixels Current physical isometric diamond width.
+ * @property {number} pixelRatio Applied drawing-buffer pixel density, including device caps.
+ * @property {number} characterZ Actual current port actor root elevation, constrained to ground.
+ */
+
+/**
  * Renderer handle returned by {@link createRenderer}.
  *
  * @typedef {object} RendererHandle
@@ -287,6 +300,29 @@ function fitBox(width, height) {
  */
 function axisScale(visual, layout) {
     return visual > 0 && layout > 0 ? visual / layout : 1;
+}
+
+/**
+ * Shared border-excluding logical content box for world projection and original UI input.
+ * CSS transforms affect the axis scales; drawing-buffer DPR does not change logical pixels.
+ *
+ * @param {HTMLCanvasElement} canvas - Presentation canvas.
+ * @returns {{left: number, top: number, width: number, height: number, scaleX: number, scaleY: number}} Visual content origin, logical size and positive visual scales.
+ */
+function canvasContentBox(canvas) {
+    const box = canvas.getBoundingClientRect();
+    const layoutWidth = Math.max(1, canvas.offsetWidth);
+    const layoutHeight = Math.max(1, canvas.offsetHeight);
+    const scaleX = axisScale(box.width, layoutWidth);
+    const scaleY = axisScale(box.height, layoutHeight);
+
+    return {
+        left: box.left + canvas.clientLeft * scaleX,
+        top: box.top + canvas.clientTop * scaleY,
+        width: Math.max(1, canvas.clientWidth || layoutWidth),
+        height: Math.max(1, canvas.clientHeight || layoutHeight),
+        scaleX, scaleY,
+    };
 }
 
 /**
@@ -426,14 +462,23 @@ async function readModel(file) {
 }
 
 /**
- * Presents WASM engine state over a bounded synthetic plane using real WebGPU submission.
- * Rendering works before any import; acceptance requires an imported PNG sprite.
+ * Presents WASM engine state using real WebGPU submissions, with optional imported
+ * static world tiles and a moving character followed by the source UI.
  *
  * @param {HTMLCanvasElement} canvas - Canvas element to present into.
  * @param {(cause: Error) => void} onError - Receives the first unrecoverable GPU failure.
+ * @param {{onWorldOpaque?: (view: WorldRenderView) => void, onWorldBuilding?: (view: WorldRenderView) => void}} [options] - Synchronous hooks before and after moving-character draws, only after prepared source tiles; exceptions propagate to the caller.
  * @returns {Promise<RendererHandle>} Ready renderer handle.
  */
-export async function createRenderer(canvas, onError) {
+export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBuilding } = {}) {
+    if (onWorldOpaque !== undefined && typeof onWorldOpaque !== 'function') {
+        throw new TypeError('onWorldOpaque must be a function.');
+    }
+
+    if (onWorldBuilding !== undefined && typeof onWorldBuilding !== 'function') {
+        throw new TypeError('onWorldBuilding must be a function.');
+    }
+
     if (!navigator.gpu) {
         throw new Error('WebGPU is unavailable in this browser; there is no fallback renderer.');
     }
@@ -483,6 +528,61 @@ export async function createRenderer(canvas, onError) {
     const characterProjection = new Float32Array(16);
     const objectMatrix = new Float32Array(16);
     let camera = { x: 5, y: 5 };
+    const worldView = { device, format, projection, camera, tilePixels: 0, width: 0, height: 0 };
+    const renderView = Object.freeze({
+        camera: Object.freeze({
+            /**
+             * Read the live camera's horizontal position.
+             *
+             * @returns {number} Camera x coordinate.
+             */
+            get x() {
+                return worldView.camera.x;
+            },
+            /**
+             * Read the live camera's vertical position.
+             *
+             * @returns {number} Camera y coordinate.
+             */
+            get y() {
+                return worldView.camera.y;
+            },
+        }),
+        /**
+         * Read the current render viewport width.
+         *
+         * @returns {number} Viewport width in pixels.
+         */
+        get width() {
+            return worldView.width;
+        },
+        /**
+         * Read the current render viewport height.
+         *
+         * @returns {number} Viewport height in pixels.
+         */
+        get height() {
+            return worldView.height;
+        },
+        /**
+         * Read the live tile projection size.
+         *
+         * @returns {number} Rendered pixels per tile.
+         */
+        get tilePixels() {
+            return worldView.tilePixels;
+        },
+        /**
+         * Read the current render pixel ratio.
+         *
+         * @returns {number} Drawing scale relative to CSS pixels.
+         */
+        get pixelRatio() {
+            return drawScale;
+        },
+        // ponytail: actor simulation is ground-only; read native z when vertical actor simulation is ported.
+        characterZ: 0,
+    });
     const uiSessions = new Set();
     let gameUI = null;
     const uiRenderer = await createUIRenderer(device, format, sampler);
@@ -498,6 +598,8 @@ export async function createRenderer(canvas, onError) {
         }
 
         const ui = createGameUI({
+            document: canvas.ownerDocument,
+            focusTarget: canvas,
             /**
              * Unregister the disposed session and withdraw it if currently presented.
              */
@@ -535,13 +637,121 @@ export async function createRenderer(canvas, onError) {
     }
 
     /**
+     * Upload real source images, decoding each shared pack page once per batch.
+     * Only cropped sprite rectangles remain on GPU; source bitmaps always close.
+     *
+     * @param {object[]} entries - Original image files, aliases and optional source crop/trim.
+     * @returns {Promise<object[]>} Candidate uploaded images; failure releases the whole batch.
+     */
+    async function uploadUITextures(entries) {
+        const files = new Map();
+        const loaded = [];
+
+        for (const entry of entries) {
+            const group = files.get(entry.file) ?? [];
+
+            group.push(entry);
+            files.set(entry.file, group);
+        }
+
+        /**
+         * Record one physical GPU image and its genuine source aliases/trim.
+         *
+         * @param {object} entry - Selected resource record.
+         * @param {number} width - Uploaded pixel width.
+         * @param {number} height - Uploaded pixel height.
+         * @param {GPUTexture} texture - Newly owned GPU resource.
+         */
+        function retain(entry, width, height, texture) {
+            loaded.push({
+                path: entry.path, aliases: entry.aliases, width, height, widthOrig: entry.widthOrig, heightOrig: entry.heightOrig,
+                offsetX: entry.offsetX, offsetY: entry.offsetY, texture,
+                /**
+                 * Release this physical uploaded image exactly once.
+                 *
+                 * @returns {void} No retained GPU image.
+                 */
+                destroy: () => texture.destroy(),
+            });
+        }
+
+        try {
+            for (const [file, group] of files) {
+                if (!group.some((entry) => entry.crop)) {
+                    for (const entry of group) {
+                        // eslint-disable-next-line no-await-in-loop
+                        const uploaded = await importImage(file, true);
+
+                        retain(entry, uploaded.metadata.width, uploaded.metadata.height, uploaded.texture);
+                    }
+
+                    continue;
+                }
+
+                if (!(file instanceof File) || file.size === 0 || file.size > MAX_SOURCE_BYTES || group.some((entry) => !entry.crop)) {
+                    throw new Error('Original UI pack page requires a bounded PNG File and source crop records');
+                }
+
+                // eslint-disable-next-line no-await-in-loop
+                const header = parsePngHeader(new Uint8Array(await file.slice(0, PNG_HEADER_BYTES).arrayBuffer()));
+
+                for (const { crop } of group) {
+                    if (![crop.x, crop.y, crop.width, crop.height].every(Number.isSafeInteger)
+                        || crop.x < 0 || crop.y < 0 || crop.width <= 0 || crop.height <= 0
+                        || crop.width > maxDimension || crop.height > maxDimension
+                        || crop.x + crop.width > header.width || crop.y + crop.height > header.height) {
+                        throw new Error('Original UI sprite crop is outside its source PNG or device limit');
+                    }
+                }
+
+                // eslint-disable-next-line no-await-in-loop
+                const bitmap = await createImageBitmap(file, { premultiplyAlpha: 'premultiply' });
+
+                try {
+                    if (stopped || destroyed || bitmap.width !== header.width || bitmap.height !== header.height) {
+                        throw new Error('Renderer stopped or original UI page decode disagrees with source dimensions');
+                    }
+
+                    for (const entry of group) {
+                        const { crop, path } = entry;
+                        const texture = device.createTexture({
+                            label: path, size: [crop.width, crop.height], format: 'rgba8unorm',
+                            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+                        });
+
+                        retain(entry, crop.width, crop.height, texture);
+                        device.queue.copyExternalImageToTexture(
+                            { source: bitmap, origin: { x: crop.x, y: crop.y } },
+                            { texture, premultipliedAlpha: true }, [crop.width, crop.height],
+                        );
+                    }
+                } finally {
+                    bitmap.close();
+                }
+            }
+
+            if (stopped || destroyed) {
+                throw new Error('Renderer stopped during original UI image upload');
+            }
+
+            return loaded;
+        } catch (cause) {
+            for (const entry of loaded) {
+                entry.destroy();
+            }
+
+            throw cause;
+        }
+    }
+
+    /**
      * Preload genuine PNG resources into an explicit, uncommitted candidate.
      * Failed decode/metrics validation destroys only candidate uploads.
      *
-     * @param {{ui:object,textures:{path:string,file:File}[],font:{descriptor:string,atlasPath:string},translations:object,settings:object,indexedTextures?:string[]|Set<string>}} resources - Selected originals and explicit port settings.
+     * @param {{ui:object,textures:object[],fonts?:Record<string,{descriptor:string,atlasPath:string}>,fontAliases?:Record<string,string>,font?:{descriptor:string,atlasPath:string},translations:object,settings:object,indexedTextures?:string[]|Set<string>,resolveItemTextures?:(definitions:object[])=>Promise<object[]>}} resources - Selected original files, verified font aliases, source trim/icon resolver and explicit port settings.
      * @returns {Promise<void>} Completed candidate resource initialization.
      */
-    async function initializeGameUI({ ui, textures, font, translations, settings, indexedTextures }) {
+    async function initializeGameUI({ ui, textures, fonts, fontAliases, font, translations, settings, indexedTextures, resolveItemTextures }) {
         if (!uiSessions.has(ui)) {
             throw new Error('Explicit candidate UI belonging to this renderer is required.');
         }
@@ -550,31 +760,43 @@ export async function createRenderer(canvas, onError) {
             throw new Error('Cannot mutate the committed game UI; initialize an independent candidate.');
         }
 
-        const loaded = [];
+        const loaded = await uploadUITextures(textures);
 
         try {
-            for (const entry of textures) {
-                // Decode/upload sequentially to bound transient bitmap and staging memory to one image.
-                // eslint-disable-next-line no-await-in-loop
-                const uploaded = await importImage(entry.file, true);
+            /**
+             * Prepare newly declared genuine icons without replacing existing source roots.
+             *
+             * @param {object[]} definitions - Current source-backed item definitions.
+             * @returns {Promise<void>} Completed additive upload.
+             */
+            async function loadItemTextures(definitions) {
+                if (!uiSessions.has(ui) || typeof resolveItemTextures !== 'function') {
+                    throw new Error('Original UI item resource owner/resolver is unavailable');
+                }
 
-                loaded.push({
-                    path: entry.path, width: uploaded.metadata.width, height: uploaded.metadata.height,
-                    texture: uploaded.texture,
-                    /**
-                     * Release this candidate's uploaded texture.
-                     *
-                     * @returns {void}
-                     */
-                    destroy: () => uploaded.texture.destroy(),
-                });
+                const entries = (await resolveItemTextures(definitions)).filter((entry) => !ui.hasTexture(entry.path));
+                const uploads = await uploadUITextures(entries);
+
+                try {
+                    if (!uiSessions.has(ui)) {
+                        throw new Error('Original UI item resource owner was disposed during preload');
+                    }
+
+                    ui.addTextures(uploads);
+                } catch (cause) {
+                    for (const entry of uploads) {
+                        entry.destroy();
+                    }
+
+                    throw cause;
+                }
             }
 
             if (stopped || destroyed) {
                 throw new Error('Renderer stopped during UI preload.');
             }
 
-            ui.initialize({ textures: loaded, font, translations, settings, indexedTextures });
+            ui.initialize({ textures: loaded, fonts, fontAliases, font, translations, settings, indexedTextures, loadItemTextures });
         } catch (cause) {
             for (const entry of loaded) {
                 entry.destroy();
@@ -610,7 +832,7 @@ export async function createRenderer(canvas, onError) {
     /**
      * Swaps the active tile layer; the replaced layer is destroyed first.
      *
-     * @param {{render: (pass: unknown, view: object) => void, destroy: () => void}|null} layer - External world layer providing render and destroy.
+     * @param {{render: (pass: unknown, view: object) => boolean, destroy: () => void}|null} layer - External world layer; render returns true only after prepared, error-free source world draws.
      */
     function setWorldLayer(layer) {
         if (destroyed || stopped) {
@@ -1168,7 +1390,7 @@ export async function createRenderer(canvas, onError) {
     }
 
     /**
-     * Submits one frame: procedural bounded plane plus the imported art at snapshot coordinates.
+     * Submits the plane, resident source world tiles, moving character, then source UI.
      *
      * @param {RendererSnapshot} snapshot - Detached engine snapshot.
      * @returns {void} Executes one GPU queue submission.
@@ -1247,8 +1469,15 @@ export async function createRenderer(canvas, onError) {
                 depthStencilAttachment: { view: depthTexture.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
             });
 
-            if (worldLayer) {
-                worldLayer.render(worldPass, { device, format, projection, camera, tilePixels, width: canvas.width, height: canvas.height });
+            worldView.camera = camera;
+            worldView.tilePixels = tilePixels;
+            worldView.width = canvas.width;
+            worldView.height = canvas.height;
+
+            const worldRendered = worldLayer?.render(worldPass, worldView) === true;
+
+            if (worldRendered && onWorldOpaque) {
+                onWorldOpaque(renderView);
             }
 
             if (character) {
@@ -1260,6 +1489,11 @@ export async function createRenderer(canvas, onError) {
             }
 
             worldPass.end();
+
+            // Source FBO renderInternal calls DoBuilding(true) after world actors, before UI.
+            if (worldRendered && onWorldBuilding) {
+                onWorldBuilding(renderView);
+            }
         }
 
         if (gameUI) {
@@ -1416,16 +1650,10 @@ export async function createRenderer(canvas, onError) {
  * @returns {{x: number, y: number}} Unbounded iso ground coordinates when camera follows; otherwise clamped [0,10].
  */
 export function worldFromCanvas(canvas, clientX, clientY) {
-    const box = canvas.getBoundingClientRect();
-    const layoutWidth = Math.max(1, canvas.offsetWidth);
-    const layoutHeight = Math.max(1, canvas.offsetHeight);
-    const scaleX = axisScale(box.width, layoutWidth);
-    const scaleY = axisScale(box.height, layoutHeight);
-    const width = Math.max(1, canvas.clientWidth || layoutWidth);
-    const height = Math.max(1, canvas.clientHeight || layoutHeight);
+    const { left, top, width, height, scaleX, scaleY } = canvasContentBox(canvas);
     const plane = fitBox(width, height);
-    const ndcX = ((clientX - box.left - canvas.clientLeft * scaleX) / (width * scaleX)) * 2 - 1;
-    const ndcY = 1 - ((clientY - box.top - canvas.clientTop * scaleY) / (height * scaleY)) * 2;
+    const ndcX = ((clientX - left) / (width * scaleX)) * 2 - 1;
+    const ndcY = 1 - ((clientY - top) / (height * scaleY)) * 2;
     const camera = canvasCameras.get(canvas);
 
     if (camera) {
@@ -1443,4 +1671,4 @@ export function worldFromCanvas(canvas, clientX, clientY) {
 }
 
 // The byte gate is exported for focused header tests only; the public surface stays the handle.
-export { parsePngHeader };
+export { canvasContentBox, parsePngHeader };
