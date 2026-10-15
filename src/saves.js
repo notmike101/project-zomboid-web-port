@@ -1,7 +1,7 @@
-import { createEngine } from './engine.js';
+import { createEngine, validateNavigationCell } from './engine.js';
 
 const SAVE_FORMAT = 'pz-web-save';
-const SAVE_VERSION = 2;
+const SAVE_VERSION = 3;
 const MAX_SAVE_BYTES = 16 * 1_024 * 1_024;
 const DATABASE = 'pz-web-saves';
 
@@ -78,7 +78,7 @@ function decodeCell(encoded) {
  * @returns {Uint8Array} Detached, canonical portable bytes.
  */
 function decodeQueue(queue) {
-    if (!queue || queue.version !== 1 || Object.keys(queue).length !== 3
+    if (!queue || ![1, 2].includes(queue.version) || Object.keys(queue).length !== 3
         || !Array.isArray(queue.sourceOwners) || queue.sourceOwners.length > 128
         || typeof queue.bytes !== 'string' || queue.bytes.length > 1_398_104) {
         throw new TypeError('Invalid saved source queue encoding.');
@@ -107,32 +107,89 @@ function decodeQueue(queue) {
 /**
  * Extend an authenticated legacy payload without mutating its world or mod data.
  *
- * @param {object} payload - Detached, integrity-verified version-one payload.
+ * @param {object} payload - Detached, integrity-verified version-one or flat version-two payload.
  * @returns {object} Unsigned current-format payload.
  */
 function migrateLegacySave(payload) {
+    const legacy = payload.formatVersion === 1;
+
+    if (legacy && (Object.hasOwn(payload, 'items') || Object.hasOwn(payload, 'itemDefs')
+        || Object.hasOwn(payload, 'inventoryGraph'))) {
+        throw new TypeError('Version-one saves cannot contain inventory records.');
+    }
+
+    const itemDefs = legacy ? [] : payload.itemDefs;
+    const rows = legacy ? [] : payload.items;
+    const containers = [{
+        id: 1, kind: 'actor', parentKind: 'actor', parentId: 1, containingItemId: null,
+        capacity: 50, weightReduction: 0, worldPosition: null, explored: false, looted: false,
+        definitionOrdinal: 0, type: 'inventory', onlyAcceptCategory: null, acceptItemFunction: null,
+    }];
+    const floors = new Map();
+    const items = rows.map(({ location, x, y, ...item }) => {
+        const definitionOrdinal = itemDefs.findIndex(({ fullType }) => fullType === item.fullType);
+        let ownerContainerId = 1;
+
+        if (location === 'ground') {
+            const square = { x: Math.floor(x), y: Math.floor(y), z: 0 };
+            const key = `${square.x},${square.y}`;
+
+            if (!floors.has(key)) {
+                const id = containers.length + 1;
+
+                floors.set(key, id);
+                containers.push({
+                    ...containers[0], id, kind: 'floor', parentKind: 'square', parentId: 0,
+                    worldPosition: square, type: 'floor',
+                });
+            }
+
+            ownerContainerId = floors.get(key);
+        }
+
+        const weight = itemDefs[definitionOrdinal].weight ?? 1;
+
+        return {
+            ...item, definitionOrdinal, ownerContainerId, internalContainerId: null,
+            worldPosition: location === 'ground' ? { x, y, z: 0 } : null,
+            weight: item.weight ?? weight, actualWeight: item.actualWeight ?? weight,
+            favorite: false, consumed: false,
+        };
+    });
+    const rest = { ...payload };
+
+    delete rest.items;
+
     return {
-        ...payload,
-        formatVersion: SAVE_VERSION,
+        ...rest, formatVersion: SAVE_VERSION,
         engine: {
             ...payload.engine,
-            state: { ...payload.engine.state, version: 2, values: [...payload.engine.state.values, 100, 1] },
+            state: legacy
+                ? { ...payload.engine.state, version: 2, values: [...payload.engine.state.values, 100, 1] }
+                : payload.engine.state,
         },
-        itemDefs: [],
-        items: [],
-        migratedFrom: 1,
+        itemDefs,
+        inventoryGraph: {
+            version: 1, containers, items, nextContainerId: containers.length + 1,
+            organized: false, disorganized: false, equippedMultiplier: 0.3,
+            dropItemsOnSquareCenter: false,
+            ...(payload.equipmentState ? { wornOrder: payload.equipmentState.wornOrder } : {}),
+        },
+        migratedFrom: payload.formatVersion,
     };
 }
 
 /**
  * Validate inventory identities and references before creating a restore engine.
  *
- * @param {object} record - Authenticated current-format save.
+ * @param {object} record - Authenticated flat or graph save.
  * @returns {void} Throws for invalid definitions or item records.
  */
 function validateInventory(record) {
+    const items = record.formatVersion === SAVE_VERSION ? record.inventoryGraph?.items : record.items;
+
     if (!Array.isArray(record.itemDefs) || record.itemDefs.length > 4_096
-        || !Array.isArray(record.items) || record.items.length > 4_096) {
+        || !Array.isArray(items) || items.length > 4_096) {
         throw new TypeError('Invalid saved inventory.');
     }
 
@@ -149,7 +206,16 @@ function validateInventory(record) {
             || typeof definition.removeOnBroken !== 'boolean'
             || !Number.isInteger(definition.conditionLowerChanceOneIn)
             || definition.conditionLowerChanceOneIn < 0 || definition.conditionLowerChanceOneIn > 4_294_967_295
-            || (definition.bodyLocation !== null && typeof definition.bodyLocation !== 'string')) {
+            || (definition.bodyLocation !== null && (typeof definition.bodyLocation !== 'string' || !definition.bodyLocation))
+            || (definition.canBeEquipped !== undefined && definition.canBeEquipped !== null
+                && (typeof definition.canBeEquipped !== 'string' || !definition.canBeEquipped))
+            || (definition.weight !== undefined && !itemWeight(definition.weight))
+            || (definition.isBag !== undefined && typeof definition.isBag !== 'boolean')
+            || (definition.capacity !== undefined && !integer(definition.capacity, -0x80_00_00_00, 0x7F_FF_FF_FF))
+            || (definition.weightReduction !== undefined
+                && !integer(definition.weightReduction, -0x80_00_00_00, 0x7F_FF_FF_FF))
+            || (definition.maxItemSize !== undefined && (!Number.isFinite(definition.maxItemSize)
+                || Math.abs(definition.maxItemSize) > 3.402_823_466_385_288_6e38))) {
             throw new TypeError('Invalid or duplicate saved item definition.');
         }
 
@@ -157,26 +223,34 @@ function validateInventory(record) {
     }
 
     const ids = new Set();
-    const wornSlots = new Set();
 
-    for (const item of record.items) {
+    for (const item of items) {
         const definition = definitions.get(item?.fullType);
+        const flat = record.formatVersion !== SAVE_VERSION;
 
-        if (!item || !definition || !Number.isInteger(item.id) || item.id < 1 || item.id > 4_294_967_295
-            || ids.has(item.id) || !['ground', 'inventory'].includes(item.location)
-            || !Number.isFinite(item.x) || !Number.isFinite(item.y)
-            || !Number.isInteger(item.condition) || item.condition < 0 || item.condition > definition.conditionMax
-            || !Number.isInteger(item.count) || item.count < 1 || item.count > definition.stackLimit
-            || (item.bodyLocation !== null && (item.location !== 'inventory'
-                || item.bodyLocation !== definition.bodyLocation || wornSlots.has(item.bodyLocation)))) {
-            throw new TypeError('Invalid or duplicate saved item.');
+        if (!item || !definition || !integer(item.id, 1, 0xFF_FF_FF_FF)
+            || ids.has(item.id)
+            || (flat && (!['ground', 'inventory'].includes(item.location)
+                || !Number.isFinite(item.x) || !Number.isFinite(item.y)))
+            || !integer(item.condition, 0, definition.conditionMax)
+            || !integer(item.count, 1, definition.stackLimit)
+            || (item.weight !== undefined && !itemWeight(item.weight))
+            || (item.actualWeight !== undefined && !itemWeight(item.actualWeight))
+            || (item.bodyLocation !== null && ((flat && item.location !== 'inventory')
+                || typeof item.bodyLocation !== 'string' || !item.bodyLocation))
+            || (flat && (definition.isBag === true || definition.type === 'Container'))) {
+            throw new TypeError('Invalid or duplicate saved inventory item.');
+        }
+
+        if (!flat && (!integer(item.definitionOrdinal, 0, record.itemDefs.length - 1)
+            || record.itemDefs[item.definitionOrdinal].fullType !== item.fullType
+            || !itemWeight(item.weight) || !itemWeight(item.actualWeight)
+            || typeof item.favorite !== 'boolean' || typeof item.consumed !== 'boolean'
+            || ['location', 'x', 'y', 'slot'].some((key) => Object.hasOwn(item, key)))) {
+            throw new TypeError('Invalid saved inventory definition reference or weight.');
         }
 
         ids.add(item.id);
-
-        if (item.bodyLocation !== null) {
-            wornSlots.add(item.bodyLocation);
-        }
     }
 }
 
@@ -189,6 +263,235 @@ function validateInventory(record) {
  * @returns {boolean} Whether the scalar is an integer within the bounds.
  */
 const integer = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
+
+/**
+ * Test a saved scalar against the finite nonnegative native f32 weight boundary.
+ *
+ * @param {unknown} value - Candidate item weight or equipped multiplier.
+ * @returns {boolean} Whether the value is a supported native weight.
+ */
+const itemWeight = (value) => Number.isFinite(value) && value >= 0 && value <= 3.402_823_466_385_288_6e38;
+
+/**
+ * Validate a bounded nonempty persisted equipment name.
+ *
+ * @param {unknown} value - Candidate registry name.
+ * @returns {boolean} Whether the name fits the persisted registry boundary.
+ */
+const savedName = (value) => typeof value === 'string' && value.length > 0 && value.length <= 256;
+
+/**
+ * Validate graph topology without executing any candidate-engine mutation.
+ *
+ * @param {object} record - Authenticated graph save.
+ */
+function validateGraph(record) {
+    const graph = record.inventoryGraph;
+
+    if (!graph || graph.version !== 1 || !Array.isArray(graph.containers) || !graph.containers.length
+        || graph.containers.length > 8_193 || !integer(graph.nextContainerId, 2, 0x1_00_00_00_00)
+        || typeof graph.organized !== 'boolean' || typeof graph.disorganized !== 'boolean'
+        || typeof graph.dropItemsOnSquareCenter !== 'boolean'
+        || !itemWeight(graph.equippedMultiplier)) {
+        throw new TypeError('Invalid saved inventory graph authority.');
+    }
+
+    const nextItemId = record.engine.state.values[11];
+
+    if (!integer(nextItemId, 1, 0x1_00_00_00_00) || graph.items.some((item) => item.id >= nextItemId)) {
+        throw new TypeError('Invalid saved inventory item allocator.');
+    }
+
+    const items = new Map(graph.items.map((item) => [item.id, item]));
+    const containers = new Map();
+    const squares = new Set();
+    let actor;
+    const worldCells = new Set(record.world.cells.map((cell) => `${cell.x},${cell.y}`));
+    /**
+     * Check native tile membership in the authenticated navigation cells.
+     *
+     * @param {number} x - World tile x coordinate.
+     * @param {number} y - World tile y coordinate.
+     * @returns {boolean} Whether the tile belongs to the saved world.
+     */
+    const worldContains = (x, y) => worldCells.size
+        ? worldCells.has(`${Math.floor(x / 256)},${Math.floor(y / 256)}`)
+        : x >= 0 && x <= 10 && y >= 0 && y <= 10;
+
+    for (const container of graph.containers) {
+        if (!container || !integer(container.id, 1, 0xFF_FF_FF_FF) || containers.has(container.id)
+            || container.id >= graph.nextContainerId || !['actor', 'floor', 'bag'].includes(container.kind)
+            || !integer(container.capacity, -0x80_00_00_00, 0x7F_FF_FF_FF)
+            || !integer(container.weightReduction, 0, 100)
+            || typeof container.explored !== 'boolean' || typeof container.looted !== 'boolean'
+            || typeof container.type !== 'string' || !container.type
+            || ['onlyAcceptCategory', 'acceptItemFunction'].some((key) =>
+                container[key] !== null && (typeof container[key] !== 'string' || !container[key]))) {
+            throw new TypeError('Invalid or duplicate saved container.');
+        }
+
+        if (container.kind === 'actor') {
+            if (actor || container.id !== 1 || container.parentKind !== 'actor' || container.parentId !== 1
+                || container.containingItemId !== null || container.worldPosition !== null
+                || container.definitionOrdinal !== 0 || container.capacity !== 50) {
+                throw new TypeError('Invalid saved actor container.');
+            }
+
+            actor = container;
+        } else if (container.kind === 'floor') {
+            const position = container.worldPosition;
+
+            if (container.parentKind !== 'square' || container.parentId !== 0 || container.containingItemId !== null
+                || container.definitionOrdinal !== 0 || !position
+                || !integer(position.x, -25_600, 25_855) || !integer(position.y, -25_600, 25_855) || position.z !== 0
+                || !worldContains(position.x + 0.5, position.y + 0.5) || container.capacity !== 50) {
+                throw new TypeError('Invalid saved floor container.');
+            }
+
+            const key = `${position.x},${position.y},${position.z}`;
+
+            if (squares.has(key)) {
+                throw new TypeError('Duplicate saved floor container square.');
+            }
+
+            squares.add(key);
+        } else {
+            const shell = items.get(container.containingItemId);
+            const definition = record.itemDefs[shell?.definitionOrdinal];
+
+            if (container.parentKind !== null || container.parentId !== null || container.worldPosition !== null
+                || !shell || shell.internalContainerId !== container.id
+                || container.definitionOrdinal !== shell.definitionOrdinal
+                || !(definition?.isBag === true || definition?.type === 'Container')) {
+                throw new TypeError('Invalid saved bag container pairing.');
+            }
+        }
+
+        containers.set(container.id, container);
+    }
+
+    if (!actor) {
+        throw new TypeError('Saved inventory graph omits actor container.');
+    }
+
+    for (const item of graph.items) {
+        const owner = containers.get(item.ownerContainerId);
+        const definition = record.itemDefs[item.definitionOrdinal];
+        const internal = containers.get(item.internalContainerId);
+
+        if (!owner || !integer(item.ownerContainerId, 1, 0xFF_FF_FF_FF)
+            || ((definition.isBag === true || definition.type === 'Container')
+                ? !internal || internal.kind !== 'bag' || internal.containingItemId !== item.id
+                : item.internalContainerId !== null)
+            || (item.bodyLocation !== null && owner.kind !== 'actor')) {
+            throw new TypeError('Invalid saved inventory owner or equipment reference.');
+        }
+
+        if (owner.kind === 'floor') {
+            const position = item.worldPosition;
+
+            if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y) || position.z !== 0
+                || !worldContains(position.x, position.y)
+                || Math.floor(position.x) !== owner.worldPosition.x || Math.floor(position.y) !== owner.worldPosition.y) {
+                throw new TypeError('Invalid saved inventory world placement.');
+            }
+        } else if (item.worldPosition !== null) {
+            throw new TypeError('Invalid saved inventory world object owner.');
+        }
+    }
+
+    for (const container of graph.containers) {
+        const visited = new Set();
+        let current = container;
+
+        while (current.kind === 'bag') {
+            if (visited.has(current.id)) {
+                throw new TypeError('Cycle in saved inventory container graph.');
+            }
+
+            visited.add(current.id);
+            current = containers.get(items.get(current.containingItemId).ownerContainerId);
+        }
+    }
+
+    if (graph.wornOrder !== undefined) {
+        const worn = graph.items.filter((item) => item.bodyLocation !== null);
+
+        if (!Array.isArray(graph.wornOrder) || graph.wornOrder.length !== worn.length
+            || new Set(graph.wornOrder).size !== graph.wornOrder.length
+            || graph.wornOrder.some((id) => !worn.some((item) => item.id === id))) {
+            throw new TypeError('Invalid saved graph equipment order.');
+        }
+    }
+
+    if (Object.hasOwn(record, 'equipmentState')) {
+        validateEquipmentState(record.equipmentState, graph);
+    }
+}
+
+/**
+ * Validate persisted registry bindings and worn identities before native staging.
+ *
+ * @param {object} state - Saved equipment registry.
+ * @param {object} graph - Structurally validated inventory graph.
+ */
+function validateEquipmentState(state, graph) {
+    if (!state || state.version !== 1 || typeof state.initialized !== 'boolean'
+        || !Array.isArray(state.locations) || state.locations.length > 4_096
+        || !Array.isArray(state.groups) || !state.groups.length || state.groups.length > 4_096
+        || !integer(state.wornGroup, 0, state.groups.length - 1) || state.groups[0]?.name !== 'Human'
+        || !Array.isArray(state.wornOrder) || !Array.isArray(graph.wornOrder)
+        || canonical(state.wornOrder) !== canonical(graph.wornOrder)) {
+        throw new TypeError('Invalid saved inventory equipment binding.');
+    }
+
+    const names = new Set();
+    const ids = new Set();
+
+    for (const location of state.locations) {
+        if (!location || !savedName(location.id) || !savedName(location.translationName) || ids.has(location.id)) {
+            throw new TypeError('Invalid or duplicate saved equipment identity.');
+        }
+
+        ids.add(location.id);
+    }
+
+    for (const group of state.groups) {
+        if (!group || !savedName(group.name) || typeof group.active !== 'boolean'
+            || !Array.isArray(group.locations) || group.locations.length > 4_096
+            || (group.active && names.has(group.name))) {
+            throw new TypeError('Invalid saved equipment group.');
+        }
+
+        if (group.active) {
+            names.add(group.name);
+        }
+
+        const members = new Set();
+
+        for (const member of group.locations) {
+            if (!member || !ids.has(member.id) || members.has(member.id) || typeof member.multiItem !== 'boolean'
+                || ['exclusive', 'hide', 'alternate'].some((key) => !Array.isArray(member[key])
+                    || member[key].length > 4_096 || new Set(member[key]).size !== member[key].length
+                    || member[key].some((id) => !ids.has(id)))) {
+                throw new TypeError('Invalid saved equipment group member.');
+            }
+
+            members.add(member.id);
+        }
+    }
+
+    const group = state.groups[state.wornGroup];
+    const equipped = graph.items.filter((item) => item.bodyLocation !== null);
+
+    for (const item of equipped) {
+        const member = group.locations.find(({ id }) => id === item.bodyLocation);
+
+        if (!member) {
+            throw new TypeError('Invalid saved inventory equipment reference.');
+        }
+    }
+}
 
 /**
  * Validates an authenticated held pair against saved inventory identities.
@@ -204,7 +507,7 @@ function validateHandState(state, items) {
 
     for (const id of [state.primary, state.secondary]) {
         if (id !== null && (!integer(id, 1, 0xFF_FF_FF_FF)
-            || !items.some((item) => item.id === id && item.location === 'inventory'))) {
+            || !items.some((item) => item.id === id && item.ownerContainerId === 1))) {
             throw new TypeError('Invalid saved hand inventory reference.');
         }
     }
@@ -259,14 +562,14 @@ function validateDoorState(state) {
 async function validateSave(record) {
     const copy = structuredClone(record);
 
-    if (copy?.format !== SAVE_FORMAT || ![1, SAVE_VERSION].includes(copy.formatVersion)) {
+    if (copy?.format !== SAVE_FORMAT || ![1, 2, SAVE_VERSION].includes(copy.formatVersion)) {
         throw new TypeError('Unsupported browser save format/version; native saves are not supported.');
     }
 
     if (typeof copy.id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/u.test(copy.id)
         || !Number.isSafeInteger(copy.revision) || copy.revision < 1
         || !Array.isArray(copy.world?.cells) || copy.world.cells.length > 64
-        || copy.engine?.abiVersion !== 1 || copy.engine.state?.version !== copy.formatVersion
+        || copy.engine?.abiVersion !== 1 || copy.engine.state?.version !== (copy.formatVersion === 1 ? 1 : 2)
         || !Array.isArray(copy.contentPacks) || !Array.isArray(copy.mods)
         || typeof copy.modState !== 'object' || copy.modState === null
         || typeof copy.integrity !== 'string') {
@@ -277,6 +580,11 @@ async function validateSave(record) {
 
     if (await digest(payload) !== integrity) {
         throw new TypeError('Browser save integrity check failed; current game remains unchanged.');
+    }
+
+    if ((copy.formatVersion === SAVE_VERSION && Object.hasOwn(copy, 'items'))
+        || (copy.formatVersion === 2 && Object.hasOwn(copy, 'inventoryGraph'))) {
+        throw new TypeError('Browser save contains conflicting flat/graph inventory formats.');
     }
 
     const values = copy.engine.state.values;
@@ -301,34 +609,43 @@ async function validateSave(record) {
         }
 
         coordinates.add(key);
-        decodeCell(cell.bytes);
+        validateNavigationCell(decodeCell(cell.bytes));
     }
 
     if (Object.hasOwn(copy, 'doorState')) {
         validateDoorState(copy.doorState);
     }
 
+    if (copy.bodyState && Object.hasOwn(copy.bodyState, 'metabolicTarget')
+        && (!Number.isFinite(copy.bodyState.metabolicTarget)
+            || copy.bodyState.metabolicTarget < -1 || copy.bodyState.metabolicTarget > Math.fround(10.3))) {
+        throw new TypeError('Invalid saved metabolic target.');
+    }
+
     if (Object.hasOwn(copy, 'queue')) {
         decodeQueue(copy.queue);
     }
 
-    if (copy.formatVersion === 1) {
-        if (Object.hasOwn(copy, 'handState')) {
-            validateHandState(copy.handState, []);
+    let validated = copy;
+
+    if (copy.formatVersion !== SAVE_VERSION) {
+        if (copy.formatVersion === 2) {
+            validateInventory(copy);
         }
 
         const migrated = migrateLegacySave(payload);
 
-        return { ...migrated, integrity: await digest(migrated) };
+        validated = { ...migrated, integrity: await digest(migrated) };
     }
 
-    validateInventory(copy);
+    validateInventory(validated);
+    validateGraph(validated);
 
-    if (Object.hasOwn(copy, 'handState')) {
-        validateHandState(copy.handState, copy.items);
+    if (Object.hasOwn(validated, 'handState')) {
+        validateHandState(validated.handState, validated.inventoryGraph.items);
     }
 
-    return copy;
+    return validated;
 }
 
 /**
@@ -339,9 +656,10 @@ async function validateSave(record) {
  * @param {object} options - Host configuration.
  * @param {string|URL|Uint8Array} options.engineSource - WASM source for staged restores.
  * @param {string} options.appVersion - Diagnostic application version.
+ * @param {function(object):Promise<void>} [options.initializeEquipment] - Actual original startup for legacy saves without registry state.
  * @returns {object} Save, load, export/import and storage diagnostics.
  */
-function createSaveStore({ engineSource, appVersion }) {
+function createSaveStore({ engineSource, appVersion, initializeEquipment }) {
     let database;
     let storageError;
     let writes = Promise.resolve();
@@ -423,11 +741,17 @@ function createSaveStore({ engineSource, appVersion }) {
             engine.worldImportCell(cell.x, cell.y, decodeCell(cell.bytes));
         }
 
+        if (Object.hasOwn(validated, 'equipmentState')) {
+            engine.loadEquipmentState(validated.equipmentState);
+        } else if (initializeEquipment) {
+            await initializeEquipment(engine);
+        }
+
         for (const definition of validated.itemDefs) {
             engine.registerItemDefinition(definition, { owner: definition.owner });
         }
 
-        engine.importItems(validated.items);
+        engine.importInventoryGraph(validated.inventoryGraph);
 
         if (Object.hasOwn(validated, 'handState')) {
             engine.loadHandState(validated.handState);
@@ -477,7 +801,10 @@ function createSaveStore({ engineSource, appVersion }) {
             updatedAt: new Date().toISOString(), application: { version: appVersion },
             engine: { abiVersion: 1, state: engine.saveState() },
             itemDefs: engine.itemDefinitions(),
-            items: engine.items(),
+            inventoryGraph: engine.exportInventoryGraph(),
+            ...(typeof engine.canSaveEquipmentState === 'function' && engine.canSaveEquipmentState()
+                ? { equipmentState: engine.saveEquipmentState() }
+                : {}),
             moodleState: engine.saveMoodleState(),
             ...(typeof engine.saveDoorState === 'function' ? { doorState: engine.saveDoorState() } : {}),
             ...(typeof engine.saveBodyState === 'function'
@@ -490,7 +817,7 @@ function createSaveStore({ engineSource, appVersion }) {
             ...(typeof engine.canSaveQueueState === 'function' && engine.canSaveQueueState()
                 ? {
                         queue: {
-                            version: 1, bytes: encodeCell(engine.saveQueueState()),
+                            version: 2, bytes: encodeCell(engine.saveQueueState()),
                             sourceOwners: engine.sourceActions.exportSourceOwners(),
                         },
                     }

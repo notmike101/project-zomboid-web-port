@@ -101,6 +101,7 @@ impl BodyPart {
 struct BodyState {
     parts: [BodyPart; PARTS],
     severity: u32,
+    metabolic_target: f32,
 }
 
 impl BodyState {
@@ -108,6 +109,7 @@ impl BodyState {
         Self {
             parts: [BodyPart::initial(); PARTS],
             severity: 1,
+            metabolic_target: 1.5,
         }
     }
 }
@@ -120,6 +122,7 @@ enum Staging {
     },
     Full {
         next: usize,
+        metabolic_seen: bool,
     },
 }
 
@@ -211,6 +214,56 @@ pub extern "C" fn thermal_action_modifier() -> f32 {
     })
 }
 
+/// Original Thermoregulator.setMetabolicTarget(float): accumulate the maximum
+/// nonnegative request, clamped to Metabolics.MAX (10.3f), not thermal simulation.
+#[unsafe(no_mangle)]
+pub extern "C" fn body_metabolic_target_set(value: f64) -> i32 {
+    if !value.is_finite() {
+        return NONFINITE;
+    }
+    if value.abs() > F32_MAX {
+        return OUT_OF_RANGE;
+    }
+    let value = value as f32;
+    BODY.with(|state| {
+        let mut state = state.borrow_mut();
+        if value >= 0.0 && value >= state.metabolic_target {
+            state.metabolic_target = value.min(10.3);
+        }
+    });
+    OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_metabolic_target_get() -> f32 {
+    BODY.with(|state| state.borrow().metabolic_target)
+}
+
+/// Saved targets include the original -1f end-of-thermal-update sentinel.
+#[unsafe(no_mangle)]
+pub extern "C" fn body_import_metabolic_stage(value: f64) -> i32 {
+    if !value.is_finite() {
+        body_import_abort();
+        return NONFINITE;
+    }
+    if !(-1.0..=10.3_f32 as f64).contains(&value) {
+        body_import_abort();
+        return OUT_OF_RANGE;
+    }
+    STAGING.with(|staging| {
+        let mut staging = staging.borrow_mut();
+        if let Some(Staging::Full { metabolic_seen, .. }) = staging.as_mut()
+            && !*metabolic_seen
+        {
+            FULL_BODY.with(|state| state.borrow_mut().metabolic_target = value as f32);
+            *metabolic_seen = true;
+            return OK;
+        }
+        *staging = None;
+        BAD_FORMAT
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn body_update_begin(part: u32) -> i32 {
     body_import_abort();
@@ -271,8 +324,17 @@ pub extern "C" fn body_import_begin(severity: u32) -> i32 {
     if severity > 2 {
         return OUT_OF_RANGE;
     }
-    FULL_BODY.with(|body| body.borrow_mut().severity = severity);
-    STAGING.with(|staging| *staging.borrow_mut() = Some(Staging::Full { next: 0 }));
+    FULL_BODY.with(|body| {
+        let mut body = body.borrow_mut();
+        body.severity = severity;
+        body.metabolic_target = 1.5;
+    });
+    STAGING.with(|staging| {
+        *staging.borrow_mut() = Some(Staging::Full {
+            next: 0,
+            metabolic_seen: false,
+        })
+    });
     OK
 }
 
@@ -292,7 +354,7 @@ pub extern "C" fn body_import_stage(index: u32, value: f64) -> i32 {
     };
     STAGING.with(|staging| {
         let mut staging = staging.borrow_mut();
-        if let Some(Staging::Full { next }) = staging.as_mut()
+        if let Some(Staging::Full { next, .. }) = staging.as_mut()
             && index as usize == *next
         {
             FULL_BODY.with(|body| {
@@ -309,7 +371,7 @@ pub extern "C" fn body_import_stage(index: u32, value: f64) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn body_import_commit() -> i32 {
     STAGING.with(|staging| {
-        let Some(Staging::Full { next }) = staging.borrow_mut().take() else {
+        let Some(Staging::Full { next, .. }) = staging.borrow_mut().take() else {
             return BAD_FORMAT;
         };
         if next != PARTS * FIELDS {
@@ -328,4 +390,50 @@ pub extern "C" fn body_import_abort() {
 pub(crate) fn reset() {
     BODY.with(|body| *body.borrow_mut() = BodyState::initial());
     body_import_abort();
+}
+
+#[cfg(test)]
+mod metabolic_tests {
+    use super::*;
+
+    #[test]
+    fn source_metabolic_target_accumulates_max_and_clamps_original_enum_limit() {
+        reset();
+        assert_eq!(body_metabolic_target_get(), 1.5);
+        assert_eq!(body_metabolic_target_set(3.2), OK);
+        assert_eq!(body_metabolic_target_get(), 3.2_f32);
+        assert_eq!(body_metabolic_target_set(1.0), OK);
+        assert_eq!(body_metabolic_target_set(-1.0), OK);
+        assert_eq!(body_metabolic_target_get(), 3.2_f32);
+        assert_eq!(body_metabolic_target_set(100.0), OK);
+        assert_eq!(body_metabolic_target_get(), 10.3_f32);
+        assert_eq!(body_metabolic_target_set(f64::NAN), NONFINITE);
+        assert_eq!(body_metabolic_target_set(f64::MAX), OUT_OF_RANGE);
+        assert_eq!(body_metabolic_target_get(), 10.3_f32);
+        reset();
+        assert_eq!(body_metabolic_target_get(), 1.5);
+    }
+
+    #[test]
+    fn full_body_import_stages_exact_metabolic_target_and_failed_stage_is_atomic() {
+        reset();
+        assert_eq!(body_metabolic_target_set(3.2), OK);
+        assert_eq!(body_import_begin(1), OK);
+        assert_eq!(body_import_metabolic_stage(-1.0), OK);
+        assert_eq!(body_metabolic_target_get(), 3.2_f32);
+        for (index, value) in BodyState::initial()
+            .parts
+            .iter()
+            .flat_map(|part| part.values.iter())
+            .enumerate()
+        {
+            assert_eq!(body_import_stage(index as u32, *value as f64), OK);
+        }
+        assert_eq!(body_import_commit(), OK);
+        assert_eq!(body_metabolic_target_get(), -1.0);
+        assert_eq!(body_import_begin(1), OK);
+        assert_eq!(body_import_metabolic_stage(11.0), OUT_OF_RANGE);
+        assert_eq!(body_import_commit(), BAD_FORMAT);
+        assert_eq!(body_metabolic_target_get(), -1.0);
+    }
 }

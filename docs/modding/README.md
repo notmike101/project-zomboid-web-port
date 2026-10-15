@@ -63,6 +63,7 @@ method on that handle throws (`stage: 'api'`).
 | `api.actions.submit(action)` | `ModCommandResult` | Enters the **same action path as page input**: every live hook resolves before the state changes and the outcome records `submittedBy` as this mod's id. Throws if called while hooks are resolving. |
 | `api.actions.getState()` / `.cancel()` | detached `ModQueueState` | `{current,pending}` native queue; cancel stops queued work and primitive movement immediately, bypassing veto. |
 | `api.actions.requestPickup(id)` / `.requestDoor(id)` / `.requestWalk({x,y,z})` | `ModQueueAcceptance` | `{accepted,actionId,state}` after shared precommit hooks; admission is not completion. Walk coordinates are signed int32 source-square coordinates. |
+| `api.actions.requestTransfer(id, sourceContainerId, destinationContainerId)` | `ModQueueAcceptance` | Immutable native container intent; acceptance is not ownership change or completion. |
 | `api.hooks.beforeAction(callback, { priority = 0 })` | `() => boolean` | Registers a hook; returns unsubscribe (`false` if already withdrawn by unload). |
 | `api.world.getBounds()` | detached `ModWorldBounds` | Reads committed navigation cell extents, not a proposed import. Optional engine capability. |
 | `api.world.getNavFlags(tileX, tileY)` | unsigned number | Reads committed navigation bits at an absolute integer tile. Optional engine capability. |
@@ -75,8 +76,11 @@ method on that handle throws (`stage: 'api'`).
 | `api.items.definitions.register(input, { override = false })` | `ModItemDefinition` | Owner-bound, synchronous activation only; explicit duplicate override; failed activation rolls back touched rows/owners/metadata. No SDK freeze method. |
 | `api.items.list()` / `.get(id)` / `.worn(bodyLocation)` | detached `ModItem[]` / item or `null` | Stable positive u32 IDs; exact body-location identity; valid unknown identities return `null`. |
 | `api.items.spawn(input)` / `.wear(id)` / `.unequip(id)` / `.drop(id, x, y)` / `.setCondition(id, condition)` | `ModCommandResult` | Same shared synchronous action/hook path; successful spawn returns authoritative `snapshot.id`. |
-| `api.items.pickup(id)` | `ModQueueAcceptance` | Same admission contract as `actions.requestPickup`, not an immediate inventory transfer. |
-| `api.items.inventoryState()` | detached `ModInventoryState` | Native flat-player `capacityWeight`, carry `capacity` and independently stored `maxWeight`; ordinary initial limits are 50 versus 8, not one threshold. |
+| `api.items.pickup(id)` / `.transferItem({id,sourceContainerId,destinationContainerId})` | `ModQueueAcceptance` | Same admission contracts as `actions.requestPickup` / `requestTransfer`, not immediate transfers. |
+| `api.items.containers()` / `.getContainer(id)` / `.playerInventoryId()` | detached `ModContainer[]` / container or `null` / number | Stable native container identities, not UI floor projections. |
+| `api.items.containerItems(id)` | detached `ModItem[]` | Direct membership in native insertion order; not a recursive flattened list. |
+| `api.items.containerState(id, actorId = null)` / `.itemWeights(id)` | detached `ModContainerState` / `ModItemWeights` | Native capacity/weight variants; supported actor ID is `1`. |
+| `api.items.inventoryState()` | detached `ModInventoryState` | Player-root `capacityWeight`, carry `capacity` and independently stored `maxWeight`; ordinary initial limits are 50 versus 8, not one threshold. |
 | `api.items.setWeight(id, weight)` / `.setActualWeight(id, actualWeight)` | `ModCommandResult` | Independent live native f32 fields through shared precommit hooks; finite/nonnegative/full-precision f32 range required before conversion. |
 | `api.character.getHealth()` / `.isDead()` / `.setHealth(health)` | number / boolean / `ModCommandResult` | WASM health `[0,100]`; health zero is current port death policy, not native survival fidelity. |
 | `api.character.isWearingAwkwardGloves()` | boolean | Actual native `base:hands` equipment and its definition's `base:awkwardgloves` tag; unsupported native capability throws, never a fabricated false. |
@@ -113,6 +117,7 @@ extents; WASM additionally refuses unloaded tiles, solid destinations and blocke
 { type: 'toggleDoor', id } // exact original stable string identity, not a numeric item ID
 { type: 'spawnItem', fullType, x, y } // optional count/condition; omitted values resolved in WASM
 { type: 'pickup', id }
+{ type: 'transferItem', id, sourceContainerId, destinationContainerId }
 { type: 'wear', id }
 { type: 'unequip', id }
 { type: 'drop', id, x, y }
@@ -137,17 +142,20 @@ timed actions through a fixed-step catch-up loop.
 
 ### Queued admission, grouping and source ownership
 
-`actions.requestPickup(id)`, `requestDoor(stableDoorId)` and
-`requestWalk({x,y,z})` return `{accepted,actionId,state}`. A hook veto returns
-`accepted:false`/`actionId:null` without admitting work; invalid, unsupported or
-reentrant requests throw attributed errors. `items.pickup` and `world.toggleDoor`
-use the same contract. Through `actions.submit`, `committed` means the engine
-received the request, not that the item moved or door changed.
+`actions.requestPickup(id)`, `requestTransfer(id, sourceContainerId, destinationContainerId)`,
+`requestDoor(stableDoorId)` and `requestWalk({x,y,z})` return
+`{accepted,actionId,state}`. A hook veto returns `accepted:false`/`actionId:null`
+without admitting work; invalid, unsupported or reentrant requests throw attributed
+errors. `items.pickup`, `items.transferItem` and `world.toggleDoor` use the same
+contracts. Through `actions.submit`, `committed` means the engine received the
+request, not that the item moved or door changed.
 
 `state` contains `current` (or `null`) and ordered `pending` actions. Detached
-records expose stable `id`, `kind:'walk'|'door'|'grab'|'getUp'`, `origin:'sdk'|'lua'`,
-target, `rawTime`, `maxTime`, `currentTime`, `lastTime`, `prevLastTime`, `delta`,
-`started` and ordered `groups` with stable IDs, raw times, full types and item IDs.
+records expose stable `id`, `kind:'walk'|'door'|'grab'|'getUp'|'transfer'`,
+`origin:'sdk'|'lua'`, target, clocks/progress, `started` and ordered `groups`
+with stable IDs, raw times, full types, `itemIds` and matching `sourceContainerIds`.
+Transfer records also expose bound `sourceContainerId`, `destinationContainerId`
+and nullable `floorPosition`.
 Native item/door queries show completion; there is no public completion callback
 in this API. Accepted work can still stop or refuse at completion-time validation.
 
@@ -158,6 +166,15 @@ performs the transfer. Do not replace original callbacks or call private commits
 Original menu semantics differ deliberately: new `createMenu` refuses speed 0,
 and repeated source grab selections clear earlier work via `luautils.walkAdj`
 without keepActions. Use SDK requests for append, not rewritten source menus.
+
+Grab groups retain each item's real floor-root source, allowing unchanged grouping
+across squares; transfer groups use a common source/destination pair. Event-5
+completion calls the unchanged supported original helpers under native authorization
+for preparation, detach, add and world placement. Failed supported helpers restore
+native ownership/order, world/equipment state and RNG: this atomic rollback is
+**port-safety policy**, not observed original failure semantics. Unsupported
+ammo/fluid/entity-equipment, vehicle, trade, radio and corpse branches refuse before
+detach. These boundaries do not implement full item processing or loot rules.
 
 `time.set('multiplier',0)` freezes source-action progress without STOP;
 `time.set('multiplier',1)` resumes it. `time.set` accepts native numeric
@@ -181,19 +198,22 @@ Closed-door heading admission refused without actor movement. These bounded
 proofs do not close full inventory/UI fidelity or any of the 13 full-game gates.
 Exact observations are in [`../STATUS.md`](../STATUS.md).
 
-### Items, footwear and health
+### Items, containers, equipment and health
 
-[`ModItemDefinitionInput`, `ModItemDefinition`, `ModItemSpawn`, `ModItem` and
-`ModAction`](../../types/mod-api.d.ts) are the public records, not internal
-ordinals/pointers. Definitions contain `fullType`, nullable `bodyLocation`,
-`conditionMax`, `stackLimit`, `removeOnBroken`, `conditionLowerChanceOneIn`, native
-f32 `weight`, optional `tags?: readonly string[]` and detached source/appearance
-metadata; returned definitions add the real owner. Omitted weight uses the
-original script-item constructor value 1. Registration is legal only inside
+[`ModItemDefinitionInput`, `ModItemDefinition`, `ModItemSpawn`, `ModItem`,
+`ModContainer` and `ModAction`](../../types/mod-api.d.ts) are the public records,
+not internal pointers. Definitions include `fullType`, nullable `bodyLocation`,
+independent nullable `canBeEquipped`, `conditionMax`, `stackLimit`, `removeOnBroken`,
+`conditionLowerChanceOneIn`, native f32 `weight`, optional `tags?: readonly string[]`
+and detached source/appearance metadata. Bag fields include `isBag`, `capacity`,
+`weightReduction`, `maxItemSize`, `containerType`, `onlyAcceptCategory` and
+`acceptItemFunction`; returned definitions add the real owner and resolved fields.
+Omitted weight uses the original script-item constructor value 1. Registration is
+legal only inside
 synchronous `activate`, bound to that mod id. Duplicates require `{override:true}`.
 Failed activation restores first-touch numeric rows/owners and appended metadata.
-The application seeds missing original footwear/hands on New/restore without
-replacing saved definitions or owners, then freezes registration before play;
+The application seeds missing original footwear/hands and bags on New/restore
+without replacing saved definitions or owners, then freezes registration before play;
 freezing is not a mod API.
 
 Source semicolon-delimited `Tags` parse into canonical lowercase `namespace:path`
@@ -205,41 +225,100 @@ wearable seeding applies verified constructor values before authored fields:
 condition maximum/chance 10, weight/run-speed modifier 1 and remove-on-broken true.
 These loader defaults are not new defaults for required public definition fields.
 
-Items contain stable never-reused positive u32 `id`, `fullType`,
-`location:'ground'|'inventory'`, `x`, `y`, `condition`, `count`, independent live
-`weight`/`actualWeight` and currently worn `bodyLocation` (otherwise `null`).
-IDs/counts must be positive u32; condition must
-be an integer in `[0, conditionMax]`; positions must be finite and pass WASM
-world membership validation. Omitted spawn count/condition are resolved by WASM
-from the real definition. Wear/unequip modify equipment state, not apparel meshes.
-All mutations and hook replacements use the shared action pipeline and final
-WASM validation. Queries return detached records; unsupported engine capabilities
-throw attributed errors, never fake items or health.
+Items contain stable never-reused positive u32 `id`, `fullType`, `definitionOrdinal`,
+`ownerContainerId`, nullable `internalContainerId`, nullable `worldPosition:{x,y,z}`,
+`condition`, `count`, independent live `weight`/`actualWeight`, `favorite`, `consumed`
+and currently worn `bodyLocation` (otherwise `null`). The native ordered graph is
+the sole ownership authority. Each floor root belongs to one real loaded square;
+only items directly owned by that root have real world placement. A bag's internal
+container and descendants never inherit the shell's `worldPosition`.
 
-Ordinary flat-player pickup checks native carry capacity 50, not the initial
-encumbrance `maxWeight` 8. Existing inventory contributions are summed in pickup
-order using native float32 arithmetic; count does not multiply actual weight,
-and worn/equipped rows contribute actual weight ×0.3. The incoming item uses its
-full unequipped weight after nearest-hundredth correction of the current total.
-Definition overrides affect future instances, not already-created live fields.
-Base-weight changes do not change actual weight, and vice versa.
+`containers()` returns actor/floor/bag records with direct parent metadata and,
+for bags, `containingItemId`. Recursive ancestry follows that shell item's
+`ownerContainerId`; `containerItems(id)` returns only direct members in native
+order. Moving a bag retains its shell/internal IDs and descendant ownership.
+Lua `item:getContainer()` returns the actual owner, not the UI floor view. Original
+floor views retain transient presentation IDs, not another ownership list; a floor
+destination is canonicalized to the actual square root before the original action
+constructor runs.
 
-Portable saves preserve that order: sorting by item ID can change float32 sums
-and turn an otherwise valid pickup into a refusal after reboot. Legacy items
-without the new live fields derive them from the validated saved definition.
-Actor words and engine ABI remain unchanged. Individual nonfinite, negative or
-out-of-f32-range inputs refuse atomically; pathological sums of individually
-legal values can overflow to positive Infinity, as native float arithmetic does.
-That aggregate is not stored as a new save field or written into bounded moodle
-inputs. This is not nested-container, ammo/fluid-content, hotbar, Moveable or
-trait/dynamic-weight parity. Lua unknown-content cases refuse explicitly.
+```js
+const destinationContainerId = api.items.playerInventoryId();
+const directItems = api.items.containerItems(destinationContainerId);
+const state = api.items.containerState(destinationContainerId, 1);
+// state: {capacity,effectiveCapacity,contentsWeight,capacityWeight,maxWeight}
+const item = api.items.list().find(({ worldPosition }) => worldPosition !== null);
+if (item) {
+  const { accepted, actionId, state: queue } = api.actions.requestTransfer(
+    item.id, item.ownerContainerId, destinationContainerId,
+  );
+  // Admission only. Read items.get(item.id).ownerContainerId later for ownership.
+}
+```
 
-The current game path is a bounded source footwear/hands subset, not full
-inventory, loot or containers. One wearable per stack (`stackLimit:1`) is explicit
-port policy, not a source constructor default. Equipped clothing is not connected
-to skinned rendering, and static FBX ground parsing is not ground-item visual
-acceptance. Native flat-item carry now exists; automatic encumbrance/run-speed/tear,
-broader item use and survival dynamics remain unsupported.
+IDs/counts must be positive u32; condition must be an integer in
+`[0, conditionMax]`; world positions must be finite and pass WASM membership
+validation. Spawn still takes `{fullType,x,y,count?,condition?}`; omitted count
+and condition resolve in WASM from the definition. Wear/unequip change equipment,
+not apparel meshes. Mutations and hook replacements use the shared action pipeline
+and final WASM validation. Detached queries never fake unsupported capabilities.
+
+Equipment uses native canonical body-location identities, ordered groups and
+an independent worn-item order. Original Lua startup declares the Human group
+and its multi-item, exclusive, hide and alternate-model rules before play,
+including headless startup. Equipment snapshots preserve registry identities,
+group order/rules, the bound worn group and worn-item order; legacy saves initialize
+the original rules before importing items. Hide/model rules retain metadata;
+they do not imply apparel rendering support. Duplicate canonical registration
+rejects without mutation: Java's invalid duplicate-input mutation-before-throw
+side effect is intentionally unsupported.
+Restore validates structural membership, exact worn IDs and order, not mutable
+current admission rules against an already valid saved equipment snapshot.
+
+`api.items.wornItems()` returns detached `{id, bodyLocation}` rows in worn order.
+`api.items.setWornItem(bodyLocation, id|null)` submits a shared `wornSet` action
+and returns void. The numeric `api.equipment.operation` bridge supports
+`wornSet(locationToken, id|null)`, `wornRemove(id)`, `wornClear()` and
+`wornGroupSet(groupToken)` through the same hooks; changing the bound group
+requires an empty worn collection. Its compatible return value `0` also covers
+hook veto or replacement and does not prove a mutation committed. Use
+`api.actions.submit` with `wornSet {locationToken,id}`, `wornRemove {id}`,
+`wornClear {}` or `wornGroupSet {groupToken}` for the attributed command result.
+Registry/query operations are live-owner attributed but do not run action hooks.
+
+`itemWeights(id)` returns `{actualWeight,contentsWeight,unequippedWeight,
+equippedWeight,hotbarEquippedWeight,wrapperEffectiveCapacity}`. Native f32 sums
+follow direct insertion order and recurse through bags; count does not multiply
+weight. Unequipped weight is shell actual weight plus unreduced contents. Equipped
+bags apply the equipped multiplier (initially 0.3) to the shell and their clamped
+0–100 weight reduction to contents; ordinary equipped items use the multiplier.
+Player carry sums direct root members using actual worn/held/fake-equipped state.
+Lua bag `getInventoryWeight()` is a separate ordered child sum selected by the
+shell's equipment state, **not** an alias of `getContentsWeight()` or a blanket
+bag-reduction formula.
+
+`containerState` distinguishes raw contents from carry/admission weight. Ordinary
+player pickup checks carry capacity 50, not initial encumbrance `maxWeight` 8.
+Admission corrects the existing weight to the nearest hundredth before adding
+incoming unequipped weight; bag capacity is capped at 50, other container capacity
+at 100 before applicable actor-relative organized/disorganized adjustments.
+Bag max-item-size, category/custom acceptance, cycle prevention, held-bag carry
+and direct-world-bag floor-weight checks remain distinct predicates; a weight
+snapshot alone is not admission. `wrapperEffectiveCapacity` additionally caps the
+bag wrapper by integer `50 - actualWeight`.
+
+Definition overrides affect future instances, not existing live fields.
+`setWeight` and `setActualWeight` are independent. Invalid individual f32 inputs
+refuse atomically; ordered sums of legal inputs may overflow to positive Infinity.
+Save/restore preserves native order, not ID sorting, and accepts structurally valid
+overcapacity graphs rather than replaying mutable admission checks.
+
+The source path includes footwear/hands and bags, not full inventory/loot/use.
+One clothing/bag instance per stack (`stackLimit:1`) is explicit port policy.
+Full original `createInventoryInterface` HUD startup/input, processing, ammo/fluid,
+vehicle/corpse systems and FMOD runtime remain open. Clothing is not connected to
+skinned rendering; static FBX parsing is not ground-item visual acceptance.
+Automatic encumbrance/run-speed/tear and survival dynamics remain unsupported.
 
 `api.character.isWearingAwkwardGloves()` and live Lua
 `player:isWearingAwkwardGloves()` query the actual native item worn on `base:hands`
@@ -405,6 +484,11 @@ Pause, visibility/session replacement and disposal are host-owned. The current
 scene uses three privately provisioned legacy WAV cues; this does not implement
 Build 42 FMOD banks, authored event routing or complete material-specific audio.
 
+Source emitter event handles support play/status/stop; they do not make an event
+intrinsically looping. The original Rummage bank event is a six-parameter one-shot,
+not a loose-file cue. Without a browser FMOD backend, its playback refuses before
+detach; static source sound/member queries are not runtime or baked-clip equivalence.
+
 ### Authoritative moodle inputs
 
 `character.moodles()` exposes `ModMoodle` IDs/levels in original registry order.
@@ -456,19 +540,24 @@ weight, weather/corpse/toxic dynamics or thermal chevrons/voices/wiggles.
 
 ### Browser save format and moodle continuity
 
-`src/saves.js` writes `pz-web-save` envelope format 2, retaining engine ABI 1 and
-twelve-word actor format 2. The pure v1 migration first authenticates the original
-integrity; it preserves the first ten actor words, world bytes, mod schemas/data
-and revision metadata, appends health 100/next-ID 1, and creates empty item tables.
-Reading never rewrites storage. This is distinct from each mod's namespace schema
-migration and is not native-save compatibility.
+`src/saves.js` writes `pz-web-save` envelope format 3 with a version-1
+`inventoryGraph`, retaining engine ABI 1 and twelve-word actor format 2.
+Legacy v1 and flat v2 are authenticated against their original integrity before
+detached migration. V1 preserves its ten actor words, appends health 100/next-ID 1
+and creates an empty actor-root graph. V2 preserves item IDs/order and live weights
+(deriving missing weights from saved definitions), assigns actor/per-square floor
+roots and replaces flat placement with owner/internal/world-position records.
+World bytes, mod schemas/data and revision metadata survive; reading never rewrites
+storage. This is separate from mod namespace migration and native-save compatibility.
 
-Restore stages a fresh engine: navigation cells → definitions → items → actor →
-optional `moodleState`. New captures include version-1 `moodleState` with exact
-named `inputs`, `painTimer`, `painLevel`, `cantSprintTimer`, preserving hidden
-timer continuity without expanding actor words. Earlier v1/v2 saves lacking this
-optional field retain fresh-engine defaults; malformed present state refuses the
-staged restore. Failed restore does not publish the candidate over the live game.
+Restore stages navigation cells → equipment registry → definitions → inventory
+graph → hands → actor → optional moodle/body state. Graph validation requires
+valid references, unique IDs/squares, acyclic paired bags, exact allocators and
+ordered worn membership; it does not reject structurally valid overcapacity saves.
+The graph is restored before source geometry/queue publication. Version-1
+`moodleState` retains exact named `inputs`, `painTimer`, `painLevel` and
+`cantSprintTimer`; missing legacy state uses fresh-engine defaults. Malformed
+present state refuses staged restore without replacing the live game.
 
 Optional version-1 `doorState` is covered by the same integrity hash. It retains
 source identities, current panel positions, locks, per-identity `toggled`,
@@ -487,11 +576,12 @@ uses actual constructor defaults. Duplicate/missing/unknown parts, malformed
 fields and unsupported versions refuse before publication without altering the
 live game. Actor format 2/12 words and ABI 1 remain unchanged.
 
-Optional integrity-covered version-1 `queue` stores native bytes and exact
-Lua action-to-owner mappings. Restore stages entities/source geometry first,
-then hydrates supported original classes and binds genuine supported
-continuations after player startup, before publication or the first tick.
-Current/future groups, stable IDs, progress/history/delta and timing survive;
+Optional integrity-covered version-2 `queue` stores native bytes, bound container
+references, per-item group sources and exact Lua action-to-owner mappings. Restore
+stages graph/entities/source geometry first, then hydrates supported original
+classes and binds genuine supported continuations after player startup, before
+publication or the first tick. Current/future groups, stable IDs,
+progress/history/delta and timing survive;
 missing exact enabled owners, malformed state or nonportable arbitrary closures
 refuse rather than silently discarding actions. Genuine browser autosave/reload
 retained the exact positive-progress mixed-origin queue at multiplier 0; public

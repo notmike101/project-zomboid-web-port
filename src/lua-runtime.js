@@ -25,6 +25,8 @@ import { WORLD_CONTEXT_PRELUDE } from './native-world-context.js';
 const EVENTS = new Set(['OnTick', 'OnPlayerUpdate', 'OnPlayerMove', 'OnGameStart', 'OnLoad', 'OnPostSave', 'OnResolutionChange', 'OnRightMouseDown', 'OnEquipPrimary', 'OnEquipSecondary', 'OnDestroyIsoThumpable', 'OnDoTileBuilding2', 'OnDoTileBuilding3', 'RenderOpaqueObjectsInWorld', 'OnCreatePlayer', 'OnPlayerDeath', 'OnMainMenuEnter', 'OnKeyPressed', 'OnKeyReleased', 'OnKeyKeepPressed', 'OnPreFillWorldObjectContextMenu', 'OnFillWorldObjectContextMenu', 'OnPressWalkTo', 'OnContainerUpdate', 'RequestTrade', 'AcceptedTrade', 'TradingUIAddItem', 'TradingUIRemoveItem', 'TradingUIUpdateState']);
 const EXTERNAL_EVENTS = new Set(['OnGameStart', 'OnLoad', 'OnPostSave', 'OnResolutionChange', 'OnRightMouseDown', 'OnEquipPrimary', 'OnEquipSecondary', 'OnCreatePlayer', 'OnPlayerDeath', 'OnMainMenuEnter', 'OnKeyPressed', 'OnKeyReleased', 'OnKeyKeepPressed']);
 
+EVENTS.add('OnClothingUpdated');
+
 const UI_PRELUDE = String.raw`
 local function ui(operation, ...) return hostCall('ui', operation, ...) end
 function getISUIStackTrace(level)
@@ -93,7 +95,7 @@ UIElement = {new = function(target)
     function object:AddChild(child) return ui('element',id,'AddChild',child.__ui) end
     function object:RemoveChild(child) return ui('element',id,'RemoveChild',child.__ui) end
     function object:DrawItemIcon(value,x,y,alpha,width,height)
-        assert(value and nativeTypes[value]=='InventoryItem','expected native inventory icon')
+        assert(value and (nativeTypes[value]=='InventoryItem' or nativeTypes[value]=='InventoryContainer'),'expected native inventory icon')
         assert(value:getFluidContainer()==nil and value:getTextureColorMask()==nil and value:getTextureFluidMask()==nil,'unsupported fluid or masked item icon')
         local texture=assert(value:getTex(),'original inventory icon unavailable')
         return self:DrawTextureScaledAspect(texture,x,y,width,height,value:getR(),value:getG(),value:getB(),alpha)
@@ -224,18 +226,56 @@ PZAPI = {ModOptions = {create = function(_, id, title)
     return options
 end}}
 local itemCache = {}
+local itemIds = setmetatable({}, {__mode='k'})
+local container,sourceItem
 local function item(id)
     if id == nil then return nil end
     if itemCache[id] then return itemCache[id] end
-    local value=nativeObject('InventoryItem')
-    local function record() return hostCall('item',id) end
+    local row=assert(hostCall('item',id),'native item is unavailable')
+    local value=nativeObject(row.internalContainerId and 'InventoryContainer' or 'InventoryItem')
+    local function record() return assert(hostCall('item',id),'native item is unavailable') end
     function value:getFullType() return record().fullType end
     function value:getCondition() return record().condition end
     function value:getConditionMax() return hostCall('itemDefinition',record().fullType).conditionMax end
     function value:getWeight() return hostCall('itemWeight',id,'weight') end
     function value:getActualWeight() return hostCall('itemWeight',id,'actualWeight') end
-    function value:getContentsWeight() return hostCall('itemContentsWeight',id) end
-    function value:getUnequippedWeight() return self:getActualWeight() + self:getContentsWeight() end
+    function value:getContentsWeight() return hostCall('itemWeights',id).contentsWeight end
+    function value:getBodyLocation()
+        local name=hostCall('itemDefinition',record().fullType).bodyLocation
+        return name~=nil and locationObject(hostCall('equipment','lookup',name)) or nil
+    end
+    function value:canBeEquipped()
+        local name=hostCall('itemDefinition',record().fullType).canBeEquipped
+        return name~=nil and locationObject(hostCall('equipment','lookup',name)) or nil
+    end
+    function value:getUnequippedWeight() return hostCall('itemWeights',id).unequippedWeight end
+    function value:getEquippedWeight() return hostCall('itemWeights',id).equippedWeight end
+    function value:getHotbarEquippedWeight() return hostCall('itemWeights',id).hotbarEquippedWeight end
+    function value:getContainer()
+        local owner=record().ownerContainerId
+        return owner~=0 and container(owner) or nil
+    end
+    function value:getOutermostContainer()
+        return container(hostCall('sourceActions','itemOutermostContainer',id))
+    end
+    function value:getOwner()
+        local current=self:getContainer()
+        return current and current:getParent()==player and player or nil
+    end
+    function value:getPlayer()
+        local outer=self:getOutermostContainer()
+        return outer and outer:getParent()==player and player or self:getOwner()
+    end
+    function value:getInventory() return container(record().internalContainerId) end
+    if row.internalContainerId then
+        function value:getInventoryWeight() return hostCall('sourceActions','itemInventoryWeight',id) end
+    end
+    function value:getEffectiveCapacity(character)
+        assert(character==nil or character==player,'unsupported bag capacity actor')
+        return hostCall('sourceActions','itemContainerCapacity',id,character==player and 1 or 0,true)
+    end
+    function value:getCapacity() return hostCall('sourceActions','itemContainerCapacity',id,0,false) end
+    function value:getWeightReduction() return hostCall('itemDefinition',record().fullType).weightReduction end
     function value:getCurrentCondition()
         local maximum=self:getConditionMax()
         assert(type(maximum)=='number' and maximum>0, 'unsupported item condition percentage without positive original ConditionMax')
@@ -245,15 +285,18 @@ local function item(id)
     function value:setWeight(weight) hostCall('setWeight',id,weight) end
     function value:setActualWeight(actualWeight) hostCall('setActualWeight',id,actualWeight) end
     itemCache[id] = value
+    itemIds[value] = id
     return value
 end
 function player:getClothingItem_Feet() return item(hostCall('worn','base:shoes')) end
-function player:getWornItem(location) return item(hostCall('worn',location)) end
+function player:getWornItem(location) return item(hostCall('equipment','wornGet',locationToken(location))) end
 function player:isWearingAwkwardGloves() return hostCall('isWearingAwkwardGloves') end
-local inventory = nativeObject('ItemContainer')
-function inventory:getCapacityWeight() return hostCall('inventoryState').capacityWeight end
-function inventory:getMaxWeight() return hostCall('inventoryState').maxWeight end
-function player:getInventory() hostCall('inventoryState'); return inventory end
+local inventory
+function player:getInventory()
+    local value=container(hostCall('playerInventoryId'))
+    inventory=value
+    return value
+end
 function player:getHealth() return hostCall('health') end
 function player:isDead() return hostCall('isDead') end
 local moodles = nativeObject('Moodles')
@@ -378,7 +421,11 @@ local sourceMethods={}
 local sourceMethodNames={'new','begin','create','adjustMaxTime','isValidStart','isValid','waitToStart',
     'start','update','perform','stop','complete','forceCancel','forceComplete','forceStop','isStarted',
     'getDuration','getJobDelta','setJobDelta','resetJobDelta','setActionAnim','setAnimVariable',
-    'setOverrideHandModels','beginAddingActions','endAddingActions','transferItem','checkQueueList','setOnComplete'}
+    'setOverrideHandModels','beginAddingActions','endAddingActions','transferItem','checkQueueList','setOnComplete',
+    'getNotFullFloorSquare','floorHasRoomFor','canDropOnFloor','isAlreadyTransferred','canMergeAction','GetDropItemOffset','removeItemOnCharacter',
+    'startActionAnim','doActionAnim','playSourceContainerOpenSound','playSourceContainerCloseSound',
+    'playDestContainerOpenSound','playDestContainerCloseSound','getTransferStartSoundName',
+    'getTransferCompleteSoundName','playTransferCompleteSound','stopLoopingSound','getTimeDelta'}
 local sourceDoorCompletion
 local restoredDoorContinuations={}
 local methodOwners=setmetatable({}, {__mode='k'})
@@ -393,7 +440,7 @@ local function allowSourceAdmission()
         'source admission denied during owner withdrawal')
 end
 local worldItems, doorObjects = {}, {}
-local itemIds = setmetatable({}, {__mode='k'})
+local worldItem
 local actorState = {farming=false,aiming=false,asleep=false,dragging=false,animation=nil,variables={},events={}}
 local jobs, transactions, nextTransaction = {}, {}, 1
 local restoring = false
@@ -424,14 +471,246 @@ local function collection(read)
     function value:contains(target) for _,entry in ipairs(read()) do if entry==target then return true end end;return false end
     return value
 end
+local containerCache,containerIds={},setmetatable({}, {__mode='k'})
+local function containerPolicy(value,entry)
+    local row=hostCall('container',assert(containerIds[value],'expected native container'))
+    local function result(allowed)
+        if eventScope then
+            eventScope.containerPolicies=eventScope.containerPolicies or {}
+            eventScope.containerPolicies[tostring(containerIds[value])..':'..tostring(itemIds[entry])]=allowed
+        end
+        return allowed
+    end
+    if row.onlyAcceptCategory and row.onlyAcceptCategory:lower()~=entry:getCategory():lower() then return result(0) end
+    if not row.acceptItemFunction then return result(1) end
+    local fn=root
+    for key in row.acceptItemFunction:gmatch('[^.]+') do
+        if rawType(fn)~='table' then fn=nil;break end
+        fn=rawget(fn,key)
+    end
+    if fn==nil then return result(1) end
+    local ok,allowed=pcall(fn,value,entry)
+    return result(ok and allowed==true and 1 or 0)
+end
+local function transferOperation(entry,operation,owner,x,y,z)
+    assert(eventScope and eventScope.event==5 and eventScope.transferItemId==itemIds[entry],
+        'item mutation requires its authorized source helper transaction')
+    if operation==3 and eventScope.worldRemoved then return end
+    if operation==3 then owner=eventScope.transferSourceContainerId end
+    local result=qa('transferOperation',eventScope.actionId,itemIds[entry],eventScope.token,operation,owner or 0,x or 0,y or 0,z or 0)
+    if operation==3 then eventScope.worldRemoved=true end
+    return result
+end
+container=function(id)
+    if id==nil then return nil end
+    if containerCache[id] then return containerCache[id] end
+    local value=nativeObject('ItemContainer')
+    local function record() return assert(hostCall('container',id),'native container unavailable') end
+    local function state(actor) return hostCall('containerState',id,actor==player and 1 or 0) end
+    function value:getID() record();return id end
+    function value:getType() return record().type end
+    function value:getParent() return record().parentKind=='actor' and player or nil end
+    function value:getContainingItem() return sourceItem(record().containingItemId) end
+    function value:getCapacity() return state().capacity end
+    function value:getEffectiveCapacity(character)
+        assert(character==nil or character==player,'unsupported container actor')
+        return state(character).effectiveCapacity
+    end
+    function value:getCapacityWeight() return state().capacityWeight end
+    function value:getContentsWeight() return state().contentsWeight end
+    function value:getMaxWeight() return state().maxWeight end
+    function value:getWeightReduction() return record().weightReduction end
+    function value:getSourceGrid()
+        local position=record().worldPosition
+        return position and cell:getGridSquare(position.x,position.y,position.z) or nil
+    end
+    function value:setSourceGrid(square)
+        local position=assert(squareRecords[square],'expected native floor square')
+        assert(id==qa('floorContainer',position.x,position.y,position.z),'floor adapter cannot change native square identity')
+    end
+    function value:getOutermostContainer() return container(qa('containerOutermost',id)) end
+    function value:getSquare()
+        local outer=self:getOutermostContainer()
+        return outer:getSourceGrid() or (outer:getParent()==player and player:getCurrentSquare() or nil)
+    end
+    function value:getWorldItem()
+        local shell=self:getContainingItem()
+        return shell and shell:getWorldItem() or nil
+    end
+    function value:hasWorldItem() return self:getWorldItem()~=nil end
+    function value:isInCharacterInventory(character)
+        assert(character==player,'unsupported container actor');return qa('containerActorOwner',id)==1
+    end
+    function value:contains(entry,recurse)
+        local itemId=itemIds[entry]
+        return itemId~=nil and qa('containerContains',id,itemId,recurse==true)
+    end
+    function value:containsTypeRecurse(name)
+        for _,row in ipairs(hostCall('items')) do
+            if row.fullType:match('%.([^%.]+)$')==name and qa('containerContains',id,row.id,true) then return true end
+        end
+        return false
+    end
+    function value:isInside(entry) return qa('containerIsInside',id,(assert(itemIds[entry],'expected native item'))) end
+    function value:isExistYet() return hostCall('container',id)~=nil end
+    function value:isVehicleSeat() record();return false end
+    function value:isRemoveItemAllowed(entry) return qa('containerRemoveAllowed',id,(assert(itemIds[entry],'expected native item'))) end
+    function value:isItemAllowed(entry) return qa('containerItemAllowed',id,(assert(itemIds[entry],'expected native item')),containerPolicy(value,entry)) end
+    function value:hasRoomFor(...)
+        local count=select('#',...)
+        local character,entry,delta=...
+        assert((count==2 or count==3) and (character==nil or character==player),'expected original character/item or character/weight[/floorDelta] overload')
+        if rawType(entry)=='number' then
+            assert(count==2 or rawType(delta)=='number','floor delta must be numeric')
+            return qa('containerHasRoomWeight',id,character==player and 1 or 0,entry,delta or 0)
+        end
+        assert(count==2,'item overload has no floor delta')
+        return qa('containerHasRoomItem',id,character==player and 1 or 0,(assert(itemIds[entry],'expected native item')),containerPolicy(value,entry))
+    end
+    function value:DoRemoveItem(entry) transferOperation(entry,1,id);return entry end
+    function value:AddItem(entry) transferOperation(entry,2,id);return entry end
+    value.DoAddItemBlind=value.AddItem
+    function value:setDrawDirty(enabled) assert(rawType(enabled)=='boolean');actorState.inventoryDirty=enabled end
+    function value:setExplored(enabled) assert(rawType(enabled)=='boolean');qa('containerSetFlags',id,0,enabled) end
+    function value:isExplored() return record().explored end
+    function value:setHasBeenLooted(enabled) assert(rawType(enabled)=='boolean');qa('containerSetFlags',id,1,enabled) end
+    function value:isHasBeenLooted() return record().looted end
+    local items=indexedCollection(function() return qa('containerItemCount',id) end,
+        function(index) return sourceItem(qa('containerItemGet',id,index)) end)
+    function value:getItems() return items end
+    for _,method in ipairs({'getContainerPosition','getFreezerPosition','getTakeSound','getPutSound','getOpenSound','getCloseSound'}) do
+        value[method]=function()
+            local row=record()
+            if row.kind~='bag' then return nil end
+            local definition=hostCall('itemDefinition',value:getContainingItem():getFullType())
+            local field=method:sub(4)
+            for _,entry in ipairs(definition.rawFields or {}) do if entry.name:lower()==field:lower() then return entry.value end end
+            return nil
+        end
+    end
+    containerCache[id],containerIds[value]=value,id
+    return value
+end
+inventory=container(1)
+local floorViews=setmetatable({}, {__mode='k'})
+local function floorViewRoot(value)
+    assert(floorViews[value],'expected transient source floor presentation')
+    local square=assert(player:getCurrentSquare(),'floor destination needs actual current square')
+    return container(qa('floorContainer',square:getX(),square:getY(),square:getZ()))
+end
+local function newFloorView()
+    local value=nativeObject('ItemContainer')
+    local ids,seen={},{}
+    local explored=false
+    floorViews[value]=true
+    local function live(id)
+        local record=hostCall('item',id)
+        local owner=record and record.ownerContainerId~=0 and hostCall('container',record.ownerContainerId)
+        if not record or not record.worldPosition or not owner or owner.kind~='floor' then return false end
+        local position=record.worldPosition
+        local stamp=seen[id]
+        return stamp==nil or (stamp.ownerContainerId==record.ownerContainerId and stamp.x==position.x and stamp.y==position.y and stamp.z==position.z)
+    end
+    local function at(index)
+        local cursor=0
+        for _,id in ipairs(ids) do
+            if live(id) then
+                if cursor==index then return sourceItem(id) end
+                cursor=cursor+1
+            end
+        end
+        return nil
+    end
+    local function size()
+        local count=0
+        for _,id in ipairs(ids) do if live(id) then count=count+1 end end
+        return count
+    end
+    function value:getType() return 'floor' end
+    function value:getParent() return nil end
+    function value:getContainingItem() return nil end
+    function value:getCapacity() return 50 end
+    function value:getEffectiveCapacity(character)
+        assert(character==nil or character==player,'unsupported presentation actor');return 50
+    end
+    function value:getMaxWeight() return 50 end
+    function value:getCapacityWeight()
+        local weight=0
+        for _,id in ipairs(ids) do
+            if live(id) then weight=hostCall('sourceFloatAdd',weight,hostCall('itemWeights',id).unequippedWeight) end
+        end
+        return weight
+    end
+    function value:getContentsWeight() return self:getCapacityWeight() end
+    function value:getSourceGrid() return player:getCurrentSquare() end
+    function value:getSquare() return self:getSourceGrid() end
+    function value:getOutermostContainer() return self end
+    function value:isInCharacterInventory(character) assert(character==player);return false end
+    function value:isVehicleSeat() return false end
+    function value:isExistYet() return player:getCurrentSquare()~=nil end
+    function value:isInside(entry) assert(itemIds[entry]);return false end
+    function value:contains(entry)
+        local id=itemIds[entry];return id~=nil and seen[id]~=nil and live(id) or false
+    end
+    function value:setExplored(enabled) assert(rawType(enabled)=='boolean');explored=enabled end
+    function value:isExplored() return explored end
+    function value:setDrawDirty(enabled) assert(rawType(enabled)=='boolean');actorState.inventoryDirty=enabled end
+    function value:clear() ids,seen={},{} end
+    function value:removeItemsFromProcessItems()
+        -- This transient presentation never registers native processing or owns an item.
+        for _,id in ipairs(ids) do if live(id) then hostCall('item',id) end end
+    end
+    function value:AddItem(entry)
+        local id=assert(itemIds[entry],'floor presentation requires a native item')
+        assert(live(id),'floor presentation requires live true world/floor ownership')
+        if not seen[id] then
+            local record=hostCall('item',id)
+            local position=record.worldPosition
+            ids[#ids+1]=id
+            seen[id]={ownerContainerId=record.ownerContainerId,x=position.x,y=position.y,z=position.z}
+        end
+        return entry
+    end
+    function value:hasRoomFor(...) return floorViewRoot(value):hasRoomFor(...) end
+    function value:isItemAllowed(entry) return floorViewRoot(value):isItemAllowed(entry) end
+    function value:isRemoveItemAllowed(entry)
+        assert(self:contains(entry),'item is not in the live floor presentation')
+        return entry:getContainer():isRemoveItemAllowed(entry)
+    end
+    local entries=indexedCollection(size,at)
+    function entries:clear() value:clear() end
+    function value:getItems() return entries end
+    return value
+end
 local activePlayerValues={player}
 local activePlayers=collection(function() hostCall('state');return activePlayerValues end)
 IsoPlayer={getPlayers=function() hostCall('state');return activePlayers end}
-local function sourceItem(id)
+sourceItem=function(id)
     if id==nil then return nil end
     local value=item(id)
     itemIds[value]=id
     function value:getID() return id end
+    function value:getType() return self:getFullType():match('%.([^%.]+)$') end
+    function value:getCategory()
+        local definition=hostCall('itemDefinition',self:getFullType())
+        return definition.sourceCategory
+    end
+    function value:getIsCraftingConsumed() return hostCall('sourceItemState',id,'consumed') end
+    function value:isFavorite() return hostCall('sourceItemState',id,'favorite') end
+    function value:setFavorite(enabled) hostCall('sourceItemState',id,'favorite',enabled) end
+    function value:hasWorldItem() return self:getWorldItem()~=nil end
+    function value:isOnGroundOnSquare(square)
+        local world=self:getWorldItem()
+        return square~=nil and world~=nil and world:getSquare()==square
+    end
+    function value:isInsideBagOnSquare(square)
+        local outer=self:getOutermostContainer()
+        local world=outer and outer:getWorldItem()
+        return square~=nil and world~=nil and world:getSquare()==square
+    end
+    function value:isOnGroundOrInsideBagOnSquare(square)
+        return self:isOnGroundOnSquare(square) or self:isInsideBagOnSquare(square)
+    end
     function value:getName() return ui('itemName',self:getFullType()) end
     local function appearance()
         local definition=hostCall('itemDefinition',value:getFullType())
@@ -455,27 +734,33 @@ local function sourceItem(id)
         value[pair[1]]=function() appearance();return itemVisuals[id][pair[2]] end
     end
     function value:getColor() appearance();return color(function() return itemVisuals[id] end) end
-    function value:getWorldItem() return hostCall('item',id).location=='ground' and worldItems[id] or nil end
-    function value:setWorldItem(other) assert(other==nil and eventScope and eventScope.event==5,'world item removal requires perform') end
+    function value:getWorldItem()
+        local record=hostCall('item',id)
+        return record and record.worldPosition and worldItem(id) or nil
+    end
+    function value:setWorldItem(other)
+        assert(other==nil,'unsupported replacement world object')
+        transferOperation(value,3)
+    end
     function value:setJobType(name) assert(rawType(name)=='string');jobs[id]=jobs[id] or {};jobs[id].type=name end
     function value:setJobDelta(deltaValue) assert(rawType(deltaValue)=='number');jobs[id]=jobs[id] or {};jobs[id].delta=deltaValue end
     function value:getJobDelta() return jobs[id] and jobs[id].delta or 0 end
+    function value:getJobType() return jobs[id] and jobs[id].type or '' end
     return value
 end
 function player:getPrimaryHandItem() return sourceItem(hostCall('handItems').primary) end
 function player:getSecondaryHandItem() return sourceItem(hostCall('handItems').secondary) end
 local function setHandItem(slot,value)
-    assert(value==nil or nativeTypes[value]=='InventoryItem','expected native held inventory item')
+    assert(value==nil or itemIds[value]~=nil,'expected native held inventory item')
     local id=value and assert(itemIds[value],'expected stable native held item identity') or nil
     local result=hostCall('sourceSetHandItem',slot,id)
     assert(result and result.committed,'source held item change denied: '..tostring(result and result.cancelledBy))
 end
 function player:setPrimaryHandItem(value) setHandItem('primary',value) end
 function player:setSecondaryHandItem(value) setHandItem('secondary',value) end
-local function worldItem(id)
+worldItem=function(id)
     if worldItems[id] then return worldItems[id] end
     local value=nativeObject('IsoWorldInventoryObject')
-    local removed=false
     function value:getItem() return sourceItem(id) end
     function value:getName() return self:getItem():getName() end
     local highlighted={}
@@ -489,27 +774,26 @@ local function worldItem(id)
     function value:getFluidContainer() return self:getItem():getFluidContainer() end
     function value:getSquare()
         local record=hostCall('item',id)
-        if removed or not record or record.location~='ground' then return nil end
-        return cell:getGridSquare(record.x,record.y,record.z or 0)
+        local position=record and record.worldPosition
+        if not position then return nil end
+        return cell:getGridSquare(position.x,position.y,position.z)
     end
-    function value:getX() local record=hostCall('item',id);return record.x end
-    function value:getY() local record=hostCall('item',id);return record.y end
-    function value:getZ() local record=hostCall('item',id);return record.z or 0 end
+    function value:getX() return assert(hostCall('item',id).worldPosition,'not a world item').x end
+    function value:getY() return assert(hostCall('item',id).worldPosition,'not a world item').y end
+    function value:getZ() return assert(hostCall('item',id).worldPosition,'not a world item').z end
     local function screenPosition(index)
         assert(index==player:getPlayerNum(),'unsupported source viewport')
         local record=assert(hostCall('item',id),'source screen projection lost its native item')
-        assert(record.location=='ground','source screen position requires a ground item')
-        return hostCall('sourceContext','objectScreenPosition',{x=record.x,y=record.y,z=record.z or 0})
+        local position=assert(record.worldPosition,'source screen position requires a world item')
+        return hostCall('sourceContext','objectScreenPosition',position)
     end
     function value:getScreenPosX(index) return screenPosition(index).x end
     function value:getScreenPosY(index) return screenPosition(index).y end
-    function value:removeFromWorld() assert(eventScope and eventScope.event==5,'world removal requires source perform') end
-    function value:removeFromSquare() assert(eventScope and eventScope.event==5,'square removal requires source perform') end
+    function value:removeFromWorld() transferOperation(self:getItem(),3) end
+    function value:removeFromSquare() transferOperation(self:getItem(),3) end
     function value:setSquare(square)
-        assert(square==nil and eventScope and eventScope.event==5,'square removal requires source perform')
-        removed=true
-        eventScope.rollbackWorld=eventScope.rollbackWorld or {}
-        eventScope.rollbackWorld[#eventScope.rollbackWorld+1]=function() removed=false end
+        assert(square==nil,'unsupported replacement square')
+        transferOperation(self:getItem(),3)
     end
     worldItems[id]=value
     itemIds[value]=id
@@ -552,7 +836,8 @@ local function viewGet(meta,index)
     if index<1 or index>viewLength(meta) then return nil end
     if meta.kind=='queue' then return residentAction(qa('get',index-1)) end
     if meta.kind=='groups' then return group(qa('groupGet',meta.id,index-1)) end
-    return worldItem(qa('groupItemGet',meta.id,index-1))
+    local id=qa('groupItemGet',meta.id,index-1)
+    return qa('actionRead',qa('groupRead',meta.id).actionId).kind=='transfer' and sourceItem(id) or worldItem(id)
 end
 local function viewInsert(meta,index,value)
     assert(rawType(index)=='number' and index%1==0 and index>=1 and index<=viewLength(meta)+1,'native view insertion index out of range')
@@ -670,6 +955,13 @@ local function portable(action)
     for _,name in ipairs(sourceMethodNames) do
         if rawget(action,name)~=nil or action[name]~=methods[name] then return false end
     end
+    local helperMethods=sourceMethods.ISTransferAction
+    if action.Type=='ISInventoryTransferAction' and helperMethods then
+        if not ISTransferAction then return false end
+        for _,name in ipairs(sourceMethodNames) do
+            if ISTransferAction[name]~=helperMethods[name] then return false end
+        end
+    end
     local baseMethods=sourceMethods.ISBaseTimedAction
     if baseMethods then
         if not ISBaseTimedAction then return false end
@@ -708,6 +1000,14 @@ promote=function(action)
     if action.Type=='ISGrabItemAction' then
         kind,target=3,assert(itemIds[action.item],'grab needs stable world item')
         location=assert(action.item:getSquare(),'grab needs live source square')
+    elseif action.Type=='ISInventoryTransferAction' then
+        kind,target=5,assert(itemIds[action.item],'transfer needs stable inventory item')
+        assert(containerIds[action.srcContainer] and containerIds[action.destContainer],'transfer needs native container identities')
+        if action.destContainer:getType()=='floor' then
+            local square=assert(action:getNotFullFloorSquare(action.item),'no source-selected floor square')
+            action.destContainer=container(qa('floorContainer',square:getX(),square:getY(),square:getZ()))
+        end
+        location=action.destContainer:getSourceGrid() or player:getCurrentSquare()
     elseif action.Type=='ISOpenCloseDoor' then
         kind,target=2,qa('doorOrdinal',(assert(action.item.__doorId,'door needs stable native identity')))
         location=assert(action.item:getSquare(),'door needs live source square')
@@ -728,7 +1028,12 @@ promote=function(action)
             if pair[1]=='stopOnAim' and action.stopOnAim==nil then qa('actionSet',id,8,0) end
         end
         qa('actionSet',id,10,portable(action) and 1 or 0)
-        if kind==3 then bindGroups(action,id,assert(action.queueList,'grab constructor did not create groups')) end
+        if kind==3 or kind==5 then
+            if kind==5 then
+                qa('actionBindTransfer',id,action.srcContainer:getID(),action.destContainer:getID())
+            end
+            bindGroups(action,id,assert(action.queueList,'source transfer constructor did not create groups'))
+        end
     end)
     if not ok then
         qa('discard',id)
@@ -808,7 +1113,11 @@ function player:getVehicle() return actorState.vehicle end
 function player:pressedMovement() return hostCall('sourceInput','movement') end
 function player:pressedCancelAction() return hostCall('sourceInput','cancel') end
 function player:reportEvent(name) actorState.events[#actorState.events+1]=name end
-function player:faceThisObject(value) return hostCall('sourceFace',value.__doorId or itemIds[value]) end
+function player:faceThisObject(value)
+    local id=rawget(value,'__doorId') or itemIds[value]
+    assert(id~=nil,'source facing requires a stable native world target')
+    return hostCall('sourceFace',id)
+end
 function player:setPath2(path) assert(path==nil,'unsupported external path replacement') end
 local path=nativeObject('PathFindBehavior2')
 BehaviorResult={Failed='Failed',Succeeded='Succeeded',Working='Working'}
@@ -837,17 +1146,53 @@ function core:getOptionTimedActionGameSpeedReset() return hostCall('sourceContex
 function getGameSpeed() return hostCall('sourceContext','gameSpeed') end
 function getNumActivePlayers() return activePlayers:size() end
 function isClient() hostCall('state');return false end
+function player:isPlayerMoving() return hostCall('sourceInput','movement') end
+function player:clearVariable(name) actorState.variables[name]=nil end
+function player:shouldBeTurning() return qa('actorShouldBeTurning') end
+function player:isSittingOnFurniture() return qa('actorSittingOnFurniture') end
+function player:isSeatedInVehicle() return qa('actorSeatedInVehicle') end
+function core:getOptionDropItemsOnSquareCenter() return qa('dropItemsOnSquareCenter') end
+function core:setOptionDropItemsOnSquareCenter(enabled) return qa('setDropItemsOnSquareCenter',enabled) end
+function player:getOverlaySprite() return qa('actorOverlaySprite') end
+local characterEmitter=nativeObject('BaseCharacterSoundEmitter')
+for _,operation in ipairs({'playSound','isPlaying','stopSound','stopOrTriggerSound'}) do
+    characterEmitter[operation]=function(_,value)
+        return hostCall('sourceContext','characterEmitter',operation,value)
+    end
+end
+function player:getEmitter() return characterEmitter end
+function player:isEquipped(entry)
+    local state=qa('itemEquipmentState',(assert(itemIds[entry],'expected native item')))
+    return state.worn or state.held
+end
+function player:removeAttachedItem(entry) transferOperation(entry,8,qa('transferRead',eventScope.actionId).sourceContainerId) end
+function player:removeFromHands(entry)
+    transferOperation(entry,5,qa('transferRead',eventScope.actionId).sourceContainerId)
+    return true
+end
+function player:removeWornItem(entry,reset)
+    assert(reset==false,'unsupported worn removal reset branch')
+    transferOperation(entry,7,qa('transferRead',eventScope.actionId).sourceContainerId)
+end
+Metabolics={LightWork='LightWork'}
+function player:setMetabolicTarget(target) return hostCall('sourceContext','actorMetabolicTarget',target) end
+CharacterTrait.HEMOPHOBIC='base:hemophobic'
+CharacterTrait.DESENSITIZED='base:desensitized'
+CharacterTrait.COWARDLY='base:cowardly'
+CharacterTrait.BRAVE='base:brave'
+ItemPickerJava={updateOverlaySprite=function(parent)
+    assert(parent==player,'unsupported original overlay parent')
+    assert(eventScope and eventScope.transferItemId,'overlay requires authorized source helper')
+    transferOperation(sourceItem(eventScope.transferItemId),6,inventory:getID())
+end}
+ItemPicker=ItemPickerJava
+DesignationZoneAnimal={removeItemFromGround=function(value)
+    local square=assert(value:getSquare(),'animal-zone lookup needs source world square')
+    assert(qa('animalZoneForSquare',squareRecords[square])==nil,
+        'unsupported original animal-zone ground item removal')
+end}
 function isServer() hostCall('state');return false end
 function CancelAction(index) assert(index==0);return ISTimedActionQueue.clear(player) end
-function inventory:hasRoomFor(character,value) assert(character==player);return hostCall('itemHasRoom',(assert(itemIds[value],'expected stable inventory item'))) end
-function inventory:AddItem(value)
-    assert(eventScope and eventScope.event==5,'inventory transfer requires source perform')
-    local id=assert(itemIds[value],'cannot factory-duplicate a transferred item')
-    local groupId=assert(eventScope.groupId,'transfer has no authorized detached group')
-    qa('commitItem',eventScope.actionId,groupId,id,eventScope.token)
-    return value
-end
-function inventory:setDrawDirty(value) actorState.inventoryDirty=value end
 function createItemTransaction(character,source,destination,inventoryValue)
     assert(character==player and source==nil and destination==nil and inventoryValue==inventory,'unsupported item transaction')
     local id=nextTransaction;nextTransaction=id+1;transactions[id]={character=character,destination=inventoryValue};return id
@@ -864,7 +1209,17 @@ function instanceof(value,class)
     if class=='IsoPlayer' or class=='IsoGameCharacter' then return label=='IsoPlayer' end
     if class=='IsoWorldInventoryObject' or class=='IItemProvider' then return label=='IsoWorldInventoryObject' end
     if class=='IsoDoor' then return label=='IsoDoor' end
-    if class=='IsoDeadBody' and label=='IsoPlayer' then return false end
+    if class=='BaseVehicle' or class=='IsoDeadBody' or class=='IsoMannequin' then
+        if value==nil then return false end
+        if label==nil then return originalInstanceof(value,class) end
+        return label==class
+    end
+    if class=='Food' or class=='Clothing' then
+        if value==nil or not itemIds[value] or label=='IsoWorldInventoryObject' then return false end
+        local definition=hostCall('itemDefinition',value:getFullType())
+        local kind=(definition.type or 'Normal'):lower():gsub('^base:','')
+        return kind==class:lower()
+    end
     if class=='Radio' then
         if label~='InventoryItem' then return false end
         local definition=hostCall('itemDefinition',value:getFullType())
@@ -883,12 +1238,97 @@ local function wrapQueue()
         return value
     end
 end
+local function prepareSourceTransfer(entry,source,destination,square)
+    assert(eventScope and eventScope.event==5 and eventScope.helperItemId==itemIds[entry],
+        'shared transfer requires its original source action event')
+    assert(eventScope.transferItemId==nil,'recursive native transfer helper')
+    local definition=hostCall('itemDefinition',entry:getFullType())
+    local kind=(definition.type or 'Normal'):lower():gsub('^base:','')
+    assert(not definition.unsupportedSubtype and (kind=='normal' or kind=='item' or kind=='container' or kind=='clothing'),
+        'unsupported original transfer subtype or side effects')
+    assert(entry:getType()~='CandleLit' and entry:getType()~='Lantern_HurricaneLit','unsupported original replacement transfer')
+    local function supportedFields(fields)
+        for _,field in ipairs(fields) do
+            assert(not field.name:lower():match('ammo') and not field.name:lower():match('fluid') and not field.name:lower():match('component'),
+                'unsupported original ammo/fluid/entity transfer')
+            if field.children then supportedFields(field.children) end
+        end
+    end
+    supportedFields(definition.rawFields or {})
+    local refs=qa('transferRead',eventScope.actionId)
+    assert((qa('actionRead',eventScope.actionId).kind=='grab' or source:getID()==refs.sourceContainerId)
+        and destination:getID()==refs.destinationContainerId,
+        'original helper containers differ from immutable native intent')
+    for _,value in ipairs({source,destination}) do
+        local record=hostCall('container',value:getID())
+        assert(record.kind=='actor' or record.kind=='floor' or record.kind=='bag','unsupported original container backend')
+        assert(value:getType()~='TradeUI','unsupported original trading transfer')
+    end
+    if source:getType()=='floor' then
+        local world=assert(entry:getWorldItem(),'floor source needs a true ground world item')
+        local worldSquare=assert(world:getSquare(),'floor source lost world square')
+        assert(qa('animalZoneForSquare',squareRecords[worldSquare])==nil,
+            'unsupported original animal-zone transfer side effects')
+    end
+    if destination:getType()=='floor' then
+        assert(square and square==destination:getSourceGrid(),'source-selected drop square differs from accepted native intent')
+        assert(square:getApparentZ(0,0)==square:getZ() and square:getApparentZ(1,1)==square:getZ(),
+            'unsupported original elevated floor item placement')
+        player:isSeatedInVehicle()
+        core:getOptionDropItemsOnSquareCenter()
+    end
+    local key=tostring(destination:getID())..':'..tostring(itemIds[entry])
+    local policy=eventScope.containerPolicies and eventScope.containerPolicies[key]
+    if policy==nil then
+        policy=hostCall('container',destination:getID()).acceptItemFunction and -1 or 1
+    end
+    qa('transferBegin',eventScope.actionId,(assert(eventScope.groupId,'helper requires detached authorized group')),
+        itemIds[entry],eventScope.token,policy)
+    eventScope.transferItemId=itemIds[entry]
+    eventScope.transferSourceContainerId=source:getID()
+    eventScope.worldRemoved=false
+end
+local function sourceHelper(action,entry,original,...)
+    assert(eventScope and eventScope.event==5 and eventScope.actionId==actionIds[action],
+        'source transfer helper requires its authorized perform')
+    assert(eventScope.helperItemId==nil,'recursive source transfer')
+    local value=action.Type=='ISGrabItemAction' and entry:getItem() or entry
+    eventScope.helperItemId=assert(itemIds[value],'helper needs stable inventory identity')
+    local arguments=table.pack(...)
+    local ok,result=pcall(function()
+        if action.Type=='ISGrabItemAction' then
+            local refs=qa('transferRead',eventScope.actionId)
+            local owner=assert(hostCall('item',itemIds[value]),'grab helper lost native item').ownerContainerId
+            prepareSourceTransfer(value,container(owner),container(refs.destinationContainerId),nil)
+            transferOperation(value,1,owner)
+        end
+        return original(action,entry,table.unpack(arguments,1,arguments.n))
+    end)
+    if eventScope.transferItemId then
+        -- PORT SAFETY: original helpers remove first; a failed supported helper restores native ownership/world/equipment.
+        local finished,finishError=pcall(qa,'transferFinish',eventScope.actionId,eventScope.transferItemId,eventScope.token,ok)
+        eventScope.transferItemId=nil
+        if not finished then ok,result=false,finishError end
+    end
+    eventScope.helperItemId,eventScope.worldRemoved,eventScope.transferSourceContainerId=nil,nil,nil
+    if not ok then rawError(result,0) end
+    return result
+end
+function ZombRandFloat(minimum,maximum)
+    assert(eventScope and eventScope.transferItemId,'random floor placement requires native helper authorization')
+    return qa('transferRandom',eventScope.actionId,eventScope.transferItemId,eventScope.token,minimum,maximum,false)
+end
+function ZombRand(minimum,maximum)
+    assert(maximum~=nil,'unsupported source random overload')
+    assert(eventScope and eventScope.transferItemId,'random floor placement requires native helper authorization')
+    return qa('transferRandom',eventScope.actionId,eventScope.transferItemId,eventScope.token,minimum,maximum,true)
+end
 function __pz_source_loaded()
     wrapQueue()
     if not sourceDoorCompletion and ISWorldObjectContextMenu and rawType(ISWorldObjectContextMenu.onOpenCloseDoor)=='function' then
         sourceDoorCompletion=ISWorldObjectContextMenu.onOpenCloseDoor
     end
-    for _,name in ipairs({'ISGrabItemAction','ISOpenCloseDoor','ISWalkToTimedAction','ISWaitWhileGettingUp'}) do
+    for _,name in ipairs({'ISGrabItemAction','ISInventoryTransferAction','ISOpenCloseDoor','ISWalkToTimedAction','ISWaitWhileGettingUp'}) do
         local prototype=rawget(root,name)
         if rawType(prototype)=='table' and not sourceClasses[name] then
             sourceClasses[name],sourceConstructors[name]=prototype,prototype.new
@@ -904,6 +1344,19 @@ function __pz_source_loaded()
             end
             return original(self,...)
         end end
+    end
+    if ISInventoryTransferAction and not rawget(ISInventoryTransferAction,'__nativeAdmission') then
+        ISInventoryTransferAction.__nativeAdmission=true
+        local original=ISInventoryTransferAction.new
+        ISInventoryTransferAction.new=function(self,character,entry,source,destination,time)
+            allowSourceAdmission()
+            if floorViews[source] then
+                assert(source:contains(entry),'source item is not in the live floor presentation')
+                source=entry:getContainer()
+            end
+            if floorViews[destination] then destination=floorViewRoot(destination) end
+            return original(self,character,entry,source,destination,time)
+        end
     end
     if ISGrabItemAction and not rawget(ISGrabItemAction,'__nativeAdmission') then
         ISGrabItemAction.__nativeAdmission=true
@@ -925,6 +1378,23 @@ function __pz_source_loaded()
             return action
         end
     end
+    for _,name in ipairs({'ISGrabItemAction','ISInventoryTransferAction'}) do
+        local prototype=rawget(root,name)
+        if prototype and not rawget(prototype,'__nativeTransferHelper') then
+            prototype.__nativeTransferHelper=true
+            local original=prototype.transferItem
+            prototype.transferItem=function(action,entry,...) return sourceHelper(action,entry,original,...) end
+        end
+    end
+    if ISTransferAction and not rawget(ISTransferAction,'__nativeTransferHelper') then
+        ISTransferAction.__nativeTransferHelper=true
+        local original=ISTransferAction.transferItem
+        ISTransferAction.transferItem=function(self,character,entry,source,destination,square)
+            assert(character==player,'unsupported original transfer actor')
+            prepareSourceTransfer(entry,source,destination,square)
+            return original(self,character,entry,source,destination,square)
+        end
+    end
     if ISBaseTimedAction and not rawget(ISBaseTimedAction,'__nativeForceCancel') then
         ISBaseTimedAction.__nativeForceCancel=true
         local original=ISBaseTimedAction.forceCancel
@@ -934,10 +1404,10 @@ function __pz_source_loaded()
             return original(action,...)
         end
     end
-    for _,name in ipairs({'ISBaseTimedAction','ISTimedActionQueue','ISGrabItemAction','ISOpenCloseDoor','ISWalkToTimedAction','ISWaitWhileGettingUp','ISWorldObjectContextMenu','ISContextMenu'}) do
+    for _,name in ipairs({'ISBaseTimedAction','ISTimedActionQueue','ISGrabItemAction','ISInventoryTransferAction','ISTransferAction','ISOpenCloseDoor','ISWalkToTimedAction','ISWaitWhileGettingUp','ISWorldObjectContextMenu','ISContextMenu'}) do
         local prototype=rawget(root,name)
         if rawType(prototype)=='table' then
-            if (sourceClasses[name] or name=='ISBaseTimedAction') and not sourceMethods[name] then
+            if (sourceClasses[name] or name=='ISBaseTimedAction' or name=='ISTransferAction') and not sourceMethods[name] then
                 local methods={}
                 for _,method in ipairs(sourceMethodNames) do methods[method]=prototype[method] end
                 sourceMethods[name]=methods
@@ -969,7 +1439,9 @@ function __pz_source_event(event)
         return guarded(callbackOwner,function()
             hostCall('sourceOwnerAlive')
             if event.event==5 then
-                if action.Type=='ISGrabItemAction' and #action.queueList>0 then event.groupId=qa('groupGet',event.actionId,0) end
+                if (action.Type=='ISGrabItemAction' or action.Type=='ISInventoryTransferAction') and #action.queueList>0 then
+                    event.groupId=qa('groupGet',event.actionId,0)
+                end
                 if action.Type=='ISOpenCloseDoor' and action.complete then action:complete() end
             end
             local value=action[method](action)
@@ -977,7 +1449,6 @@ function __pz_source_event(event)
             return 0
         end)
     end,function(err) return err end)
-    if not ok and event.rollbackWorld then for _,rollback in ipairs(event.rollbackWorld) do rollback() end end
     eventScope=nil
     -- Native eventReply may authorize a detached same-action STOP; retirement follows slot lifetime, not FIFO membership.
     if not ok then rawError(result,0) end
@@ -1024,7 +1495,8 @@ function __pz_source_prepare_save()
             local action=assert(actionObjects[id],'source save lost resident table')
             guarded(owner,function()
                 qa('actionSet',id,10,portable(action) and 1 or 0)
-                if action.Type=='ISGrabItemAction' then qa('actionSet',id,11,action.started and 1 or 0) end
+                if action.Type=='ISGrabItemAction' or action.Type=='ISInventoryTransferAction' then qa('actionSet',id,11,action.started and 1 or 0) end
+                if action.Type=='ISInventoryTransferAction' then qa('actionSet',id,12,action.allowMissingItems and 1 or 0) end
             end)
         end
     end
@@ -1037,7 +1509,7 @@ function __pz_source_owners()
     return result
 end
 local function constructSource(row,deferDoorCompletion)
-    local names={walk='ISWalkToTimedAction',door='ISOpenCloseDoor',grab='ISGrabItemAction',getUp='ISWaitWhileGettingUp'}
+    local names={walk='ISWalkToTimedAction',door='ISOpenCloseDoor',grab='ISGrabItemAction',transfer='ISInventoryTransferAction',getUp='ISWaitWhileGettingUp'}
     local name=assert(names[row.kind],'unsupported source constructor '..tostring(row.kind))
     local prototype=assert(sourceClasses[name],'original source constructor is not loaded: '..name)
     local constructor=assert(sourceConstructors[name],'original source constructor identity missing')
@@ -1046,6 +1518,11 @@ local function constructSource(row,deferDoorCompletion)
     if row.kind=='grab' then
         local first=assert(row.groups[1] and row.groups[1].itemIds[1],'source grab has no stable group')
         return constructor(prototype,player,worldItem(first),row.rawTime)
+    end
+    if row.kind=='transfer' then
+        local refs=qa('transferRead',row.id)
+        local first=assert(row.groups[1] and row.groups[1].itemIds[1],'source transfer has no stable group')
+        return constructor(prototype,player,sourceItem(first),container(refs.sourceContainerId),container(refs.destinationContainerId),row.rawTime)
     end
     local action=constructor(prototype,player)
     if not deferDoorCompletion and row.target.id and row.target.id~=4294967295 then
@@ -1069,17 +1546,18 @@ residentAction=function(id)
     restoring,selectionPermits,sourceAdmissionPermit=oldRestoring,oldPermits,oldAdmission
     if not ok then rawError(action,0) end
     actionIds[action],actionObjects[id]=id,action
-    if row.kind=='grab' then bindGroups(action,id,nil) end
+    if row.kind=='grab' or row.kind=='transfer' then bindGroups(action,id,nil) end
     action.action=handle(action,id)
     local previous=getmetatable(action)
     local index=previous.__index
     rawset(action,'maxTime',nil)
-    if row.kind=='grab' or row.kind=='door' then rawset(action,'item',nil) end
+    if row.kind=='grab' or row.kind=='transfer' or row.kind=='door' then rawset(action,'item',nil) end
     setmetatable(action,{__index=function(value,key)
         if key=='maxTime' then return qa('actionRead',id).maxTime end
         if key=='item' then
             local current=qa('actionRead',id)
-            return current.kind=='door' and door(current.target.id) or worldItem(current.target.id)
+            if current.kind=='door' then return door(current.target.id) end
+            return current.kind=='transfer' and sourceItem(current.target.id) or worldItem(current.target.id)
         end
         if rawType(index)=='function' then return index(value,key) end
         return index[key]
@@ -1125,6 +1603,13 @@ function __pz_source_restore(state,owners,constructorOwner)
     for _,owner in ipairs(owners) do ownerById[owner.actionId]=owner end
     require 'TimedActions/ISTimedActionQueue'
     require 'TimedActions/ISGrabItemAction'
+    for _,row in ipairs(rows) do
+        if row.kind=='transfer' then
+            require 'TimedActions/ISInventoryTransferAction'
+            require 'TimedActions/ISTransferAction'
+            break
+        end
+    end
     require 'TimedActions/ISOpenCloseDoor'
     require 'TimedActions/WalkToTimedAction'
     require 'TimedActions/ISWaitWhileGettingUp'
@@ -1148,10 +1633,11 @@ function __pz_source_restore(state,owners,constructorOwner)
                 local current=state.current and state.current.id==row.id
                 action.maxTime=current and qa('sourceTime',row.id) or row.rawTime
                 actionIds[action],actionObjects[row.id],actionOwners[row.id]=row.id,action,owner
-                if row.kind=='grab' then
+                if row.kind=='grab' or row.kind=='transfer' then
                     bindGroups(action,row.id,nil)
-                    action.item=worldItem(row.groups[1].itemIds[1])
+                    action.item=row.kind=='transfer' and sourceItem(row.groups[1].itemIds[1]) or worldItem(row.groups[1].itemIds[1])
                     action.started=(qa('actionRead',row.id).flags & 256)~=0
+                    if row.kind=='transfer' then action.allowMissingItems=(qa('actionRead',row.id).flags & 1024)~=0 end
                 end
                 if current then action.action=handle(action,row.id);sourceBegun[row.id]=true end
                 end)
@@ -1195,6 +1681,164 @@ function __pz_source_complete_restore()
         end
         restoredDoorContinuations[id]=nil
     end
+end
+`;
+
+const EQUIPMENT_PRELUDE = String.raw`
+local function equipment(operation, ...) return hostCall('equipment', operation, ...) end
+local locations, locationIds, groups, members = {}, setmetatable({}, {__mode='k'}), {}, {}
+local resources, resourceNames = {}, setmetatable({}, {__mode='k'})
+ResourceLocation = {}
+function ResourceLocation.of(name)
+    local canonical=equipment('canonical',name)
+    if resources[canonical] then return resources[canonical] end
+    local value=nativeObject('ResourceLocation')
+    function value:toString() return canonical end
+    getmetatable(value).__tostring=function() return canonical end
+    resources[canonical],resourceNames[value]=value,canonical
+    return value
+end
+locationToken=function(value)
+    return (assert(locationIds[value], 'expected native ItemBodyLocation'))
+end
+locationObject=function(token)
+    if token==nil or token==0 then return nil end
+    if locations[token] then return locations[token] end
+    local value=nativeObject('ItemBodyLocation')
+    function value:toString() return equipment('read',token,0) end
+    function value:getTranslationName() return equipment('read',token,1) end
+    getmetatable(value).__tostring=function() return value:toString() end
+    locations[token],locationIds[value]=value,token
+    return value
+end
+ItemBodyLocation=setmetatable({}, {__index=function(_,name)
+    for index=0,equipment('count')-1 do
+        local token=equipment('at',index)
+        local constant=equipment('read',token,2)
+        if constant and constant~='' then rawset(ItemBodyLocation,constant,locationObject(token)) end
+    end
+    local value=rawget(ItemBodyLocation,name)
+    assert(value~=nil,'unknown ItemBodyLocation constant: '..tostring(name))
+    return value
+end})
+function ItemBodyLocation.get(resource)
+    return locationObject(equipment('lookup',(assert(resourceNames[resource],'expected native ResourceLocation'))))
+end
+function ItemBodyLocation.register(name) return locationObject(equipment('register',name)) end
+local groupObject
+local function memberObject(group,token)
+    if token==nil or token==0 then return nil end
+    members[group]=members[group] or {}
+    if members[group][token] then return members[group][token] end
+    local value=nativeObject('BodyLocation')
+    function value:getId() return locationObject(token) end
+    function value:isId(other) return token==locationToken(other) end
+    function value:isMultiItem() return equipment('multiGet',group,token) end
+    function value:setMultiItem(enabled) equipment('multiSet',group,token,enabled);return self end
+    for _,pair in ipairs({{'Exclusive',3},{'HideModel',1},{'AltModel',2}}) do
+        local suffix,kind=pair[1],pair[2]
+        value['set'..suffix]=function(self,other) equipment('relationSet',group,token,locationToken(other),kind);return self end
+        value['is'..suffix]=function(self,other) return equipment('relationGet',group,token,locationToken(other),kind) end
+    end
+    members[group][token]=value
+    return value
+end
+groupObject=function(token)
+    if token==nil or token==0 then return nil end
+    if groups[token] then return groups[token] end
+    local value=nativeObject('BodyLocationGroup')
+    function value:getId() return equipment('groupName',token) end
+    function value:size() return equipment('locationCount',token) end
+    function value:getLocation(location)
+        local id=locationToken(location)
+        return equipment('locationIndex',token,id)>=0 and memberObject(token,id) or nil
+    end
+    function value:getOrCreateLocation(location)
+        local id=locationToken(location)
+        equipment('locationAdd',token,id)
+        return memberObject(token,id)
+    end
+    function value:getLocationByIndex(index)
+        assert(rawType(index)=='number' and index%1==0,'location index must be an integer')
+        if index<0 or index>=self:size() then return nil end
+        return memberObject(token,equipment('locationAt',token,index))
+    end
+    function value:indexOf(location) return equipment('locationIndex',token,locationToken(location)) end
+    function value:moveLocationToIndex(location,index) equipment('move',token,locationToken(location),index) end
+    function value:setMultiItem(location,enabled) equipment('multiSet',token,locationToken(location),enabled) end
+    function value:isMultiItem(location) return equipment('multiGet',token,locationToken(location)) end
+    for _,pair in ipairs({{'Exclusive',0},{'HideModel',1},{'AltModel',2}}) do
+        local suffix,kind=pair[1],pair[2]
+        value['set'..suffix]=function(self,a,b) equipment('relationSet',token,locationToken(a),locationToken(b),kind) end
+        value['is'..suffix]=function(self,a,b) return equipment('relationGet',token,locationToken(a),locationToken(b),kind) end
+    end
+    local all=indexedCollection(function() return value:size() end,function(index) return value:getLocationByIndex(index) end)
+    function value:getAllLocations() return all end
+    groups[token]=value
+    return value
+end
+BodyLocations={}
+function BodyLocations.getGroup(name) return groupObject(equipment('groupGet',name,true)) end
+function BodyLocations.reset() equipment('reset') end
+local allGroups=indexedCollection(function() return equipment('groupCount') end,function(index) return groupObject(equipment('groupAt',index)) end)
+function BodyLocations.getAllGroups() return allGroups end
+local worn=nativeObject('WornItems')
+local wornRecords={}
+local function wornRecord(index)
+    local row=equipment('wornRead',index)
+    assert(row,'worn item index out of range')
+    local key=tostring(row.id)..':'..tostring(row.location)
+    if not wornRecords[key] then
+        local value=nativeObject('WornItem')
+        function value:getItem() return sourceItem(row.id) end
+        function value:getLocation() return locationObject(row.location) end
+        wornRecords[key]=value
+    end
+    return wornRecords[key]
+end
+function worn:getBodyLocationGroup() return groupObject(equipment('wornGroupGet')) end
+function worn:size() return equipment('wornCount') end
+function worn:isEmpty() return self:size()==0 end
+function worn:get(index) return wornRecord(index) end
+function worn:getItem(location) return sourceItem(equipment('wornGet',locationToken(location))) end
+function worn:getItemByIndex(index)
+    if index<0 or index>=self:size() then return nil end
+    return self:get(index):getItem()
+end
+function worn:getItemById(id)
+    for index=0,self:size()-1 do local entry=self:get(index):getItem();if itemIds[entry]==id then return entry end end
+    return nil
+end
+function worn:setItem(location,value)
+    local id=value~=nil and (assert(itemIds[value],'expected native InventoryItem')) or nil
+    equipment('wornSet',locationToken(location),id)
+end
+function worn:getLocation(value)
+    local id=itemIds[value]
+    if not id then return nil end
+    for index=0,self:size()-1 do local row=equipment('wornRead',index);if row.id==id then return locationObject(row.location) end end
+    return nil
+end
+function worn:contains(value) return self:getLocation(value)~=nil end
+function worn:remove(value) equipment('wornRemove',(assert(itemIds[value],'expected native InventoryItem'))) end
+function worn:clear() equipment('wornClear') end
+function worn:forEach(consumer)
+    local index=0
+    while index<self:size() do consumer(self:get(index));index=index+1 end
+end
+local wornList=indexedCollection(function() return worn:size() end,wornRecord)
+function worn:getItems() return wornList end
+function player:getWornItems() return worn end
+function player:setWornItem(location,value) worn:setItem(location,value) end
+local previousInstanceof=instanceof
+function instanceof(value,class)
+    if class=='InventoryItem' then return itemIds[value]~=nil and nativeTypes[value]~='IsoWorldInventoryObject' end
+    if class=='InventoryContainer' then return nativeTypes[value]=='InventoryContainer' end
+    if class=='ItemContainer' then return nativeTypes[value]=='ItemContainer' end
+    if class=='ItemBodyLocation' or class=='ResourceLocation' or class=='BodyLocationGroup' or class=='BodyLocation' or class=='WornItems' or class=='WornItem' then
+        return nativeTypes[value]==class
+    end
+    return previousInstanceof(value,class)
 end
 `;
 
@@ -1296,6 +1940,8 @@ local function evaluate(record, name)
     end
     loading[key] = true
     local ok, value = pcall(guarded, record, function()
+        local equipmentStartup=record.engineSource and record.path:lower()=='media/lua/shared/npcs/bodylocations.lua'
+        if equipmentStartup and hostCall('equipment','initialized') then return true end
         -- This original action's top-level Page write is an implicit dependency.
         -- Enter the action first so Page -> Pane -> Util -> Action observes native recursive nil.
         if record.engineSource and record.path == 'media/lua/client/TimedActions/ISInventoryTransferAction.lua' then
@@ -1304,6 +1950,7 @@ local function evaluate(record, name)
         local fn, err = sourceFunction(record)
         if not fn then rawError(err, 0) end
         local result = fn(name)
+        if equipmentStartup then hostCall('equipment','initialized',true) end
         if __pz_source_loaded then __pz_source_loaded() end
         return result
     end)
@@ -1357,6 +2004,7 @@ local function nativeObject(name)
     nativeTypes[value] = name
     return value
 end
+local locationObject, locationToken
 local player = nativeObject('IsoPlayer')
 function player:getX() return hostCall('state').x end
 function player:getY() return hostCall('state').y end
@@ -1424,10 +2072,11 @@ local function unsupportedObject(name)
     return setmetatable({}, {__index = function(_, key) rawError(fault('unsupported native facility: ' .. name .. '.' .. tostring(key)), 2) end,
         __call = unsupported(name)})
 end
-for _, name in ipairs({'PZAPI', 'Calendar', 'java', 'UIFont', 'ItemBodyLocation', 'SandboxVars'}) do root[name] = unsupportedObject(name) end
+for _, name in ipairs({'PZAPI', 'Calendar', 'java', 'UIFont', 'SandboxVars'}) do root[name] = unsupportedObject(name) end
 ${UI_PRELUDE}
 ${BODY_PRELUDE}
 ${ACTION_PRELUDE}
+${EQUIPMENT_PRELUDE}
 ${WORLD_CONTEXT_PRELUDE}
 -- Lua's ordinary optional global lookups remain nil. No blanket _G trap.
 io = nil
@@ -1455,13 +2104,19 @@ function __pz_dispatch(name, ...)
     local args = table.pack(...)
     if name == 'OnPlayerUpdate' or name == 'OnPlayerMove' or name == 'OnPlayerDeath' then args = table.pack(player) end
     if name == 'OnCreatePlayer' then args = table.pack(0, player) end
-    if name == 'OnEquipPrimary' or name == 'OnEquipSecondary' then args = table.pack(player, sourceItem(args[1])) end
+    local equip=name=='OnEquipPrimary' or name=='OnEquipSecondary'
     local snapshot = {}
     for _, item in ipairs(handlers[name]) do snapshot[#snapshot + 1] = item end
     for _, item in ipairs(snapshot) do
         local present = false
         for _, live in ipairs(handlers[name]) do if live == item then present = true; break end end
-        if present then guarded(item, item.fn, table.unpack(args, 1, args.n)) end
+        if present then
+            if equip then
+                guarded(item,function() return item.fn(player,sourceItem(args[1])) end)
+            else
+                guarded(item,item.fn,table.unpack(args,1,args.n))
+            end
+        end
     end
 end
 function __pz_tick(seconds, number)
@@ -1971,6 +2626,20 @@ export async function createLuaSession(options = {}) {
 
                 return sourceTiming[name](...values);
             }
+            case 'sourceApparentZ': {
+                api().movement.getState();
+
+                if (typeof sourceContext?.squareApparentZ === 'function') {
+                    return sourceContext.squareApparentZ(...args);
+                }
+
+                if (typeof sourceActions?.squareApparentZ !== 'function') {
+                    throw new TypeError('unsupported native facility: authoritative source square elevation');
+                }
+
+                // Flat/sloped native facts need no renderer setting; the real backend refuses unconfigured stairs.
+                return sourceActions.squareApparentZ(...args);
+            }
             case 'sourceContext': {
                 api().movement.getState();
                 const [name, ...values] = args;
@@ -2023,7 +2692,13 @@ export async function createLuaSession(options = {}) {
                     throw new TypeError('source facing target is unavailable');
                 }
 
-                return sourceActions.face(target.x + 0.5, target.y + 0.5);
+                const position = typeof args[0] === 'string' ? target : target.worldPosition;
+
+                if (!position) {
+                    throw new TypeError('source item facing requires true world placement');
+                }
+
+                return sourceActions.face(position.x + 0.5, position.y + 0.5);
             }
             case 'sourcePathCancel': {
                 api().movement.getState();
@@ -2102,15 +2777,6 @@ export async function createLuaSession(options = {}) {
 
                 return sourceActions[name](args[0], args[1] ?? null);
             }
-            case 'itemHasRoom': {
-                api().movement.getState();
-
-                if (typeof sourceActions?.itemHasRoom !== 'function') {
-                    throw new TypeError('unsupported native facility: source inventory room predicate');
-                }
-
-                return sourceActions.itemHasRoom(args[0]);
-            }
             case 'square': {
                 if (args.length !== 3 || args.some((value) => typeof value !== 'number')) {
                     throw new TypeError('getGridSquare requires three numeric coordinates');
@@ -2154,6 +2820,39 @@ export async function createLuaSession(options = {}) {
             case 'readOptions': return capability('ui', 'readOptions', args[0]);
             case 'writeOptions': return capability('ui', 'writeOptions', args[0], jsonCopy(args[1]));
             case 'item': return capability('items', 'get', args[0]);
+            case 'container': return capability('items', 'getContainer', args[0]);
+            case 'playerInventoryId': return capability('items', 'playerInventoryId');
+            case 'containerState': return capability('items', 'containerState', args[0], args[1] === 1 ? 1 : null);
+            case 'itemWeights': return capability('items', 'itemWeights', args[0]);
+            case 'sourceFloatAdd': {
+                if (args.length !== 2 || args.some((value) => typeof value !== 'number' || Number.isNaN(value) || value < 0)) {
+                    throw new TypeError('Source floor weights require two nonnegative native numeric values.');
+                }
+
+                return Math.fround(Math.fround(args[0]) + Math.fround(args[1]));
+            }
+            case 'sourceItemState': {
+                api().movement.getState();
+
+                if (typeof sourceActions?.itemSourceState !== 'function') {
+                    throw new TypeError('unsupported native facility: authoritative source item flags');
+                }
+
+                return sourceActions.itemSourceState(...args);
+            }
+            case 'equipment': {
+                const [name, ...values] = args;
+
+                if (name === 'wornSet') {
+                    values[1] ??= null;
+                }
+
+                const result = capability('equipment', 'operation', name, ...values);
+
+                return ['multiSet', 'relationSet', 'move', 'reset', 'wornGroupSet', 'wornSet', 'wornRemove', 'wornClear'].includes(name)
+                    ? undefined
+                    : result;
+            }
             case 'itemDefinition': {
                 const definition = capability('items.definitions', 'get', args[0]);
 
@@ -2176,18 +2875,6 @@ export async function createLuaSession(options = {}) {
                 }
 
                 return value;
-            }
-            case 'itemContentsWeight': {
-                const record = capability('items', 'get', args[0]);
-                const definition = record && capability('items.definitions', 'get', record.fullType);
-
-                if ((definition?.type !== 'Clothing' && definition?.type !== 'base:clothing')
-                    || Object.keys(definition).some((name) => /ammo|fluid|component/i.test(name))
-                    || (Array.isArray(definition.rawFields) && definition.rawFields.some((field) => field.children || /ammo|fluid|component/i.test(field.name)))) {
-                    throw new Error('unsupported item contents weight outside source-proven flat Clothing without ammo or fluid components');
-                }
-
-                return 0;
             }
             case 'worn': {
                 const worn = capability('items', 'worn', args[0]);

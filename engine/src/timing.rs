@@ -1,4 +1,4 @@
-//! Source awake standalone clock and the two pickup trait registry entries.
+//! Source awake standalone clock and supported pickup/transfer trait entries.
 //! Empty selected traits are the new port actor policy, not original startup.
 
 use std::cell::RefCell;
@@ -17,7 +17,7 @@ pub(super) struct TimingContext {
     pub elapsed: f32,
     pub slow: [bool; 3],
     pub instant: bool,
-    pub traits: [bool; 2],
+    pub traits: [bool; 3],
     pub game_mode: Vec<u8>,
 }
 
@@ -31,7 +31,7 @@ impl TimingContext {
             elapsed: 0.0,
             slow: [false; 3],
             instant: false,
-            traits: [false; 2],
+            traits: [false; 3],
             game_mode: b"Sandbox".to_vec(),
         }
     }
@@ -121,6 +121,46 @@ pub(super) fn pickup_base(weight: f32, carried: f32, max_weight: i32, awkward_gl
     })
 }
 
+/// Original ISInventoryTransferAction transfer time; retain Lua-double operation
+/// order and its conditional delta clamp, including NaN and favorite-last policy.
+pub(super) fn transfer_base(
+    weight: f32,
+    base: f64,
+    capacity_delta: f64,
+    floor_factor: f64,
+    awkward_gloves: bool,
+    favorite_leaving: bool,
+) -> f64 {
+    TIMING.with(|state| {
+        let state = state.borrow();
+        let weight = weight as f64;
+        let weight = if weight > 3.0 { 3.0 } else { weight };
+        let delta = if capacity_delta < 0.4 {
+            0.4
+        } else {
+            capacity_delta
+        };
+        let mut time = base * weight * delta;
+        if state.game_mode == b"LastStand" {
+            time *= 0.3;
+        }
+        time *= floor_factor;
+        if state.traits[0] {
+            time *= 0.5;
+        }
+        if state.traits[1] || awkward_gloves {
+            time *= 2.0;
+        }
+        if state.instant {
+            time = 1.0;
+        }
+        if favorite_leaving {
+            time = 0.0;
+        }
+        time
+    })
+}
+
 pub(super) fn adjust_initial(
     base: f64,
     unhappy: u32,
@@ -172,7 +212,7 @@ pub extern "C" fn source_timing_read() -> i32 {
             u32::from(state.traits[1]) as f64,
             state.game_mode.len() as f64,
             state.game_multiplier() as f64,
-            0.0,
+            u32::from(state.traits[2]) as f64,
             0.0,
         ];
         SCRATCH.with(|scratch| *scratch.borrow_mut() = row);
@@ -217,7 +257,7 @@ pub extern "C" fn source_trait_get(index: u32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn source_trait_set(index: u32, enabled: u32) -> i32 {
-    if index >= 2 || enabled > 1 {
+    if index >= 3 || enabled > 1 {
         return OUT_OF_RANGE;
     }
     TIMING.with(|state| state.borrow_mut().traits[index as usize] = enabled != 0);
@@ -292,8 +332,8 @@ pub extern "C" fn source_mode_get_byte(index: u32) -> i32 {
     })
 }
 
-/// Five raw f32 words, three slow flags, instant, two traits, byte count,
-/// then one u32 per UTF-8 byte. Derived clock values are recomputed, not saved.
+/// Five raw f32 words, three slow flags, instant, dextrous/hemophobic bits,
+/// allthumbs, byte count, then UTF-8 bytes. Queue v1 permits only dextrous bit0.
 pub(super) fn snapshot_words() -> Vec<u32> {
     TIMING.with(|state| {
         let state = state.borrow();
@@ -308,7 +348,7 @@ pub(super) fn snapshot_words() -> Vec<u32> {
             u32::from(state.slow[1]),
             u32::from(state.slow[2]),
             u32::from(state.instant),
-            u32::from(state.traits[0]),
+            u32::from(state.traits[0]) | (u32::from(state.traits[2]) << 1),
             u32::from(state.traits[1]),
             state.game_mode.len() as u32,
         ]);
@@ -337,7 +377,9 @@ pub(super) fn validate_words(words: &[u32]) -> Result<TimingContext, i32> {
         || !(0.0..=5.0).contains(&fps)
         || elapsed.is_nan()
         || elapsed == f32::NEG_INFINITY
-        || words[5..11].iter().any(|&value| value > 1)
+        || words[5..9].iter().any(|&value| value > 1)
+        || words[9] & !3 != 0
+        || words[10] > 1
         || words[CONTEXT_HEADER..].iter().any(|&byte| byte > 255)
     {
         return Err(BAD_FORMAT);
@@ -358,7 +400,7 @@ pub(super) fn validate_words(words: &[u32]) -> Result<TimingContext, i32> {
         elapsed,
         slow: [words[5] != 0, words[6] != 0, words[7] != 0],
         instant: words[8] != 0,
-        traits: [words[9] != 0, words[10] != 0],
+        traits: [words[9] & 1 != 0, words[10] != 0, words[9] & 2 != 0],
         game_mode,
     })
 }
@@ -397,10 +439,25 @@ mod tests {
         assert_eq!(source_trait_set(1, 0), OK);
         assert_eq!(pickup_base(2.0, 0.0, 8, false), 48.0);
         assert_eq!(pickup_base(2.0, 0.0, 8, true), 96.0);
-        assert_eq!(source_trait_set(2, 1), OUT_OF_RANGE);
-        assert_eq!(source_trait_get(2), OUT_OF_RANGE);
+        assert_eq!(source_trait_set(3, 1), OUT_OF_RANGE);
+        assert_eq!(source_trait_get(3), OUT_OF_RANGE);
         assert_eq!(source_trait_set(0, 2), OUT_OF_RANGE);
         assert_eq!(has_trait(0), Ok(true));
+    }
+
+    #[test]
+    fn transfer_source_timing_keeps_floor_modifier_order_and_favorite_override_last() {
+        reset();
+        assert_eq!(transfer_base(2.0, 50.0, -0.1, 1.0, false, false), 40.0);
+        assert_eq!(transfer_base(4.0, 50.0, 1.0, 0.5, false, false), 75.0);
+        assert!(transfer_base(2.0, 50.0, f64::NAN, 1.0, false, false).is_nan());
+        set_mode("LastStand");
+        assert_eq!(source_trait_set(0, 1), OK);
+        assert_eq!(source_trait_set(1, 1), OK);
+        assert_eq!(transfer_base(2.0, 50.0, 0.8, 0.5, true, false), 12.0);
+        assert_eq!(source_timing_set(6, 1.0), OK);
+        assert_eq!(transfer_base(2.0, 50.0, f64::NAN, 1.0, false, false), 1.0);
+        assert_eq!(transfer_base(2.0, 50.0, 0.8, 0.5, true, true), 0.0);
     }
 
     #[test]
@@ -591,5 +648,30 @@ mod tests {
         assert_eq!(snapshot_words(), saved);
         assert_eq!(source_trait_get(1), 1);
         assert_eq!(row()[1].to_bits(), (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn transfer_hemophobic_trait_has_native_identity_and_roundtrips_without_changing_pickup_time() {
+        reset();
+        assert_eq!(source_trait_get(2), 0);
+        assert_eq!(source_trait_set(2, 1), OK);
+        assert_eq!(source_trait_get(2), 1);
+        assert_eq!(pickup_base(2.0, 0.0, 8, false), 96.0);
+        assert_eq!(row()[14], 1.0);
+        let saved = snapshot_words();
+        assert_eq!(saved[9], 2);
+        assert_eq!(saved[10], 0);
+        reset();
+        restore_validated(validate_words(&saved).unwrap());
+        assert_eq!(source_trait_get(2), 1);
+        let mut legacy = saved.clone();
+        legacy[9] = 1;
+        restore_validated(validate_words(&legacy).unwrap());
+        assert_eq!(source_trait_get(0), 1);
+        assert_eq!(source_trait_get(2), 0);
+        let mut invalid = saved;
+        invalid[9] = 4;
+        assert!(validate_words(&invalid).is_err());
+        assert_eq!(source_trait_get(2), 0);
     }
 }

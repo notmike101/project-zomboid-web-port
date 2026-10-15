@@ -65,6 +65,7 @@ async function startup(source) {
         'media/tiledefinitions_overlays.tiles', 'media/tiledefinitions_b42chunkcaching.tiles',
         'media/tiledefinitions_noiseworks.patch.tiles', 'media/jumbo_trees_big.tiles', 'media/jumbo_trees.tiles',
         'media/sound/PZ_FootSteps_Concrete_01.wav', 'media/sound/dooropen.wav', 'media/sound/doorclose.wav',
+        'media/scripts/generated/items/clothing.txt', 'media/scripts/generated/items/container.txt',
     ]) {
         // eslint-disable-next-line no-await-in-loop -- Keep fixture writes ordered.
         await put(source, path);

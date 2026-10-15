@@ -79,6 +79,7 @@ export function importPickupSquares(engine, x = 5, y = 5, blocked = []) {
                 solidTrans: false, tree: false, independentWalls: 0,
                 reachWalls: { north: false, west: false },
                 vehicleObstructed: false, solidFloor: true,
+                floorFlags: 1, stairTypes: 0, slopeDirection: 0, slopeMin: 0, slopeMax: 0,
             });
         }
     }

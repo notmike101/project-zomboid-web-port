@@ -29,7 +29,9 @@ const WORLD_MAX = 10;
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 10;
 const MAX_SAVE_BYTES = 256 * 1_024;
-const ACTION_TYPES = new Set(['moveTo', 'walk', 'requestWalk', 'cancel', 'toggleDoor', 'spawnItem', 'pickup', 'wear', 'unequip', 'drop', 'setCondition', 'setWeight', 'setActualWeight', 'setHandItem', 'setHealth', 'setCharacterStat', 'setMoodleInputs', 'setBodyPart', 'setInjurySeverity']);
+const WORN_ACTION_TYPES = new Set(['wornSet', 'wornRemove', 'wornClear', 'wornGroupSet']);
+const EQUIPMENT_ACTION_TYPES = new Set(['setHandItem', ...WORN_ACTION_TYPES]);
+const ACTION_TYPES = new Set(['moveTo', 'walk', 'requestWalk', 'cancel', 'toggleDoor', 'spawnItem', 'pickup', 'transferItem', 'wear', 'unequip', 'drop', 'setCondition', 'setWeight', 'setActualWeight', ...EQUIPMENT_ACTION_TYPES, 'setHealth', 'setCharacterStat', 'setMoodleInputs', 'setBodyPart', 'setInjurySeverity']);
 /** Reserved internal attribution id for page input; a mod cannot claim it. */
 const RESERVED_ID = 'host';
 const CORE_ID = 'pz-base-game';
@@ -847,6 +849,25 @@ export function createModHost(engine, options = {}) {
             return { type, x: coordinate(candidate.x, 'x', modId, bounded), y: coordinate(candidate.y, 'y', modId, bounded) };
         }
 
+        if (WORN_ACTION_TYPES.has(type)) {
+            capability('equipmentOperation');
+
+            if (type === 'wornSet') {
+                return {
+                    type, locationToken: integer(candidate.locationToken, 'body location token', 0, 0xFF_FF_FF_FF),
+                    id: candidate.id === null ? null : integer(candidate.id, 'worn item ID', 0, 0xFF_FF_FF_FF),
+                };
+            }
+
+            if (type === 'wornRemove') {
+                return { type, id: integer(candidate.id, 'worn item ID', 0, 0xFF_FF_FF_FF) };
+            }
+
+            return type === 'wornGroupSet'
+                ? { type, groupToken: integer(candidate.groupToken, 'body group token', 0, 0xFF_FF_FF_FF) }
+                : { type: 'wornClear' };
+        }
+
         capability('items');
 
         if (type === 'setHandItem') {
@@ -881,6 +902,16 @@ export function createModHost(engine, options = {}) {
         }
 
         const id = integer(candidate.id, 'item id', 1, 0xFF_FF_FF_FF);
+
+        if (type === 'transferItem') {
+            capability('getContainer');
+
+            return {
+                type, id,
+                sourceContainerId: integer(candidate.sourceContainerId, 'source container ID', 1, 0xFF_FF_FF_FF),
+                destinationContainerId: integer(candidate.destinationContainerId, 'destination container ID', 1, 0xFF_FF_FF_FF),
+            };
+        }
 
         if (type === 'drop') {
             return { type, id, x: coordinate(candidate.x, 'x', modId, false), y: coordinate(candidate.y, 'y', modId, false) };
@@ -1012,6 +1043,7 @@ export function createModHost(engine, options = {}) {
             const result = mutate(action);
 
             return Object.freeze({
+                ...result,
                 accepted: result.accepted ?? false, actionId: result.actionId ?? null,
                 state: result.state ?? access('actions', () => queueCapability().getState()),
             });
@@ -1088,6 +1120,64 @@ export function createModHost(engine, options = {}) {
                     engine.setSpeed(validateSpeed(speed, entry.id));
                 },
             },
+            equipment: {
+                /**
+                 * Keep native query returns while routing worn mutations through action hooks.
+                 *
+                 * @param {string} op - Native registry/query or worn mutation operation.
+                 * @param {...unknown} args - Operation-specific native operands.
+                 * @returns {number|string|boolean|{id: number, location: number}|null} Native query result, or zero even for vetoed worn writes.
+                 */
+                operation: (op, ...args) => {
+                    alive();
+
+                    if (typeof op !== 'string') {
+                        return access('equipment', () => {
+                            throw new TypeError('equipment operation must be a string');
+                        });
+                    }
+
+                    if (!WORN_ACTION_TYPES.has(op)) {
+                        return access('equipment', () => capability('equipmentOperation')(op, ...args));
+                    }
+
+                    let arity = 1;
+                    let action;
+
+                    switch (op) {
+                        case 'wornSet': {
+                            arity = 2;
+                            action = { type: op, locationToken: args[0], id: args[1] };
+
+                            break;
+                        }
+                        case 'wornRemove': {
+                            action = { type: op, id: args[0] };
+
+                            break;
+                        }
+                        case 'wornGroupSet': {
+                            action = { type: op, groupToken: args[0] };
+
+                            break;
+                        }
+
+                        default: {
+                            arity = 0;
+                            action = { type: op };
+                        }
+                    }
+
+                    if (args.length !== arity) {
+                        throw modError(entry.id, 'action', `${op} requires ${arity} arguments`);
+                    }
+
+                    mutate(action);
+
+                    // Original Lua callers require native status semantics, including a vetoed no-op.
+                    return 0;
+                },
+            },
             items: {
                 definitions: {
                     /**
@@ -1157,12 +1247,79 @@ export function createModHost(engine, options = {}) {
                     return capability('getItem')(id);
                 }),
                 /**
+                 * Read native container and item graph records through the attributed items capability.
+                 *
+                 * @returns {import('../types/mod-api').ModContainer[]} Detached native-ordered containers.
+                 */
+                containers: () => access('items', () => capability('containers')()),
+                /**
+                 * Read one native container by stable identity.
+                 *
+                 * @param {number} id - Positive uint32 container identity.
+                 * @returns {import('../types/mod-api').ModContainer|null} Detached record or absence.
+                 */
+                getContainer: (id) => access('items', () => capability('getContainer')(id)),
+                /**
+                 * Read direct item membership in native order.
+                 *
+                 * @param {number} id - Positive uint32 container identity.
+                 * @returns {import('../types/mod-api').ModItem[]} Detached direct member records.
+                 */
+                containerItems: (id) => access('items', () => capability('containerItems')(id)),
+                /**
+                 * Read the actual native actor-root inventory identity.
+                 *
+                 * @returns {number} Player inventory container ID.
+                 */
+                playerInventoryId: () => access('items', () => capability('playerInventoryId')()),
+                /**
+                 * Read actor-relative admission and capacity state.
+                 *
+                 * @param {number} id - Positive uint32 container identity.
+                 * @param {number|null} [actorId=null] - Optional native actor identity.
+                 * @returns {import('../types/mod-api').ModContainerState} Detached capacity and weight state.
+                 */
+                containerState: (id, actorId = null) => access('items', () => capability('containerState')(id, actorId)),
+                /**
+                 * Read source-authoritative weight variants for an item.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @returns {import('../types/mod-api').ModItemWeights} Detached item weight values.
+                 */
+                itemWeights: (id) => access('items', () => capability('itemWeights')(id)),
+                /**
                  * Reads authoritative equipment at an exact body-location identity.
                  *
                  * @param {string} bodyLocation - Exact nonempty equipment slot.
                  * @returns {import('../types/mod-api').ModItem|null} Worn item or an empty slot.
                  */
                 worn: (bodyLocation) => access('items', () => capability('wornItem')(identity(bodyLocation, 'bodyLocation'))),
+                /**
+                 * Read authoritative ordered worn references.
+                 *
+                 * @returns {import('../types/mod-api').ModWornItem[]} Detached native worn order.
+                 */
+                wornItems: () => access('items', () => capability('wornItems')()),
+                /**
+                 * Set or clear an exact body-location slot through precommit hooks.
+                 *
+                 * @param {string} bodyLocation - Registered canonical name or alias.
+                 * @param {number|null} id - Native item identity, or null to clear.
+                 * @returns {void}
+                 */
+                setWornItem: (bodyLocation, id) => {
+                    const locationToken = access('items', () => {
+                        const token = capability('equipmentOperation')('lookup', identity(bodyLocation, 'bodyLocation'));
+
+                        if (token === null) {
+                            throw new RangeError(`Unknown bodyLocation: ${bodyLocation}`);
+                        }
+
+                        return token;
+                    });
+
+                    mutate({ type: 'wornSet', locationToken, id });
+                },
                 /**
                  * Read detached numeric current-player carry state from the engine.
                  *
@@ -1192,6 +1349,13 @@ export function createModHost(engine, options = {}) {
                  * @returns {import('../types/mod-api').ModQueueAcceptance} Immutable acceptance, not transfer completion.
                  */
                 pickup: (id) => queuedRequest({ type: 'pickup', id }),
+                /**
+                 * Request an attributed item transfer; native completion occurs asynchronously.
+                 *
+                 * @param {import('../types/mod-api').ModItemTransfer} input - Item and source/destination container identities.
+                 * @returns {import('../types/mod-api').ModQueueAcceptance} Queued acceptance, not completion.
+                 */
+                transferItem: (input) => queuedRequest({ ...input, type: 'transferItem' }),
                 /**
                  * Equips through precommit hooks.
                  *
@@ -1513,6 +1677,16 @@ export function createModHost(engine, options = {}) {
                  */
                 requestPickup: (id) => queuedRequest({ type: 'pickup', id }),
                 /**
+                 * Request an attributed transfer through permission and precommit hooks.
+                 *
+                 * @param {number} id - Positive uint32 item identity.
+                 * @param {number} sourceContainerId - Positive uint32 current owner container.
+                 * @param {number} destinationContainerId - Positive uint32 destination container.
+                 * @returns {import('../types/mod-api').ModQueueAcceptance} Queued acceptance, not transfer completion.
+                 */
+                requestTransfer: (id, sourceContainerId, destinationContainerId) =>
+                    queuedRequest({ type: 'transferItem', id, sourceContainerId, destinationContainerId }),
+                /**
                  * Request a door toggle through owner-attributed acceptance hooks.
                  *
                  * @param {string} id - Stable native door identity.
@@ -1737,6 +1911,7 @@ export function createModHost(engine, options = {}) {
         Object.freeze(api.world);
         Object.freeze(api.saveData);
         Object.freeze(api.events);
+        Object.freeze(api.equipment);
         Object.freeze(api.items.definitions);
         Object.freeze(api.items);
         Object.freeze(api.character);
@@ -2012,7 +2187,7 @@ export function createModHost(engine, options = {}) {
             throw modError(submitterId, 'action', cause instanceof Error ? cause.message : String(cause), cause);
         }
 
-        if ((submitted.type === 'toggleDoor' || submitted.type === 'setHandItem') && mods.get(submitterId)?.activating) {
+        if ((submitted.type === 'toggleDoor' || EQUIPMENT_ACTION_TYPES.has(submitted.type)) && mods.get(submitterId)?.activating) {
             throw modError(submitterId, 'action', 'equipment and door mutation is forbidden during synchronous activate');
         }
 
@@ -2101,7 +2276,7 @@ export function createModHost(engine, options = {}) {
             dispatching = false;
         }
 
-        if ((submitted.type === 'setHandItem' || current.type === 'setHandItem') && submitterId !== RESERVED_ID
+        if ((EQUIPMENT_ACTION_TYPES.has(submitted.type) || EQUIPMENT_ACTION_TYPES.has(current.type)) && submitterId !== RESERVED_ID
             && !(submitterId === CORE_ID ? coreEntry : mods.get(submitterId))?.active) {
             throw modError(submitterId, 'api', 'equipment owner became inactive during hooks');
         }
@@ -2119,7 +2294,7 @@ export function createModHost(engine, options = {}) {
             };
         }
 
-        if ((current.type === 'toggleDoor' || current.type === 'setHandItem') && mods.get(submitterId)?.activating) {
+        if ((current.type === 'toggleDoor' || EQUIPMENT_ACTION_TYPES.has(current.type)) && mods.get(submitterId)?.activating) {
             throw modError(submitterId, 'action', 'equipment and door mutation is forbidden during synchronous activate');
         }
 

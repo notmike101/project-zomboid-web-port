@@ -19,6 +19,7 @@ const DOUBLE_WEST_DY = [0, -1, 1, 0];
 const DOUBLE_NORTH_SPRITE_OFFSET = [5, 3, 4, 4];
 const DOUBLE_WEST_SPRITE_OFFSET = [4, 4, 5, 3];
 const STAIR_TYPES = new Set(['stairsTN', 'stairsMN', 'stairsBN', 'stairsTW', 'stairsMW', 'stairsBW']);
+const STAIR_BITS = new Map([...STAIR_TYPES].map((type, index) => [type, 1 << index]));
 const SLOPE_DIRECTIONS = new Set(['N', 'NW', 'W', 'SW', 'S', 'SE', 'E', 'NE']);
 const EARLY_OTHER_TYPES = new Set(['lightswitch', 'curtainN', 'curtainS', 'curtainE', 'curtainW']);
 const FURNITURE_CONTAINERS = new Set(['barbecue', 'barbecuepropane', 'fireplace', 'clothingdryer', 'clothingwasher', 'woodstove', 'microwave']);
@@ -365,17 +366,15 @@ function standEdges(sprite) {
 }
 
 /**
- * Validate the source enum direction using Java ASCII-trim semantics.
+ * Match Java String.trim without widening source property whitespace.
  *
- * @param {object} square - Source square for boundary diagnostics.
- * @param {string} value - Source SlopedSurfaceDirection property.
- * @returns {boolean} True for a nonnull native slope direction.
+ * @param {string} value - Original source property.
+ * @returns {string} ASCII-trimmed property.
  */
-function slopeFloor(square, value) {
+function trimSourceProperty(value) {
     let start = 0;
     let end = value.length;
 
-    // Match Java String.trim, not JavaScript's broader Unicode whitespace trimming.
     while (start < end && value.charCodeAt(start) <= 32) {
         start += 1;
     }
@@ -384,7 +383,18 @@ function slopeFloor(square, value) {
         end -= 1;
     }
 
-    const direction = value.slice(start, end).toUpperCase();
+    return value.slice(start, end);
+}
+
+/**
+ * Validate the source enum direction using Java ASCII-trim semantics.
+ *
+ * @param {object} square - Source square for boundary diagnostics.
+ * @param {string} value - Source SlopedSurfaceDirection property.
+ * @returns {boolean} True for a nonnull native slope direction.
+ */
+function slopeFloor(square, value) {
+    const direction = trimSourceProperty(value).toUpperCase();
 
     if (!SLOPE_DIRECTIONS.has(direction)) {
         throw new Error(`Unsupported original slope direction ${JSON.stringify(value)} at ${square.x},${square.y},${square.z}`);
@@ -845,6 +855,11 @@ function projectSquareObjects(square, objects, doors, doorVisuals, doorIds) {
     let slope;
     let reachWalls = 0;
 
+    let slopeMin = '0';
+    let slopeMax = '0';
+    let floorFlags = 0;
+    let stairTypes = 0;
+
     square.interactionProperties = {};
 
     for (const object of objects) {
@@ -879,6 +894,17 @@ function projectSquareObjects(square, objects, doors, doorVisuals, doorIds) {
         square.solidTrans ||= props.has('solidtrans');
         square.tree ||= sprite.tileType === 'tree' || props.has('tree');
         square.solidFloor ||= props.has('solidfloor') || STAIR_TYPES.has(sprite.tileType);
+        floorFlags |= (props.has('solidfloor') ? 1 : 0) | (props.has('solid') ? 2 : 0)
+            | (props.has('solidtrans') ? 4 : 0) | (props.has('windowN') ? 8 : 0) | (props.has('windowW') ? 16 : 0);
+        stairTypes |= STAIR_BITS.get(sprite.tileType) ?? 0;
+
+        if (props.has('SlopedSurfaceHeightMin')) {
+            slopeMin = props.get('SlopedSurfaceHeightMin');
+        }
+
+        if (props.has('SlopedSurfaceHeightMax')) {
+            slopeMax = props.get('SlopedSurfaceHeightMax');
+        }
 
         if (props.has('SlopedSurfaceDirection')) {
             slope = props.get('SlopedSurfaceDirection');
@@ -890,6 +916,28 @@ function projectSquareObjects(square, objects, doors, doorVisuals, doorIds) {
     if (slope !== undefined) {
         applySlopeFloor(square, slope);
     }
+
+    square.floorFlags = floorFlags;
+    square.stairTypes = stairTypes;
+    square.slopeDirection = slope === undefined
+        ? 0
+        : (['N', 'S', 'W', 'E', 'NW', 'SW', 'SE', 'NE'].indexOf(trimSourceProperty(slope).toUpperCase()) + 1 || 9);
+    square.slopeMin = slopeHeight(slopeMin);
+    square.slopeMax = slopeHeight(slopeMax);
+}
+
+/**
+ * Match Java integer parsing and PropertyContainer's independent byte clamps.
+ *
+ * @param {string} value - Original slope height property.
+ * @returns {number} Native normalized float height.
+ */
+function slopeHeight(value) {
+    const trimmed = trimSourceProperty(value);
+    const parsed = /^[+-]?\d+$/.test(trimmed) ? Number(trimmed) : 0;
+    const integer = Number.isInteger(parsed) && parsed >= -2_147_483_648 && parsed <= 2_147_483_647 ? parsed : 0;
+
+    return Math.fround(Math.min(100, Math.max(0, integer)) / 100);
 }
 
 /**
@@ -981,7 +1029,7 @@ async function projectWorldObjects(cells, registry) {
                     const roomId = roomAt(rects, x + dx, y + dy, z);
 
                     // Coverage: the current WASM world has no vehicle objects; this is not a native-map vehicle census.
-                    squares.push({ x: x + dx, y: y + dy, z, roomId, outside: roomId === -1, solid: false, solidTrans: false, tree: false, solidFloor: false, hoppableEdges: 0, windowEdges: 0, independentWalls: 0, windows: 0, doorWalls: 0, vehicleObstructed: false, reachWalls: REACH_WALLS[0] });
+                    squares.push({ x: x + dx, y: y + dy, z, roomId, outside: roomId === -1, solid: false, solidTrans: false, tree: false, solidFloor: false, floorFlags: 0, stairTypes: 0, slopeDirection: 0, slopeMin: 0, slopeMax: 0, hoppableEdges: 0, windowEdges: 0, independentWalls: 0, windows: 0, doorWalls: 0, vehicleObstructed: false, reachWalls: REACH_WALLS[0] });
                 }
             }
 

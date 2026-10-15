@@ -250,10 +250,14 @@ function canonicalTags(value, fail) {
  */
 function definitions(text, provenance, kind, mapping) {
     const { records, fail } = scriptRecords(text, provenance, kind);
+    const names = new Map(Object.entries(mapping).map(([name, spec]) => [kind === 'item' ? name.toLowerCase() : name, spec]));
 
     for (const record of records) {
+        // Original Item constructor's script actualWeight precedes ordered DoParam.
+        let actualWeight = 1;
+
         for (const field of record.rawFields) {
-            const spec = Object.hasOwn(mapping, field.name) ? mapping[field.name] : undefined;
+            const spec = names.get(kind === 'item' ? field.name.trim().toLowerCase() : field.name);
 
             if (!spec || field.children) {
                 continue;
@@ -273,11 +277,34 @@ function definitions(text, provenance, kind, mapping) {
             } else if (type) {
                 const number = Number(value);
 
-                if (!NUMBER.test(value) || !Number.isFinite(number) || number < 0 || (type === 'integer' && !Number.isSafeInteger(number)) || (type === 'positiveInteger' && (!Number.isSafeInteger(number) || number < 1)) || (type === 'positive' && number <= 0)) {
+                const signed = ['javaFloat', 'javaInt', 'javaWeight'].includes(type);
+
+                if (!NUMBER.test(value) || !Number.isFinite(number) || (!signed && number < 0)
+                    || (type === 'javaInt' && (!/^[+-]?\d+$/u.test(value) || number < -2_147_483_648 || number > 2_147_483_647))
+                    || (type === 'integer' && !Number.isSafeInteger(number))
+                    || (type === 'positiveInteger' && (!Number.isSafeInteger(number) || number < 1))
+                    || (type === 'positive' && number <= 0)) {
                     fail(`Invalid ${field.name} numeric value.`, field.offset);
                 }
 
-                value = number;
+                value = signed && type !== 'javaInt' ? Math.fround(number) : number;
+
+                if (!Number.isFinite(value)) {
+                    fail(`Invalid ${field.name} float value.`, field.offset);
+                }
+
+                if (type === 'javaWeight') {
+                    value = Math.max(0, value);
+                    actualWeight = value;
+                }
+            }
+
+            if (key === 'capacity') {
+                const bound = Math.fround(50 - actualWeight);
+
+                if (Math.fround(value) > bound) {
+                    value = Math.max(-2_147_483_648, Math.min(2_147_483_647, Math.trunc(bound)));
+                }
             }
 
             record[key] = value;
@@ -297,9 +324,14 @@ function definitions(text, provenance, kind, mapping) {
 function parseItemDefinitions(text, provenance) {
     return definitions(text, provenance, 'item', {
         ItemType: ['type'], Type: ['type'], DisplayName: ['displayName'], BodyLocation: ['bodyLocation'],
+        CanBeEquipped: ['canBeEquipped'],
         ConditionMax: ['conditionMax', 'integer'], ConditionLowerChanceOneIn: ['conditionLowerChanceOneIn', 'positiveInteger'],
-        RemoveOnBroken: ['removeOnBroken', 'boolean'], Weight: ['weight', 'number'], RunSpeedModifier: ['runSpeedModifier', 'number'],
+        RemoveOnBroken: ['removeOnBroken', 'boolean'], Weight: ['weight', 'javaWeight'], RunSpeedModifier: ['runSpeedModifier', 'number'],
         WorldStaticModel: ['worldStaticModel'], ClothingItem: ['clothingItem'], Tags: ['tags', 'tags'],
+        Capacity: ['capacity', 'javaInt'], WeightReduction: ['weightReduction', 'javaInt'], MaxItemSize: ['maxItemSize', 'javaFloat'],
+        DisplayCategory: ['displayCategory'],
+        OnlyAcceptCategory: ['onlyAcceptCategory'], AcceptItemFunction: ['acceptItemFunction'],
+        AmmoType: ['ammoType'],
     });
 }
 

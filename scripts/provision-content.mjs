@@ -29,6 +29,7 @@ const startup = {
 const startupPaths = new Set([
     ...startup.packs, ...startup.cells.flatMap(({ navigation, header, lotpack }) => [navigation, header, lotpack]),
     ...Object.values(startup.character), ...startup.tileDefinitions.map(({ path }) => path), ...Object.values(startup.audio),
+    'media/scripts/generated/items/clothing.txt', 'media/scripts/generated/items/container.txt',
 ]);
 
 /**

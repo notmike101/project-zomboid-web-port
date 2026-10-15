@@ -41,11 +41,16 @@ export type ModAction =
   | { type: 'toggleDoor'; id: string }
   | ({ type: 'spawnItem' } & ModItemSpawn)
   | { type: 'pickup' | 'wear' | 'unequip'; id: number }
+  | ({ type: 'transferItem' } & ModItemTransfer)
   | { type: 'drop'; id: number; x: number; y: number }
   | { type: 'setCondition'; id: number; condition: number }
   | { type: 'setWeight'; id: number; weight: number }
   | { type: 'setActualWeight'; id: number; actualWeight: number }
   | { type: 'setHandItem'; slot: 'primary' | 'secondary'; itemId: number | null }
+  | { type: 'wornSet'; locationToken: number; id: number | null }
+  | { type: 'wornRemove'; id: number }
+  | { type: 'wornClear' }
+  | { type: 'wornGroupSet'; groupToken: number }
   | { type: 'setHealth'; health: number }
   | { type: 'setCharacterStat'; name: string; value: number }
   | { type: 'setMoodleInputs'; inputs: Record<string, number | boolean> }
@@ -54,7 +59,7 @@ export type ModAction =
 
 export interface ModQueuedAction {
   readonly id: number;
-  readonly kind: 'walk' | 'door' | 'grab' | 'getUp';
+  readonly kind: 'walk' | 'door' | 'grab' | 'getUp' | 'transfer';
   readonly origin: 'sdk' | 'lua';
   readonly target: Readonly<{ id: number | string; x: number; y: number; z: number }>;
   readonly rawTime: number;
@@ -64,7 +69,11 @@ export interface ModQueuedAction {
   readonly prevLastTime: number;
   readonly delta: number;
   readonly started: boolean;
-  readonly groups: readonly Readonly<{ id: number; rawTime: number; fullType: string | null; itemIds: readonly number[] }>[];
+  readonly groups: readonly Readonly<{ id: number; rawTime: number; fullType: string | null; itemIds: readonly number[]; sourceContainerIds: readonly number[] }>[];
+  /** Native acceptance binds these references; mutable Lua tables cannot change the intent. */
+  readonly sourceContainerId?: number;
+  readonly destinationContainerId?: number;
+  readonly floorPosition?: Readonly<ModWorldCoordinates> | null;
 }
 export interface ModQueueState {
   readonly current: ModQueuedAction | null;
@@ -74,10 +83,15 @@ export interface ModQueueAcceptance {
   readonly accepted: boolean;
   readonly actionId: number | null;
   readonly state: ModQueueState;
+  /** SDK admission carries action attribution; engine-only admissions have no submitting mod. */
+  readonly submittedBy?: string;
+  readonly modifiedBy?: readonly string[];
+  readonly cancelledBy?: string;
 }
 export interface ModQueuedActions {
   getState(): ModQueueState;
   requestPickup(itemId: number): ModQueueAcceptance;
+  requestTransfer(itemId: number, sourceContainerId: number, destinationContainerId: number): ModQueueAcceptance;
   requestDoor(doorId: string): ModQueueAcceptance;
   requestWalk(target: ModWorldCoordinates): ModQueueAcceptance;
   cancel(): ModQueueState;
@@ -96,7 +110,7 @@ export interface ModSourceTimingState {
   readonly slowEighth: boolean;
   readonly instant: boolean;
   readonly gameMode: string;
-  readonly traits: Readonly<{ 'base:dextrous': boolean; 'base:allthumbs': boolean }>;
+  readonly traits: Readonly<{ 'base:dextrous': boolean; 'base:allthumbs': boolean; 'base:hemophobic': boolean; 'base:organized': boolean; 'base:disorganized': boolean }>;
 }
 export interface ModSourceTiming {
   getState(): ModSourceTimingState;
@@ -131,10 +145,19 @@ export interface ModItemSpawn {
   condition?: number;
 }
 
+/** Transfer acceptance is queued; event5-authorized native completion changes ownership later. */
+export interface ModItemTransfer {
+  id: number;
+  sourceContainerId: number;
+  destinationContainerId: number;
+}
+
 /** Numeric definition fields live in WASM; additional fields are detached source/appearance metadata. */
 export interface ModItemDefinitionInput {
   fullType: string;
   bodyLocation: string | null;
+  /** Independent non-clothing preferred equip location; omitted resolves to null. */
+  canBeEquipped?: string | null;
   conditionMax: number;
   stackLimit: number;
   removeOnBroken: boolean;
@@ -143,6 +166,22 @@ export interface ModItemDefinitionInput {
   weight?: number;
   /** Detached canonical ResourceLocation identities; omitted tags register as an empty list. */
   tags?: readonly string[];
+  isBag?: boolean;
+  /** Source Capacity is resolved in authored DoParam order against the then-current weight. */
+  capacity?: number;
+  /** Source integer; native runtime registration clamps to [0,100]. */
+  weightReduction?: number;
+  maxItemSize?: number;
+  containerType?: string | null;
+  /** Exact runtime category, case-folded for native admission; not the UI DisplayCategory. */
+  category?: string | null;
+  /** Original getCategory spelling for unchanged Lua/UI consumers; native category above is case-folded. */
+  sourceCategory?: string;
+  onlyAcceptCategory?: string | null;
+  acceptItemFunction?: string | null;
+  lightWhenAttached?: boolean;
+  fakeEquipped?: boolean;
+  unsupportedSubtype?: boolean;
   [metadata: string]: unknown;
 }
 
@@ -150,15 +189,29 @@ export interface ModItemDefinitionInput {
 export interface ModItemDefinition extends ModItemDefinitionInput {
   owner: string;
   weight: number;
+  canBeEquipped: string | null;
+  isBag: boolean;
+  capacity: number;
+  weightReduction: number;
+  maxItemSize: number;
+  containerType: string | null;
+  category: string | null;
+  onlyAcceptCategory: string | null;
+  acceptItemFunction: string | null;
+  lightWhenAttached: boolean;
+  fakeEquipped: boolean;
+  unsupportedSubtype: boolean;
 }
 
 /** Stable positive uint32 identity; null bodyLocation means not currently worn. */
 export interface ModItem {
   id: number;
   fullType: string;
-  location: 'ground' | 'inventory';
-  x: number;
-  y: number;
+  definitionOrdinal: number;
+  ownerContainerId: number;
+  internalContainerId: number | null;
+  /** Only true native world objects have placement; bag descendants never inherit it. */
+  worldPosition: ModWorldCoordinates | null;
   condition: number;
   count: number;
   bodyLocation: string | null;
@@ -166,9 +219,116 @@ export interface ModItem {
   weight: number;
   /** Live effective actual field used by native inventory carry accounting. */
   actualWeight: number;
+  favorite: boolean;
+  consumed: boolean;
 }
 
-/** Current flat player inventory; pickup capacity is separate from stored encumbrance maxWeight. */
+
+/** Detached direct parent metadata; bag ancestry follows the containing item's owner. */
+export interface ModContainer {
+  id: number;
+  kind: 'actor' | 'floor' | 'bag';
+  parentKind: 'actor' | 'square' | null;
+  parentId: number | null;
+  containingItemId: number | null;
+  capacity: number;
+  weightReduction: number;
+  worldPosition: ModWorldCoordinates | null;
+  explored: boolean;
+  looted: boolean;
+  definitionOrdinal: number;
+  type: string | null;
+  onlyAcceptCategory: string | null;
+  acceptItemFunction: string | null;
+}
+export interface ModContainerState {
+  capacity: number;
+  effectiveCapacity: number;
+  contentsWeight: number;
+  capacityWeight: number;
+  maxWeight: number;
+}
+export interface ModItemWeights {
+  actualWeight: number;
+  contentsWeight: number;
+  unequippedWeight: number;
+  equippedWeight: number;
+  hotbarEquippedWeight: number;
+  wrapperEffectiveCapacity: number;
+}
+/** Native ordered graph payload, used inside authenticated game-save format3.
+ * The actor-state envelope remains version2; queue envelopes use version2.
+ * Imports validate the whole graph atomically, not admission capacity. */
+export interface ModInventoryGraph {
+  version: 1;
+  containers: ModContainer[];
+  items: ModItem[];
+  /** Exact f64 allocator, including exhausted uint32+1. */
+  nextContainerId: number;
+  organized: boolean;
+  disorganized: boolean;
+  equippedMultiplier: number;
+  dropItemsOnSquareCenter: boolean;
+  wornOrder?: number[];
+}
+/** Ordered worn/render traversal, not inventory insertion order. */
+export interface ModWornItem {
+  id: number;
+  bodyLocation: string;
+}
+
+/** Portable native registry snapshot. Group references index this snapshot, never native tokens. */
+export interface ModEquipmentState {
+  version: 1;
+  initialized: boolean;
+  locations: { id: string; translationName: string }[];
+  groups: {
+    name: string;
+    active: boolean;
+    locations: {
+      id: string;
+      multiItem: boolean;
+      exclusive: string[];
+      hide: string[];
+      alternate: string[];
+    }[];
+  }[];
+  wornGroup: number;
+  wornOrder: number[];
+}
+
+/** Native identity tokens are runtime-only; all persisted identities use canonical strings. */
+export interface ModEquipmentOperation {
+  (op: 'lookup' | 'register', name: string): number | null;
+  (op: 'canonical', name: string): string;
+  (op: 'count' | 'groupCount' | 'groupTotalCount' | 'wornCount' | 'wornGroupGet'): number;
+  (op: 'at', index: number): number;
+  (op: 'read', token: number, field: 0 | 1 | 2): string;
+  (op: 'groupGet', name: string, create?: boolean): number | null;
+  (op: 'groupAt', index: number): number | null;
+  (op: 'groupName', group: number): string;
+  (op: 'groupActive', group: number): boolean;
+  (op: 'locationCount', group: number): number;
+  (op: 'locationAt', group: number, index: number): number | null;
+  (op: 'locationIndex', group: number, location: number): number;
+  (op: 'locationAdd', group: number, location: number): number;
+  (op: 'multiSet', group: number, location: number, enabled: boolean): number;
+  (op: 'multiGet', group: number, location: number): boolean;
+  (op: 'relationSet', group: number, from: number, to: number, kind: 0 | 1 | 2 | 3): number;
+  (op: 'relationGet', group: number, from: number, to: number, kind: 0 | 1 | 2 | 3): boolean;
+  (op: 'relationCount', group: number, from: number, kind: 0 | 1 | 2 | 3): number;
+  (op: 'relationAt', group: number, from: number, kind: 0 | 1 | 2 | 3, index: number): number | null;
+  (op: 'move', group: number, location: number, finalIndex: number): number;
+  (op: 'reset' | 'wornClear'): number;
+  (op: 'initialized', enabled?: boolean): boolean;
+  (op: 'groupDetach' | 'wornGroupSet', group: number): number;
+  (op: 'wornRead', index: number): { id: number; location: number };
+  (op: 'wornGet', location: number): number | null;
+  (op: 'wornSet', location: number, id: number | null): number;
+  (op: 'wornRemove', id: number): number;
+}
+
+/** Current native actor-root inventory; admission capacity is separate from stored encumbrance maxWeight. */
 export interface ModInventoryState {
   /** Native f32 accumulation; valid individual weights can overflow the aggregate to +Infinity. */
   capacityWeight: number;
@@ -285,6 +445,8 @@ export type ModBodyPartInputLimits = {
 export interface ModBodyState {
   version: 1;
   injurySeverity: ModInjurySeverity;
+  /** Optional only for authenticated old saves; actual native capture includes the source target. */
+  metabolicTarget?: number;
   parts: (ModBodyPartValues & { id: ModBodyPartId })[];
 }
 
@@ -488,9 +650,14 @@ export interface ModApi {
     submit(action: ModAction): ModCommandResult;
     getState(): ModQueueState;
     requestPickup(itemId: number): ModQueueAcceptance;
+    requestTransfer(itemId: number, sourceContainerId: number, destinationContainerId: number): ModQueueAcceptance;
     requestDoor(doorId: string): ModQueueAcceptance;
     requestWalk(target: ModWorldCoordinates): ModQueueAcceptance;
     cancel(): ModQueueState;
+  };
+  /** Original registry semantics. Worn mutations use the shared action-hook path. */
+  equipment: {
+    operation: ModEquipmentOperation;
   };
   /** Real optional engine capabilities; unsupported queries throw ModError/items. */
   items: {
@@ -506,12 +673,23 @@ export interface ModApi {
     list(): ModItem[];
     /** Valid unknown ids return null. */
     get(id: number): ModItem | null;
+    containers(): ModContainer[];
+    getContainer(id: number): ModContainer | null;
+    /** Direct native membership in insertion order, never a recursive flattened list. */
+    containerItems(id: number): ModItem[];
+    playerInventoryId(): number;
+    containerState(id: number, actorId?: number | null): ModContainerState;
+    itemWeights(id: number): ModItemWeights;
     worn(bodyLocation: string): ModItem | null;
+    /** Ordered native worn traversal. */
+    wornItems(): ModWornItem[];
+    setWornItem(bodyLocation: string, id: number | null): void;
     /** Detached authoritative current-player carry state; unavailable engines throw. */
     inventoryState(): ModInventoryState;
     /** All mutations use actions.submit's shared synchronous hook path. */
     spawn(input: ModItemSpawn): ModCommandResult;
     pickup(id: number): ModQueueAcceptance;
+    transferItem(input: ModItemTransfer): ModQueueAcceptance;
     wear(id: number): ModCommandResult;
     unequip(id: number): ModCommandResult;
     drop(id: number, x: number, y: number): ModCommandResult;
@@ -731,8 +909,21 @@ export interface ModEngine {
   items?(): ModItem[];
   /** Detached live stable-ID read; unknown valid uint32 identities return null. */
   getItem?(id: number): ModItem | null;
-  importItems?(records: ModItem[]): void;
+  exportInventoryGraph?(): ModInventoryGraph;
+  importInventoryGraph?(graph: ModInventoryGraph): void;
+  containers?(): ModContainer[];
+  getContainer?(id: number): ModContainer | null;
+  containerItems?(id: number): ModItem[];
+  playerInventoryId?(): number;
+  containerState?(id: number, actorId?: number | null): ModContainerState;
+  itemWeights?(id: number): ModItemWeights;
   wornItem?(bodyLocation: string): ModItem | null;
+  equipmentOperation?: ModEquipmentOperation;
+  wornItems?(): ModWornItem[];
+  setWornItem?(bodyLocation: string, id: number | null): void;
+  canSaveEquipmentState?(): boolean;
+  saveEquipmentState?(): ModEquipmentState;
+  loadEquipmentState?(state: ModEquipmentState): void;
   inventoryState?(): ModInventoryState;
   isWearingAwkwardGloves?(): boolean;
   getHandItems?(): ModHandItems;

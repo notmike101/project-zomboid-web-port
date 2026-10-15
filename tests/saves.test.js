@@ -28,6 +28,12 @@ async function signed(payload) {
 async function fixture() {
     const bytes = await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url));
     const engine = await createEngine(bytes);
+    const group = engine.equipmentOperation('groupGet', 'Human', true);
+
+    for (const name of ['Shoes', 'Hands']) {
+        engine.equipmentOperation('locationAdd', group, engine.equipmentOperation('lookup', name));
+    }
+
     const cells = new Uint8Array(1_026);
 
     cells[1] = 1;
@@ -42,7 +48,26 @@ async function fixture() {
         contentPacks: [], mods: [], modState: { absent: { schemaVersion: 1, data: { retained: true } } },
     };
 
-    return { engine, record: await signed(payload), store: createSaveStore({ engineSource: bytes, appVersion: 'test' }) };
+    const store = createSaveStore({
+        engineSource: bytes, appVersion: 'test',
+        /**
+         * Declare fixture registry rules before importing legacy worn rows.
+         *
+         * @param {object} target - Fresh staged engine.
+         */
+        initializeEquipment(target) {
+            const e = target.equipmentOperation;
+            const human = e('groupGet', 'Human', true);
+
+            for (const name of ['Shoes', 'Hands']) {
+                e('locationAdd', human, e('lookup', name));
+            }
+
+            e('multiSet', human, e('lookup', 'Shoes'), true);
+        },
+    });
+
+    return { engine, record: await signed(payload), store };
 }
 
 /**
@@ -69,7 +94,7 @@ function encode(value) {
  * Like engine.test.js's legacyModule fixture, only WASM sections are changed.
  *
  * @param {Uint8Array} bytes - Compiled engine module.
- * @param {'pre-body' | 'trap' | 'pre-hand' | 'hand-trap'} mode - Native capability or capture failure.
+ * @param {'pre-body' | 'trap' | 'pre-hand' | 'hand-trap' | 'graph-trap'} mode - Native capability or capture failure.
  * @returns {Uint8Array} Independent native module fixture.
  */
 function bodyModule(bytes, mode) {
@@ -114,7 +139,15 @@ function bodyModule(bytes, mode) {
                 const kind = bytes[offset++];
                 const target = unsigned();
 
-                if (name === (mode === 'hand-trap' ? 'hand_item_get' : 'body_part_value') && kind === 0) {
+                let trappedExport = 'body_part_value';
+
+                if (mode === 'graph-trap') {
+                    trappedExport = 'item_import_commit';
+                } else if (mode === 'hand-trap') {
+                    trappedExport = 'hand_item_get';
+                }
+
+                if (name === trappedExport && kind === 0) {
                     bodyReader = target;
                 }
 
@@ -128,7 +161,7 @@ function bodyModule(bytes, mode) {
             const payload = [...encode(entries.length), ...entries.flatMap((entry) => [...entry])];
 
             output.push(id, ...encode(payload.length), ...payload);
-        } else if (id === 10 && (mode === 'trap' || mode === 'hand-trap')) {
+        } else if (id === 10 && ['trap', 'hand-trap', 'graph-trap'].includes(mode)) {
             const count = unsigned();
             const payload = [...encode(count)];
 
@@ -205,7 +238,7 @@ test('future save format and duplicate cell coordinates are refused', async () =
 
     delete payload.integrity;
 
-    payload.formatVersion = 3;
+    payload.formatVersion = 4;
     await assert.rejects(validateSave(await signed(payload)), /version/u);
     payload.formatVersion = 1;
     payload.world.cells.push({ ...payload.world.cells[0] });
@@ -429,7 +462,7 @@ test('portable door state preserves unlocked closure and RNG after matching sour
     completeActions(engine);
     const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
 
-    assert.equal(exported.formatVersion, 2);
+    assert.equal(exported.formatVersion, 3);
     assert.equal(exported.engine.state.values.length, 12);
     assert.equal(exported.doorState.seed, 0xFF_FF_FF_FF);
     assert.equal(exported.doorState.doors[0].locked, false);
@@ -555,7 +588,7 @@ test('legacy and current backups without door state retain explicit source initi
     assert.equal(Object.hasOwn(restored, 'doorState'), false);
     const current = structuredClone(restored.record);
 
-    assert.equal(current.formatVersion, 2);
+    assert.equal(current.formatVersion, 3);
     assert.equal(Object.hasOwn(await validateSave(current), 'doorState'), false);
     assert.equal(Object.hasOwn(await store.restore(current), 'doorState'), false);
 });
@@ -683,7 +716,7 @@ test('portable queue payload stages native progress after source geometry and re
     }));
     const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
 
-    assert.equal(exported.queue.version, 1);
+    assert.equal(exported.queue.version, 2);
     assert.equal(typeof exported.queue.bytes, 'string');
     const restored = await store.restore(exported);
 
@@ -697,10 +730,10 @@ test('portable queue payload stages native progress after source geometry and re
     corrupt[0] ^= 255;
     assert.throws(() => restored.engine.loadQueueState(corrupt));
     assert.deepEqual(restored.engine.actions.getState(), state);
-    assert.equal(engine.items()[0].location, 'ground');
+    assert.notEqual(engine.items()[0].worldPosition, null);
     completeActions(restored.engine);
     assert.equal(restored.engine.items()[0].id, id);
-    assert.equal(restored.engine.items()[0].location, 'inventory');
+    assert.equal(restored.engine.items()[0].ownerContainerId, restored.engine.playerInventoryId());
     engine.sourceActions.setSaveHook(() => {
         throw new Error('opaque source closure cannot be resumed');
     });
@@ -741,13 +774,16 @@ test('portable held refs restore MAX pairs before source code and malformed payl
     };
 
     engine.registerItemDefinition(definition, { owner: 'base' });
-    const x = engine.snapshot().x;
-    const y = engine.snapshot().y;
 
-    engine.importItems([{
-        id: 0xFF_FF_FF_FF, fullType: definition.fullType, location: 'inventory',
-        x, y, condition: 10, count: 1, bodyLocation: null, weight: 10, actualWeight: 10,
-    }]);
+    engine.importInventoryGraph({
+        ...engine.exportInventoryGraph(),
+        items: [{
+            id: 0xFF_FF_FF_FF, fullType: definition.fullType, definitionOrdinal: 0,
+            ownerContainerId: engine.playerInventoryId(), internalContainerId: null, worldPosition: null,
+            condition: 10, count: 1, bodyLocation: null, weight: 10, actualWeight: 10,
+            favorite: false, consumed: false,
+        }],
+    });
     engine.setHandItem('primary', 0xFF_FF_FF_FF);
     engine.setHandItem('secondary', 0xFF_FF_FF_FF);
     const exported = JSON.parse(await (await store.exportLive(engine, {
@@ -824,4 +860,408 @@ test('actual pre-hand ABI1 omits held state while native held-reader traps canno
     assert.throws(() => trap.saveHandState(), WebAssembly.RuntimeError);
     await assert.rejects(trapStore.exportLive(trap), WebAssembly.RuntimeError);
     assert.throws(() => trapStore.save(trap), WebAssembly.RuntimeError);
+});
+
+test('portable equipment preserves custom identities, detached bound groups and same-slot worn order', async () => {
+    const { engine, record, store } = await fixture();
+    const e = engine.equipmentOperation;
+    const location = e('register', 'Fixture:Layer');
+    const group = e('groupGet', 'FixtureGroup', true);
+
+    e('locationAdd', group, location);
+    e('multiSet', group, location, true);
+    const shoes = e('lookup', 'Shoes');
+
+    e('locationAdd', group, shoes);
+    e('relationSet', group, location, shoes, 3);
+    e('relationSet', group, location, shoes, 1);
+    e('relationSet', group, shoes, location, 2);
+    e('wornGroupSet', group);
+    e('reset');
+    const active = e('groupGet', 'FixtureGroup', true);
+
+    e('locationAdd', active, shoes);
+    engine.registerItemDefinition({
+        fullType: 'Fixture.Layer', bodyLocation: 'fixture:layer', canBeEquipped: 'Shoes',
+        conditionMax: 10, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0,
+    }, { owner: 'fixture' });
+    const rows = [1, 0xFF_FF_FF_FF].map((id) => ({
+        id, fullType: 'Fixture.Layer', definitionOrdinal: 0, ownerContainerId: engine.playerInventoryId(),
+        internalContainerId: null, worldPosition: null,
+        condition: 10, count: 1, bodyLocation: 'fixture:layer', weight: 1, actualWeight: 1,
+        favorite: false, consumed: false,
+    }));
+
+    engine.importInventoryGraph({ ...engine.exportInventoryGraph(), items: rows, wornOrder: [0xFF_FF_FF_FF, 1] });
+    const cells = record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: new Uint8Array(Buffer.from(cell.bytes, 'base64')),
+    }));
+    const actor = engine.saveState();
+    const exported = await store.exportLive(engine, { cells, modState: record.modState });
+    const captured = JSON.parse(await exported.text());
+    const restored = await store.restore(captured);
+
+    assert.equal(captured.formatVersion, 3);
+    assert.deepEqual(restored.engine.saveState(), actor);
+    assert.equal(captured.equipmentState.version, 1);
+    assert.equal(captured.equipmentState.groups.find(({ name }) => name === 'FixtureGroup').active, false);
+    assert.deepEqual(restored.engine.wornItems(), [
+        { id: 0xFF_FF_FF_FF, bodyLocation: 'fixture:layer' }, { id: 1, bodyLocation: 'fixture:layer' },
+    ]);
+    assert.notEqual(restored.engine.equipmentOperation('groupGet', 'FixtureGroup', false),
+        restored.engine.equipmentOperation('wornGroupGet'), 'active same-name group must not replace detached binding');
+    assert.deepEqual(restored.engine.saveEquipmentState(), engine.saveEquipmentState());
+});
+
+test('portable worn snapshots survive later multiplicity and exclusivity rule changes', async () => {
+    const { engine, record, store } = await fixture();
+    const e = engine.equipmentOperation;
+    const group = e('wornGroupGet');
+    const shoes = e('lookup', 'Shoes');
+    const hands = e('lookup', 'Hands');
+
+    e('multiSet', group, shoes, true);
+    engine.registerItemDefinition({
+        fullType: 'Fixture.RuleChange', bodyLocation: 'Shoes', conditionMax: 10,
+        stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0, weight: 1,
+    }, { owner: 'fixture' });
+    const rows = [[1, 'Shoes'], [2, 'Shoes'], [3, 'Hands']].map(([id, bodyLocation]) => ({
+        id, fullType: 'Fixture.RuleChange', definitionOrdinal: 0, ownerContainerId: 1,
+        internalContainerId: null, worldPosition: null, condition: 10, count: 1,
+        bodyLocation, weight: 1, actualWeight: 1, favorite: false, consumed: false,
+    }));
+
+    engine.importInventoryGraph({ ...engine.exportInventoryGraph(), items: rows, wornOrder: [2, 1, 3] });
+    e('multiSet', group, shoes, false);
+    e('relationSet', group, shoes, hands, 1);
+    const exported = JSON.parse(await (await store.exportLive(engine, {
+        cells: [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }],
+    })).text());
+    const restored = await store.restore(exported);
+
+    assert.deepEqual(restored.engine.wornItems(), [
+        { id: 2, bodyLocation: 'base:shoes' },
+        { id: 1, bodyLocation: 'base:shoes' },
+        { id: 3, bodyLocation: 'base:hands' },
+    ]);
+    assert.equal(restored.engine.equipmentOperation('multiGet', group, shoes), false);
+    assert.equal(restored.engine.equipmentOperation('relationGet', group, shoes, hands, 1), true);
+    assert.deepEqual(restored.engine.saveEquipmentState(), engine.saveEquipmentState());
+    const missing = structuredClone(exported);
+
+    delete missing.integrity;
+    missing.inventoryGraph.items[0].bodyLocation = 'fixture:missing';
+    await assert.rejects(validateSave(await signed(missing)), /equipment/iu);
+    assert.deepEqual(engine.wornItems().map(({ id }) => id), [2, 1, 3]);
+});
+
+test('legacy equipment derives stable group-index order without preferred-location or blanket multi-slot rejection', async () => {
+    const { engine, record, store } = await fixture();
+    const e = engine.equipmentOperation;
+
+    e('multiSet', e('wornGroupGet'), e('lookup', 'Shoes'), true);
+    engine.registerItemDefinition({
+        fullType: 'Fixture.Legacy', bodyLocation: 'Hands',
+        conditionMax: 10, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0,
+    }, { owner: 'fixture' });
+    const rows = [[3, 'Hands'], [1, 'Shoes'], [0xFF_FF_FF_FF, 'Shoes']].map(([id, bodyLocation]) => ({
+        id, fullType: 'Fixture.Legacy', location: 'inventory', x: 5, y: 5,
+        condition: 10, count: 1, bodyLocation, weight: 1, actualWeight: 1,
+    }));
+
+    engine.importInventoryGraph({
+        ...engine.exportInventoryGraph(), wornOrder: undefined,
+        items: rows.map((item) => ({
+            id: item.id, fullType: item.fullType, condition: item.condition, count: item.count,
+            bodyLocation: item.bodyLocation, weight: item.weight, actualWeight: item.actualWeight,
+            definitionOrdinal: 0, ownerContainerId: engine.playerInventoryId(),
+            internalContainerId: null, worldPosition: null, favorite: false, consumed: false,
+        })),
+    });
+    const cells = record.world.cells.map((cell) => ({
+        x: cell.x, y: cell.y, bytes: new Uint8Array(Buffer.from(cell.bytes, 'base64')),
+    }));
+    const actor = engine.saveState();
+    const exported = await store.exportLive(engine, { cells });
+    const payload = JSON.parse(await exported.text());
+
+    delete payload.integrity;
+    delete payload.equipmentState;
+    delete payload.inventoryGraph;
+    payload.formatVersion = 2;
+    payload.items = rows;
+    payload.itemDefs[0].bodyLocation = 'Hands';
+    delete payload.itemDefs[0].canBeEquipped;
+    const restored = await store.restore(await signed(payload));
+
+    assert.deepEqual(restored.engine.saveState(), actor);
+    assert.deepEqual(restored.engine.wornItems(), [
+        { id: 1, bodyLocation: 'base:shoes' }, { id: 0xFF_FF_FF_FF, bodyLocation: 'base:shoes' },
+        { id: 3, bodyLocation: 'base:hands' },
+    ]);
+    assert.equal(restored.engine.itemDefinitions()[0].bodyLocation, 'base:hands');
+});
+
+test('ordered graph backups preserve container allocator, nested ownership, traits and overcapacity', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.command({ type: 'cancel' });
+    engine.registerItemDefinition({
+        fullType: 'Fixture.SaveBag', weight: 1, bodyLocation: null, conditionMax: 10,
+        stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0,
+        isBag: true, capacity: 2, weightReduction: 50, maxItemSize: 10,
+    }, { owner: 'fixture' });
+    const graph = engine.exportInventoryGraph();
+    const actor = graph.containers.find(({ kind }) => kind === 'actor');
+    const bagContainer = {
+        id: 7, kind: 'bag', parentKind: null, parentId: null, containingItemId: 11,
+        capacity: 2, weightReduction: 50, worldPosition: null, explored: true, looted: false,
+        definitionOrdinal: 0, type: 'container', onlyAcceptCategory: null, acceptItemFunction: null,
+    };
+    const shell = {
+        id: 11, fullType: 'Fixture.SaveBag', definitionOrdinal: 0, ownerContainerId: actor.id,
+        internalContainerId: 7, worldPosition: null, condition: 10, count: 1,
+        bodyLocation: null, weight: 1, actualWeight: 1,
+        favorite: true, consumed: false,
+    };
+    const inner = { ...bagContainer, id: 8, containingItemId: 13 };
+
+    graph.containers.push(bagContainer, inner);
+    graph.items = [
+        shell, { ...shell, id: 13, ownerContainerId: 7, internalContainerId: 8, weight: 8, actualWeight: 8, consumed: true },
+    ];
+    Object.assign(graph, {
+        nextContainerId: 95, organized: true, disorganized: true, equippedMultiplier: 0.25,
+        dropItemsOnSquareCenter: true,
+    });
+    engine.importInventoryGraph(graph);
+    const cells = [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }];
+    const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+    const restored = await store.restore(exported);
+
+    assert.deepEqual(restored.engine.exportInventoryGraph(), engine.exportInventoryGraph());
+    assert.equal(exported.inventoryGraph.nextContainerId, 95);
+    const signedCapacity = structuredClone(exported);
+
+    delete signedCapacity.integrity;
+    signedCapacity.inventoryGraph.containers[1].capacity = -1;
+    const restoredNegative = await store.restore(await signed(signedCapacity));
+
+    assert.equal(restoredNegative.engine.getContainer(7).capacity, -1,
+        'original signed stored capacity is structural state, not admission success');
+    const spawned = restored.engine.command({ type: 'spawnItem', fullType: 'Fixture.SaveBag', x: 5, y: 5 });
+
+    assert.equal(restored.engine.getItem(spawned.id).internalContainerId, 96,
+        'new floor consumes allocator 95 before new bag consumes 96');
+    const before = engine.exportInventoryGraph();
+    const mutations = [
+        (value) => {
+            value.items[1].ownerContainerId = 999;
+        },
+        (value) => {
+            value.items[0].internalContainerId = 8;
+        },
+        (value) => {
+            value.items[0].ownerContainerId = 7;
+        },
+        (value) => {
+            value.items[0].ownerContainerId = 8;
+        },
+        (value) => {
+            value.items.push({ ...value.items[0] });
+        },
+        (value) => {
+            value.containers.push({ ...value.containers[0] });
+        },
+        (value) => {
+            value.items[1].worldPosition = { x: 5, y: 5, z: 0 };
+        },
+        (value) => {
+            value.items[1].bodyLocation = 'base:shoes';
+            value.wornOrder = [13];
+        },
+        (value) => {
+            value.nextContainerId = 8;
+        },
+        (value) => {
+            value.items[0].favorite = 1;
+        },
+        (value) => {
+            value.dropItemsOnSquareCenter = 1;
+        },
+        (value) => {
+            value.containers[0].parentId = 99;
+        },
+        (value) => {
+            value.containers[1].containingItemId = 99;
+        },
+        (value) => {
+            value.wornOrder = [13];
+        },
+        (value) => {
+            value.items[0].location = 'inventory';
+        },
+        (value) => {
+            value.containers.push({
+                ...value.containers[0], id: 50, kind: 'floor', parentKind: 'square', parentId: 0,
+                worldPosition: { x: 256, y: 0, z: 0 }, type: 'floor',
+            });
+        },
+    ];
+
+    await Promise.all(mutations.map(async (mutate) => {
+        const invalid = structuredClone(exported);
+
+        delete invalid.integrity;
+        mutate(invalid.inventoryGraph);
+        const invalidRecord = await signed(invalid);
+
+        await Promise.all([
+            assert.rejects(validateSave(invalidRecord), /inventory|container|graph|equipment/iu),
+            assert.rejects(store.restore(invalidRecord)),
+        ]);
+        assert.deepEqual(engine.exportInventoryGraph(), before);
+    }));
+
+    const held = structuredClone(exported);
+
+    delete held.integrity;
+    held.handState = { version: 1, primary: 13, secondary: null };
+    await assert.rejects(validateSave(await signed(held)), /hand/iu);
+    const tampered = structuredClone(exported);
+
+    tampered.inventoryGraph.equippedMultiplier = 0.5;
+    await assert.rejects(store.restore(tampered), /integrity/u);
+});
+
+test('authenticated flat v2 migration preserves encounter order, real floor roots and unknown-owner refusal', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.registerItemDefinition({
+        fullType: 'Fixture.Flat', weight: 1, bodyLocation: null, conditionMax: 10,
+        stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0,
+    }, { owner: 'fixture' });
+    const payload = {
+        ...record, formatVersion: 2, engine: { abiVersion: 1, state: engine.saveState() },
+        itemDefs: engine.itemDefinitions(),
+        items: [
+            { id: 9, fullType: 'Fixture.Flat', location: 'ground', x: 5.5, y: 6.5, condition: 10, count: 1, bodyLocation: null },
+            { id: 3, fullType: 'Fixture.Flat', location: 'inventory', x: 5.5, y: 6.5, condition: 10, count: 1, bodyLocation: null },
+            { id: 7, fullType: 'Fixture.Flat', location: 'ground', x: 5.9, y: 6.1, condition: 10, count: 1, bodyLocation: null },
+        ],
+    };
+
+    delete payload.integrity;
+    payload.engine.state.values[11] = 10;
+    const flat = await signed(payload);
+    const unchanged = structuredClone(flat);
+    const validated = await validateSave(flat);
+    const restored = await store.restore(flat);
+
+    assert.deepEqual(flat, unchanged);
+    assert.deepEqual(validated.inventoryGraph.items.map(({ id }) => id), [9, 3, 7]);
+    assert.deepEqual(validated.inventoryGraph.items.map(({ ownerContainerId }) => ownerContainerId), [2, 1, 2]);
+    assert.equal(validated.inventoryGraph.nextContainerId, 3);
+    assert.deepEqual(validated.inventoryGraph.containers[1].worldPosition, { x: 5, y: 6, z: 0 });
+    assert.deepEqual(restored.engine.items().map(({ id }) => id), [9, 3, 7]);
+    assert.equal(Object.hasOwn(restored.record, 'items'), false);
+    flat.items[0].location = 'unknown';
+    await assert.rejects(validateSave(flat), /integrity/u);
+    await assert.rejects(validateSave(await signed({ ...payload, items: flat.items })), /inventory|item/iu);
+});
+
+test('required native graph import traps propagate without touching the live graph', async () => {
+    const { engine, record, store } = await fixture();
+    const exported = JSON.parse(await (await store.exportLive(engine, {
+        cells: [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }],
+    })).text());
+    const bytes = bodyModule(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    )), 'graph-trap');
+    const failing = createSaveStore({ engineSource: bytes, appVersion: 'test' });
+    const before = engine.exportInventoryGraph();
+
+    await assert.rejects(failing.restore(exported), WebAssembly.RuntimeError);
+    assert.deepEqual(engine.exportInventoryGraph(), before);
+});
+
+test('portable transfer queue resumes immutable container intent after graph and source geometry restore', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.command({ type: 'cancel' });
+    const definition = {
+        bodyLocation: null, conditionMax: 10, stackLimit: 1,
+        removeOnBroken: false, conditionLowerChanceOneIn: 0, weight: 1,
+    };
+
+    engine.registerItemDefinition({
+        ...definition, fullType: 'Fixture.TransferBag', isBag: true,
+        capacity: 20, weightReduction: 0, maxItemSize: 10,
+    }, { owner: 'fixture' });
+    engine.registerItemDefinition({ ...definition, fullType: 'Fixture.TransferItem' }, { owner: 'fixture' });
+    const actor = engine.snapshot();
+    const bagId = engine.command({ type: 'spawnItem', fullType: 'Fixture.TransferBag', x: actor.x, y: actor.y }).id;
+    const itemId = engine.command({ type: 'spawnItem', fullType: 'Fixture.TransferItem', x: actor.x, y: actor.y }).id;
+
+    for (const id of [bagId, itemId]) {
+        engine.actions.requestPickup(id);
+        completeActions(engine);
+    }
+
+    const destinationContainerId = engine.getItem(bagId).internalContainerId;
+    const accepted = engine.actions.requestTransfer(itemId, engine.playerInventoryId(), destinationContainerId);
+
+    assert.equal(accepted.accepted, true);
+    engine.frameStep(1 / 60);
+    const before = engine.actions.getState();
+    const exported = JSON.parse(await (await store.exportLive(engine, {
+        cells: [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }],
+    })).text());
+    const restored = await store.restore(exported);
+
+    importPickupSquares(restored.engine, actor.x, actor.y);
+    restored.engine.loadDoorState(restored.doorState);
+    restored.engine.loadQueueState(restored.queueState);
+    restored.engine.sourceActions.validateSourceOwners(restored.sourceOwners);
+    assert.deepEqual(restored.engine.actions.getState(), before);
+    assert.equal(restored.engine.actions.getState().current.destinationContainerId, destinationContainerId);
+    completeActions(restored.engine);
+    assert.equal(restored.engine.getItem(itemId).ownerContainerId, destinationContainerId);
+    assert.deepEqual(restored.engine.containerItems(destinationContainerId).map(({ id }) => id), [itemId]);
+    assert.equal(engine.getItem(itemId).ownerContainerId, engine.playerInventoryId());
+});
+
+test('supported original transfer actor traits and metabolic target survive authenticated native restore', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.sourceTiming.setTrait('base:hemophobic', true);
+    engine.sourceActions.setMetabolicTarget(3.2);
+    assert.equal(engine.sourceActions.getMetabolicTarget(), Math.fround(3.2));
+    const exported = JSON.parse(await (await store.exportLive(engine, {
+        cells: [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }],
+    })).text());
+    const restored = await store.restore(exported);
+
+    assert.equal(exported.bodyState.metabolicTarget, Math.fround(3.2));
+    assert.equal(restored.engine.sourceActions.getMetabolicTarget(), Math.fround(3.2));
+    importPickupSquares(restored.engine, engine.snapshot().x, engine.snapshot().y);
+    restored.engine.loadDoorState(restored.doorState);
+    restored.engine.loadQueueState(restored.queueState);
+    assert.equal(restored.engine.sourceTiming.hasTrait('base:hemophobic'), true);
+    assert.equal(restored.engine.sourceTiming.hasTrait('base:dextrous'), false);
+    const tampered = structuredClone(exported);
+
+    tampered.bodyState.metabolicTarget = 1.5;
+    await assert.rejects(store.restore(tampered), /integrity/u);
+    const invalid = structuredClone(exported);
+
+    delete invalid.integrity;
+    invalid.bodyState.metabolicTarget = 11;
+    await assert.rejects(store.restore(await signed(invalid)));
+    assert.equal(engine.sourceActions.getMetabolicTarget(), Math.fround(3.2));
+    const legacyBody = structuredClone(exported);
+
+    delete legacyBody.integrity;
+    delete legacyBody.bodyState.metabolicTarget;
+    assert.equal((await store.restore(await signed(legacyBody))).engine.sourceActions.getMetabolicTarget(), 1.5);
 });

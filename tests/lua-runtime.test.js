@@ -100,6 +100,503 @@ function loadSource(session, host, source, id) {
     });
 }
 
+test('native graph Lua wrappers preserve recursive ownership, bag identity and all three room overloads', async () => {
+    const { engine, host, session } = await fixture();
+
+    engine.registerItemDefinition({
+        ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.GraphBag', type: 'Container', weight: 1,
+        isBag: true, capacity: 20, weightReduction: 50, maxItemSize: 10,
+    }, { owner: 'fixture' });
+    engine.registerItemDefinition({
+        ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.GraphLeaf', type: 'Normal', weight: 2,
+    }, { owner: 'fixture' });
+    importPickupSquares(engine);
+    const bags = Array.from({ length: 3 }, () => engine.getItem(host.api.items.spawn({ fullType: 'Fixture.GraphBag', x: 5, y: 5 }).snapshot.id));
+    const bag = bags[0];
+    const leaf = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.GraphLeaf', x: 5, y: 5 }).snapshot.id);
+
+    for (const value of bags) {
+        host.api.items.pickup(value.id);
+        completeActions(engine);
+    }
+
+    for (let index = 1; index < bags.length; index += 1) {
+        host.api.items.transferItem({
+            id: bags[index].id, sourceContainerId: engine.playerInventoryId(), destinationContainerId: bags[index - 1].internalContainerId,
+        });
+        completeActions(engine);
+    }
+
+    host.api.items.transferItem({
+        id: leaf.id, sourceContainerId: leaf.ownerContainerId, destinationContainerId: bags[2].internalContainerId,
+    });
+    completeActions(engine);
+    try {
+        activate(session, host, `
+            local root=getPlayer():getInventory()
+            local bag=root:getItems():get(0)
+            assert(instanceof(bag,"InventoryContainer") and instanceof(bag,"InventoryItem"))
+            local inside=bag:getInventory()
+            assert(inside==bag:getInventory() and inside:getContainingItem()==bag)
+            local middle=inside:getItems():get(0)
+            local inner=middle:getInventory():getItems():get(0)
+            local leaf=inner:getInventory():getItems():get(0)
+            GraphOuterBag,GraphLeaf=bag,leaf
+            assert(not leaf:isFavorite() and not leaf:getIsCraftingConsumed())
+            leaf:setFavorite(true)
+            assert(leaf:isFavorite())
+            assert(leaf:getContainer()==inner:getInventory() and bag:getContainer()==root)
+            assert(leaf:getOwner()==nil and leaf:getPlayer()==getPlayer())
+            assert(root:contains(bag) and not root:contains(leaf) and root:contains(leaf,true))
+            assert(root:containsTypeRecurse("GraphLeaf"))
+            assert(inside:getOutermostContainer()==root and inside:isInCharacterInventory(getPlayer()))
+            assert(inside:isInside(bag) and not root:isInside(bag))
+            assert(bag:getContentsWeight()==4 and bag:getUnequippedWeight()==5)
+            assert(bag:getInventoryWeight()==4)
+            assert(middle:getContentsWeight()==3 and inner:getContentsWeight()==2)
+            assert(inside:hasRoomFor(getPlayer(),leaf))
+            assert(inside:hasRoomFor(getPlayer(),1))
+            assert(inside:hasRoomFor(getPlayer(),1,0))
+            assert(not pcall(function() inside:hasRoomFor(leaf) end))
+            assert(not pcall(function() inside:getItems():add(leaf) end))
+        `);
+        host.coreApi.character.setHandItem('primary', bag.id);
+        const childEquippedWeight = engine.itemWeights(bags[1].id).equippedWeight;
+
+        activate(session, host, `
+            assert(GraphOuterBag:getInventoryWeight()==${childEquippedWeight})
+            assert(GraphOuterBag:getContentsWeight()==4)
+        `, 'graph-equipped-inventory-weight');
+        host.api.items.drop(bag.id, 5, 5);
+        activate(session, host, `
+            local square=getPlayer():getCurrentSquare()
+            assert(GraphOuterBag:getOutermostContainer()==nil)
+            assert(GraphLeaf:getOutermostContainer()==GraphOuterBag:getInventory())
+            assert(GraphLeaf:isInsideBagOnSquare(square) and GraphLeaf:getWorldItem()==nil)
+            assert(GraphOuterBag:getInventory():getOutermostContainer()~=GraphLeaf:getOutermostContainer())
+            assert(GraphLeaf:getPlayer()==nil)
+            assert(GraphLeaf:isFavorite(), "moving a bag shell must retain descendant policy state")
+        `, 'graph-floor-root-check');
+        assert.equal(engine.getItem(leaf.id).ownerContainerId, bags[2].internalContainerId);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('source grouped grabs retain distinct true floor roots across native queue replay', async () => {
+    const { engine, host, session } = await fixture();
+
+    importPickupSquares(engine);
+    engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.CrossFloor', type: 'Normal', weight: 0.01 }, { owner: 'fixture' });
+    const first = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.CrossFloor', x: 5, y: 5 }).snapshot.id);
+    const adjacent = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.CrossFloor', x: 6, y: 5 }).snapshot.id);
+
+    try {
+        activate(session, host, `${SOURCE_GROUP_FIXTURE}
+            local a=getCell():getGridSquare(5,5,0):getWorldObjects():get(0)
+            local b=getCell():getGridSquare(6,5,0):getWorldObjects():get(0)
+            ISTimedActionQueue.add(ISGrabItemAction:new(getPlayer(),a,1))
+            ISTimedActionQueue.add(ISGrabItemAction:new(getPlayer(),b,1))
+        `, 'cross-floor-source');
+        const before = engine.actions.getState();
+
+        assert.equal(before.pending.length, 0, 'the original same-type source grouping must remain intact');
+        assert.deepEqual(before.current.groups[0].itemIds, [first.id, adjacent.id]);
+        assert.deepEqual(before.current.groups[0].sourceContainerIds, [first.ownerContainerId, adjacent.ownerContainerId]);
+        assert.notEqual(first.ownerContainerId, adjacent.ownerContainerId);
+        const bytes = engine.saveQueueState();
+
+        engine.loadQueueState(bytes);
+        assert.deepEqual(engine.actions.getState(), before);
+        completeLuaActions(engine, host, session);
+        assert.deepEqual(engine.containerItems(engine.playerInventoryId()).map(({ id }) => id), [first.id, adjacent.id]);
+        assert.equal(engine.getItem(first.id).worldPosition, null);
+        assert.equal(engine.getItem(adjacent.id).worldPosition, null);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('original floor presentation keeps adjacent world roots and filters native moves without owning items', async () => {
+    const { engine, host, session } = await fixture();
+
+    engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.FloorView', type: 'Normal', weight: 1 }, { owner: 'fixture' });
+    importPickupSquares(engine);
+    const first = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.FloorView', x: 5, y: 5 }).snapshot.id);
+    const adjacent = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.FloorView', x: 6, y: 5 }).snapshot.id);
+
+    try {
+        activate(session, host, `
+            local a=getCell():getGridSquare(5,5,0):getWorldObjects():get(0):getItem()
+            local b=getCell():getGridSquare(6,5,0):getWorldObjects():get(0):getItem()
+            FloorViewCheck=ItemContainer.new("floor",nil,nil)
+            FloorViewCheck:setExplored(true)
+            FloorViewCheck:AddItem(a)
+            FloorViewCheck:AddItem(b)
+            FloorViewCheck:AddItem(a)
+            assert(FloorViewCheck:getItems():size()==2 and FloorViewCheck:getItems():get(0)==a)
+            assert(FloorViewCheck:getMaxWeight()==50 and FloorViewCheck:getCapacityWeight()==2)
+            assert(a:getContainer()~=b:getContainer() and a:getContainer()~=FloorViewCheck)
+            assert(a:getOutermostContainer()==nil and a:getOwner()==nil)
+            assert(not pcall(function() FloorViewCheck:DoRemoveItem(a) end))
+            FloorViewCheck:clear()
+            assert(FloorViewCheck:getItems():isEmpty() and a:getWorldItem()~=nil)
+            FloorViewCheck:AddItem(a)
+            FloorViewCheck:AddItem(b)
+        `, 'floor-view-check');
+        assert.equal(host.api.items.get(first.id).ownerContainerId, first.ownerContainerId);
+        assert.equal(host.api.items.get(adjacent.id).ownerContainerId, adjacent.ownerContainerId);
+        host.api.items.pickup(adjacent.id);
+        completeActions(engine);
+        activate(session, host, `
+            assert(FloorViewCheck:getItems():size()==1)
+            assert(FloorViewCheck:getItems():get(0):getID()==${first.id})
+            assert(FloorViewCheck:getCapacityWeight()==1)
+        `, 'floor-view-after-move');
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('source facing consumes native world placement and refuses inventory-only items', async () => {
+    const { engine, host, session } = await fixture();
+
+    importPickupSquares(engine);
+    engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.FaceWorld', type: 'Normal', weight: 1 }, { owner: 'fixture' });
+    const world = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.FaceWorld', x: 6.125, y: 5.25 }).snapshot.id);
+    const calls = [];
+
+    session.attachSourceActions({
+        ...engine.sourceActions,
+        /**
+         * Observe the boundary while executing the actual native facing operation.
+         *
+         * @param {number} x - Actual world-space facing target x.
+         * @param {number} y - Actual world-space facing target y.
+         * @returns {void} Updates the real native actor facing target.
+         */
+        face: (x, y) => {
+            calls.push([x, y]);
+
+            return engine.sourceActions.face(x, y);
+        },
+    }, engine.sourceTiming);
+    try {
+        activate(session, host, `
+            local object=getCell():getGridSquare(6,5,0):getWorldObjects():get(0)
+            getPlayer():faceThisObject(object)
+        `, 'face-world-check');
+        assert.deepEqual(calls, [[world.worldPosition.x + 0.5, world.worldPosition.y + 0.5]]);
+        host.api.items.pickup(world.id);
+        completeActions(engine);
+        assert.throws(() => activate(session, host, `
+            getPlayer():faceThisObject(getPlayer():getInventory():getItems():get(0))
+        `, 'face-nonworld-check'), /requires true world placement/u);
+        assert.equal(calls.length, 1, 'a non-world item must not reach the native facing mutation');
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+});
+
+test('private original shared transfer helper preserves native bag order and rolls back a supported helper failure', async (t) => {
+    let originals;
+
+    try {
+        originals = await Promise.all(['media/lua/shared/ISBaseObject.lua', 'media/lua/shared/TimedActions/ISTransferAction.lua']
+            .map(async (path) => ({ path, source: await readFile(new URL(`../content/${path}`, import.meta.url), 'utf8'), execute: false })));
+    } catch (error) {
+        if (error.code !== 'ENOENT') {
+            throw error;
+        }
+
+        t.skip('Requires privately provisioned original Lua; no original bytes are committed.');
+
+        return;
+    }
+
+    const { engine, host, session, saved } = await fixture();
+
+    importPickupSquares(engine);
+    engine.registerItemDefinition({
+        ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.TransferBag', type: 'Container', weight: 1,
+        capacity: 20, weightReduction: 50, maxItemSize: 10,
+    }, { owner: 'fixture' });
+    engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.TransferLeaf', type: 'Normal', weight: 2 }, { owner: 'fixture' });
+    const bag = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.TransferBag', x: 5, y: 5 }).snapshot.id);
+    const secondBag = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.TransferBag', x: 5, y: 5 }).snapshot.id);
+    const leaf = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.TransferLeaf', x: 5, y: 5 }).snapshot.id);
+
+    for (const id of [bag.id, secondBag.id, leaf.id]) {
+        host.api.items.pickup(id);
+        completeActions(engine);
+    }
+
+    host.coreApi.character.setHandItem('primary', leaf.id);
+    try {
+        session.preload({ id: 'private-transfer-helper', sources: originals });
+        // Authored scheduling fixture; the shared original helper text is loaded and executed unchanged.
+        activate(session, host, `${SOURCE_GROUP_FIXTURE}
+            getModData().TransferObservers={clothing=0,handRemoved=0}
+            Events.OnClothingUpdated.Add(function(character)
+                assert(character==getPlayer() and character:getPrimaryHandItem()==nil)
+                getModData().TransferObservers.clothing=getModData().TransferObservers.clothing+1
+            end)
+            Events.OnEquipPrimary.Add(function(character,entry)
+                assert(character==getPlayer())
+                if entry==nil then
+                    getModData().TransferObservers.handRemoved=getModData().TransferObservers.handRemoved+1
+                end
+            end)
+            require "TimedActions/ISTransferAction"
+            ISInventoryTransferAction=setmetatable({Type="ISInventoryTransferAction"},{__index=ISBaseTimedAction})
+            ISInventoryTransferAction.__index=ISInventoryTransferAction
+            function ISInventoryTransferAction:new(character,entry,source,destination,time)
+                return setmetatable({character=character,item=entry,srcContainer=source,destContainer=destination,
+                    maxTime=time,queueList={{time=time,items={entry}}}},self)
+            end
+            function ISInventoryTransferAction:isValid()
+                return self.srcContainer:contains(self.item) and self.destContainer:hasRoomFor(self.character,self.item)
+            end
+            function ISInventoryTransferAction:getNotFullFloorSquare(entry)
+                return ISTransferAction:getNotFullFloorSquare(self.character,entry,self.destContainer)
+            end
+            function ISInventoryTransferAction:isAlreadyTransferred(entry) return self.destContainer:contains(entry) end
+            function ISInventoryTransferAction:transferItem(entry)
+                return ISTransferAction:transferItem(self.character,entry,self.srcContainer,self.destContainer,self:getNotFullFloorSquare(entry))
+            end
+            function ISInventoryTransferAction:perform()
+                local batch=table.remove(self.queueList,1)
+                for _,entry in ipairs(batch.items) do
+                    self.item=entry
+                    if self:isValid() then self:transferItem(entry) end
+                end
+                ISBaseTimedAction.perform(self)
+            end
+            __pz_source_loaded()
+            local root=getPlayer():getInventory()
+            local bag=root:getItems():get(0)
+            local entry=root:getItems():get(2)
+            SharedTransferBag,SharedTransferBag2,SharedTransferLeaf=bag,root:getItems():get(1),entry
+            SharedTransferAction=ISInventoryTransferAction:new(getPlayer(),entry,root,bag:getInventory(),1)
+            ISTimedActionQueue.add(SharedTransferAction)
+            -- Authored control events keep every stage under this one source owner and save namespace.
+            Events.OnKeyPressed.Add(function(key)
+                if key==1 then
+                    SharedTransferAction.getNotFullFloorSquare=function() return nil end
+                elseif key==2 then
+                    SharedTransferAction.getNotFullFloorSquare=nil
+                elseif key==3 then
+                    SharedTransferAction.isAlreadyTransferred=function() return nil end
+                elseif key==4 then
+                    SharedTransferAction.isAlreadyTransferred=nil
+                elseif key==5 then
+                    ISTimedActionQueue.add(ISInventoryTransferAction:new(getPlayer(),SharedTransferLeaf,SharedTransferBag:getInventory(),SharedTransferBag2:getInventory(),1))
+                elseif key==6 then
+                    local floor=ItemContainer.new("floor",nil,nil)
+                    ISTimedActionQueue.add(ISInventoryTransferAction:new(getPlayer(),SharedTransferLeaf,SharedTransferBag2:getInventory(),floor,1))
+                elseif key==7 then
+                    ISTimedActionQueue.add(ISInventoryTransferAction:new(getPlayer(),SharedTransferLeaf,SharedTransferLeaf:getContainer(),SharedTransferBag:getInventory(),1))
+                elseif key==8 then
+                    local character=getPlayer()
+                    local original=character.removeWornItem
+                    character.removeWornItem=function(self,entry,reset)
+                        original(self,entry,reset)
+                        error("supported helper failure after native equipment removal")
+                    end
+                    ISTimedActionQueue.add(ISInventoryTransferAction:new(character,SharedTransferLeaf,character:getInventory(),SharedTransferBag:getInventory(),1))
+                end
+            end)
+        `, 'shared-transfer-check');
+        const accepted = engine.actions.getState().current;
+
+        assert.equal(accepted.kind, 'transfer');
+        const refs = engine.sourceActions.transferRead(accepted.id);
+
+        assert.equal(refs.sourceContainerId, engine.playerInventoryId());
+        assert.equal(refs.destinationContainerId, bag.internalContainerId);
+
+        for (const [delegate, key] of [['getNotFullFloorSquare', 1], ['isAlreadyTransferred', 3]]) {
+            session.dispatch('OnKeyPressed', key);
+            assert.throws(() => engine.saveQueueState(), `opaque ${delegate} must refuse portable capture`);
+            session.dispatch('OnKeyPressed', key + 1);
+            assert.ok(engine.saveQueueState().length > 0);
+        }
+
+        completeLuaActions(engine, host, session);
+        assert.deepEqual(engine.containerItems(bag.internalContainerId).map(({ id }) => id), [leaf.id]);
+        assert.equal(engine.getHandItems().primary, null);
+        session.flushSaveData();
+        assert.deepEqual(saved.get('host').data.nativePlayerData.TransferObservers, { clothing: 1, handRemoved: 1 });
+        session.dispatch('OnKeyPressed', 5);
+        completeLuaActions(engine, host, session);
+        assert.equal(engine.getItem(leaf.id).ownerContainerId, secondBag.internalContainerId);
+        session.dispatch('OnKeyPressed', 6);
+        completeLuaActions(engine, host, session);
+        assert.notEqual(engine.getItem(leaf.id).worldPosition, null);
+        assert.equal(engine.getContainer(engine.getItem(leaf.id).ownerContainerId).kind, 'floor');
+        session.dispatch('OnKeyPressed', 7);
+        completeLuaActions(engine, host, session);
+        assert.equal(engine.getItem(leaf.id).worldPosition, null);
+        assert.equal(engine.getItem(leaf.id).ownerContainerId, bag.internalContainerId);
+        host.api.items.transferItem({
+            id: leaf.id, sourceContainerId: bag.internalContainerId, destinationContainerId: engine.playerInventoryId(),
+        });
+        completeActions(engine);
+        host.coreApi.character.setHandItem('primary', leaf.id);
+        const before = engine.exportInventoryGraph();
+
+        session.dispatch('OnKeyPressed', 8);
+        assert.throws(() => completeLuaActions(engine, host, session), /supported helper failure after native equipment removal/u);
+        assert.deepEqual(engine.exportInventoryGraph(), before, 'PORT SAFETY rollback must preserve native membership/order after helper failure');
+        assert.equal(engine.getHandItems().primary, leaf.id, 'rollback must restore the actual held item');
+        session.flushSaveData();
+        assert.deepEqual(saved.get('host').data.nativePlayerData.TransferObservers, { clothing: 1, handRemoved: 1 },
+            'rolled-back equipment mutation must not publish committed hand removal');
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+});
+
+test('equipment wrappers preserve native identities, ordered worn traversal and headless mutation', async () => {
+    const { engine, host, session } = await fixture();
+
+    engine.registerItemDefinition({
+        fullType: 'Authored.Layer', stackLimit: 1, conditionMax: 10, conditionLowerChanceOneIn: 1,
+        removeOnBroken: false, bodyLocation: 'Shoes', canBeEquipped: 'Hat',
+    }, { owner: 'fixture' });
+    importPickupSquares(engine);
+    const ids = Array.from({ length: 2 }, () => {
+        const id = host.api.items.spawn({ fullType: 'Authored.Layer', x: 5, y: 5 }).snapshot.id;
+
+        host.api.items.pickup(id);
+        completeActions(engine);
+
+        return id;
+    });
+
+    try {
+        activate(session, host, `
+            local shoes = ItemBodyLocation.SHOES
+            assert(type(shoes) == "userdata")
+            assert(shoes == ItemBodyLocation.get(ResourceLocation.of("BASE:Shoes")))
+            assert(ResourceLocation.of("Authored:NotRegistered"):toString()=="authored:notregistered")
+            assert(ItemBodyLocation.get(ResourceLocation.of("Authored:NotRegistered"))==nil)
+            assert(shoes:toString() == "base:shoes" and tostring(shoes) == "base:shoes")
+            assert(shoes:getTranslationName() == "Shoes")
+            assert(ItemBodyLocation.BELT_EXTRA == ItemBodyLocation.get(ResourceLocation.of("BeltExtra")))
+            assert(ItemBodyLocation.FORE_ARM_LEFT == ItemBodyLocation.get(ResourceLocation.of("ForeArm_Left")))
+            assert(ItemBodyLocation.MAKE_UP_EYES_SHADOW == ItemBodyLocation.get(ResourceLocation.of("MakeUp_EyesShadow")))
+            local custom = ItemBodyLocation.register("Authored:Layer")
+            assert(custom == ItemBodyLocation.get(ResourceLocation.of("authored:layer")))
+            assert(not pcall(ItemBodyLocation.register, "Shoes"))
+            assert(not pcall(ItemBodyLocation.register, "Authored:Layer"))
+            local group = BodyLocations.getGroup("Human")
+            assert(group == BodyLocations.getGroup("Human"))
+            local member = group:getOrCreateLocation(shoes)
+            assert(member == group:getLocation(shoes) and member:getId() == shoes)
+            assert(member == group:getLocationByIndex(0))
+            assert(group:getLocation(ItemBodyLocation.HAT) == nil)
+            assert(group:indexOf(ItemBodyLocation.HAT) == -1)
+            assert(group:getLocationByIndex(-1) == nil)
+            group:getOrCreateLocation(ItemBodyLocation.HAT)
+            member:setMultiItem(true)
+            member:setExclusive(ItemBodyLocation.HAT)
+            assert(group:isExclusive(shoes, ItemBodyLocation.HAT))
+            assert(not group:isExclusive(ItemBodyLocation.HAT, shoes))
+            group:setExclusive(shoes, ItemBodyLocation.HAT)
+            assert(group:isExclusive(ItemBodyLocation.HAT, shoes))
+            group:setHideModel(shoes, ItemBodyLocation.HAT)
+            assert(group:isHideModel(shoes, ItemBodyLocation.HAT))
+            assert(not group:isHideModel(ItemBodyLocation.HAT, shoes))
+            local worn = getPlayer():getWornItems()
+            assert(worn == getPlayer():getWornItems() and worn:getBodyLocationGroup() == group)
+            local a = getPlayer():getInventory():getItems():get(0)
+            local b = getPlayer():getInventory():getItems():get(1)
+            assert(a:getBodyLocation() == shoes and a:canBeEquipped() == ItemBodyLocation.HAT)
+            getPlayer():setWornItem(shoes, a)
+            worn:setItem(shoes, b)
+            worn:setItem(shoes, a)
+            assert(worn:size() == 2 and not worn:isEmpty())
+            assert(worn:get(0):getItem() == b and worn:get(1):getItem() == a)
+            assert(worn:get(0):getLocation() == shoes)
+            assert(worn:getItem(shoes) == b and getPlayer():getWornItem(shoes) == b)
+            assert(worn:getItemById(${ids[0]}) == a and worn:getItemByIndex(0) == b)
+            assert(worn:getLocation(a) == shoes and worn:contains(a))
+            local count = 0
+            worn:forEach(function(entry) count=count+1; assert(entry:getLocation()==shoes) end)
+            assert(count == 2)
+            assert(not pcall(function() getPlayer():getWornItem({id=shoes}) end))
+            assert(not pcall(function() getPlayer():getWornItem("Shoes") end))
+            worn:setItem(shoes, nil)
+            assert(worn:size() == 2)
+            worn:remove(b)
+            assert(worn:size()==1 and not worn:contains(b))
+            worn:clear()
+            assert(worn:isEmpty() and worn:getItemByIndex(0)==nil)
+            local groups=BodyLocations.getAllGroups()
+            BodyLocations.reset()
+            assert(groups:size()==0 and group:size()==2)
+            assert(BodyLocations.getGroup("Human") ~= group)
+        `);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('void equipment bridge discards host object graphs after the real native mutation', async () => {
+    const { engine, host, session } = await fixture();
+    const graph = {};
+
+    Object.defineProperty(graph, 'ownerDocument', {
+        enumerable: true,
+        /**
+         * Reject any accidental serialization of this void host result.
+         */
+        get() {
+            throw new Error('void equipment return graph was traversed');
+        },
+    });
+    const api = {
+        ...host.api,
+        equipment: {
+            /**
+             * Preserve the real operation while poisoning only its void return.
+             *
+             * @param {string} op - Native equipment operation.
+             * @param {...unknown} args - Original bridge arguments.
+             * @returns {unknown} Real scalar query result or the poisoned mutation graph.
+             */
+            operation(op, ...args) {
+                const result = host.api.equipment.operation(op, ...args);
+
+                return op === 'multiSet' ? graph : result;
+            },
+        },
+    };
+
+    try {
+        session.activatePackage({
+            id: 'void-equipment', nativeId: 'void-equipment', api,
+            sources: [{
+                path: 'media/lua/client/VoidEquipment.lua',
+                source: 'local group=BodyLocations.getGroup("Human"); local value=group:getOrCreateLocation(ItemBodyLocation.SHOES); assert(value:setMultiItem(true)==value); assert(value:isMultiItem())',
+            }],
+        });
+        const group = engine.equipmentOperation('groupGet', 'Human');
+
+        assert.equal(engine.equipmentOperation('multiGet', group, engine.equipmentOperation('lookup', 'Shoes')), true);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
 test('original MoodleType constants resolve the authoritative registry without legacy aliases or neutral fallbacks', async () => {
     const { engine, host, session } = await fixture();
 
@@ -300,7 +797,7 @@ test('corpse context consumers exclude flat world items and player inventory and
             assert(not pcall(function() RetainedNativeObjects:get(0) end))
         `, 'corpse-context-after-removal');
         assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
-        assert.equal(host.api.items.list({ location: 'inventory' }).length, 2);
+        assert.equal(host.api.items.containerItems(host.api.items.playerInventoryId()).length, 2);
     } finally {
         session.close();
         host.dispose();
@@ -675,6 +1172,7 @@ test('Lua awkward-glove query observes real native handwear replacement and uneq
     };
 
     engine.registerItemDefinition(gloves, { owner: 'fixture' });
+    engine.equipmentOperation('locationAdd', engine.equipmentOperation('groupGet', 'Human', true), engine.equipmentOperation('lookup', 'Hands'));
     importPickupSquares(engine);
     engine.registerItemDefinition({
         ...gloves, fullType: 'Fixture.LightGloves', tags: [],
@@ -725,6 +1223,7 @@ test('Lua item weights stay live and independent while inventory carry uses nati
     engine.registerItemDefinition({
         ...definition, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 1,
     }, { owner: 'original-fixture' });
+    engine.equipmentOperation('locationAdd', engine.equipmentOperation('groupGet', 'Human', true), engine.equipmentOperation('lookup', 'Shoes'));
     const id = host.api.items.spawn({ fullType: 'Fixture.WeightedShoes', x: 5, y: 5 }).snapshot.id;
 
     importPickupSquares(engine);
@@ -739,7 +1238,7 @@ test('Lua item weights stay live and independent while inventory carry uses nati
             local inventory = player:getInventory()
             assert(inventory == player:getInventory())
             assert(inventory:getMaxWeight() == 8)
-            assert(shoes == player:getWornItem('base:shoes'))
+            assert(shoes == player:getWornItem(ItemBodyLocation.SHOES))
             assert(shoes:getUnequippedWeight() == 0.20000000298023224)
             assert(inventory:getCapacityWeight() == 0.06000000238418579)
             shoes:setWeight(9)
@@ -774,15 +1273,26 @@ test('Lua item weights stay live and independent while inventory carry uses nati
                 ${contents}
             } }`, 'fixture-unsupported-contents');
 
-            engine.registerItemDefinition({
-                ...unsupported, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 1,
-            }, { owner: 'original-fixture', override: true });
+            const before = engine.exportInventoryGraph();
+            const previous = engine.itemDefinitions().find(({ fullType }) => fullType === unsupported.fullType);
             const previousErrors = session.diagnostics().errors.length;
 
+            engine.beginItemDefinitionRegistration('original-fixture');
+            try {
+                assert.throws(() => engine.registerItemDefinition({
+                    ...unsupported, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 1,
+                }, { owner: 'original-fixture', override: true }), /outside the accepted range/u,
+                'unsupported source weight facilities must refuse before changing a live native definition');
+            } finally {
+                engine.rollbackItemDefinitionRegistration('original-fixture');
+            }
+
+            assert.deepEqual(engine.itemDefinitions().find(({ fullType }) => fullType === unsupported.fullType), previous);
+            assert.deepEqual(engine.exportInventoryGraph(), before);
             host.step(1 / 60);
-            assert.ok(session.diagnostics().errors.slice(previousErrors).some((error) => error.nativeModId === 'weights' && /unsupported item contents weight/.test(error.message)));
-            assert.equal(host.diagnostics().errors.at(-1).stage, 'onTick');
+            assert.equal(session.diagnostics().errors.length, previousErrors);
             assert.deepEqual([engine.items()[0].weight, engine.items()[0].actualWeight], [9, 0.375]);
+            assert.equal(engine.itemWeights(id).unequippedWeight, 0.375);
         }
     } finally {
         session.close();
@@ -1466,9 +1976,9 @@ for (const sdkFirst of [false, true]) {
             assert.equal(merged.rawTime, before.rawTime);
             assert.deepEqual(merged.groups[0].itemIds, ids);
             assert.deepEqual(session.exportSourceOwners(), sdkFirst ? [] : [{ actionId: before.id, ownerId: 'queue-admit' }]);
-            assert.ok(ids.every((id) => host.api.items.get(id).location === 'ground'));
+            assert.ok(ids.every((id) => host.api.items.get(id).worldPosition !== null));
             completeLuaActions(engine, host, session);
-            assert.ok(ids.every((id) => host.api.items.get(id).location === 'inventory'));
+            assert.ok(ids.every((id) => host.api.items.get(id).ownerContainerId === host.api.items.playerInventoryId()));
             session.flushSaveData();
             const stats = saved.get('queue-model').data.nativePlayerData.QueueModel;
 
@@ -1501,9 +2011,9 @@ test('source transfer preserves a valid capacity prefix and opaque callbacks ref
         await loadSource(session, host, `QueueModelHead.additionalTest=nil`, 'queue-clear-opaque');
         assert.ok(engine.saveQueueState().length > 0);
         completeLuaActions(engine, host, session);
-        assert.equal(host.api.items.get(ids[0]).location, 'inventory');
-        assert.equal(host.api.items.get(ids[1]).location, 'inventory');
-        assert.equal(host.api.items.get(ids[2]).location, 'ground');
+        assert.equal(host.api.items.get(ids[0]).ownerContainerId, host.api.items.playerInventoryId());
+        assert.equal(host.api.items.get(ids[1]).ownerContainerId, host.api.items.playerInventoryId());
+        assert.notEqual(host.api.items.get(ids[2]).worldPosition, null);
         session.flushSaveData();
         assert.equal(saved.get('queue-prefix').data.nativePlayerData.QueueModel.duplicateDenied, true);
     } finally {
@@ -1537,7 +2047,7 @@ test('source clear stops the active action and force-cancels each pending table 
 
         assert.equal(stats.stops, 1);
         assert.equal(stats.cancelled, 2);
-        assert.ok(ids.every((id) => host.api.items.get(id).location === 'ground'));
+        assert.ok(ids.every((id) => host.api.items.get(id).worldPosition !== null));
         assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
     } finally {
         session.close();
@@ -1629,7 +2139,7 @@ test('source hydration uses declared owners before activation and preserves late
         assert.deepEqual(candidate.engine.actions.getState(), admitted);
         candidate.engine.sourceActions.dispatch(candidate.session.dispatchSourceAction);
         completeLuaActions(candidate.engine, candidate.host, candidate.session);
-        assert.equal(candidate.host.api.items.list({ location: 'inventory' }).length, 27);
+        assert.equal(candidate.host.api.items.containerItems(candidate.host.api.items.playerInventoryId()).length, 27);
         assert.deepEqual(candidate.engine.actions.getState(), { current: null, pending: [] });
     } finally {
         original.session.close();
@@ -1674,6 +2184,7 @@ test('private original queued grabs restore before lifecycle without eagerly reg
     const eager = ['env', 'ISBaseObject', 'ISUI/ISUIElement', 'ISUI/Layout/ISDock', 'ISUI/Style/UIHorizontalAlignment', 'ISUI/ISUITextureGetter'];
     const seeds = [
         ...eager, 'TimedActions/ISTimedActionQueue', 'TimedActions/ISGrabItemAction',
+        'TimedActions/ISInventoryTransferAction', 'TimedActions/ISTransferAction',
         'TimedActions/ISOpenCloseDoor', 'TimedActions/WalkToTimedAction', 'TimedActions/ISWaitWhileGettingUp',
         'luautils', 'ISUI/ISContextMenu', 'ISUI/ISPanelJoypad', 'ISUI/ISRichTextPanel',
         'ISUI/ISToolTip', 'ISUI/ISToolTipInv', 'ISUI/ISInventoryItem', 'ISUI/ISInventoryPage',
@@ -1845,8 +2356,7 @@ test('private original queued grabs restore before lifecycle without eagerly reg
         candidate.session.completeSourceRestore();
         assert.deepEqual(candidate.engine.actions.getState(), restored, 'bootstrap must not tick, clear or rebuild saved native rows');
         completeLuaActions(candidate.engine, candidate.host, candidate.session);
-        assert.equal(candidate.host.api.items.get(1).location, 'inventory',
-            'restored original perform must complete before any first context-menu bootstrap');
+        assert.equal(candidate.host.api.items.get(1).ownerContainerId, candidate.host.api.items.playerInventoryId(), 'restored original perform must complete before any first context-menu bootstrap');
         candidate.host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
         assert.equal(candidate.session.openWorldContextMenu({ screenX: 320, screenY: 320, worldX: 5, worldY: 5 }), true);
         await loadSource(candidate.session, candidate.host, `
@@ -1856,6 +2366,37 @@ test('private original queued grabs restore before lifecycle without eagerly reg
             assert(getmetatable(data.lootInventory)==ISInventoryPage)
             assert(getPlayerContextMenu(0)==data.contextMenu and getmetatable(data.contextMenu)==ISContextMenu)
         `, 'original-restored-ui-consumer');
+        await loadSource(candidate.session, candidate.host, `
+            SourceMenuShape=0
+            Events.OnFillWorldObjectContextMenu.Add(function(playerIndex,context,objects,test)
+                assert(playerIndex==0 and not test)
+                context:clear()
+                if SourceMenuShape==0 then return end
+                local empty=context:addOption("Empty branch",nil,nil)
+                context:addSubMenu(empty,ISContextMenu:getNew(context))
+                local nested=context:addOption("Ordered branch",nil,nil)
+                local children=ISContextMenu:getNew(context)
+                context:addSubMenu(nested,children)
+                local function selected(_,value) getModData().MirrorPicked=value end
+                children:addOption("First",nil,selected,1)
+                children:addOption("Second",nil,selected,2)
+            end)
+        `, 'source-menu-shapes');
+        assert.equal(candidate.session.openWorldContextMenu({ screenX: 320, screenY: 320, worldX: 5, worldY: 5 }), true);
+        assert.equal(candidateDOM.document.body.children.some((node) => Object.hasOwn(node.dataset, 'sourceContextMenu')), false,
+            'an original menu cleared by a real source fill consumer must clear its semantic mirror');
+        await loadSource(candidate.session, candidate.host, 'SourceMenuShape=1', 'source-menu-populate');
+        assert.equal(candidate.session.openWorldContextMenu({ screenX: 320, screenY: 320, worldX: 5, worldY: 5 }), true);
+        const mirrored = candidateDOM.document.body.children.find((node) => Object.hasOwn(node.dataset, 'sourceContextMenu'));
+
+        assert.ok(mirrored);
+        assert.deepEqual(mirrored.children.map((row) => row.children[0].getAttribute('aria-label')), ['Empty branch', 'Ordered branch']);
+        assert.equal(mirrored.children[0].children.length, 1, 'an empty original submenu must not export a Lua object as a child array');
+        const ordered = mirrored.children[1].children[1];
+
+        assert.deepEqual(ordered.children.map((row) => row.children[0].getAttribute('aria-label')), ['First', 'Second']);
+        ordered.children[1].children[0].dispatchEvent(new Event('click', { cancelable: true }));
+        await loadSource(candidate.session, candidate.host, 'assert(getModData().MirrorPicked==2)', 'source-menu-selected-index');
         assert.deepEqual(candidate.session.diagnostics().errors, []);
         assert.deepEqual(sourceFeedback, []);
     } finally {
@@ -2456,17 +2997,18 @@ test('real held transitions invoke source consumers after commit without same-va
                 `,
             }],
         });
-        assert.equal(host.api.items.get(first).location, 'ground', 'pickup admission is not inventory transfer');
+        assert.notEqual(host.api.items.get(first).worldPosition, null, 'pickup admission is not inventory transfer');
         assert.throws(() => host.coreApi.character.setHandItem('primary', first),
             (cause) => cause.name === 'ModError' && cause.modId === 'pz-base-game'
                 && cause.stage === 'action' && cause.cause instanceof RangeError);
         assert.deepEqual(engine.getHandItems(), { primary: null, secondary: null });
         assert.equal(host.api.items.get(first).actualWeight, 1, 'rejected ground equipment cannot emit a source callback');
         completeActions(engine);
-        assert.equal(host.api.items.get(first).location, 'inventory');
-        assert.equal(host.api.items.get(second).location, 'inventory');
+        assert.equal(host.api.items.get(first).ownerContainerId, host.api.items.playerInventoryId());
+        assert.equal(host.api.items.get(second).ownerContainerId, host.api.items.playerInventoryId());
         host.coreApi.character.setHandItem('primary', first);
-        assert.equal(host.api.items.get(first).actualWeight, 1.125);
+        assert.equal(host.api.items.get(first).actualWeight, 1.125,
+            JSON.stringify({ hostErrors: host.diagnostics().errors, luaErrors: session.diagnostics().errors }));
         host.coreApi.character.setHandItem('primary', first);
         assert.equal(host.api.items.get(first).actualWeight, 1.125);
         const unveto = host.api.hooks.beforeAction((action) => action.type === 'setHandItem' ? false : undefined);
@@ -2709,8 +3251,8 @@ test('source world menu collects all 25 live native items without serializing wh
             assert(LiveWorldItems:isEmpty() and LiveSquareObjects:isEmpty())
             assert(not pcall(function() LiveWorldItems:get(0) end))
         `, 'source-live-items-empty');
-        assert.equal(host.api.items.get(prior).location, 'inventory');
-        assert.ok(ids.every((id) => host.api.items.get(id).location === 'inventory'));
+        assert.equal(host.api.items.get(prior).ownerContainerId, host.api.items.playerInventoryId());
+        assert.ok(ids.every((id) => host.api.items.get(id).ownerContainerId === host.api.items.playerInventoryId()));
     } finally {
         session.close();
         host.dispose();
@@ -2813,7 +3355,7 @@ for (const size of [1_280, 640]) {
             session.flushSaveData();
             assert.deepEqual(saved.get('pz-base-game').data.nativePlayerData.ScreenConsumer.ids, [ids[0], ids[1], ids[3]]);
             assert.deepEqual(engine.actions.getState().current.groups[0].itemIds, [ids[0], ids[1]]);
-            assert.equal(host.api.items.get(ids[2]).location, 'ground');
+            assert.notEqual(host.api.items.get(ids[2]).worldPosition, null);
         } finally {
             session.close();
             host.dispose();
@@ -3193,7 +3735,7 @@ for (const kind of ['walk', 'door']) {
                 completeLuaActions(engine, host, session);
                 session.flushSaveData();
                 assert.equal(saved.get('source-begin-model').data.nativePlayerData.QueueModel.adjustments, 1);
-                assert.equal(host.api.items.get(id).location, 'inventory');
+                assert.equal(host.api.items.get(id).ownerContainerId, host.api.items.playerInventoryId());
                 assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
             } finally {
                 session.close();
@@ -3325,8 +3867,8 @@ for (const throughMenu of [false, true]) {
             assert.equal(stats.stops, 1);
             assert.equal(stats.resets, 1);
             assert.equal(stats.jobStops, 1);
-            assert.equal(host.api.items.get(target).location, 'ground');
-            assert.equal(host.api.items.get(filler).location, 'inventory');
+            assert.notEqual(host.api.items.get(target).worldPosition, null);
+            assert.equal(host.api.items.get(filler).ownerContainerId, host.api.items.playerInventoryId());
             assert.equal(engine.sourceActions.eventRead(), null);
             assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
         } finally {
@@ -3384,9 +3926,9 @@ test('synchronous source clear completes old stop and pending cancellations befo
         assert.equal(stats.cancelled, 2);
         assert.equal(saved.get('host').data.nativePlayerData.RestartConsumer.oldStops, 1);
         completeLuaActions(engine, host, session);
-        assert.equal(host.api.items.get(ids[0]).location, 'ground');
-        assert.equal(host.api.items.get(ids[1]).location, 'ground');
-        assert.equal(host.api.items.get(ids[2]).location, 'inventory');
+        assert.notEqual(host.api.items.get(ids[0]).worldPosition, null);
+        assert.notEqual(host.api.items.get(ids[1]).worldPosition, null);
+        assert.equal(host.api.items.get(ids[2]).ownerContainerId, host.api.items.playerInventoryId());
     } finally {
         session.close();
         host.dispose();
@@ -3503,7 +4045,7 @@ for (const failedActivation of [false, true]) {
             assert.deepEqual(session.exportSourceOwners(), []);
 
             for (const id of ids) {
-                assert.equal(host.api.items.get(id).location, 'ground');
+                assert.notEqual(host.api.items.get(id).worldPosition, null);
             }
 
             await loadPackage(session, host, {
@@ -3558,7 +4100,7 @@ for (const force of ['forceComplete', 'forceStop']) {
             `, `source-start-${force.toLowerCase()}`);
             assert.equal(engine.sourceActions.eventRead(), null);
             assert.equal(engine.actions.getState().current.currentTime, 0);
-            assert.equal(host.api.items.get(id).location, 'ground');
+            assert.notEqual(host.api.items.get(id).worldPosition, null);
             host.frameStep(1 / 60);
             engine.sourceActions.dispatch(session.dispatchSourceAction);
             session.flushSaveData();
@@ -3567,7 +4109,7 @@ for (const force of ['forceComplete', 'forceStop']) {
             assert.equal(stats.starts, 1);
             assert.equal(stats.performs, force === 'forceComplete' ? 1 : 0);
             assert.equal(stats.stops, force === 'forceStop' ? 1 : 0);
-            assert.equal(host.api.items.get(id).location, force === 'forceComplete' ? 'inventory' : 'ground');
+            assert.equal(host.api.items.get(id).ownerContainerId === host.api.items.playerInventoryId(), force === 'forceComplete');
             assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
         } finally {
             session.close();

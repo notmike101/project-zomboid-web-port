@@ -2,6 +2,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{begin_actor_container_fixture, stage_floor_container_fixture};
     fn clock_action(raw: f64) -> Action {
         Action::new(1, 2, 0, 1, (5, 5, 0), raw)
     }
@@ -100,10 +101,14 @@ mod tests {
             assert_eq!(s.group(first).unwrap().raw, 48.0);
             assert_eq!(s.group(second).unwrap().raw, 96.0);
         });
-        assert!(ids.iter().all(|id| item(*id).unwrap().location == 0));
+        assert!(ids.iter().all(|id| item(*id).unwrap().world_object));
         assert_eq!(queue_action_set(action, 0, 0.0), OK);
         assert_eq!(step(0.0), OK);
-        assert!(ids[..20].iter().all(|id| item(*id).unwrap().location == 1));
+        assert!(
+            ids[..20]
+                .iter()
+                .all(|id| item(*id).unwrap().owner_container == PLAYER_INVENTORY)
+        );
         STORE.with(|s| {
             let s = s.borrow();
             let a = s.action(action).unwrap();
@@ -119,10 +124,177 @@ mod tests {
         assert_eq!(queue_request_pickup(ids[1]), id as i32);
         assert_eq!(queue_action_set(id, 0, 0.0), OK);
         assert_eq!(step(0.0), OK);
-        assert_eq!(item(ids[0]).unwrap().location, 1);
-        assert_eq!(item(ids[1]).unwrap().location, 0);
+        assert_eq!(item(ids[0]).unwrap().owner_container, PLAYER_INVENTORY);
+        assert!(item(ids[1]).unwrap().world_object);
         assert_eq!(queue_length(), 0);
     }
+    #[test]
+    fn graph_source_helper_rollback_restores_order_world_and_rejects_replay() {
+        let ids = items_fixture(1.0, 2);
+        let source = item(ids[0]).unwrap().owner_container;
+        let action = queue_action_new(5, 1, ids[0], 5, 5, 0, 0.0) as u32;
+        assert_eq!(
+            queue_action_bind_transfer(action, source, PLAYER_INVENTORY),
+            OK
+        );
+        let group = queue_group_new(action, 0.0) as u32;
+        assert_eq!(queue_group_item_insert(group, 0, ids[0]), OK);
+        assert_eq!(queue_group_insert(action, 0, group), OK);
+        assert_eq!(queue_insert(0, action), OK);
+        begin_source(action);
+        assert_eq!(queue_action_set(action, 3, 1.0), OK);
+        assert_eq!(step(0.0), OK);
+        reply(1);
+        let token = event().token;
+        assert_eq!(event().kind, 5);
+        assert_eq!(queue_transfer_begin(action, group, ids[0], token, 1), OK);
+        assert_eq!(
+            queue_transfer_operation(action, ids[0], token, 1, source, 0.0, 0.0, 0),
+            OK
+        );
+        assert_eq!(container_item_count(source), 1);
+        assert_eq!(source_world_item_count(5, 5, 0), 2);
+        assert_eq!(source_world_item_get(5, 5, 0, 0), ids[0] as f64);
+        assert_eq!(
+            queue_transfer_operation(action, ids[0], token, 2, source, 0.0, 0.0, 0),
+            OUT_OF_RANGE
+        );
+        assert_eq!(
+            queue_transfer_operation(action, ids[0], token, 3, source, 0.0, 0.0, 0),
+            OK
+        );
+        assert_eq!(source_world_item_count(5, 5, 0), 1);
+        assert_eq!(source_world_item_get(5, 5, 0, 0), ids[1] as f64);
+        assert_eq!(queue_transfer_finish(action, ids[0], token, 0), OK);
+        assert_eq!(container_item_get(source, 0), ids[0] as f64);
+        assert_eq!(source_world_item_count(5, 5, 0), 2);
+        assert_eq!(
+            queue_transfer_begin(action, group, ids[0], token, 1),
+            OUT_OF_RANGE
+        );
+    }
+    #[test]
+    fn detached_bag_keeps_its_real_outermost_container_during_transfer_callback() {
+        items_fixture(1.0, 0);
+        assert_eq!(
+            item_definition_register(1, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(
+            item_definition_container_set(1, 1, 1, 10, 0, 0.0, 1, 1, 0, 0, 0),
+            OK
+        );
+        assert_eq!(item_spawn(1, 5.0, 5.0, 1, 100), OK);
+        let shell = item_last_id();
+        let bag = item(shell).unwrap().internal_container;
+        let source = item(shell).unwrap().owner_container;
+        assert_eq!(container_outermost(bag), source as f64);
+        let action = queue_action_new(5, 1, shell, 5, 5, 0, 0.0) as u32;
+        assert_eq!(
+            queue_action_bind_transfer(action, source, PLAYER_INVENTORY),
+            OK
+        );
+        let group = queue_group_new(action, 0.0) as u32;
+        assert_eq!(queue_group_item_insert(group, 0, shell), OK);
+        assert_eq!(queue_group_insert(action, 0, group), OK);
+        assert_eq!(queue_insert(0, action), OK);
+        begin_source(action);
+        assert_eq!(queue_action_set(action, 3, 1.0), OK);
+        assert_eq!(step(0.0), OK);
+        reply(1);
+        let token = event().token;
+        assert_eq!(event().kind, 5);
+        assert_eq!(queue_transfer_begin(action, group, shell, token, 1), OK);
+        assert_eq!(
+            queue_transfer_operation(action, shell, token, 1, source, 0.0, 0.0, 0),
+            OK
+        );
+        assert_eq!(item(shell).unwrap().owner_container, 0);
+        assert_eq!(container_outermost(bag), bag as f64);
+        assert_eq!(queue_transfer_finish(action, shell, token, 0), OK);
+        assert_eq!(container_outermost(bag), source as f64);
+    }
+
+    #[test]
+    fn queue_v2_ground_restore_rejects_bag_references_atomically_and_keeps_floor_sources() {
+        let ids = items_fixture(1.0, 2);
+        assert_eq!(item_spawn(0, 6.0, 5.0, 1, 100), OK);
+        let other_ground = item_last_id();
+        let first_floor = item(ids[0]).unwrap().owner_container;
+        let other_floor = item(other_ground).unwrap().owner_container;
+        assert_ne!(first_floor, other_floor);
+        assert_eq!(
+            item_definition_register(1, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(
+            item_definition_container_set(1, 1, 1, 10, 0, 0.0, 1, 1, 0, 0, 0),
+            OK
+        );
+        assert_eq!(item_spawn(1, 5.0, 5.0, 1, 100), OK);
+        let bag = item(item_last_id()).unwrap().internal_container;
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            let nested = items
+                .live
+                .iter_mut()
+                .find(|item| item.id == ids[1])
+                .unwrap();
+            nested.owner_container = bag;
+            nested.world_object = false;
+        });
+        let action = queue_action_new(3, 1, ids[0], 5, 5, 0, 0.0) as u32;
+        let group = queue_group_new(action, 0.0) as u32;
+        assert_eq!(queue_group_item_insert(group, 0, ids[0]), OK);
+        assert_eq!(queue_group_item_insert(group, 1, other_ground), OK);
+        assert_eq!(queue_group_insert(action, 0, group), OK);
+        assert_eq!(queue_insert(0, action), OK);
+        let bytes = STORE.with(|store| encode(&store.borrow()).unwrap());
+        assert_eq!(stage_bytes(&bytes), OK);
+        assert_eq!(queue_group_item_source_get(group, 0), first_floor as f64);
+        assert_eq!(queue_group_item_source_get(group, 1), other_floor as f64);
+        let before = STORE.with(|store| encode(&store.borrow()).unwrap());
+        let clock = timing::snapshot_words();
+        let timing_count = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+        let action_at = 44 + timing_count * 4 + 12;
+        // One group: 24-byte header followed by two (item, source) pairs.
+        let group_at = bytes.len() - 40;
+        for corruption in 0..4 {
+            let mut malformed = bytes.clone();
+            match corruption {
+                0 => malformed[action_at + 32..action_at + 36].copy_from_slice(&bag.to_le_bytes()),
+                1 => {
+                    malformed[action_at + 12..action_at + 16]
+                        .copy_from_slice(&ids[1].to_le_bytes());
+                    malformed[action_at + 28..action_at + 32].copy_from_slice(&bag.to_le_bytes());
+                    malformed[group_at + 24..group_at + 28].copy_from_slice(&ids[1].to_le_bytes());
+                    malformed[group_at + 28..group_at + 32].copy_from_slice(&bag.to_le_bytes());
+                }
+                2 => {
+                    malformed[group_at + 32..group_at + 36].copy_from_slice(&ids[1].to_le_bytes());
+                    malformed[group_at + 36..group_at + 40].copy_from_slice(&bag.to_le_bytes());
+                }
+                _ => malformed[group_at + 36..group_at + 40]
+                    .copy_from_slice(&first_floor.to_le_bytes()),
+            }
+            assert_eq!(stage_bytes(&malformed), BAD_FORMAT);
+            assert_eq!(STORE.with(|store| encode(&store.borrow()).unwrap()), before);
+            assert_eq!(timing::snapshot_words(), clock);
+            assert_eq!(queue_group_item_source_get(group, 0), first_floor as f64);
+            assert_eq!(queue_group_item_source_get(group, 1), other_floor as f64);
+        }
+        assert_eq!(queue_clear(), OK);
+        let general = queue_action_new(5, 1, ids[1], 5, 5, 0, 0.0) as u32;
+        assert_eq!(queue_action_bind_transfer(general, bag, first_floor), OK);
+        let group = queue_group_new(general, 0.0) as u32;
+        assert_eq!(queue_group_item_insert(group, 0, ids[1]), OK);
+        assert_eq!(queue_group_insert(general, 0, group), OK);
+        assert_eq!(queue_insert(0, general), OK);
+        let bytes = STORE.with(|store| encode(&store.borrow()).unwrap());
+        assert_eq!(stage_bytes(&bytes), OK);
+        assert_eq!(queue_group_item_source_get(group, 0), bag as f64);
+    }
+
     #[test]
     fn source_callbacks_tokens_detached_batch_and_partial_error_are_authoritative() {
         let ids = items_fixture(1.0, 2);
@@ -157,8 +329,8 @@ mod tests {
         assert_eq!(queue_commit_item(id, group, ids[0], e.token), OK);
         assert_ne!(queue_commit_item(id, group, ids[0], e.token), OK);
         assert_eq!(queue_event_reply(id, 5, e.token, -4), OK);
-        assert_eq!(item(ids[0]).unwrap().location, 1);
-        assert_eq!(item(ids[1]).unwrap().location, 0);
+        assert_eq!(item(ids[0]).unwrap().owner_container, PLAYER_INVENTORY);
+        assert!(item(ids[1]).unwrap().world_object);
         assert_eq!(queue_group_read(group), OUT_OF_RANGE);
         assert_eq!(queue_length(), 0);
         assert_eq!(queue_event_reply(id, 5, e.token, 0), OUT_OF_RANGE);
@@ -217,7 +389,7 @@ mod tests {
         assert!(id > 0);
         assert_eq!(walk(1.0, 0.0), OK);
         assert_eq!(queue_action_read(id as u32), OUT_OF_RANGE);
-        assert_eq!(item(ids[0]).unwrap().location, 0);
+        assert!(item(ids[0]).unwrap().world_object);
         assert_eq!(item_definition_begin(1), OK);
         assert_eq!(queue_request_pickup(ids[0]), OUT_OF_RANGE);
         assert_eq!(item_definition_rollback(1), OK);
@@ -273,7 +445,7 @@ mod tests {
                 assert_eq!(queue_action_set(id, 0, 0.0), OK);
                 assert_eq!(step(0.0), OK);
             }
-            assert_eq!(item(item_id).unwrap().location, 1);
+            assert_eq!(item(item_id).unwrap().owner_container, PLAYER_INVENTORY);
             assert_eq!(queue_length(), 0);
             assert_eq!(item_last_id(), item_id);
             assert_eq!(item_spawn(0, 5.0, 5.0, 1, 100), OUT_OF_RANGE);
@@ -315,7 +487,7 @@ mod tests {
         let timing_count = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
         let action_at = 44 + timing_count * 4 + 12;
         let mut malformed = bytes.clone();
-        malformed[action_at + 64..action_at + 68].copy_from_slice(&256u32.to_le_bytes());
+        malformed[action_at + 72..action_at + 76].copy_from_slice(&256u32.to_le_bytes());
         assert!(decode(&malformed).is_err());
         let mut malformed = bytes;
         malformed[action_at..action_at + 4].copy_from_slice(&0u32.to_le_bytes());
@@ -419,7 +591,7 @@ mod tests {
         assert_eq!(queue_clear(), OK);
         reply(0);
         assert_eq!(queue_length(), 0);
-        assert_eq!(item(ids[0]).unwrap().location, 0);
+        assert!(item(ids[0]).unwrap().world_object);
     }
     #[test]
     fn completion_precedes_same_frame_stop_and_never_ticks_successor() {
@@ -504,7 +676,7 @@ mod tests {
         assert!(fresh > id);
         assert_eq!(queue_action_set(fresh, 0, 0.0), OK);
         assert_eq!(step(0.0), OK);
-        assert_eq!(item(ids[0]).unwrap().location, 1);
+        assert_eq!(item(ids[0]).unwrap().owner_container, PLAYER_INVENTORY);
     }
     #[test]
     fn empty_future_sdk_group_refuses_without_trap_after_successful_prefix() {
@@ -520,11 +692,15 @@ mod tests {
         assert_eq!(queue_length(), 1);
         assert_eq!(queue_group_length(id), 2);
         assert_eq!(queue_group_item_length(future), 0);
-        assert!(ids.iter().all(|id| item(*id).unwrap().location == 0));
+        assert!(ids.iter().all(|id| item(*id).unwrap().world_object));
         assert_eq!(queue_action_set(id, 0, 0.0), OK);
         assert_eq!(step(0.0), OK);
-        assert!(ids[..20].iter().all(|id| item(*id).unwrap().location == 1));
-        assert_eq!(item(ids[20]).unwrap().location, 0);
+        assert!(
+            ids[..20]
+                .iter()
+                .all(|id| item(*id).unwrap().owner_container == PLAYER_INVENTORY)
+        );
+        assert!(item(ids[20]).unwrap().world_object);
         assert_eq!(queue_current(), 0);
         assert!(queue_save_size() > 0);
         let bytes = SAVED.with(|s| s.borrow().clone());
@@ -597,9 +773,11 @@ mod tests {
         assert!(queue_request_pickup(ids[0]) > 0);
         assert!(queue_save_size() > 0);
         let bytes = SAVED.with(|s| s.borrow().clone());
-        assert_eq!(item_import_begin(), OK);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        let floor = container_next_id() as u32;
+        stage_floor_container_fixture(floor, 5, 5);
         assert_eq!(
-            item_import_stage(ids[0], 1, 0, 5.0, 5.0, 100, 1, 0, 1.0, 1.0),
+            item_import_stage(ids[0], 1, floor, 5.0, 5.0, 100, 1, 0, 1.0, 1.0, 0, 1),
             OK
         );
         assert_eq!(item_import_commit(), OK);
@@ -634,8 +812,10 @@ mod tests {
     #[test]
     fn glove_modifier_uses_canonical_hands_and_binding_rolls_back() {
         let ids = items_fixture(1.0, 1);
-        let hands = 42;
-        let other = 7;
+        let hands = BODY_LOCATIONS.with(|r| r.borrow().lookup("base:hands").unwrap());
+        let other = BODY_LOCATIONS.with(|r| r.borrow().lookup("base:back").unwrap());
+        assert_eq!(body_group_location_add(1, hands), OK);
+        assert_eq!(body_group_location_add(1, other), OK);
         assert_eq!(
             item_definition_register(1, 1, 100, other, 1, 0, 0, 0, 0.0, 1),
             OK
@@ -744,8 +924,12 @@ mod tests {
         for item in &ids[..20] {
             assert_eq!(queue_commit_item(source, group, *item, token), OK);
         }
-        assert!(ids[..20].iter().all(|id| item(*id).unwrap().location == 1));
-        assert!(ids[20..].iter().all(|id| item(*id).unwrap().location == 0));
+        assert!(
+            ids[..20]
+                .iter()
+                .all(|id| item(*id).unwrap().owner_container == PLAYER_INVENTORY)
+        );
+        assert!(ids[20..].iter().all(|id| item(*id).unwrap().world_object));
         assert_eq!(queue_action_set(source, 0, 48.0), OK);
         assert_eq!(queue_action_set(source, 2, 1.0), OK);
         assert_eq!(queue_action_set(source, 11, 0.0), OK);
@@ -802,8 +986,8 @@ mod tests {
                 (20.0, 35, 35.0, 0.0, -1.0, 0.0)
             );
         });
-        assert_eq!(item(ids[0]).unwrap().location, 1);
-        assert_eq!(item(ids[1]).unwrap().location, 0);
+        assert_eq!(item(ids[0]).unwrap().owner_container, PLAYER_INVENTORY);
+        assert!(item(ids[1]).unwrap().world_object);
         assert_eq!(step(0.0), OK);
         reply(1);
         assert_eq!(event().kind, 4);
@@ -841,8 +1025,8 @@ mod tests {
             let a = s.action(sdk_grab).unwrap();
             assert_eq!((a.origin, a.raw, a.max, a.current), (0, 48.0, 84, 0.0));
         });
-        assert_eq!(item(ids[0]).unwrap().location, 1);
-        assert_eq!(item(ids[1]).unwrap().location, 0);
+        assert_eq!(item(ids[0]).unwrap().owner_container, PLAYER_INVENTORY);
+        assert!(item(ids[1]).unwrap().world_object);
     }
     #[test]
     fn explicit_fresh_start_clears_force_flags_before_source_start_can_set_new_ones() {
@@ -861,7 +1045,7 @@ mod tests {
             });
             assert_eq!(step(0.0), OK);
             assert_eq!(queue_current(), sdk as i32);
-            assert_eq!(item(ids[0]).unwrap().location, 0);
+            assert!(item(ids[0]).unwrap().world_object);
         }
         crate::reset();
         let source = queue_action_new(4, 1, u32::MAX, 5, 5, 0, -1.0) as u32;
@@ -897,9 +1081,11 @@ mod tests {
                     assert_eq!(source_path_result(source), 2);
                 }
                 if importing {
-                    assert_eq!(item_import_begin(), OK);
+                    assert_eq!(begin_actor_container_fixture(), OK);
+                    let floor = container_next_id() as u32;
+                    stage_floor_container_fixture(floor, 5, 5);
                     assert_eq!(
-                        item_import_stage(ids[0], 0, 0, 5.0, 5.0, 100, 1, 0, 1.0, 1.0),
+                        item_import_stage(ids[0], 0, floor, 5.0, 5.0, 100, 1, 0, 1.0, 1.0, 0, 1),
                         OK
                     );
                     assert_eq!(item_import_commit(), OK);
@@ -961,7 +1147,7 @@ mod tests {
             assert_eq!(queue_clear(), OK);
             reply(0);
             assert_eq!(queue_length(), 0);
-            assert_eq!(item(ids[0]).unwrap().location, 0);
+            assert!(item(ids[0]).unwrap().world_object);
             assert_eq!(action(), ACTION_DESTINATION);
         }
     }
@@ -1004,8 +1190,8 @@ mod tests {
                 assert_eq!(step(0.0), OUT_OF_RANGE);
             }
             assert_retired_queue();
-            assert_eq!(item(ids[0]).unwrap().location, 1);
-            assert_eq!(item(ids[1]).unwrap().location, 0);
+            assert_eq!(item(ids[0]).unwrap().owner_container, PLAYER_INVENTORY);
+            assert!(item(ids[1]).unwrap().world_object);
             ENGINE.with(|e| {
                 let e = e.borrow();
                 assert_eq!(
@@ -1021,7 +1207,7 @@ mod tests {
             assert!(later_sdk > source as i32);
             assert_eq!(queue_action_set(later_sdk as u32, 0, 0.0), OK);
             assert_eq!(step(0.0), OK);
-            assert_eq!(item(ids[1]).unwrap().location, 1);
+            assert_eq!(item(ids[1]).unwrap().owner_container, PLAYER_INVENTORY);
             STORE.with(|s| assert_eq!(s.borrow().next_token, u32::MAX));
         }
     }
@@ -1096,7 +1282,7 @@ mod tests {
                     assert_eq!(queue_event_reply(source, 4, update.token, 0), OUT_OF_RANGE);
                 }
                 assert_retired_queue();
-                assert_eq!(item(ids[0]).unwrap().location, 0);
+                assert!(item(ids[0]).unwrap().world_object);
                 STORE.with(|s| assert_eq!(s.borrow().next_token, u32::MAX));
             })
             .join()
@@ -1122,7 +1308,7 @@ mod tests {
         assert_eq!(queue_start(next, -1.0, 1), OK);
         assert_eq!(queue_event_reply(source, 5, perform.token, 0), OUT_OF_RANGE);
         assert_retired_queue();
-        assert_eq!(item(ids[0]).unwrap().location, 1);
+        assert_eq!(item(ids[0]).unwrap().owner_container, PLAYER_INVENTORY);
         assert_eq!(
             queue_commit_item(source, group, ids[0], perform.token),
             OUT_OF_RANGE
@@ -1213,7 +1399,7 @@ mod tests {
                     });
                 }
                 assert_retired_queue();
-                assert_eq!(item(ids[0]).unwrap().location, 0);
+                assert!(item(ids[0]).unwrap().world_object);
                 crate::cancel();
                 assert_retired_queue();
                 assert_eq!(action(), ACTION_IDLE);
@@ -1262,7 +1448,7 @@ mod tests {
             assert_eq!(queue_event_reply(source, 6, stop.token, 0), OK);
             assert_retired_queue();
             assert_eq!(queue_event_reply(source, 6, stop.token, 0), OUT_OF_RANGE);
-            assert_eq!(item(ids[0]).unwrap().location, 0);
+            assert!(item(ids[0]).unwrap().world_object);
         }
     }
     #[test]
@@ -1279,7 +1465,7 @@ mod tests {
         assert_eq!(queue_start(next, -1.0, 1), OK);
         assert_eq!(queue_event_reply(source, 6, stop.token, 0), OUT_OF_RANGE);
         assert_retired_queue();
-        assert_eq!(item(ids[0]).unwrap().location, 0);
+        assert!(item(ids[0]).unwrap().world_object);
         STORE.with(|s| assert_eq!(s.borrow().next_token, u32::MAX));
     }
     #[test]
@@ -1316,13 +1502,10 @@ mod tests {
             assert_eq!(queue_action_read(id), OK);
             assert_eq!(QUEUE_SCRATCH.with(|s| s.borrow()[..16].to_vec()), before);
             assert_eq!(timing::snapshot_words(), clock);
-            assert_eq!(item(ids[1 - broken]).unwrap().location, 0);
+            assert!(item(ids[1 - broken]).unwrap().world_object);
             assert_eq!(step(0.0), OK);
             assert_retired_queue();
-            assert_eq!(
-                item(ids[1 - broken]).unwrap().location,
-                if broken == 0 { 0 } else { 1 }
-            );
+            assert_eq!(item(ids[1 - broken]).unwrap().world_object, broken == 0);
             assert!(item(ids[broken]).is_none());
             assert!(queue_save_size() > 0);
             let bytes = SAVED.with(|s| s.borrow().clone());
@@ -1418,7 +1601,7 @@ mod tests {
         assert_eq!(queue_insert(0, source), OK);
         assert_eq!(queue_save_size(), OUT_OF_RANGE);
         assert_eq!(queue_get(0), source as i32);
-        assert_eq!(item(ids[0]).unwrap().location, 0);
+        assert!(item(ids[0]).unwrap().world_object);
         let group = queue_group_new(source, 20.0) as u32;
         assert_eq!(queue_group_insert(source, 0, group), OK);
         assert_eq!(queue_save_size(), OUT_OF_RANGE);
@@ -1450,6 +1633,10 @@ const RUN: u32 = 32;
 const AIM: u32 = 64;
 const WAIT: u32 = 128;
 const SOURCE_GRAB_STARTED: u32 = 256;
+const ALLOW_MISSING: u32 = 1024;
+fn transfer_kind(kind: u32) -> bool {
+    kind == 3 || kind == 5
+}
 
 #[derive(Clone)]
 struct Action {
@@ -1458,6 +1645,8 @@ struct Action {
     origin: u32,
     target: u32,
     xyz: (i32, i32, i32),
+    source_container: u32,
+    destination_container: u32,
     raw: f64,
     source_time: f64,
     max: i32,
@@ -1477,6 +1666,12 @@ impl Action {
             origin,
             target,
             xyz,
+            source_container: if kind == 3 {
+                item(target).map_or(0, |i| i.owner_container)
+            } else {
+                0
+            },
+            destination_container: if kind == 3 { PLAYER_INVENTORY } else { 0 },
             raw,
             source_time: raw,
             max: raw as i32,
@@ -1484,9 +1679,13 @@ impl Action {
             last: -1.0,
             prev: 0.0,
             delta: 0.0,
-            flags: if kind == 3 { WALK | RUN | LOOP } else { 0 },
+            flags: if transfer_kind(kind) {
+                WALK | RUN | LOOP
+            } else {
+                0
+            },
             portable: true,
-            groups: if kind == 3 {
+            groups: if transfer_kind(kind) {
                 Vec::with_capacity(GROUPS)
             } else {
                 Vec::new()
@@ -1529,6 +1728,7 @@ struct Group {
     raw: f64,
     definition: Option<u32>,
     items: Vec<u32>,
+    sources: [u32; GROUP_ITEMS],
 }
 #[derive(Clone, Copy)]
 struct Event {
@@ -1540,10 +1740,28 @@ struct Event {
     committed_door: bool,
     group: u32,
     authorized: [u32; GROUP_ITEMS],
+    authorized_sources: [u32; GROUP_ITEMS],
     authorized_count: usize,
     consumed: [u32; GROUP_ITEMS],
     consumed_count: usize,
     begin_supplied: bool,
+}
+
+struct TransferTransaction {
+    action: u32,
+    token: u32,
+    item: Item,
+    index: usize,
+    held: [u32; 2],
+    worn_index: Option<usize>,
+    source: u32,
+    destination: u32,
+    detached: bool,
+    added: bool,
+    actor_overlay: u32,
+    attached_index: Option<usize>,
+    rng_state: u64,
+    container_flags: [u32; 2],
 }
 struct Store {
     actions: Vec<Action>,
@@ -1560,6 +1778,7 @@ struct Store {
     preserve_movement: bool,
     retrigger: u32,
     path_owner: u32,
+    transfer: Option<TransferTransaction>,
 }
 impl Store {
     fn new() -> Self {
@@ -1578,7 +1797,48 @@ impl Store {
             preserve_movement: false,
             retrigger: 0,
             path_owner: 0,
+            transfer: None,
         }
+    }
+    fn rollback_transfer(&mut self) {
+        let Some(transaction) = self.transfer.take() else {
+            return;
+        };
+        // PORT SAFETY: original removes first; restore ownership on failed helper.
+        ITEMS.with(|state| {
+            let mut state = state.borrow_mut();
+            if let Some(index) = state
+                .live
+                .iter()
+                .position(|item| item.id == transaction.item.id)
+            {
+                state.live.remove(index);
+            }
+            let index = transaction.index.min(state.live.len());
+            state.live.insert(index, transaction.item);
+            state.attached.retain(|id| *id != transaction.item.id);
+            if let Some(index) = transaction.attached_index {
+                let index = index.min(state.attached.len());
+                state.attached.insert(index, transaction.item.id);
+            }
+            state.held = transaction.held;
+            state.worn.retain(|id| *id != transaction.item.id);
+            if let Some(index) = transaction.worn_index {
+                let index = index.min(state.worn.len());
+                state.worn.insert(index, transaction.item.id);
+            }
+            state.actor_overlay = transaction.actor_overlay;
+            for (id, flags) in [
+                (transaction.source, transaction.container_flags[0]),
+                (transaction.destination, transaction.container_flags[1]),
+            ] {
+                if let Some(row) = state.containers.iter_mut().find(|row| row.id == id) {
+                    row.flags = flags;
+                }
+            }
+            state.source_transfer = false;
+        });
+        doors::restore_rng(transaction.rng_state);
     }
     fn action(&self, id: u32) -> Option<&Action> {
         self.actions.iter().find(|a| a.id == id)
@@ -1600,7 +1860,7 @@ impl Store {
         xyz: (i32, i32, i32),
         raw: f64,
     ) -> Result<u32, i32> {
-        if !(1..=4).contains(&kind)
+        if !(1..=5).contains(&kind)
             || origin > 1
             || (kind == 4 && origin != 1)
             || self.actions.len() == ACTIONS
@@ -1615,7 +1875,7 @@ impl Store {
         Ok(id)
     }
     fn new_group(&mut self, action: u32, raw: f64) -> Result<u32, i32> {
-        if self.action(action).is_none_or(|a| a.kind != 3)
+        if self.action(action).is_none_or(|a| !transfer_kind(a.kind))
             || self.groups.len() == GROUPS
             || self.next_group > i32::MAX as u32
         {
@@ -1629,6 +1889,7 @@ impl Store {
             raw,
             definition: None,
             items: Vec::with_capacity(GROUP_ITEMS),
+            sources: [0; GROUP_ITEMS],
         });
         Ok(id)
     }
@@ -1672,9 +1933,11 @@ impl Store {
             0
         };
         let mut authorized = [0; GROUP_ITEMS];
+        let mut authorized_sources = [0; GROUP_ITEMS];
         let authorized_count = self.group(group).map_or(0, |g| g.items.len());
         if let Some(g) = self.group(group) {
             authorized[..authorized_count].copy_from_slice(&g.items);
+            authorized_sources[..authorized_count].copy_from_slice(&g.sources[..authorized_count]);
         }
         self.event = Some(Event {
             action: id,
@@ -1685,6 +1948,7 @@ impl Store {
             committed_door: false,
             group,
             authorized,
+            authorized_sources,
             authorized_count,
             consumed: [0; GROUP_ITEMS],
             consumed_count: 0,
@@ -1694,6 +1958,7 @@ impl Store {
         OK
     }
     fn abort(&mut self) {
+        self.rollback_transfer();
         let cancel_owned_path = self.path_owner != 0;
         self.actions.clear();
         self.fifo.clear();
@@ -1796,7 +2061,7 @@ impl Store {
                 doors::commit_toggle(self.action(id).unwrap().target);
             }
             self.retire(id);
-        } else if kind == 3 {
+        } else if transfer_kind(kind) {
             let Some(gid) = self.action(id).unwrap().groups.first().copied() else {
                 self.retire(id);
                 return OK;
@@ -1811,7 +2076,13 @@ impl Store {
             let mut failed = false;
             for index in 0..len {
                 let item = self.groups[group_index].items[index];
-                if transfer(item) != OK {
+                let action = self.action(id).unwrap();
+                if transfer(
+                    item,
+                    self.groups[group_index].sources[index],
+                    action.destination_container,
+                ) != OK
+                {
                     failed = true;
                     break;
                 }
@@ -1835,7 +2106,10 @@ impl Store {
                 let xyz = (next_item.x.floor() as i32, next_item.y.floor() as i32, 0);
                 let a = self.action_mut(id).unwrap();
                 a.target = target;
-                a.xyz = xyz;
+                if a.kind == 3 {
+                    a.source_container = next_item.owner_container;
+                    a.xyz = xyz;
+                }
                 a.max = raw as i32;
                 a.source_time = raw;
                 a.reset_progress();
@@ -1931,7 +2205,7 @@ pub(super) fn row(values: &[f64]) {
 fn items_available() -> bool {
     ITEMS.with(|items| {
         let items = items.borrow();
-        !items.importing && items.transaction_owner == 0
+        !items.importing && !items.source_transfer && items.transaction_owner == 0
     })
 }
 fn mutation_allowed() -> bool {
@@ -1943,27 +2217,86 @@ fn actor_square() -> (i32, i32, i32) {
 fn item(id: u32) -> Option<Item> {
     ITEMS.with(|items| items.borrow().live.iter().find(|i| i.id == id).copied())
 }
-fn item_valid(id: u32) -> bool {
+fn transfer_check(id: u32, source: u32, destination: u32, policy: i32) -> i32 {
+    transfer_check_inner(id, source, destination, policy, true)
+}
+fn transfer_check_inner(
+    id: u32,
+    source: u32,
+    destination: u32,
+    policy: i32,
+    admission: bool,
+) -> i32 {
     if !mutation_allowed() {
-        return false;
+        return OUT_OF_RANGE;
     }
-    ITEMS.with(|items| {
-        let items = items.borrow();
-        items.live.iter().find(|i| i.id == id).is_some_and(|i| {
-            i.location == 0
-                && !doors::blocked_to((i.x.floor() as i32, i.y.floor() as i32, 0), actor_square())
-                && has_room(&items, i)
-        })
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        if state.actor_turn_target != 0 || state.actor_furniture != 0 || state.actor_vehicle != 0 {
+            return UNSUPPORTED;
+        }
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        if source == destination
+            || item.owner_container != source
+            || state.container(source).is_none()
+            || state.container(destination).is_none()
+        {
+            return OUT_OF_RANGE;
+        }
+        if state.definitions[item.definition as usize].graph_flags & 4 != 0 {
+            return UNSUPPORTED;
+        }
+        if item.source_flags & 2 != 0 {
+            return OUT_OF_RANGE;
+        }
+        if item.source_flags & 1 != 0
+            && state.outermost(source) == Some(PLAYER_INVENTORY)
+            && state.outermost(destination) != Some(PLAYER_INVENTORY)
+        {
+            return BLOCKED;
+        }
+        for container in [source, destination] {
+            let root = state.outermost(container).unwrap();
+            if let Some(row) = state.container(root).filter(|row| row.kind == 2)
+                && doors::blocked_to(row.xyz, actor_square())
+            {
+                return BLOCKED;
+            }
+        }
+        let allowed = if admission {
+            state.has_room_item(destination, 1, item, policy)
+        } else {
+            state.item_allowed(destination, item, policy)
+        };
+        match allowed {
+            Ok(true) if !state.inside(destination, id) => OK,
+            Ok(_) => BLOCKED,
+            Err(code) => code,
+        }
     })
 }
-fn transfer(id: u32) -> i32 {
-    if !item_valid(id) {
-        return BLOCKED;
+fn transfer(id: u32, source: u32, destination: u32) -> i32 {
+    let status = transfer_check(id, source, destination, -1);
+    if status != OK {
+        return status;
     }
-    change_item(id, |items, index| {
-        let mut item = items.live.remove(index);
-        item.location = 1;
-        items.live.push(item);
+    change_item(id, |state, index| {
+        let mut item = state.live.remove(index);
+        item.owner_container = destination;
+        item.world_object = state.container(destination).unwrap().kind == 2;
+        if item.world_object {
+            let xyz = state.container(destination).unwrap().xyz;
+            item.x = xyz.0 as f64 + 0.5;
+            item.y = xyz.1 as f64 + 0.5;
+        }
+        if destination != PLAYER_INVENTORY {
+            item.slot = 0;
+            state.clear_held(id);
+            state.remove_worn(id);
+        }
+        state.live.push(item);
         OK
     })
 }
@@ -1974,7 +2307,7 @@ fn valid_action(a: &Action) -> bool {
     match a.kind {
         1 => a.xyz.2 == 0 && item_position_valid(a.xyz.0 as f64 + 0.5, a.xyz.1 as f64 + 0.5),
         2 => doors::reach_door(a.target, actor_square()),
-        3 => item_valid(a.target),
+        3 | 5 => transfer_check(a.target, a.source_container, a.destination_container, -1) == OK,
         4 => a.origin == 1 && (a.target == u32::MAX || doors::position(a.target).is_some()),
         _ => false,
     }
@@ -1991,6 +2324,7 @@ fn adjusted(raw: f64) -> i32 {
 pub(super) fn invalidate() {
     STORE.with(|s| {
         let mut s = s.borrow_mut();
+        s.rollback_transfer();
         if s.path_owner != 0 {
             mutate(|engine| engine.cancel());
         }
@@ -2011,6 +2345,7 @@ pub(super) fn invalidate() {
 pub(super) fn cancel_queue() -> i32 {
     STORE.with(|s| {
         let mut s = s.borrow_mut();
+        s.rollback_transfer();
         let id = s.current;
         if s.event.is_some_and(|e| e.kind == 5) && !s.fifo.contains(&id) {
             // Original completion callbacks may clear pending actions before
@@ -2129,9 +2464,10 @@ pub extern "C" fn queue_action_new(
         }
         2 => doors::position(target_id) == Some((x, y, z)),
         3 => item(target_id).is_some_and(|i| {
-            i.location == 0 && (i.x.floor() as i32, i.y.floor() as i32, 0) == (x, y, z)
+            i.world_object && (i.x.floor() as i32, i.y.floor() as i32, 0) == (x, y, z)
         }),
         4 => origin == 1 && (target_id == u32::MAX || doors::position(target_id).is_some()),
+        5 => item(target_id).is_some(),
         _ => false,
     };
     if !valid {
@@ -2197,11 +2533,18 @@ pub extern "C" fn queue_action_set(id: u32, field: u32, value: f64) -> i32 {
                 }
             }
             10 if value == 0.0 || value == 1.0 => a.portable = value == 1.0,
-            11 if a.origin == 1 && a.kind == 3 && (value == 0.0 || value == 1.0) => {
+            11 if a.origin == 1 && transfer_kind(a.kind) && (value == 0.0 || value == 1.0) => {
                 if value == 1.0 {
                     a.flags |= SOURCE_GRAB_STARTED;
                 } else {
                     a.flags &= !SOURCE_GRAB_STARTED;
+                }
+            }
+            12 if a.origin == 1 && a.kind == 5 && (value == 0.0 || value == 1.0) => {
+                if value == 1.0 {
+                    a.flags |= ALLOW_MISSING;
+                } else {
+                    a.flags &= !ALLOW_MISSING;
                 }
             }
             _ => return OUT_OF_RANGE,
@@ -2364,6 +2707,19 @@ pub extern "C" fn queue_group_item_get(id: u32, index: u32) -> f64 {
             .unwrap_or(0) as f64
     })
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_group_item_source_get(id: u32, index: u32) -> f64 {
+    STORE.with(|state| {
+        let state = state.borrow();
+        state
+            .group(id)
+            .filter(|group| (index as usize) < group.items.len())
+            .map_or(OUT_OF_RANGE as f64, |group| {
+                group.sources[index as usize] as f64
+            })
+    })
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn queue_group_item_insert(id: u32, index: u32, item_id: u32) -> i32 {
     if !mutation_allowed() {
@@ -2372,11 +2728,16 @@ pub extern "C" fn queue_group_item_insert(id: u32, index: u32, item_id: u32) -> 
     let Some(item) = item(item_id) else {
         return OUT_OF_RANGE;
     };
-    if item.location != 0 {
-        return OUT_OF_RANGE;
-    }
     STORE.with(|s| {
         let mut s = s.borrow_mut();
+        let Some(action) = s.group(id).and_then(|group| s.action(group.action)) else {
+            return OUT_OF_RANGE;
+        };
+        if (action.kind == 3 && !item.world_object)
+            || (action.kind == 5 && item.owner_container != action.source_container)
+        {
+            return OUT_OF_RANGE;
+        }
         let Some(g) = s.group_mut(id) else {
             return OUT_OF_RANGE;
         };
@@ -2388,6 +2749,9 @@ pub extern "C" fn queue_group_item_insert(id: u32, index: u32, item_id: u32) -> 
             return OUT_OF_RANGE;
         }
         g.definition = Some(item.definition);
+        g.sources
+            .copy_within(index as usize..g.items.len(), index as usize + 1);
+        g.sources[index as usize] = item.owner_container;
         g.items.insert(index as usize, item_id);
         OK
     })
@@ -2402,7 +2766,11 @@ pub extern "C" fn queue_group_item_remove(id: u32, index: u32) -> f64 {
         if index as usize >= g.items.len() {
             return OUT_OF_RANGE as f64;
         }
-        g.items.remove(index as usize) as f64
+        let item = g.items.remove(index as usize);
+        g.sources
+            .copy_within(index as usize + 1..g.items.len() + 1, index as usize);
+        g.sources[g.items.len()] = 0;
+        item as f64
     })
 }
 #[unsafe(no_mangle)]
@@ -2478,6 +2846,7 @@ pub extern "C" fn queue_event_reply(id: u32, event: u32, token: u32, result: i32
         {
             return OUT_OF_RANGE;
         }
+        s.rollback_transfer();
         s.event = None;
         if result < 0 {
             s.abort();
@@ -2519,7 +2888,7 @@ pub extern "C" fn queue_event_reply(id: u32, event: u32, token: u32, result: i32
                 if let Some(a) = s.action_mut(id) {
                     a.flags &= !COMPLETE;
                 }
-                if attached && s.action(id).is_some_and(|a| a.kind == 3) {
+                if attached && s.action(id).is_some_and(|a| transfer_kind(a.kind)) {
                     let next = s
                         .action(id)
                         .unwrap()
@@ -2529,13 +2898,16 @@ pub extern "C" fn queue_event_reply(id: u32, event: u32, token: u32, result: i32
                         .and_then(|g| g.items.first())
                         .copied()
                         .and_then(item);
-                    let Some(next) = next.filter(|i| i.location == 0) else {
+                    let Some(next) = next else {
                         s.abort();
                         return BLOCKED;
                     };
                     let a = s.action_mut(id).unwrap();
                     a.target = next.id;
-                    a.xyz = (next.x.floor() as i32, next.y.floor() as i32, 0);
+                    if a.kind == 3 {
+                        a.source_container = next.owner_container;
+                        a.xyz = (next.x.floor() as i32, next.y.floor() as i32, 0);
+                    }
                 }
                 if stop {
                     return s.emit(id, 6, e.frame);
@@ -2589,18 +2961,488 @@ pub extern "C" fn queue_commit_item(id: u32, gid: u32, item_id: u32, token: u32)
                 || !e.authorized[..e.authorized_count].contains(&item_id)
                 || e.consumed[..e.consumed_count].contains(&item_id)
                 || e.consumed_count == GROUP_ITEMS
-        }) || s.action(id).is_none_or(|a| a.origin != 1 || a.kind != 3)
+        }) || s
+            .action(id)
+            .is_none_or(|a| a.origin != 1 || !transfer_kind(a.kind))
             || s.group(gid).is_none_or(|g| g.action != id)
         {
             return OUT_OF_RANGE;
         }
-        let result = transfer(item_id);
+        let a = s.action(id).unwrap();
+        let event = s.event.unwrap();
+        let source = event.authorized_sources[event.authorized[..event.authorized_count]
+            .iter()
+            .position(|id| *id == item_id)
+            .unwrap()];
+        let result = transfer(item_id, source, a.destination_container);
         if result == OK {
             let event = s.event.as_mut().unwrap();
             event.consumed[event.consumed_count] = item_id;
             event.consumed_count += 1;
         }
         result
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_transfer_read(id: u32) -> i32 {
+    STORE.with(|state| {
+        let state = state.borrow();
+        let Some(action) = state.action(id).filter(|action| transfer_kind(action.kind)) else {
+            return OUT_OF_RANGE;
+        };
+        row(&[
+            action.source_container as f64,
+            action.destination_container as f64,
+            action.xyz.0 as f64,
+            action.xyz.1 as f64,
+            action.xyz.2 as f64,
+        ]);
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_action_bind_transfer(id: u32, source: u32, destination: u32) -> i32 {
+    if !mutation_allowed() || source == destination {
+        return OUT_OF_RANGE;
+    }
+    STORE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.fifo.contains(&id) || state.event.is_some_and(|event| event.action == id) {
+            return OUT_OF_RANGE;
+        }
+        let Some(action) = state.action_mut(id).filter(|action| {
+            action.kind == 5 && action.source_container == 0 && action.destination_container == 0
+        }) else {
+            return OUT_OF_RANGE;
+        };
+        let supported = ITEMS.with(|items| {
+            let items = items.borrow();
+            items
+                .live
+                .iter()
+                .find(|item| item.id == action.target)
+                .is_some_and(|item| item.owner_container == source)
+                && items.container(source).is_some()
+                && items.container(destination).is_some()
+        });
+        if !supported {
+            return OUT_OF_RANGE;
+        }
+        action.source_container = source;
+        action.destination_container = destination;
+        let root = ITEMS.with(|items| {
+            let items = items.borrow();
+            let root = items.outermost(destination).unwrap();
+            items
+                .container(root)
+                .filter(|row| row.kind == 2)
+                .map(|row| row.xyz)
+        });
+        action.xyz = root.unwrap_or_else(actor_square);
+        OK
+    })
+}
+
+fn transfer_time(item: u32, source: u32, destination: u32) -> f64 {
+    let (weight, base, delta, floor_factor, hands_slot, favorite_leaving) = ITEMS.with(|items| {
+        let items = items.borrow();
+        let item = items.live.iter().find(|row| row.id == item).unwrap();
+        let source_actor = items.outermost(source) == Some(PLAYER_INVENTORY);
+        let destination_actor = items.outermost(destination) == Some(PLAYER_INVENTORY);
+        let row = items.container(destination).unwrap();
+        let mut base = 120.0;
+        let mut delta = 1.0;
+        if source == PLAYER_INVENTORY {
+            if destination_actor {
+                let max = if destination == PLAYER_INVENTORY {
+                    MOODLES.with(|state| state.borrow().inputs[MOODLE_MAX_WEIGHT] as i32)
+                } else {
+                    Items::source_capacity(row)
+                };
+                delta = items.container_capacity_weight(destination) as f64 / max as f64;
+            } else {
+                base = 50.0;
+            }
+        } else if !source_actor && destination_actor {
+            base = 50.0;
+        }
+        let floor_factor = if row.type_token == 2 {
+            if source == PLAYER_INVENTORY {
+                0.1
+            } else if source_actor {
+                1.0
+            } else {
+                0.2
+            }
+        } else {
+            1.0
+        };
+        (
+            item.actual_weight,
+            base,
+            delta,
+            floor_factor,
+            items.hands_slot,
+            item.source_flags & 1 != 0 && !destination_actor,
+        )
+    });
+    timing::transfer_base(
+        weight,
+        base,
+        delta,
+        floor_factor,
+        item_wearing_awkward_gloves(hands_slot) != 0,
+        favorite_leaving,
+    )
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_request_transfer(item: u32, source: u32, destination: u32) -> i32 {
+    let status = transfer_check(item, source, destination, -1);
+    if status != OK {
+        return status;
+    }
+    let raw = transfer_time(item, source, destination);
+    STORE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.actions.len() == ACTIONS
+            || state.fifo.len() == ACTIONS
+            || state.groups.len() == GROUPS
+            || state.next_action > i32::MAX as u32
+            || state.next_group > i32::MAX as u32
+        {
+            return OUT_OF_RANGE;
+        }
+        let definition = ITEMS.with(|items| {
+            items
+                .borrow()
+                .live
+                .iter()
+                .find(|row| row.id == item)
+                .unwrap()
+                .definition
+        });
+        let xyz = ITEMS.with(|items| {
+            let items = items.borrow();
+            [destination, source]
+                .iter()
+                .find_map(|id| {
+                    items
+                        .outermost(*id)
+                        .and_then(|root| items.container(root))
+                        .filter(|row| row.kind == 2)
+                        .map(|row| row.xyz)
+                })
+                .unwrap_or_else(actor_square)
+        });
+        let id = state.new_action(5, 0, item, xyz, raw).unwrap();
+        let action = state.action_mut(id).unwrap();
+        action.source_container = source;
+        action.destination_container = destination;
+        let group = state.new_group(id, raw).unwrap();
+        let row = state.group_mut(group).unwrap();
+        row.definition = Some(definition);
+        row.items.push(item);
+        row.sources[0] = source;
+        state.action_mut(id).unwrap().groups.push(group);
+        state.fifo.push(id);
+        let status = state.begin_head();
+        if status != OK {
+            return status;
+        }
+        id as i32
+    })
+}
+
+fn authorized_item(state: &Store, action: u32, group: u32, item: u32, token: u32) -> bool {
+    state.event.is_some_and(|event| {
+        event.action == action
+            && event.kind == 5
+            && event.token == token
+            && event.group == group
+            && event.authorized[..event.authorized_count].contains(&item)
+            && !event.consumed[..event.consumed_count].contains(&item)
+            && event.consumed_count < GROUP_ITEMS
+    }) && state
+        .action(action)
+        .is_some_and(|row| row.origin == 1 && transfer_kind(row.kind))
+        && state.group(group).is_some_and(|row| row.action == action)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_transfer_begin(
+    action: u32,
+    group: u32,
+    item: u32,
+    token: u32,
+    policy: i32,
+) -> i32 {
+    STORE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.transfer.is_some() || !authorized_item(&state, action, group, item, token) {
+            return OUT_OF_RANGE;
+        }
+        let row = state.action(action).unwrap();
+        let destination = row.destination_container;
+        let event = state.event.unwrap();
+        let source = event.authorized_sources[event.authorized[..event.authorized_count]
+            .iter()
+            .position(|id| *id == item)
+            .unwrap()];
+        let admission =
+            ITEMS.with(|items| items.borrow().container(destination).unwrap().kind != 2);
+        let status = transfer_check_inner(item, source, destination, policy, admission);
+        if status != OK {
+            return status;
+        }
+        let transaction = ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            let index = items.live.iter().position(|row| row.id == item).unwrap();
+            items.source_transfer = true;
+            TransferTransaction {
+                action,
+                token,
+                item: items.live[index],
+                index,
+                held: items.held,
+                worn_index: items.worn.iter().position(|id| *id == item),
+                attached_index: items.attached.iter().position(|id| *id == item),
+                rng_state: doors::rng_state(),
+                container_flags: [
+                    items.container(source).unwrap().flags,
+                    items.container(destination).unwrap().flags,
+                ],
+                actor_overlay: items.actor_overlay,
+                source,
+                destination,
+                detached: false,
+                added: false,
+            }
+        });
+        // Reserve once even when a helper fails: a replied event cannot replay.
+        let event = state.event.as_mut().unwrap();
+        event.consumed[event.consumed_count] = item;
+        event.consumed_count += 1;
+        state.transfer = Some(transaction);
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_transfer_random(
+    action: u32,
+    item: u32,
+    token: u32,
+    min: f64,
+    max: f64,
+    integer: u32,
+) -> f64 {
+    if !min.is_finite() || !max.is_finite() {
+        return NONFINITE as f64;
+    }
+    if integer > 1
+        || min < 0.0
+        || max > F32_MAX
+        || min >= max
+        || (integer == 1 && (min.fract() != 0.0 || max.fract() != 0.0 || max > i32::MAX as f64))
+    {
+        return OUT_OF_RANGE as f64;
+    }
+    STORE.with(|state| {
+        let state = state.borrow();
+        if state
+            .event
+            .is_none_or(|event| event.action != action || event.kind != 5 || event.token != token)
+            || state.transfer.as_ref().is_none_or(|transaction| {
+                transaction.action != action
+                    || transaction.token != token
+                    || transaction.item.id != item
+            })
+        {
+            return OUT_OF_RANGE as f64;
+        }
+        if integer == 1 {
+            min + doors::random((max - min) as u64) as f64
+        } else {
+            let unit = doors::random(1 << 24) as f32 / (1 << 24) as f32;
+            (min as f32 + unit * (max as f32 - min as f32)) as f64
+        }
+    })
+}
+
+pub(super) fn source_flags_needed(id: u32) -> bool {
+    STORE.with(|state| {
+        let state = state.borrow();
+        state.actions.iter().any(|action| action.target == id)
+            || state.groups.iter().any(|group| group.items.contains(&id))
+            || state
+                .event
+                .is_some_and(|event| event.authorized[..event.authorized_count].contains(&id))
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_transfer_operation(
+    action: u32,
+    item: u32,
+    token: u32,
+    operation: u32,
+    container: u32,
+    x: f64,
+    y: f64,
+    z: i32,
+) -> i32 {
+    STORE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state
+            .event
+            .is_none_or(|event| event.action != action || event.kind != 5 || event.token != token)
+        {
+            return OUT_OF_RANGE;
+        }
+        let Some(transaction) = state.transfer.as_mut().filter(|transaction| {
+            transaction.action == action
+                && transaction.token == token
+                && transaction.item.id == item
+        }) else {
+            return OUT_OF_RANGE;
+        };
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            let Some(index) = items.live.iter().position(|row| row.id == item) else {
+                return OUT_OF_RANGE;
+            };
+            match operation {
+                1 => {
+                    if transaction.detached
+                        || transaction.added
+                        || container != transaction.source
+                        || items.live[index].owner_container != transaction.source
+                    {
+                        return OUT_OF_RANGE;
+                    }
+                    items.live[index].owner_container = 0;
+                    transaction.detached = true;
+                }
+                2 => {
+                    if !transaction.detached
+                        || transaction.added
+                        || container != transaction.destination
+                        || items.live[index].world_object
+                    {
+                        return OUT_OF_RANGE;
+                    }
+                    let mut row = items.live.remove(index);
+                    row.owner_container = container;
+                    items.live.push(row);
+                    transaction.added = true;
+                }
+                3 => {
+                    if !transaction.detached
+                        || transaction.added
+                        || !items.live[index].world_object
+                        || !transaction.item.world_object
+                        || container != transaction.source
+                    {
+                        return OUT_OF_RANGE;
+                    }
+                    items.live[index].world_object = false;
+                }
+                4 => {
+                    if !transaction.detached
+                        || !transaction.added
+                        || container != transaction.destination
+                        || items.live[index].owner_container != container
+                        || items.live[index].world_object
+                        || items.container(container).unwrap().kind != 2
+                    {
+                        return OUT_OF_RANGE;
+                    }
+                    if z != 0 {
+                        return UNSUPPORTED;
+                    }
+                    if !x.is_finite() || !y.is_finite() {
+                        return NONFINITE;
+                    }
+                    if !item_position_valid(x, y)
+                        || items.container(container).unwrap().xyz
+                            != (x.floor() as i32, y.floor() as i32, z)
+                    {
+                        return OUT_OF_RANGE;
+                    }
+                    items.live[index].world_object = true;
+                    items.live[index].x = x;
+                    items.live[index].y = y;
+                }
+                5 => {
+                    if !transaction.detached || container != transaction.source {
+                        return OUT_OF_RANGE;
+                    }
+                    items.clear_held(item);
+                }
+                6 => {
+                    if container != PLAYER_INVENTORY {
+                        return OUT_OF_RANGE;
+                    }
+                    items.actor_overlay = 0;
+                }
+                7 => {
+                    if !transaction.detached || container != transaction.source {
+                        return OUT_OF_RANGE;
+                    }
+                    items.remove_worn(item);
+                }
+                8 => {
+                    if !transaction.detached || container != transaction.source {
+                        return OUT_OF_RANGE;
+                    }
+                    items.attached.retain(|id| *id != item);
+                }
+                _ => return OUT_OF_RANGE,
+            }
+            OK
+        })
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_transfer_finish(action: u32, item: u32, token: u32, success: u32) -> i32 {
+    STORE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(transaction) = state.transfer.as_ref().filter(|transaction| {
+            transaction.action == action
+                && transaction.token == token
+                && transaction.item.id == item
+        }) else {
+            return OUT_OF_RANGE;
+        };
+        if success > 1
+            || state.event.is_none_or(|event| {
+                event.action != action || event.kind != 5 || event.token != token
+            })
+        {
+            return OUT_OF_RANGE;
+        }
+        if success == 0 {
+            state.rollback_transfer();
+            return OK;
+        }
+        let valid = transaction.detached
+            && transaction.added
+            && ITEMS.with(|items| {
+                let items = items.borrow();
+                let row = items.live.iter().find(|row| row.id == item).unwrap();
+                row.owner_container == transaction.destination
+                    && row.world_object
+                        == (items.container(transaction.destination).unwrap().kind == 2)
+                    && (row.owner_container == PLAYER_INVENTORY
+                        || (row.slot == 0 && !items.held.contains(&item)))
+            });
+        if !valid {
+            state.rollback_transfer();
+            return BAD_FORMAT;
+        }
+        state.transfer = None;
+        ITEMS.with(|items| items.borrow_mut().source_transfer = false);
+        OK
     })
 }
 #[unsafe(no_mangle)]
@@ -2751,7 +3593,7 @@ pub extern "C" fn queue_request_pickup(item_id: u32) -> i32 {
     if !mutation_allowed() {
         return OUT_OF_RANGE;
     }
-    let Some(i) = item(item_id).filter(|i| i.location == 0) else {
+    let Some(i) = item(item_id).filter(|i| i.world_object) else {
         return OUT_OF_RANGE;
     };
     let target = (i.x.floor() as i32, i.y.floor() as i32, 0);
@@ -2785,7 +3627,9 @@ pub extern "C" fn queue_request_pickup(item_id: u32) -> i32 {
                 g.items.len() < GROUP_ITEMS && g.definition == Some(i.definition)
             });
             if let Some(gid) = existing {
-                s.group_mut(gid).unwrap().items.push(item_id);
+                let group = s.group_mut(gid).unwrap();
+                group.sources[group.items.len()] = i.owner_container;
+                group.items.push(item_id);
                 return last as i32;
             }
             let gid = match s.new_group(last, raw) {
@@ -2794,6 +3638,7 @@ pub extern "C" fn queue_request_pickup(item_id: u32) -> i32 {
             };
             let group = s.group_mut(gid).unwrap();
             group.definition = Some(i.definition);
+            group.sources[0] = i.owner_container;
             group.items.push(item_id);
             s.action_mut(last).unwrap().groups.push(gid);
             return last as i32;
@@ -2814,6 +3659,7 @@ pub extern "C" fn queue_request_pickup(item_id: u32) -> i32 {
         let gid = s.new_group(id, raw).unwrap();
         let group = s.group_mut(gid).unwrap();
         group.definition = Some(i.definition);
+        group.sources[0] = i.owner_container;
         group.items.push(item_id);
         s.action_mut(id).unwrap().groups.push(gid);
         s.fifo.push(id);
@@ -3015,7 +3861,25 @@ fn portable_target_valid(a: &Action) -> bool {
                 && (!world_extents().0 || tile_passable(tile_at(a.xyz.0 as i64, a.xyz.1 as i64)))
         }
         2 => doors::position(a.target) == Some(a.xyz),
-        3 => item(a.target).is_some_and(|i| (i.x.floor() as i32, i.y.floor() as i32, 0) == a.xyz),
+        3 => {
+            a.destination_container == PLAYER_INVENTORY
+                && item(a.target)
+                    .is_some_and(|i| i.world_object && i.owner_container == a.source_container)
+                && ITEMS.with(|state| {
+                    state
+                        .borrow()
+                        .container(a.source_container)
+                        .is_some_and(|row| row.kind == 2)
+                })
+        }
+        5 => {
+            item(a.target).is_some_and(|i| i.owner_container == a.source_container)
+                && ITEMS.with(|state| {
+                    let state = state.borrow();
+                    state.container(a.source_container).is_some()
+                        && state.container(a.destination_container).is_some()
+                })
+        }
         4 => a.origin == 1 && (a.target == u32::MAX || doors::position(a.target).is_some()),
         _ => false,
     }
@@ -3029,14 +3893,29 @@ fn encode(s: &Store) -> Result<Vec<u8>, i32> {
             !a.portable
                 || !s.fifo.contains(&a.id)
                 || !portable_target_valid(a)
-                || (a.kind == 3 && a.groups.is_empty())
+                || (transfer_kind(a.kind) && a.groups.is_empty())
         })
         || s.groups.iter().any(|g| {
             g.items.is_empty()
                 || s.action(g.action).is_none_or(|a| !a.groups.contains(&g.id))
                 || g.definition.is_none_or(|definition| {
-                    g.items.iter().any(|id| {
-                        item(*id).is_none_or(|i| i.location != 0 || i.definition != definition)
+                    g.items.iter().enumerate().any(|(index, id)| {
+                        item(*id).is_none_or(|i| {
+                            i.owner_container != g.sources[index]
+                                || i.definition != definition
+                                || s.action(g.action).is_some_and(|a| {
+                                    a.kind == 3
+                                        && (!i.world_object
+                                            || ITEMS.with(|state| {
+                                                state
+                                                    .borrow()
+                                                    .container(g.sources[index])
+                                                    .is_none_or(|row| row.kind != 2)
+                                            }))
+                                })
+                        }) || s
+                            .action(g.action)
+                            .is_some_and(|a| a.kind == 5 && g.sources[index] != a.source_container)
                     })
                 })
         })
@@ -3045,7 +3924,7 @@ fn encode(s: &Store) -> Result<Vec<u8>, i32> {
     }
     let mut bytes = Vec::with_capacity(64 + s.actions.len() * 80 + s.groups.len() * 100);
     word(&mut bytes, 0x31515a50);
-    word(&mut bytes, 1);
+    word(&mut bytes, 2);
     word(&mut bytes, s.next_action);
     word(&mut bytes, s.next_group);
     word(&mut bytes, s.current);
@@ -3074,6 +3953,8 @@ fn encode(s: &Store) -> Result<Vec<u8>, i32> {
         ] {
             word(&mut bytes, value);
         }
+        word(&mut bytes, a.source_container);
+        word(&mut bytes, a.destination_container);
         wide(&mut bytes, a.raw.to_bits());
         wide(&mut bytes, a.source_time.to_bits());
         word(&mut bytes, a.max as u32);
@@ -3096,8 +3977,9 @@ fn encode(s: &Store) -> Result<Vec<u8>, i32> {
         wide(&mut bytes, g.raw.to_bits());
         word(&mut bytes, g.definition.ok_or(OUT_OF_RANGE)?);
         word(&mut bytes, g.items.len() as u32);
-        for id in &g.items {
+        for (index, id) in g.items.iter().enumerate() {
             word(&mut bytes, *id);
+            word(&mut bytes, g.sources[index]);
         }
     }
     if bytes.len() > PAYLOAD {
@@ -3135,7 +4017,11 @@ fn decode(bytes: &[u8]) -> Result<(Store, timing::TimingContext), i32> {
         return Err(BAD_FORMAT);
     }
     let mut r = Reader { bytes, at: 0 };
-    if r.word()? != 0x31515a50 || r.word()? != 1 {
+    if r.word()? != 0x31515a50 {
+        return Err(BAD_FORMAT);
+    }
+    let version = r.word()?;
+    if version != 1 && version != 2 {
         return Err(BAD_FORMAT);
     }
     let mut s = Store::new();
@@ -3154,6 +4040,9 @@ fn decode(bytes: &[u8]) -> Result<(Store, timing::TimingContext), i32> {
     for _ in 0..time_count {
         words.push(r.word()?);
     }
+    if version == 1 && words.get(9).is_none_or(|word| *word > 1) {
+        return Err(BAD_FORMAT);
+    }
     let timing = timing::validate_words(&words)?;
     let action_count = r.count(ACTIONS)?;
     let fifo_count = r.count(ACTIONS)?;
@@ -3169,8 +4058,17 @@ fn decode(bytes: &[u8]) -> Result<(Store, timing::TimingContext), i32> {
         let origin = r.word()?;
         let target = r.word()?;
         let xyz = (r.word()? as i32, r.word()? as i32, r.word()? as i32);
+        let references = if version == 2 {
+            Some((r.word()?, r.word()?))
+        } else {
+            None
+        };
         let raw = f64::from_bits(r.wide()?);
         let mut a = Action::new(id, kind, origin, target, xyz, raw);
+        if let Some((source, destination)) = references {
+            a.source_container = source;
+            a.destination_container = destination;
+        }
         a.source_time = f64::from_bits(r.wide()?);
         a.max = r.word()? as i32;
         a.current = f32::from_bits(r.word()?);
@@ -3193,14 +4091,18 @@ fn decode(bytes: &[u8]) -> Result<(Store, timing::TimingContext), i32> {
             || id >= s.next_action
             || !action_ids.insert(id)
             || origin > 1
+            || (version == 1 && kind > 4)
+            || (!transfer_kind(kind) && (a.source_container != 0 || a.destination_container != 0))
+            || (transfer_kind(kind) && a.source_container == a.destination_container)
             || portable != 1
-            || a.flags & !511 != 0
+            || a.flags & !(511 | ALLOW_MISSING) != 0
+            || (a.flags & ALLOW_MISSING != 0 && (origin != 1 || kind != 5 || version == 1))
             || !target_valid
             || xyz.2 != 0
-            || (a.flags & SOURCE_GRAB_STARTED != 0 && (origin != 1 || kind != 3))
+            || (a.flags & SOURCE_GRAB_STARTED != 0 && (origin != 1 || !transfer_kind(kind)))
             || (origin == 1 && a.source_time as i32 != a.max)
-            || (kind != 3 && count != 0)
-            || (kind == 3 && count == 0)
+            || (!transfer_kind(kind) && count != 0)
+            || (transfer_kind(kind) && count == 0)
             || (id != s.current && a.flags & STARTED != 0)
         {
             return Err(BAD_FORMAT);
@@ -3228,18 +4130,40 @@ fn decode(bytes: &[u8]) -> Result<(Store, timing::TimingContext), i32> {
             || !group_ids.insert(id)
             || !group_refs.contains(&id)
             || s.action(action)
-                .is_none_or(|a| a.kind != 3 || !a.groups.contains(&id))
+                .is_none_or(|a| !transfer_kind(a.kind) || !a.groups.contains(&id))
         {
             return Err(BAD_FORMAT);
         }
         let mut items = Vec::with_capacity(GROUP_ITEMS);
-        for _ in 0..count {
+        let mut sources = [0; GROUP_ITEMS];
+        for slot in sources.iter_mut().take(count) {
             let item_id = r.word()?;
             let i = item(item_id).ok_or(BAD_FORMAT)?;
-            if i.location != 0 || i.definition != accepted_definition {
+            let source = if version == 2 {
+                r.word()?
+            } else {
+                i.owner_container
+            };
+            if i.owner_container != source
+                || i.definition != accepted_definition
+                || s.action(action).is_some_and(|a| match a.kind {
+                    3 => {
+                        !i.world_object
+                            || ITEMS.with(|state| {
+                                state
+                                    .borrow()
+                                    .container(source)
+                                    .is_none_or(|row| row.kind != 2)
+                            })
+                    }
+                    5 => source != a.source_container,
+                    _ => false,
+                })
+            {
                 return Err(BAD_FORMAT);
             }
             items.push(item_id);
+            *slot = source;
         }
         s.groups.push(Group {
             id,
@@ -3247,6 +4171,7 @@ fn decode(bytes: &[u8]) -> Result<(Store, timing::TimingContext), i32> {
             raw,
             definition: Some(accepted_definition),
             items,
+            sources,
         });
     }
     if r.at != bytes.len()
@@ -3409,9 +4334,6 @@ pub(super) fn adjacent_row_for_test() -> (i32, i32, i32) {
     })
 }
 
-fn has_room(items: &Items, item: &Item) -> bool {
-    floating_point_correction(items.capacity_weight()) + item.actual_weight <= INVENTORY_CAPACITY
-}
 #[unsafe(no_mangle)]
 pub extern "C" fn source_item_has_room(id: u32) -> i32 {
     ITEMS.with(|items| {
@@ -3420,7 +4342,11 @@ pub extern "C" fn source_item_has_room(id: u32) -> i32 {
             .live
             .iter()
             .find(|item| item.id == id)
-            .map_or(OUT_OF_RANGE, |item| i32::from(has_room(&items, item)))
+            .map_or(OUT_OF_RANGE, |item| {
+                items
+                    .has_room_item(PLAYER_INVENTORY, 1, item, -1)
+                    .map_or_else(|code| code, i32::from)
+            })
     })
 }
 

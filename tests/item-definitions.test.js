@@ -23,7 +23,7 @@ test('script structure preserves source order, provenance and unknown quoted fie
     assert.equal(records[0].conditionMax, 12);
     assert.equal(records[0].conditionLowerChanceOneIn, 3);
     assert.equal(records[0].removeOnBroken, false);
-    assert.equal(records[0].weight, 0.7);
+    assert.equal(records[0].weight, 0.699_999_988_079_071);
     assert.equal(records[0].runSpeedModifier, 0.8);
     assert.equal(records[0].worldStaticModel, 'Ground');
     assert.equal(records[0].clothingItem, 'Worn');
@@ -35,6 +35,15 @@ test('script structure preserves source order, provenance and unknown quoted fie
     assert.equal(records[0].provenance.path, 'authored.txt');
     records[0].provenance.path = 'detached';
     assert.equal(records[1].provenance.path, 'authored.txt');
+});
+
+test('CanBeEquipped remains independent from a clothing BodyLocation', () => {
+    const [definition] = parseItemDefinitions(`module Fixture {
+        item Harness { BodyLocation = Torso1, CanBeEquipped = Back, }
+    }`, 'equipment.txt');
+
+    assert.equal(definition.bodyLocation, 'Torso1');
+    assert.equal(definition.canBeEquipped, 'Back');
 });
 
 test('script normal texture uses explicit Icon or the first IconsForTexture without inventing missing metadata', () => {
@@ -87,6 +96,12 @@ test('source Tags become detached canonical resource IDs without adding missing 
 
 test('original wearable seeding applies script constructor defaults only at registration and preserves existing owners', async () => {
     const subject = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
+    const group = subject.equipmentOperation('groupGet', 'Human', true);
+
+    for (const name of ['Shoes', 'Hands']) {
+        subject.equipmentOperation('locationAdd', group, subject.equipmentOperation('lookup', name));
+    }
+
     const source = `module Base {
         item Shoes_ArmyBoots { BodyLocation = base:shoes, ConditionMax = 30, Weight = 2, RemoveOnBroken = false, }
         item Shoes_FlipFlop { BodyLocation = base:shoes, ConditionMax = 1, Weight = .2, }
@@ -96,9 +111,10 @@ test('original wearable seeding applies script constructor defaults only at regi
         item DefaultHands { BodyLocation = base:hands, }
         item SourceHands { BodyLocation = base:hands, ConditionMax = 4, ConditionLowerChanceOneIn = 3, Weight = .5, RunSpeedModifier = .8, RemoveOnBroken = false, }
         item Unrelated { BodyLocation = base:head, }
+        item AuthoredBag { Type = Container, Weight = 2, Capacity = 60, WeightReduction = 130, MaxItemSize = 5, OnlyAcceptCategory = Clothing, }
     }`;
     const content = {
-        manifest: { sourceBuild: { version: 'synthetic' } },
+        manifest: { sourceBuild: { version: '42.0.0' }, files: [{ path: 'media/scripts/generated/items/clothing.txt' }] },
         /**
          * Supply the synthetic source file consumed by wearable seeding.
          *
@@ -126,9 +142,16 @@ test('original wearable seeding applies script constructor defaults only at regi
 
     assert.deepEqual(definitions.map(({ fullType }) => fullType), [
         'Base.Shoes_ArmyBoots', 'Base.Shoes_FlipFlop', 'Test.LightHands', 'Test.HeavyHands',
-        'Test.DefaultHands', 'Test.SourceHands',
+        'Test.DefaultHands', 'Test.SourceHands', 'Test.AuthoredBag',
     ]);
     assert.deepEqual(definitions[0], existing);
+    const bag = definitions.find(({ fullType }) => fullType === 'Test.AuthoredBag');
+
+    assert.deepEqual([bag.capacity, bag.weightReduction, bag.maxItemSize, bag.onlyAcceptCategory], [48, 100, 5, 'clothing']);
+    assert.equal(bag.sourceCategory, 'Container');
+    const bagId = subject.command({ type: 'spawnItem', fullType: bag.fullType, x: 5, y: 5 }).id;
+
+    assert.equal(subject.getContainer(subject.getItem(bagId).internalContainerId).capacity, 48);
 
     for (const [fullType, weight, tags] of [
         ['Test.LightHands', 0.1, ['base:awkwardgloves']],
@@ -170,7 +193,7 @@ test('original wearable seeding applies script constructor defaults only at regi
 test('original wearable seeding still refuses missing required footwear before registration', async () => {
     const subject = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
     const content = {
-        manifest: { sourceBuild: { version: 'synthetic' } },
+        manifest: { sourceBuild: { version: '42.0.0' }, files: [{ path: 'media/scripts/generated/items/clothing.txt' }] },
         /**
          * Supply a fixture intentionally missing the required footwear.
          *

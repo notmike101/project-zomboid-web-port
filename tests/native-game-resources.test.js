@@ -13,8 +13,10 @@ import { parsePngHeader } from '../src/renderer.js';
  */
 function fixture() {
     const entries = new Map([
+        ['media/lua/shared/NPCs/BodyLocations.lua', 'BodyLocations.getGroup("Human"):getOrCreateLocation(ItemBodyLocation.SHOES)'],
         ...['env', 'ISBaseObject', 'ISUI/ISUIElement', 'ISUI/Layout/ISDock', 'ISUI/Style/UIHorizontalAlignment', 'ISUI/ISUITextureGetter'].map((name) => [`media/lua/client/${name}.lua`, '']),
         ...['TimedActions/ISBaseTimedAction', 'TimedActions/ISTimedActionQueue', 'TimedActions/ISGrabItemAction', 'TimedActions/ISOpenCloseDoor', 'TimedActions/WalkToTimedAction', 'TimedActions/ISWaitWhileGettingUp', 'luautils', 'ISUI/ISContextMenu', 'ISUI/ISPanelJoypad', 'ISUI/ISScrollingListBox', 'ISUI/ISTradingUI', 'ISUI/ISWorldObjectContextMenu', 'ISUI/ISToolTip', 'ISUI/ISToolTipInv', 'ISUI/ISInventoryItem', 'ISUI/ISInventoryPage', 'ISUI/ISRichTextPanel'].map((name) => [`media/lua/client/${name}.lua`, '']),
+        ...['TimedActions/ISInventoryTransferAction', 'TimedActions/ISTransferAction'].map((name) => [`media/lua/client/${name}.lua`, '']),
         ...['ISUI/PlayerData/ISPlayerDataObject', 'ISUI/PlayerData/ISPlayerData', 'BuildingObjects/ISMoveableCursor', 'RadioCom/ISRadioWindow'].map((name) => [`media/lua/client/${name}.lua`, '']),
         ['media/fonts/EN/fonts.txt', 'VERSION = 1,\nfont Small { fnt = tiny.fnt, img = tiny.png, }\nfont Medium { fnt = middle.fnt, img = middle.png, }\nfont Large { fnt = big.fnt, img = big.png, }\nfont NewSmall { fnt = tiny.fnt, img = tiny.png, }'],
         ...[['tiny', 10, 12], ['middle', 17, 19], ['big', 24, 28]].flatMap(([name, size, height]) => [
@@ -111,7 +113,12 @@ test('selected native font overlay supplies its actual metrics and bytes in acti
 test('vanilla source UI activation loads actual fonts without requiring any installed mod', async () => {
     const { content } = fixture();
 
-    assert.equal(await loadNativeGameResources(content, [], 60), undefined);
+    const headless = await loadNativeGameResources(content, [], 60);
+
+    assert.equal(headless.ui, false);
+    assert.deepEqual(headless.engineSources.map(({ path, execute }) => ({ path, execute })), [
+        { path: 'media/lua/shared/NPCs/BodyLocations.lua', execute: true },
+    ]);
     const resources = await loadNativeGameResources(content, [], 60, { requireUI: true });
 
     assert.equal(resources.fontSize.Medium, 17);
@@ -151,6 +158,7 @@ test('lazy original UI seeds traverse exact transitive literal paths without exe
 
     assert.equal(resources.engineSources.some(({ path }) => path === unrelated), false);
     assert.deepEqual(resources.engineSources.filter(({ execute }) => execute).map(({ path }) => path), [
+        'media/lua/shared/NPCs/BodyLocations.lua',
         'media/lua/client/env.lua', 'media/lua/client/ISBaseObject.lua', 'media/lua/client/ISUI/ISUIElement.lua',
         'media/lua/client/ISUI/Layout/ISDock.lua', 'media/lua/client/ISUI/Style/UIHorizontalAlignment.lua',
         'media/lua/client/ISUI/ISUITextureGetter.lua',
@@ -169,6 +177,17 @@ test('original startup lookup preserves manifest path casing under native case-i
 
     assert.equal(resources.engineSources.some(({ path }) => path === original), false);
     assert.equal(resources.engineSources.find(({ path }) => path === actual)?.execute, true);
+});
+
+test('equipment source startup is manifest-backed and independent of movement-only mods and UI', async () => {
+    const { content, entries } = fixture();
+    const descriptors = [{ sources: [{ path: 'media/lua/client/Move.lua', source: 'getPlayer():setSpeed(3)' }] }];
+    const resources = await loadNativeGameResources(content, descriptors, 60);
+
+    assert.equal(resources.ui, false);
+    assert.equal(resources.engineSources[0].source, entries.get('media/lua/shared/NPCs/BodyLocations.lua'));
+    content.manifest.files = content.manifest.files.filter(({ path }) => path !== 'media/lua/shared/NPCs/BodyLocations.lua');
+    await assert.rejects(loadNativeGameResources(content, [], 60), /BodyLocations.*found 0/u);
 });
 
 /**

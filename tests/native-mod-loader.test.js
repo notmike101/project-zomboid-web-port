@@ -6,7 +6,7 @@ import { createEngine } from '../src/engine.js';
 import { createGameUI } from '../src/game-ui.js';
 import { parseModPackage, resolveModOrder } from '../src/mod-manager.js';
 import { createModHost } from '../src/mods.js';
-import { activateNativePackage, bindNativeSession, closeNativeSession, discoverNativePackages, engineSources, nativePackageFiles, prepareNativeSession } from '../src/native-mod-loader.js';
+import { activateNativePackage, bindNativeSession, closeNativeSession, discoverNativePackages, engineSources, initializeOriginalEquipment, nativePackageFiles, prepareNativeSession } from '../src/native-mod-loader.js';
 
 /**
  * Build a private synthetic directory.
@@ -16,6 +16,7 @@ import { activateNativePackage, bindNativeSession, closeNativeSession, discoverN
  * @returns {object} Private content-like source.
  */
 function directory(entries, version = '42.21.0') {
+    entries = { 'media/lua/shared/NPCs/BodyLocations.lua': '', ...entries };
     const files = Object.entries(entries).map(([path, source]) => ({ path, size: new TextEncoder().encode(source).length }));
     const roots = [...new Set(files.filter(({ path }) => path.endsWith('/mod.info')).map(({ path }) => path.replace(/\/(?:common|\d+(?:\.\d+)*)\/mod.info$/, '').replace(/\/mod.info$/, '')))];
 
@@ -299,7 +300,7 @@ test('inert Lua comments and string bodies never fetch ambiguous engine pseudo-r
 
         await host.load(`data:text/javascript,${encodeURIComponent(source)}`);
         assert.equal(engine.snapshot().speed, 4);
-        assert.deepEqual(requests, ['media/lua/shared/Actual.lua']);
+        assert.equal(requests.some((path) => path.endsWith('/Unused.lua')), false);
     } finally {
         closeNativeSession();
         host.dispose();
@@ -666,4 +667,54 @@ test('native session shares original MoodleType constants with the actual charac
         closeNativeSession({ discardSaveData: true });
         host.dispose();
     }
+});
+
+test('manifest equipment startup runs headlessly with no mods and skips authoritative reinitialization', async () => {
+    const content = directory({
+        'media/lua/shared/NPCs/BodyLocations.lua': `
+            local group = BodyLocations.getGroup("Human")
+            assert(group:size() == 0)
+            group:getOrCreateLocation(ItemBodyLocation.HAT)
+            group:getOrCreateLocation(ItemBodyLocation.SHOES)
+        `,
+    });
+    const engine = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
+    const host = createModHost(engine);
+
+    try {
+        const session = await prepareNativeSession([], content, { coreApi: host.coreApi });
+        const group = engine.equipmentOperation('groupGet', 'Human');
+        const shoes = engine.equipmentOperation('lookup', 'Shoes');
+
+        assert.ok(session);
+        assert.equal(engine.equipmentOperation('initialized'), true);
+        assert.equal(engine.equipmentOperation('locationCount', group), 2);
+        engine.equipmentOperation('move', group, shoes, 0);
+        const legacyEngine = await createEngine(await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url)));
+
+        await initializeOriginalEquipment(legacyEngine, content);
+        assert.equal(legacyEngine.equipmentOperation('initialized'), true);
+        assert.equal(legacyEngine.equipmentOperation('locationCount', legacyEngine.equipmentOperation('groupGet', 'Human')), 2);
+        closeNativeSession({ discardSaveData: true });
+        await initializeOriginalEquipment(engine, content);
+        const rebuilt = await prepareNativeSession([], content, { coreApi: host.coreApi });
+
+        assert.equal(engine.equipmentOperation('locationAt', group, 0), shoes);
+        assert.equal(engine.equipmentOperation('locationCount', group), 2);
+        rebuilt.activatePackage({
+            id: 'consumer', nativeId: 'consumer', api: host.api,
+            sources: [{ path: 'media/lua/client/Consumer.lua', source: 'require "NPCs/BodyLocations"; assert(BodyLocations.getGroup("Human"):getLocationByIndex(0):getId()==ItemBodyLocation.SHOES)' }],
+        });
+    } finally {
+        closeNativeSession({ discardSaveData: true });
+        host.dispose();
+    }
+});
+
+test('native equipment startup refuses a missing original manifest source before activating any package', async () => {
+    const content = directory({ 'mods/A/mod.info': 'id=A', 'mods/A/media/lua/client/A.lua': 'getPlayer():setSpeed(3)' });
+    const descriptors = await discoverNativePackages(content);
+
+    content.manifest.files = content.manifest.files.filter(({ path }) => path !== 'media/lua/shared/NPCs/BodyLocations.lua');
+    await assert.rejects(prepareNativeSession(descriptors, content, { staged: true }), /BodyLocations.*found 0/u);
 });

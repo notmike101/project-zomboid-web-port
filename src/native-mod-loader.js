@@ -2,6 +2,7 @@
 import { literalLuaRequires } from './lua-requires.js';
 import { createLuaSession } from './lua-runtime.js';
 import { MAX_FILES, MAX_FILE_BYTES, MAX_MANIFEST_BYTES, MAX_PACKAGE_BYTES } from './mod-manager.js';
+import { createModHost } from './mods.js';
 
 const LUA_PATH = /^media\/lua\/(shared|client|server)\/.+\.lua$/u;
 const TREE = /^\d+(?:\.\d+)*$/u;
@@ -404,6 +405,51 @@ async function engineSources(descriptors, content, additionalSources = []) {
 }
 
 /**
+ * Resolve the equipment startup from the actual manifest without importing UI.
+ *
+ * @param {object} content - Validated original content directory.
+ * @returns {Promise<object[]>} Original startup seed, preserving manifest casing.
+ */
+async function equipmentStartup(content) {
+    const matches = content.manifest.files.filter(({ path }) => path.toLowerCase() === 'media/lua/shared/npcs/bodylocations.lua');
+
+    if (matches.length !== 1) {
+        throw new Error(`Original startup module NPCs/BodyLocations requires one manifest source; found ${matches.length}.`);
+    }
+
+    const { path } = matches[0];
+
+    return [{ path, source: await readText(content, path), execute: true }];
+}
+
+/**
+ * Initialize a legacy save's original equipment rules before inventory import.
+ *
+ * @param {object} engine - Candidate engine receiving authoritative equipment.
+ * @param {object} content - Validated original content directory.
+ * @returns {Promise<void>} Executes actual original Lua only when not initialized.
+ */
+async function initializeOriginalEquipment(engine, content) {
+    if (engine.equipmentOperation('initialized')) {
+        return;
+    }
+
+    const sources = await engineSources([], content, await equipmentStartup(content));
+    const host = createModHost(engine);
+    const session = await createLuaSession({
+        engineStartup: sources.filter(({ execute }) => execute).map(({ path }) => ({ id: 'engine-lua', path })),
+    });
+
+    try {
+        session.preload({ id: 'engine-lua', nativeId: 'ProjectZomboid', engineSource: true, sources });
+        session.activatePackage({ id: 'pz-base-game', nativeId: 'ProjectZomboid', api: host.coreApi, sources: [] });
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+}
+
+/**
  * Prepare a fresh VM and all cross-package require ownership before any activation.
  * Source rows hydrate before package scripts; the caller must completeSourceRestore
  * after genuine player startup events and before publishing/ticking the candidate.
@@ -456,7 +502,8 @@ async function prepareNativeSession(descriptors, content, options = {}) {
         }
     }
 
-    const sources = await engineSources(descriptors, content, options.engineSources);
+    const startup = await equipmentStartup(content);
+    const sources = await engineSources(descriptors, content, [...startup, ...(options.engineSources ?? [])]);
     const session = await createLuaSession({
         ui: options.ui,
         sourceFiles: options.sourceFiles,
@@ -533,4 +580,4 @@ function closeNativeSession(options = {}) {
     liveDescriptors = new Map();
 }
 
-export { parseModInfo, selectNativeTree, discoverNativePackages, nativePackageFiles, engineSources, prepareNativeSession, activateNativePackage, closeNativeSession, bindNativeSession };
+export { parseModInfo, selectNativeTree, discoverNativePackages, nativePackageFiles, engineSources, initializeOriginalEquipment, prepareNativeSession, activateNativePackage, closeNativeSession, bindNativeSession };

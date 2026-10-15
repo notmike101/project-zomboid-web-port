@@ -6,6 +6,7 @@ import { openPack } from './packs.js';
 const UI_STARTUP = ['env', 'ISBaseObject', 'ISUI/ISUIElement', 'ISUI/Layout/ISDock', 'ISUI/Style/UIHorizontalAlignment', 'ISUI/ISUITextureGetter'];
 const SOURCE_UI_MODULES = [
     'TimedActions/ISBaseTimedAction', 'TimedActions/ISTimedActionQueue', 'TimedActions/ISGrabItemAction',
+    'TimedActions/ISInventoryTransferAction', 'TimedActions/ISTransferAction',
     'TimedActions/ISOpenCloseDoor', 'TimedActions/WalkToTimedAction', 'TimedActions/ISWaitWhileGettingUp', 'luautils',
     'ISUI/ISContextMenu', 'ISUI/ISPanelJoypad', 'ISUI/ISScrollingListBox', 'ISUI/ISTradingUI',
     'ISUI/ISWorldObjectContextMenu', 'ISUI/ISToolTip', 'ISUI/ISToolTipInv', 'ISUI/ISInventoryItem', 'ISUI/ISInventoryPage',
@@ -17,24 +18,47 @@ const FONT_DECLARATIONS = 'media/fonts/EN/fonts.txt';
 const FONT_NAMES = ['Small', 'Medium', 'Large'];
 
 /**
- * Seed missing original shoes and hands wearables, retaining present definitions and owners.
+ * Seed missing authored shoes, hands wearables and bags from the exact provisioned manifest.
  * Verified script Item constructor defaults precede explicitly authored source fields.
  *
  * @param {object} engine - Uncommitted candidate engine, fresh or restored.
  * @param {object} content - Validated external content directory.
- * @returns {Promise<void>} Registers source-ordered shoes and hands wearables.
+ * @returns {Promise<void>} Registers source-ordered original definitions, retaining existing owners.
  */
 export async function seedOriginalWearables(engine, content) {
-    const path = 'media/scripts/generated/items/clothing.txt';
-    const source = content.getFile(path);
-    const definitions = parseItemDefinitions(await source.text(), {
-        path, sourceBuild: content.manifest.sourceBuild, size: source.size, lastModified: source.lastModified,
-    }).filter((definition) => definition.bodyLocation === 'base:shoes' || definition.bodyLocation === 'base:hands');
+    const build = content.manifest.sourceBuild;
+
+    if (!build || !/^\d+\.\d+(?:\.\d+)?$/u.test(build.version) || !Array.isArray(content.manifest.files)) {
+        throw new Error('Original item seeding requires a known manifest sourceBuild and authored file inventory.');
+    }
+
+    const paths = content.manifest.files.map(({ path }) => path)
+        .filter((path) => /^media\/scripts\/generated\/items\/.+\.txt$/iu.test(path));
+    const definitions = [];
+
+    for (const path of paths) {
+        const source = content.getFile(path);
+        // eslint-disable-next-line no-await-in-loop
+        const parsed = parseItemDefinitions(await source.text(), {
+            path, sourceBuild: structuredClone(build), size: source.size, lastModified: source.lastModified,
+        });
+
+        for (const definition of parsed) {
+            if (definition.bodyLocation === 'base:shoes' || definition.bodyLocation === 'base:hands'
+                || definition.type?.toLowerCase() === 'container' || definition.type?.toLowerCase() === 'base:container') {
+                definitions.push(definition);
+            }
+        }
+    }
 
     for (const fullType of ['Base.Shoes_ArmyBoots', 'Base.Shoes_FlipFlop']) {
         if (!definitions.some((definition) => definition.fullType === fullType)) {
-            throw new Error(`Original footwear definition missing from ${path}: ${fullType}`);
+            throw new Error(`Original footwear definition missing from manifest-authored item scripts: ${fullType}`);
         }
+    }
+
+    if (!definitions.some((definition) => definition.type?.toLowerCase().replace(/^base:/u, '') === 'container')) {
+        throw new Error('Original bag definitions are missing from manifest-authored item scripts.');
     }
 
     const existing = new Set(engine.itemDefinitions().map((definition) => definition.fullType));
@@ -44,10 +68,14 @@ export async function seedOriginalWearables(engine, content) {
             continue;
         }
 
-        // Project clothing policy: one wearable instance per stack, not a native default claim.
+        const isBag = definition.type?.toLowerCase().replace(/^base:/u, '') === 'container';
+
+        // Port policy: one clothing/bag instance per stack; constructor defaults are source-backed.
         engine.registerItemDefinition({
             conditionMax: 10, conditionLowerChanceOneIn: 10, weight: 1, runSpeedModifier: 1, removeOnBroken: true,
-            ...definition, stackLimit: 1,
+            bodyLocation: null, ...definition, isBag, stackLimit: 1,
+            unsupportedSubtype: Boolean(definition.ammoType
+                || definition.rawFields.some((field) => field.name.toLowerCase() === 'fluidcontainer')),
         }, { owner: 'ProjectZomboid' });
     }
 }
@@ -60,31 +88,34 @@ export async function seedOriginalWearables(engine, content) {
  * @param {object[]} descriptors - Exact native subsequence of the full actual activation order.
  * @param {number} lockFPS - Actual fixed-step scheduler rate.
  * @param {{requireUI?:boolean,itemDefinitions?:object[]}} [options] - Explicit original UI demand and source-backed item definitions needing icons.
- * @returns {Promise<object|undefined>} Candidate resources, or no UI for movement-only mods.
+ * @returns {Promise<object>} Candidate equipment source closure and optional UI resources.
  */
 export async function loadNativeGameResources(content, descriptors, lockFPS, { requireUI = false, itemDefinitions = [] } = {}) {
-    if (!requireUI && !descriptors.some((entry) => entry.sources.some(({ source }) => /\bISUIElement\b|\bISContextMenu\b|\bUIFont\b|\bgetTextManager\s*\(|\bgetTexture\s*\(|PZAPI\.ModOptions/u.test(source)))) {
-        return undefined;
-    }
+    const ui = requireUI || descriptors.some((entry) => entry.sources.some(({ source }) => /\bISUIElement\b|\bISContextMenu\b|\bUIFont\b|\bgetTextManager\s*\(|\bgetTexture\s*\(|PZAPI\.ModOptions/u.test(source)));
 
     const paths = new Set(content.manifest.files.map((entry) => entry.path));
     const startup = [];
 
-    for (const name of [...UI_STARTUP, ...(requireUI ? SOURCE_UI_MODULES : [])]) {
+    for (const name of ['NPCs/BodyLocations', ...(ui ? UI_STARTUP : []), ...(requireUI ? SOURCE_UI_MODULES : [])]) {
         const matches = [...paths].filter((path) => /^media\/lua\/(shared|client|server)\//u.test(path)
             && path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, '').toLowerCase() === name.toLowerCase());
 
         if (matches.length !== 1) {
-            throw new Error(`Original UI startup module ${name} requires one manifest source; found ${matches.length}.`);
+            throw new Error(`Original startup module ${name} requires one manifest source; found ${matches.length}.`);
         }
 
         const path = matches[0];
 
         // eslint-disable-next-line no-await-in-loop
-        startup.push({ path, source: await content.getFile(path).text(), execute: UI_STARTUP.includes(name) });
+        startup.push({ path, source: await content.getFile(path).text(), execute: name === 'NPCs/BodyLocations' || UI_STARTUP.includes(name) });
     }
 
     const sources = await engineSources(descriptors, content, startup);
+
+    if (!ui) {
+        return { engineSources: sources, ui: false, sourceFboRenderChunk: true };
+    }
+
     const textures = new Map();
     const translations = Object.create(null);
     const filesByPackage = [];
@@ -396,6 +427,9 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
     loaded.push(...itemTextures);
 
     return {
+        ui: true,
+        // Source-build-bound mutable baseline from original PerformanceSettings; not inferred from WebGPU.
+        sourceFboRenderChunk: true,
         engineSources: sources,
         textures: loaded,
         indexedTextures: [...new Set([...inventory.keys(), ...itemTextures.flatMap((entry) => [entry.path, ...entry.aliases])])],

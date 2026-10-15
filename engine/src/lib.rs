@@ -60,6 +60,8 @@ const OUT_OF_RANGE: i32 = -2;
 const BLOCKED: i32 = -3;
 /// A streaming world import was malformed; no partial cell state survives.
 const BAD_FORMAT: i32 = -4;
+/// A requested original facility has no provisioned native backend.
+const UNSUPPORTED: i32 = -5;
 
 // MoodleStat/Moodle.Update thresholds from retained original bytecode.
 // Inputs are genuine port-owned state; this does not supply native survival,
@@ -974,13 +976,15 @@ pub extern "C" fn api_version() -> u32 {
 /// state, so a host restoring a save re-imports cells before `state_load`.
 #[unsafe(no_mangle)]
 pub extern "C" fn reset() {
+    actions::full_reset();
+    ANIMAL_ZONES.with(|zones| zones.borrow_mut().clear());
     world_reset();
     mutate(|engine| *engine = Engine::initial());
     ITEMS.with(|items| items.borrow_mut().reset());
+    BODY_LOCATIONS.with(|registry| *registry.borrow_mut() = BodyRegistry::new());
     moodle_reset();
     body::reset();
     timing::reset();
-    actions::full_reset();
 }
 
 /// Sets movement speed in world units per second; only [0.1, 10] is accepted.
@@ -1485,11 +1489,667 @@ pub extern "C" fn state_load(values: *const f64) -> i32 {
     })
 }
 
-// Flat source item weights/carry capacity; tear timing and containers remain unmodeled.
+// Ordered bounded native item/container ownership and source carry rules.
 const MAX_ITEMS: usize = 4096;
 const MAX_DEFS: usize = 4096;
 const INVENTORY_CAPACITY: f32 = 50.0;
 const MOODLE_MAX_WEIGHT: usize = 25;
+const PLAYER_INVENTORY: u32 = 1;
+const MAX_CONTAINERS: usize = MAX_ITEMS * 2 + 1;
+
+// Identities are independent of group declaration/render order.
+const BODY_LOCATION_CONSTANTS: &[(&str, &str)] = &[
+    ("AMMO_STRAP", "AmmoStrap"),
+    ("ANKLE_HOLSTER", "AnkleHolster"),
+    ("BACK", "Back"),
+    ("BANDAGE", "Bandage"),
+    ("BATH_ROBE", "BathRobe"),
+    ("BELLY_BUTTON", "BellyButton"),
+    ("BELT", "Belt"),
+    ("BELT_EXTRA", "BeltExtra"),
+    ("BODY_COSTUME", "BodyCostume"),
+    ("BOILERSUIT", "Boilersuit"),
+    ("CALF_LEFT", "Calf_Left"),
+    ("CALF_LEFT_TEXTURE", "Calf_Left_Texture"),
+    ("CALF_RIGHT", "Calf_Right"),
+    ("CALF_RIGHT_TEXTURE", "Calf_Right_Texture"),
+    ("CODPIECE", "Codpiece"),
+    ("CUIRASS", "Cuirass"),
+    ("DRESS", "Dress"),
+    ("EARS", "Ears"),
+    ("EAR_TOP", "EarTop"),
+    ("ELBOW_LEFT", "Elbow_Left"),
+    ("ELBOW_RIGHT", "Elbow_Right"),
+    ("EYES", "Eyes"),
+    ("FANNY_PACK_BACK", "FannyPackBack"),
+    ("FANNY_PACK_FRONT", "FannyPackFront"),
+    ("FORE_ARM_LEFT", "ForeArm_Left"),
+    ("FORE_ARM_RIGHT", "ForeArm_Right"),
+    ("FULL_HAT", "FullHat"),
+    ("FULL_ROBE", "FullRobe"),
+    ("FULL_SUIT", "FullSuit"),
+    ("FULL_SUIT_HEAD", "FullSuitHead"),
+    ("FULL_SUIT_HEAD_SCBA", "FullSuitHeadSCBA"),
+    ("FULL_TOP", "FullTop"),
+    ("GAITER_LEFT", "Gaiter_Left"),
+    ("GAITER_RIGHT", "Gaiter_Right"),
+    ("GORGET", "Gorget"),
+    ("HANDS", "Hands"),
+    ("HANDS_LEFT", "HandsLeft"),
+    ("HANDS_RIGHT", "HandsRight"),
+    ("HAT", "Hat"),
+    ("JACKET", "Jacket"),
+    ("JACKET_BULKY", "Jacket_Bulky"),
+    ("JACKET_DOWN", "Jacket_Down"),
+    ("JACKET_HAT", "JacketHat"),
+    ("JACKET_HAT_BULKY", "JacketHat_Bulky"),
+    ("JACKET_SUIT", "JacketSuit"),
+    ("JERSEY", "Jersey"),
+    ("KNEE_LEFT", "Knee_Left"),
+    ("KNEE_RIGHT", "Knee_Right"),
+    ("LEFT_MIDDLE_FINGER", "Left_MiddleFinger"),
+    ("LEFT_RING_FINGER", "Left_RingFinger"),
+    ("LEFT_ARM", "LeftArm"),
+    ("LEFT_EYE", "LeftEye"),
+    ("LEFT_WRIST", "LeftWrist"),
+    ("LEGS1", "Legs1"),
+    ("LEGS5", "Legs5"),
+    ("LONG_DRESS", "LongDress"),
+    ("LONG_SKIRT", "LongSkirt"),
+    ("MAKE_UP_EYES", "MakeUp_Eyes"),
+    ("MAKE_UP_EYES_SHADOW", "MakeUp_EyesShadow"),
+    ("MAKE_UP_FULL_FACE", "MakeUp_FullFace"),
+    ("MAKE_UP_LIPS", "MakeUp_Lips"),
+    ("MASK", "Mask"),
+    ("MASK_EYES", "MaskEyes"),
+    ("MASK_FULL", "MaskFull"),
+    ("NECK", "Neck"),
+    ("NECK_TEXTURE", "Neck_Texture"),
+    ("NECKLACE", "Necklace"),
+    ("NECKLACE_LONG", "Necklace_Long"),
+    ("NOSE", "Nose"),
+    ("PANTS", "Pants"),
+    ("PANTS_SKINNY", "Pants_Skinny"),
+    ("PANTS_EXTRA", "PantsExtra"),
+    ("RIGHT_MIDDLE_FINGER", "Right_MiddleFinger"),
+    ("RIGHT_RING_FINGER", "Right_RingFinger"),
+    ("RIGHT_ARM", "RightArm"),
+    ("RIGHT_EYE", "RightEye"),
+    ("RIGHT_WRIST", "RightWrist"),
+    ("SATCHEL", "Satchel"),
+    ("SCARF", "Scarf"),
+    ("SCBA", "SCBA"),
+    ("SCBANOTANK", "SCBAnotank"),
+    ("SHIRT", "Shirt"),
+    ("SHOES", "Shoes"),
+    ("SHORT_PANTS", "ShortPants"),
+    ("SHORT_SLEEVE_SHIRT", "ShortSleeveShirt"),
+    ("SHORTS_SHORT", "ShortsShort"),
+    ("SHOULDER_HOLSTER", "ShoulderHolster"),
+    ("SHOULDERPAD_LEFT", "ShoulderpadLeft"),
+    ("SHOULDERPAD_RIGHT", "ShoulderpadRight"),
+    ("SKIRT", "Skirt"),
+    ("SOCKS", "Socks"),
+    ("SPORT_SHOULDERPAD", "SportShoulderpad"),
+    ("SPORT_SHOULDERPAD_ON_TOP", "SportShoulderpadOnTop"),
+    ("SWEATER", "Sweater"),
+    ("SWEATER_HAT", "SweaterHat"),
+    ("TAIL", "Tail"),
+    ("TANK_TOP", "TankTop"),
+    ("THIGH_LEFT", "Thigh_Left"),
+    ("THIGH_RIGHT", "Thigh_Right"),
+    ("TORSO1LEGS1", "Torso1Legs1"),
+    ("TORSO1", "Torso1"),
+    ("TORSO_EXTRA", "TorsoExtra"),
+    ("TORSO_EXTRA_VEST", "TorsoExtraVest"),
+    ("TORSO_EXTRA_VEST_BULLET", "TorsoExtraVestBullet"),
+    ("TSHIRT", "Tshirt"),
+    ("UNDERWEAR", "Underwear"),
+    ("UNDERWEAR_BOTTOM", "UnderwearBottom"),
+    ("UNDERWEAR_EXTRA1", "UnderwearExtra1"),
+    ("UNDERWEAR_EXTRA2", "UnderwearExtra2"),
+    ("UNDERWEAR_TOP", "UnderwearTop"),
+    ("VEST_TEXTURE", "VestTexture"),
+    ("WEBBING", "Webbing"),
+    ("WOUND", "Wound"),
+    ("ZED_DMG", "ZedDmg"),
+];
+
+struct BodyLocationIdentity {
+    canonical: String,
+    translation: String,
+    constant: &'static str,
+}
+
+struct BodyGroupLocation {
+    id: u32,
+    multi: bool,
+    relations: [Vec<u32>; 3],
+}
+
+struct BodyGroup {
+    name: String,
+    locations: Vec<BodyGroupLocation>,
+    active: bool,
+}
+
+impl BodyGroup {
+    fn index(&self, location: u32) -> Option<usize> {
+        self.locations
+            .iter()
+            .position(|member| member.id == location)
+    }
+}
+
+struct BodyRegistry {
+    identities: Vec<BodyLocationIdentity>,
+    groups: Vec<BodyGroup>,
+    initialized: bool,
+}
+
+impl BodyRegistry {
+    fn new() -> Self {
+        Self {
+            identities: BODY_LOCATION_CONSTANTS
+                .iter()
+                .map(|(constant, translation)| BodyLocationIdentity {
+                    canonical: format!("base:{}", translation.to_lowercase()),
+                    translation: (*translation).to_owned(),
+                    constant,
+                })
+                .collect(),
+            groups: vec![BodyGroup {
+                name: "Human".to_owned(),
+                locations: Vec::new(),
+                active: true,
+            }],
+            initialized: false,
+        }
+    }
+
+    fn group(&self, token: u32) -> Option<&BodyGroup> {
+        token
+            .checked_sub(1)
+            .and_then(|index| self.groups.get(index as usize))
+    }
+
+    fn group_mut(&mut self, token: u32) -> Option<&mut BodyGroup> {
+        token
+            .checked_sub(1)
+            .and_then(|index| self.groups.get_mut(index as usize))
+    }
+
+    fn identity_valid(&self, token: u32) -> bool {
+        token != 0 && token as usize <= self.identities.len()
+    }
+
+    fn lookup(&self, name: &str) -> Option<u32> {
+        let (namespace, path) = name.split_once(':').unwrap_or(("base", name));
+        if namespace.is_empty() || path.is_empty() {
+            return None;
+        }
+        let namespace = body_lowercase(namespace);
+        let path = body_lowercase(path);
+        self.identities
+            .iter()
+            .position(|identity| {
+                let (registered_namespace, registered_path) =
+                    identity.canonical.split_once(':').unwrap();
+                namespace.eq_ignore_ascii_case(registered_namespace)
+                    && path.eq_ignore_ascii_case(registered_path)
+            })
+            .map(|index| index as u32 + 1)
+    }
+}
+
+fn body_lowercase(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.is_ascii() {
+        std::borrow::Cow::Borrowed(value)
+    } else {
+        std::borrow::Cow::Owned(value.to_lowercase())
+    }
+}
+
+thread_local! {
+    static BODY_LOCATIONS: RefCell<BodyRegistry> = RefCell::new(BodyRegistry::new());
+}
+
+fn with_body_text(length: u32, operation: impl FnOnce(&str) -> i32) -> i32 {
+    if length == 0 || length > scratch_size() {
+        return OUT_OF_RANGE;
+    }
+    SCRATCH.with(|scratch| {
+        let words = scratch.borrow();
+        let bytes =
+            unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), length as usize) };
+        match std::str::from_utf8(bytes) {
+            Ok(text) => operation(text),
+            Err(_) => BAD_FORMAT,
+        }
+    })
+}
+
+fn write_body_text(text: &str) -> i32 {
+    if text.len() > scratch_size() as usize {
+        return OUT_OF_RANGE;
+    }
+    SCRATCH.with(|scratch| {
+        let mut words = scratch.borrow_mut();
+        let bytes = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), 96) };
+        bytes[..text.len()].copy_from_slice(text.as_bytes());
+    });
+    text.len() as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_location_lookup(length: u32) -> i32 {
+    with_body_text(length, |name| {
+        BODY_LOCATIONS.with(|registry| registry.borrow().lookup(name).unwrap_or(0) as i32)
+    })
+}
+
+/// ResourceLocation.of without registration; lowercases namespace/path, never trims.
+#[unsafe(no_mangle)]
+pub extern "C" fn body_location_canonical(length: u32) -> i32 {
+    let mut output = [0_u8; 96];
+    let count = with_body_text(length, |name| {
+        let (namespace, path) = name.split_once(':').unwrap_or(("base", name));
+        if namespace.is_empty() || path.is_empty() {
+            return OUT_OF_RANGE;
+        }
+        let namespace = body_lowercase(namespace);
+        let path = body_lowercase(path);
+        let mut count = 0;
+        for byte in namespace
+            .bytes()
+            .chain(std::iter::once(b':'))
+            .chain(path.bytes())
+        {
+            if count == output.len() {
+                return OUT_OF_RANGE;
+            }
+            output[count] = byte.to_ascii_lowercase();
+            count += 1;
+        }
+        count as i32
+    });
+    if count < 0 {
+        return count;
+    }
+    write_body_text(std::str::from_utf8(&output[..count as usize]).unwrap())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_location_register(length: u32) -> i32 {
+    with_body_text(length, |name| {
+        let (namespace, path) = name.split_once(':').unwrap_or(("base", name));
+        if namespace.is_empty() || path.is_empty() || namespace.eq_ignore_ascii_case("base") {
+            return OUT_OF_RANGE;
+        }
+        BODY_LOCATIONS.with(|registry| {
+            let mut registry = registry.borrow_mut();
+            if registry.lookup(name).is_some() {
+                return BAD_FORMAT;
+            }
+            let canonical = format!("{}:{}", namespace.to_lowercase(), path.to_lowercase());
+            if canonical.len() > 96 || registry.identities.len() >= MAX_DEFS {
+                return OUT_OF_RANGE;
+            }
+            registry.identities.push(BodyLocationIdentity {
+                canonical,
+                translation: name.to_owned(),
+                constant: "",
+            });
+            registry.identities.len() as i32
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_location_count() -> u32 {
+    BODY_LOCATIONS.with(|registry| registry.borrow().identities.len() as u32)
+}
+
+/// UTF-8 scratch fields: canonical ID, original translation spelling, constant field.
+#[unsafe(no_mangle)]
+pub extern "C" fn body_location_read(token: u32, field: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        let registry = registry.borrow();
+        let Some(identity) = token
+            .checked_sub(1)
+            .and_then(|index| registry.identities.get(index as usize))
+        else {
+            return OUT_OF_RANGE;
+        };
+        write_body_text(match field {
+            0 => &identity.canonical,
+            1 => &identity.translation,
+            2 => identity.constant,
+            _ => return OUT_OF_RANGE,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_get(length: u32, create: u32) -> i32 {
+    if create > 1 {
+        return OUT_OF_RANGE;
+    }
+    with_body_text(length, |name| {
+        BODY_LOCATIONS.with(|registry| {
+            let mut registry = registry.borrow_mut();
+            if let Some(index) = registry
+                .groups
+                .iter()
+                .position(|group| group.active && group.name == name)
+            {
+                return index as i32 + 1;
+            }
+            if create == 0 {
+                return 0;
+            }
+            if registry.groups.len() >= MAX_DEFS {
+                return OUT_OF_RANGE;
+            }
+            registry.groups.push(BodyGroup {
+                name: name.to_owned(),
+                locations: Vec::new(),
+                active: true,
+            });
+            registry.groups.len() as i32
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_count() -> u32 {
+    BODY_LOCATIONS.with(|registry| {
+        registry
+            .borrow()
+            .groups
+            .iter()
+            .filter(|group| group.active)
+            .count() as u32
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_at(index: u32) -> u32 {
+    BODY_LOCATIONS.with(|registry| {
+        registry
+            .borrow()
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| group.active)
+            .nth(index as usize)
+            .map(|(index, _)| index as u32 + 1)
+            .unwrap_or(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_total_count() -> u32 {
+    BODY_LOCATIONS.with(|registry| registry.borrow().groups.len() as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_active(group: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        registry
+            .borrow()
+            .group(group)
+            .map(|group| i32::from(group.active))
+            .unwrap_or(OUT_OF_RANGE)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_detach(group: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let Some(group) = registry.group_mut(group) else {
+            return OUT_OF_RANGE;
+        };
+        group.active = false;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_name(group: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        registry
+            .borrow()
+            .group(group)
+            .map(|group| write_body_text(&group.name))
+            .unwrap_or(OUT_OF_RANGE)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_location_count(group: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        registry
+            .borrow()
+            .group(group)
+            .map(|group| group.locations.len() as i32)
+            .unwrap_or(OUT_OF_RANGE)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_location_at(group: u32, index: u32) -> u32 {
+    BODY_LOCATIONS.with(|registry| {
+        registry
+            .borrow()
+            .group(group)
+            .and_then(|group| group.locations.get(index as usize))
+            .map(|member| member.id)
+            .unwrap_or(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_location_index(group: u32, location: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        registry
+            .borrow()
+            .group(group)
+            .and_then(|group| group.index(location))
+            .map(|index| index as i32)
+            .unwrap_or(-1)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_location_add(group: u32, location: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        if !registry.identity_valid(location) {
+            return OUT_OF_RANGE;
+        }
+        let Some(group) = registry.group_mut(group) else {
+            return OUT_OF_RANGE;
+        };
+        if group.index(location).is_none() {
+            group.locations.push(BodyGroupLocation {
+                id: location,
+                multi: false,
+                relations: std::array::from_fn(|_| Vec::new()),
+            });
+        }
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_multi_set(group: u32, location: u32, enabled: u32) -> i32 {
+    if enabled > 1 {
+        return OUT_OF_RANGE;
+    }
+    BODY_LOCATIONS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let Some(group) = registry.group_mut(group) else {
+            return OUT_OF_RANGE;
+        };
+        let Some(index) = group.index(location) else {
+            return OUT_OF_RANGE;
+        };
+        group.locations[index].multi = enabled != 0;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_multi_get(group: u32, location: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        let registry = registry.borrow();
+        let Some(group) = registry.group(group) else {
+            return OUT_OF_RANGE;
+        };
+        group
+            .index(location)
+            .map(|index| i32::from(group.locations[index].multi))
+            .unwrap_or(OUT_OF_RANGE)
+    })
+}
+
+/// Kinds: 0 symmetric exclusive, 1 hide, 2 alternate, 3 directional exclusive.
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_relation_set(group: u32, from: u32, to: u32, kind: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        if kind > 3 || !registry.identity_valid(to) {
+            return OUT_OF_RANGE;
+        }
+        let Some(group) = registry.group_mut(group) else {
+            return OUT_OF_RANGE;
+        };
+        let Some(index) = group.index(from) else {
+            return OUT_OF_RANGE;
+        };
+        let relations =
+            &mut group.locations[index].relations[(if kind == 3 { 0 } else { kind }) as usize];
+        if !relations.contains(&to) {
+            relations.push(to);
+        }
+        if kind == 0 {
+            // Original group setter mutates the source before a missing target fails.
+            let Some(index) = group.index(to) else {
+                return OUT_OF_RANGE;
+            };
+            let relations = &mut group.locations[index].relations[0];
+            if !relations.contains(&from) {
+                relations.push(from);
+            }
+        }
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_relation_get(group: u32, from: u32, to: u32, kind: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        let registry = registry.borrow();
+        let Some(group) = registry.group(group) else {
+            return OUT_OF_RANGE;
+        };
+        let Some(index) = group.index(from) else {
+            return OUT_OF_RANGE;
+        };
+        let Some(relations) = group.locations[index]
+            .relations
+            .get((if kind == 3 { 0 } else { kind }) as usize)
+        else {
+            return OUT_OF_RANGE;
+        };
+        i32::from(relations.contains(&to))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_relation_count(group: u32, from: u32, kind: u32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        let registry = registry.borrow();
+        let Some(group) = registry.group(group) else {
+            return OUT_OF_RANGE;
+        };
+        group
+            .index(from)
+            .and_then(|index| {
+                group.locations[index]
+                    .relations
+                    .get((if kind == 3 { 0 } else { kind }) as usize)
+            })
+            .map(|relations| relations.len() as i32)
+            .unwrap_or(OUT_OF_RANGE)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_relation_at(group: u32, from: u32, kind: u32, index: u32) -> u32 {
+    BODY_LOCATIONS.with(|registry| {
+        let registry = registry.borrow();
+        registry
+            .group(group)
+            .and_then(|group| {
+                group.index(from).and_then(|member| {
+                    group.locations[member]
+                        .relations
+                        .get((if kind == 3 { 0 } else { kind }) as usize)
+                })
+            })
+            .and_then(|relations| relations.get(index as usize))
+            .copied()
+            .unwrap_or(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_group_move(group: u32, location: u32, target: i32) -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let Some(group) = registry.group_mut(group) else {
+            return OUT_OF_RANGE;
+        };
+        if target >= 0
+            && (target as usize) < group.locations.len()
+            && let Some(index) = group.index(location)
+        {
+            let member = group.locations.remove(index);
+            group.locations.insert(target as usize, member);
+        }
+        OK
+    })
+}
+
+/// Detached group objects remain queryable, as do their bound WornItems.
+#[unsafe(no_mangle)]
+pub extern "C" fn body_locations_reset() -> i32 {
+    BODY_LOCATIONS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        for group in &mut registry.groups {
+            group.active = false;
+        }
+        registry.initialized = false;
+    });
+    OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_registry_initialized() -> u32 {
+    BODY_LOCATIONS.with(|registry| u32::from(registry.borrow().initialized))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn body_registry_set_initialized(enabled: u32) -> i32 {
+    if enabled > 1 {
+        return OUT_OF_RANGE;
+    }
+    BODY_LOCATIONS.with(|registry| registry.borrow_mut().initialized = enabled != 0);
+    OK
+}
 
 #[derive(Clone, Copy)]
 struct ItemDefinition {
@@ -1501,13 +2161,25 @@ struct ItemDefinition {
     condition_lower_chance_one_in: u32,
     weight: f32,
     awkward_gloves: bool,
+    can_equip: u32,
+    bag: bool,
+    capacity: i32,
+    reduction: i32,
+    max_item_size: f32,
+    type_token: u32,
+    category: u32,
+    only_category: u32,
+    accept_function: u32,
+    graph_flags: u32,
 }
 
 #[derive(Clone, Copy)]
 struct Item {
     id: u32,
     definition: u32,
-    location: u32,
+    owner_container: u32,
+    internal_container: u32,
+    world_object: bool,
     x: f64,
     y: f64,
     condition: i32,
@@ -1515,6 +2187,44 @@ struct Item {
     slot: u32,
     weight: f32,
     actual_weight: f32,
+    source_flags: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Container {
+    id: u32,
+    kind: u32,
+    parent_kind: u32,
+    parent_id: u32,
+    containing_item: u32,
+    capacity: i32,
+    reduction: i32,
+    xyz: (i32, i32, i32),
+    flags: u32,
+    definition: u32,
+    type_token: u32,
+    only_category: u32,
+    accept_function: u32,
+}
+
+impl Container {
+    fn actor() -> Self {
+        Self {
+            id: PLAYER_INVENTORY,
+            kind: 1,
+            parent_kind: 1,
+            parent_id: 1,
+            containing_item: 0,
+            capacity: 50,
+            reduction: 0,
+            xyz: (0, 0, 0),
+            flags: 0,
+            definition: 0,
+            type_token: 1,
+            only_category: 0,
+            accept_function: 0,
+        }
+    }
 }
 
 struct Items {
@@ -1525,7 +2235,28 @@ struct Items {
     frozen: bool,
     live: Vec<Item>,
     staged: Vec<Item>,
+    containers: Vec<Container>,
+    staged_containers: Vec<Container>,
+    next_container: u64,
+    staged_next_container: u64,
+    organized: bool,
+    disorganized: bool,
+    equipped_multiplier: f32,
+    staged_policy: (bool, bool, f32),
+    drop_items_center: bool,
+    staged_drop_items_center: bool,
+    actor_turn_target: u32,
+    actor_furniture: u32,
+    actor_vehicle: u32,
+    retired_source_flags: Vec<(u32, u32)>,
+    worn: Vec<u32>,
+    staged_worn: Vec<u32>,
+    explicit_worn: bool,
+    worn_group: u32,
     importing: bool,
+    source_transfer: bool,
+    actor_overlay: u32,
+    attached: Vec<u32>,
     last_id: u32,
     hands_slot: u32,
     transaction_hands_slot: u32,
@@ -1542,10 +2273,35 @@ impl Items {
             frozen: false,
             live: Vec::with_capacity(MAX_ITEMS),
             staged: Vec::with_capacity(MAX_ITEMS),
+            containers: {
+                let mut rows = Vec::with_capacity(MAX_CONTAINERS);
+                rows.push(Container::actor());
+                rows
+            },
+            staged_containers: Vec::with_capacity(MAX_CONTAINERS),
+            next_container: 2,
+            staged_next_container: 2,
+            organized: false,
+            disorganized: false,
+            equipped_multiplier: 0.3,
+            staged_policy: (false, false, 0.3),
+            drop_items_center: false,
+            staged_drop_items_center: false,
+            actor_turn_target: 0,
+            actor_furniture: 0,
+            actor_vehicle: 0,
+            retired_source_flags: Vec::with_capacity(MAX_ITEMS * 3),
+            worn: Vec::with_capacity(MAX_ITEMS),
+            staged_worn: Vec::with_capacity(MAX_ITEMS),
+            explicit_worn: false,
+            worn_group: 1,
             importing: false,
+            source_transfer: false,
+            actor_overlay: 0,
+            attached: Vec::new(),
             last_id: 0,
-            hands_slot: 0,
-            transaction_hands_slot: 0,
+            hands_slot: 36, // Canonical base:hands, independent of Human declaration order.
+            transaction_hands_slot: 36,
             held: [0; 2],
         }
     }
@@ -1558,11 +2314,41 @@ impl Items {
         self.frozen = false;
         self.live.clear();
         self.staged.clear();
+        self.containers.clear();
+        self.containers.push(Container::actor());
+        self.staged_containers.clear();
+        self.next_container = 2;
+        self.staged_next_container = 2;
+        self.organized = false;
+        self.disorganized = false;
+        self.equipped_multiplier = 0.3;
+        self.staged_policy = (false, false, 0.3);
+        self.drop_items_center = false;
+        self.staged_drop_items_center = false;
+        self.actor_turn_target = 0;
+        self.actor_furniture = 0;
+        self.actor_vehicle = 0;
+        self.retired_source_flags.clear();
+        self.worn.clear();
+        self.staged_worn.clear();
+        self.explicit_worn = false;
+        self.worn_group = 1;
         self.importing = false;
+        self.source_transfer = false;
+        self.actor_overlay = 0;
+        self.attached.clear();
         self.last_id = 0;
-        self.hands_slot = 0;
-        self.transaction_hands_slot = 0;
+        self.hands_slot = 36;
+        self.transaction_hands_slot = 36;
         self.held = [0; 2];
+    }
+
+    fn abort_import(&mut self) {
+        self.staged.clear();
+        self.staged_containers.clear();
+        self.staged_worn.clear();
+        self.explicit_worn = false;
+        self.importing = false;
     }
 
     fn valid(&self, item: &Item) -> bool {
@@ -1570,7 +2356,7 @@ impl Items {
             return false;
         };
         item.id != 0
-            && item.location <= 1
+            && item.owner_container != 0
             && item.x.is_finite()
             && item.y.is_finite()
             && item.condition >= 0
@@ -1581,16 +2367,22 @@ impl Items {
             && item.weight >= 0.0
             && item.actual_weight.is_finite()
             && item.actual_weight >= 0.0
-            && (item.slot == 0 || (item.location == 1 && item.slot == definition.slot))
-            && (item.location == 1 || item_position_valid(item.x, item.y))
+            && (item.slot == 0
+                || (item.owner_container == PLAYER_INVENTORY
+                    && BODY_LOCATIONS.with(|registry| {
+                        registry
+                            .borrow()
+                            .group(self.worn_group)
+                            .is_some_and(|group| group.index(item.slot).is_some())
+                    })))
+            && (!item.world_object || item_position_valid(item.x, item.y))
     }
 
     fn valid_held(&self, id: u32) -> bool {
         id == 0
-            || self
-                .live
-                .iter()
-                .any(|item| item.id == id && item.location == 1 && self.valid(item))
+            || self.live.iter().any(|item| {
+                item.id == id && item.owner_container == PLAYER_INVENTORY && self.valid(item)
+            })
     }
 
     fn clear_held(&mut self, id: u32) {
@@ -1601,19 +2393,1348 @@ impl Items {
         }
     }
 
+    fn remove_worn(&mut self, id: u32) {
+        self.worn.retain(|old| *old != id);
+        if let Some(item) = self.live.iter_mut().find(|item| item.id == id) {
+            item.slot = 0;
+        }
+    }
+
+    fn set_worn(&mut self, location: u32, id: u32) -> i32 {
+        if self.importing
+            || self.source_transfer
+            || self.transaction_owner != 0
+            || (id != 0
+                && !self
+                    .live
+                    .iter()
+                    .any(|item| item.id == id && item.owner_container == PLAYER_INVENTORY))
+        {
+            return OUT_OF_RANGE;
+        }
+        BODY_LOCATIONS.with(|registry| {
+            let registry = registry.borrow();
+            let Some(group) = registry.group(self.worn_group) else {
+                return OUT_OF_RANGE;
+            };
+            let Some(location_index) = group.index(location) else {
+                return OUT_OF_RANGE;
+            };
+            let member = &group.locations[location_index];
+            if !member.multi
+                && let Some(old_id) = self.worn.iter().copied().find(|old_id| {
+                    self.live
+                        .iter()
+                        .any(|item| item.id == *old_id && item.slot == location)
+                })
+            {
+                self.remove_worn(old_id);
+            }
+            let mut index = 0;
+            while index < self.worn.len() {
+                let old_id = self.worn[index];
+                let slot = self
+                    .live
+                    .iter()
+                    .find(|item| item.id == old_id)
+                    .unwrap()
+                    .slot;
+                if member.relations[0].contains(&slot) {
+                    self.remove_worn(old_id);
+                } else {
+                    index += 1;
+                }
+            }
+            if id == 0 {
+                return OK;
+            }
+            self.remove_worn(id);
+            let index = self
+                .worn
+                .iter()
+                .position(|old_id| {
+                    let slot = self
+                        .live
+                        .iter()
+                        .find(|item| item.id == *old_id)
+                        .unwrap()
+                        .slot;
+                    group
+                        .index(slot)
+                        .is_some_and(|index| index > location_index)
+                })
+                .unwrap_or(self.worn.len());
+            self.live
+                .iter_mut()
+                .find(|item| item.id == id)
+                .unwrap()
+                .slot = location;
+            self.worn.insert(index, id);
+            OK
+        })
+    }
+
+    fn valid_worn(&self, rows: &[Item], worn: &[u32]) -> bool {
+        if rows.iter().filter(|item| item.slot != 0).count() != worn.len() {
+            return false;
+        }
+        BODY_LOCATIONS.with(|registry| {
+            let registry = registry.borrow();
+            let Some(group) = registry.group(self.worn_group) else {
+                return worn.is_empty();
+            };
+            for (position, id) in worn.iter().enumerate() {
+                let Some(item) = rows.iter().find(|item| {
+                    item.id == *id && item.slot != 0 && item.owner_container == PLAYER_INVENTORY
+                }) else {
+                    return false;
+                };
+                if group.index(item.slot).is_none() {
+                    return false;
+                }
+                if worn[..position].contains(id) {
+                    return false;
+                }
+            }
+            // A snapshot preserves records, not a replay against today's mutable group rules.
+            if self.explicit_worn {
+                return true;
+            }
+            for member in &group.locations {
+                let count = rows.iter().filter(|item| item.slot == member.id).count();
+                if count == 0 {
+                    continue;
+                }
+                if count > 1 && !member.multi {
+                    return false;
+                }
+                for exclusive in &member.relations[0] {
+                    if (*exclusive == member.id && count > 1)
+                        || (*exclusive != member.id
+                            && rows.iter().any(|item| item.slot == *exclusive))
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+    }
+
     fn capacity_weight(&self) -> f32 {
-        // Live row order preserves native inventory insertion order on pickup.
+        self.container_capacity_weight(PLAYER_INVENTORY)
+    }
+
+    fn container(&self, id: u32) -> Option<&Container> {
+        self.containers.iter().find(|row| row.id == id)
+    }
+
+    fn parent_container(&self, id: u32) -> Option<u32> {
+        let row = self.container(id)?;
         self.live
             .iter()
-            .filter(|item| item.location == 1)
-            .fold(0.0, |sum, item| {
-                sum + if item.slot == 0 && !self.held.contains(&item.id) {
-                    item.actual_weight
+            .find(|item| item.id == row.containing_item)
+            .and_then(|item| (item.owner_container != 0).then_some(item.owner_container))
+    }
+
+    fn outermost(&self, mut id: u32) -> Option<u32> {
+        self.container(id)?;
+        for _ in 0..=self.containers.len() {
+            match self.parent_container(id) {
+                Some(parent) => id = parent,
+                None => return Some(id),
+            }
+        }
+        None
+    }
+
+    fn inside(&self, mut container: u32, item: u32) -> bool {
+        for _ in 0..self.containers.len() {
+            let Some(row) = self.container(container) else {
+                return false;
+            };
+            if row.containing_item == item {
+                return true;
+            }
+            let Some(parent) = self.parent_container(container) else {
+                return false;
+            };
+            container = parent;
+        }
+        false
+    }
+
+    fn contains(&self, container: u32, id: u32, recurse: bool) -> bool {
+        let Some(item) = self.live.iter().find(|item| item.id == id) else {
+            return false;
+        };
+        let mut owner = item.owner_container;
+        for _ in 0..=self.containers.len() {
+            if owner == container {
+                return true;
+            }
+            if !recurse {
+                return false;
+            }
+            let Some(parent) = self.parent_container(owner) else {
+                return false;
+            };
+            owner = parent;
+        }
+        false
+    }
+
+    fn contents_weight(&self, container: u32) -> f32 {
+        // ponytail: bounded 4096-row ordered scans; index only if profiling demands it.
+        self.live
+            .iter()
+            .filter(|item| item.owner_container == container)
+            .fold(0.0_f32, |sum, item| sum + self.unequipped_weight(item))
+    }
+
+    fn item_contents_weight(&self, item: &Item) -> f32 {
+        if item.internal_container == 0 {
+            0.0
+        } else {
+            self.contents_weight(item.internal_container)
+        }
+    }
+
+    fn unequipped_weight(&self, item: &Item) -> f32 {
+        item.actual_weight + self.item_contents_weight(item)
+    }
+
+    fn equipped_weight(&self, item: &Item) -> f32 {
+        let contents = self.item_contents_weight(item);
+        if item.internal_container != 0 {
+            let reduction = self.container(item.internal_container).unwrap().reduction;
+            let multiplier = if reduction > 0 {
+                1.0 - reduction as f32 / 100.0
+            } else {
+                1.0
+            };
+            item.actual_weight * self.equipped_multiplier + contents * multiplier
+        } else {
+            (item.actual_weight + contents) * self.equipped_multiplier
+        }
+    }
+
+    fn container_capacity_weight(&self, id: u32) -> f32 {
+        if id != PLAYER_INVENTORY {
+            return self.contents_weight(id);
+        }
+        self.live
+            .iter()
+            .filter(|item| item.owner_container == id)
+            .fold(0.0_f32, |sum, item| {
+                let flags = self.definitions[item.definition as usize].graph_flags;
+                sum + if item.slot != 0 || self.held.contains(&item.id) || flags & 2 != 0 {
+                    self.equipped_weight(item)
                 } else {
-                    item.actual_weight * 0.3
+                    self.unequipped_weight(item)
                 }
             })
     }
+
+    fn source_capacity(row: &Container) -> i32 {
+        row.capacity.min(if row.kind == 3 { 50 } else { 100 })
+    }
+
+    fn effective_capacity(&self, row: &Container, actor: u32) -> i32 {
+        let capacity = Self::source_capacity(row);
+        if actor == 0 || row.parent_kind == 1 || row.type_token == 2 {
+            return capacity;
+        }
+        if self.organized {
+            (capacity as f32 * 1.3).max(capacity.wrapping_add(1) as f32) as i32
+        } else if self.disorganized {
+            (capacity as f32 * 0.7).max(1.0) as i32
+        } else {
+            capacity
+        }
+    }
+
+    fn direct_world_item(&self, row: &Container) -> Option<&Item> {
+        self.live
+            .iter()
+            .find(|item| item.id == row.containing_item && item.world_object)
+    }
+
+    fn item_allowed(&self, container: u32, item: &Item, policy: i32) -> Result<bool, i32> {
+        let row = self.container(container).ok_or(OUT_OF_RANGE)?;
+        let definition = self.definitions[item.definition as usize];
+        if definition.graph_flags & 4 != 0 {
+            return Err(UNSUPPORTED);
+        }
+        if self.inside(container, item.id) {
+            return Ok(false);
+        }
+        if row.only_category != 0 && row.only_category != definition.category {
+            return Ok(false);
+        }
+        if row.accept_function != 0 {
+            if policy < 0 {
+                return Err(UNSUPPORTED);
+            }
+            if policy != 1 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn has_room_weight(
+        &self,
+        container: u32,
+        actor: u32,
+        weight: f32,
+        floor_delta: f32,
+    ) -> Result<bool, i32> {
+        if actor > 1 {
+            return Err(UNSUPPORTED);
+        }
+        let row = self.container(container).ok_or(OUT_OF_RANGE)?;
+        if row.kind == 3 {
+            let max_size = self.definitions[row.definition as usize].max_item_size;
+            if max_size > 0.0 && weight > max_size {
+                return Ok(false);
+            }
+        }
+        if actor != 0
+            && self.outermost(container) != Some(PLAYER_INVENTORY)
+            && let Some(world) = self.direct_world_item(row)
+        {
+            let floor = world.owner_container;
+            if self.contents_weight(floor) + floor_delta > 50.0 {
+                return Ok(false);
+            }
+        }
+        Ok(
+            floating_point_correction(self.container_capacity_weight(container)) + weight
+                <= self.effective_capacity(row, actor) as f32,
+        )
+    }
+
+    fn has_room_item(
+        &self,
+        container: u32,
+        actor: u32,
+        item: &Item,
+        policy: i32,
+    ) -> Result<bool, i32> {
+        if !self.item_allowed(container, item, policy)? {
+            return Ok(false);
+        }
+        let row = self.container(container).unwrap();
+        let weight = self.unequipped_weight(item);
+        if row.containing_item != 0
+            && self.held.contains(&row.containing_item)
+            && item.owner_container != PLAYER_INVENTORY
+        {
+            if actor == 0 || floating_point_correction(self.capacity_weight()) + weight > 50.0 {
+                return Ok(false);
+            }
+            return self.has_room_weight(container, actor, weight, weight);
+        }
+        let mut delta = weight;
+        if let Some(world) = self.direct_world_item(row)
+            && self.outermost(item.owner_container) == Some(world.owner_container)
+        {
+            delta = 0.0;
+        }
+        self.has_room_weight(container, actor, weight, delta)
+    }
+
+    fn floor(&mut self, xyz: (i32, i32, i32)) -> Result<u32, i32> {
+        if xyz.2 != 0 {
+            return Err(UNSUPPORTED);
+        }
+        if !item_position_valid(xyz.0 as f64, xyz.1 as f64) {
+            return Err(OUT_OF_RANGE);
+        }
+        if let Some(row) = self
+            .containers
+            .iter()
+            .find(|row| row.kind == 2 && row.xyz == xyz)
+        {
+            return Ok(row.id);
+        }
+        if self.next_container > u32::MAX as u64 || self.containers.len() == MAX_CONTAINERS {
+            return Err(OUT_OF_RANGE);
+        }
+        let id = self.next_container as u32;
+        self.next_container += 1;
+        self.containers.push(Container {
+            id,
+            kind: 2,
+            parent_kind: 2,
+            parent_id: 0,
+            containing_item: 0,
+            capacity: 50,
+            reduction: 0,
+            xyz,
+            flags: 0,
+            definition: 0,
+            type_token: 2,
+            only_category: 0,
+            accept_function: 0,
+        });
+        Ok(id)
+    }
+
+    fn valid_graph(&self, rows: &[Item], containers: &[Container], next: u64) -> bool {
+        if next < 2
+            || next > u32::MAX as u64 + 1
+            || containers.len() > MAX_CONTAINERS
+            || containers.iter().filter(|row| row.kind == 1).count() != 1
+        {
+            return false;
+        }
+        for (index, row) in containers.iter().enumerate() {
+            if row.id == 0
+                || row.id as u64 >= next
+                || containers[..index].iter().any(|old| old.id == row.id)
+                || !(0..=100).contains(&row.reduction)
+                || row.flags & !3 != 0
+            {
+                return false;
+            }
+            match row.kind {
+                1 => {
+                    if row.id != PLAYER_INVENTORY
+                        || row.parent_kind != 1
+                        || row.parent_id != 1
+                        || row.containing_item != 0
+                        || row.capacity != 50
+                    {
+                        return false;
+                    }
+                }
+                2 => {
+                    if row.parent_kind != 2
+                        || row.parent_id != 0
+                        || row.containing_item != 0
+                        || row.xyz.2 != 0
+                        || row.capacity != 50
+                        || !item_position_valid(row.xyz.0 as f64, row.xyz.1 as f64)
+                        || containers[..index]
+                            .iter()
+                            .any(|old| old.kind == 2 && old.xyz == row.xyz)
+                    {
+                        return false;
+                    }
+                }
+                3 => {
+                    if row.parent_kind != 0 || row.parent_id != 0 {
+                        return false;
+                    }
+                    let Some(shell) = rows.iter().find(|item| item.id == row.containing_item)
+                    else {
+                        return false;
+                    };
+                    if shell.internal_container != row.id
+                        || shell.definition != row.definition
+                        || self
+                            .definitions
+                            .get(row.definition as usize)
+                            .is_none_or(|def| !def.bag)
+                    {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        for (index, item) in rows.iter().enumerate() {
+            if !self.valid(item) || rows[..index].iter().any(|old| old.id == item.id) {
+                return false;
+            }
+            let Some(owner) = containers.iter().find(|row| row.id == item.owner_container) else {
+                return false;
+            };
+            if item.world_object != (owner.kind == 2)
+                || (item.world_object
+                    && owner.xyz != (item.x.floor() as i32, item.y.floor() as i32, 0))
+                || (self.definitions[item.definition as usize].bag
+                    != (item.internal_container != 0))
+                || (item.internal_container != 0
+                    && !containers.iter().any(|row| {
+                        row.id == item.internal_container
+                            && row.kind == 3
+                            && row.containing_item == item.id
+                    }))
+            {
+                return false;
+            }
+            let mut cursor = item.owner_container;
+            let mut root = false;
+            for _ in 0..containers.len() {
+                let Some(row) = containers.iter().find(|row| row.id == cursor) else {
+                    return false;
+                };
+                if row.kind != 3 {
+                    root = true;
+                    break;
+                }
+                let Some(shell) = rows.iter().find(|shell| shell.id == row.containing_item) else {
+                    return false;
+                };
+                if shell.id == item.id {
+                    return false;
+                }
+                cursor = shell.owner_container;
+            }
+            if !root {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn player_inventory_id() -> u32 {
+    PLAYER_INVENTORY
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_count() -> u32 {
+    ITEMS.with(|state| state.borrow().containers.len() as u32)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_next_id() -> f64 {
+    ITEMS.with(|state| state.borrow().next_container as f64)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_config_read() {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..4].copy_from_slice(&[
+                u32::from(state.organized) as f64,
+                u32::from(state.disorganized) as f64,
+                state.equipped_multiplier as f64,
+                u32::from(state.drop_items_center) as f64,
+            ])
+        });
+    });
+}
+
+fn write_container(row: &Container) {
+    SCRATCH.with(|scratch| {
+        scratch.borrow_mut()[..12].copy_from_slice(&[
+            row.id as f64,
+            row.kind as f64,
+            row.parent_kind as f64,
+            row.parent_id as f64,
+            row.containing_item as f64,
+            row.capacity as f64,
+            row.reduction as f64,
+            row.xyz.0 as f64,
+            row.xyz.1 as f64,
+            row.xyz.2 as f64,
+            row.flags as f64,
+            row.definition as f64,
+        ])
+    });
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_read(index: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(row) = state.containers.get(index as usize) else {
+            return OUT_OF_RANGE;
+        };
+        write_container(row);
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_read_id(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(row) = state.container(id) else {
+            return OUT_OF_RANGE;
+        };
+        write_container(row);
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_policy_read(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(row) = state.container(id) else {
+            return OUT_OF_RANGE;
+        };
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..3].copy_from_slice(&[
+                row.type_token as f64,
+                row.only_category as f64,
+                row.accept_function as f64,
+            ])
+        });
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_flags_set(id: u32, field: u32, value: u32) -> i32 {
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if field > 1 || value > 1 || state.importing || state.transaction_owner != 0 {
+            return OUT_OF_RANGE;
+        }
+        let Some(row) = state.containers.iter_mut().find(|row| row.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        row.flags = (row.flags & !(1 << field)) | (value << field);
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn source_floor_container(x: i32, y: i32, z: i32) -> f64 {
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.importing || state.transaction_owner != 0 {
+            return OUT_OF_RANGE as f64;
+        }
+        state
+            .floor((x, y, z))
+            .map_or_else(|code| code as f64, |id| id as f64)
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_item_count(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        if state.container(id).is_none() {
+            return OUT_OF_RANGE;
+        }
+        state
+            .live
+            .iter()
+            .filter(|item| item.owner_container == id)
+            .count() as i32
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_item_get(id: u32, index: u32) -> f64 {
+    ITEMS.with(|state| {
+        state
+            .borrow()
+            .live
+            .iter()
+            .filter(|item| item.owner_container == id)
+            .nth(index as usize)
+            .map_or(OUT_OF_RANGE as f64, |item| item.id as f64)
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_contains(id: u32, item: u32, recurse: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        if recurse > 1 || state.container(id).is_none() {
+            return OUT_OF_RANGE;
+        }
+        i32::from(state.contains(id, item, recurse != 0))
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_is_inside(id: u32, item: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        if state.container(id).is_none() {
+            return OUT_OF_RANGE;
+        }
+        i32::from(state.inside(id, item))
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_outermost(id: u32) -> f64 {
+    ITEMS.with(|state| {
+        state
+            .borrow()
+            .outermost(id)
+            .map_or(OUT_OF_RANGE as f64, |id| id as f64)
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn item_outermost_container(id: u32) -> f64 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE as f64;
+        };
+        let mut owner = item.owner_container;
+        if owner == 0
+            || state
+                .container(owner)
+                .is_some_and(|row| row.type_token == 2)
+        {
+            return 0.0;
+        }
+        for _ in 0..=state.containers.len() {
+            match state.parent_container(owner) {
+                Some(parent) if parent != 0 => {
+                    if state
+                        .container(parent)
+                        .is_some_and(|row| row.type_token == 2)
+                    {
+                        return owner as f64;
+                    }
+                    owner = parent;
+                }
+                _ => return owner as f64,
+            }
+        }
+        OUT_OF_RANGE as f64
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_actor_owner(id: u32) -> u32 {
+    ITEMS.with(|state| u32::from(state.borrow().outermost(id) == Some(PLAYER_INVENTORY)))
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn source_floating_point_correction(weight: f64) -> f64 {
+    if weight.is_nan() {
+        return f64::NAN;
+    }
+    floating_point_correction(weight as f32) as f64
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_state_read(id: u32, actor: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        if actor > 1 {
+            return UNSUPPORTED;
+        }
+        let Some(row) = state.container(id) else {
+            return OUT_OF_RANGE;
+        };
+        let max = if row.kind == 1 {
+            MOODLES.with(|m| m.borrow().inputs[MOODLE_MAX_WEIGHT] as i32 as f64)
+        } else {
+            Items::source_capacity(row) as f64
+        };
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..5].copy_from_slice(&[
+                Items::source_capacity(row) as f64,
+                state.effective_capacity(row, actor) as f64,
+                state.contents_weight(id) as f64,
+                state.container_capacity_weight(id) as f64,
+                max,
+            ])
+        });
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_container_capacity(id: u32, actor: u32, effective: u32) -> i32 {
+    if actor > 1 {
+        return UNSUPPORTED;
+    }
+    if effective > 1 {
+        return OUT_OF_RANGE;
+    }
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        let Some(container) = state.container(item.internal_container) else {
+            return OUT_OF_RANGE;
+        };
+        let capacity = if effective == 1 {
+            state.effective_capacity(container, actor)
+        } else {
+            Items::source_capacity(container)
+        };
+        let capacity = capacity.min((50.0_f32 - item.actual_weight) as i32);
+        SCRATCH.with(|scratch| scratch.borrow_mut()[0] = capacity as f64);
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn item_weights_read(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        let definition = state.definitions[item.definition as usize];
+        if definition.graph_flags & 4 != 0 {
+            return UNSUPPORTED;
+        }
+        let unequipped = state.unequipped_weight(item);
+        let wrapper = state.container(item.internal_container).map_or(0, |row| {
+            state
+                .effective_capacity(row, 1)
+                .min((50.0 - item.actual_weight) as i32)
+        });
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..6].copy_from_slice(&[
+                item.actual_weight as f64,
+                state.item_contents_weight(item) as f64,
+                unequipped as f64,
+                state.equipped_weight(item) as f64,
+                (unequipped
+                    * if definition.graph_flags & 1 != 0 {
+                        state.equipped_multiplier
+                    } else {
+                        0.7
+                    }) as f64,
+                wrapper as f64,
+            ])
+        });
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn item_inventory_weight_read(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        if item.internal_container == 0 {
+            return UNSUPPORTED;
+        }
+        let flags = state.definitions[item.definition as usize].graph_flags;
+        let equipped = item.owner_container == PLAYER_INVENTORY
+            && (item.slot != 0 || state.held.contains(&item.id) || flags & 2 != 0);
+        let mut weight = 0.0_f32;
+        for child in state
+            .live
+            .iter()
+            .filter(|child| child.owner_container == item.internal_container)
+        {
+            if state.definitions[child.definition as usize].graph_flags & 4 != 0 {
+                return UNSUPPORTED;
+            }
+            weight += if equipped {
+                state.equipped_weight(child)
+            } else {
+                state.unequipped_weight(child)
+            };
+        }
+        SCRATCH.with(|scratch| scratch.borrow_mut()[0] = weight as f64);
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_item_allowed(id: u32, item: u32, policy: i32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|row| row.id == item) else {
+            return OUT_OF_RANGE;
+        };
+        state
+            .item_allowed(id, item, policy)
+            .map_or_else(|code| code, i32::from)
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_has_room_item(id: u32, actor: u32, item: u32, policy: i32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|row| row.id == item) else {
+            return OUT_OF_RANGE;
+        };
+        state
+            .has_room_item(id, actor, item, policy)
+            .map_or_else(|code| code, i32::from)
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_has_room_weight(id: u32, actor: u32, weight: f64, delta: f64) -> i32 {
+    if !weight.is_finite() || !delta.is_finite() {
+        return NONFINITE;
+    }
+    if weight.abs() > F32_MAX || delta.abs() > F32_MAX {
+        return OUT_OF_RANGE;
+    }
+    let (weight, delta) = (weight as f32, delta as f32);
+    ITEMS.with(|state| {
+        state
+            .borrow()
+            .has_room_weight(id, actor, weight, delta)
+            .map_or_else(|code| code, i32::from)
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_remove_allowed(id: u32, item: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        if state.container(id).is_none() {
+            return OUT_OF_RANGE;
+        }
+        let Some(item) = state.live.iter().find(|row| row.id == item) else {
+            return OUT_OF_RANGE;
+        };
+        if state.definitions[item.definition as usize].graph_flags & 4 != 0 {
+            return UNSUPPORTED;
+        }
+        1
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_container_set(
+    id: u32,
+    owner: u32,
+    bag: u32,
+    capacity: i32,
+    reduction: i32,
+    max_size: f64,
+    type_token: u32,
+    category: u32,
+    only_category: u32,
+    accept_function: u32,
+    flags: u32,
+) -> i32 {
+    if !max_size.is_finite() {
+        return NONFINITE;
+    }
+    if max_size.abs() > F32_MAX || bag > 1 || flags & !7 != 0 {
+        return OUT_OF_RANGE;
+    }
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        let index = id as usize;
+        if owner == 0
+            || state.frozen
+            || state.importing
+            || state.source_transfer
+            || (state.transaction_owner != 0 && state.transaction_owner != owner)
+            || state
+                .definitions
+                .get(index)
+                .is_none_or(|row| row.owner != owner)
+            || state.live.iter().any(|item| {
+                item.definition == id
+                    && (state.definitions[index].bag != (bag == 1) || flags & 4 != 0)
+            })
+        {
+            return OUT_OF_RANGE;
+        }
+        if state.transaction_owner != 0
+            && index < state.transaction_start
+            && !state.journal.iter().any(|(old, _)| *old == index)
+        {
+            let row = state.definitions[index];
+            state.journal.push((index, row));
+        }
+        let row = &mut state.definitions[index];
+        row.bag = bag == 1;
+        row.capacity = capacity;
+        row.reduction = reduction.clamp(0, 100);
+        row.max_item_size = max_size as f32;
+        row.type_token = type_token;
+        row.category = category;
+        row.only_category = only_category;
+        row.accept_function = accept_function;
+        row.graph_flags = flags;
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_container_read(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(row) = state.definitions.get(id as usize) else {
+            return OUT_OF_RANGE;
+        };
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..9].copy_from_slice(&[
+                u32::from(row.bag) as f64,
+                row.capacity as f64,
+                row.reduction as f64,
+                row.max_item_size as f64,
+                row.type_token as f64,
+                row.category as f64,
+                row.only_category as f64,
+                row.accept_function as f64,
+                row.graph_flags as f64,
+            ])
+        });
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn container_import_stage() -> i32 {
+    let w = SCRATCH.with(|scratch| *scratch.borrow());
+    for index in [0, 1, 2, 3, 4, 10, 11] {
+        if !w[index].is_finite()
+            || w[index].fract() != 0.0
+            || !(0.0..=u32::MAX as f64).contains(&w[index])
+        {
+            item_import_abort();
+            return BAD_FORMAT;
+        }
+    }
+    for index in [5, 6, 7, 8, 9] {
+        if !w[index].is_finite()
+            || w[index].fract() != 0.0
+            || !(i32::MIN as f64..=i32::MAX as f64).contains(&w[index])
+        {
+            item_import_abort();
+            return BAD_FORMAT;
+        }
+    }
+    if w[1] > 3.0 || w[2] > 2.0 || w[9] != 0.0 {
+        item_import_abort();
+        return UNSUPPORTED;
+    }
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if !state.importing
+            || state.staged_containers.len() == MAX_CONTAINERS
+            || state
+                .staged_containers
+                .iter()
+                .any(|row| row.id == w[0] as u32)
+        {
+            state.abort_import();
+            return BAD_FORMAT;
+        }
+        state.staged_containers.push(Container {
+            id: w[0] as u32,
+            kind: w[1] as u32,
+            parent_kind: w[2] as u32,
+            parent_id: w[3] as u32,
+            containing_item: w[4] as u32,
+            capacity: w[5] as i32,
+            reduction: w[6] as i32,
+            xyz: (w[7] as i32, w[8] as i32, w[9] as i32),
+            flags: w[10] as u32,
+            definition: w[11] as u32,
+            type_token: 0,
+            only_category: 0,
+            accept_function: 0,
+        });
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_import_policy_stage(
+    id: u32,
+    token: u32,
+    category: u32,
+    function: u32,
+) -> i32 {
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if !state.importing {
+            return OUT_OF_RANGE;
+        }
+        let Some(index) = state.staged_containers.iter().position(|row| row.id == id) else {
+            state.abort_import();
+            return BAD_FORMAT;
+        };
+        let row = &mut state.staged_containers[index];
+        row.type_token = token;
+        row.only_category = category;
+        row.accept_function = function;
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_import_allocator(
+    next: f64,
+    organized: u32,
+    disorganized: u32,
+    multiplier: f64,
+    drop_center: u32,
+) -> i32 {
+    if !next.is_finite()
+        || next.fract() != 0.0
+        || !(2.0..=u32::MAX as f64 + 1.0).contains(&next)
+        || organized > 1
+        || disorganized > 1
+        || drop_center > 1
+        || !multiplier.is_finite()
+        || !(0.0..=F32_MAX).contains(&multiplier)
+    {
+        item_import_abort();
+        return BAD_FORMAT;
+    }
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if !state.importing {
+            return OUT_OF_RANGE;
+        }
+        state.staged_next_container = next as u64;
+        state.staged_policy = (organized != 0, disorganized != 0, multiplier as f32);
+        state.staged_drop_items_center = drop_center != 0;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn container_trait_get(index: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        match index {
+            0 => i32::from(state.organized),
+            1 => i32::from(state.disorganized),
+            _ => OUT_OF_RANGE,
+        }
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn container_trait_set(index: u32, value: u32) -> i32 {
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if index > 1 || value > 1 || state.importing || state.transaction_owner != 0 {
+            return OUT_OF_RANGE;
+        }
+        if index == 0 {
+            state.organized = value != 0;
+        } else {
+            state.disorganized = value != 0;
+        }
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn item_source_state_read(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let flags = state
+            .live
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| item.source_flags)
+            .or_else(|| {
+                state
+                    .retired_source_flags
+                    .iter()
+                    .find(|(old, _)| *old == id)
+                    .map(|(_, flags)| *flags)
+            });
+        let Some(flags) = flags else {
+            return OUT_OF_RANGE;
+        };
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..2]
+                .copy_from_slice(&[(flags & 1) as f64, ((flags >> 1) & 1) as f64])
+        });
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn item_source_state_set(id: u32, field: u32, value: u32) -> i32 {
+    if field > 1 || value > 1 {
+        return OUT_OF_RANGE;
+    }
+    change_item(id, |state, index| {
+        state.live[index].source_flags =
+            (state.live[index].source_flags & !(1 << field)) | (value << field);
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_source_state(id: u32, flags: u32) -> i32 {
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if !state.importing || flags & !3 != 0 {
+            return BAD_FORMAT;
+        }
+        let Some(item) = state.staged.iter_mut().find(|item| item.id == id) else {
+            return BAD_FORMAT;
+        };
+        item.source_flags = flags;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn source_actor_overlay_get() -> u32 {
+    ITEMS.with(|state| state.borrow().actor_overlay)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn item_equipment_state_read(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..3].copy_from_slice(&[
+                u32::from(item.slot != 0) as f64,
+                u32::from(state.held.contains(&id)) as f64,
+                u32::from(state.attached.contains(&id)) as f64,
+            ])
+        });
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn source_actor_transfer_state_read() -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..4].copy_from_slice(&[
+                u32::from(state.actor_turn_target != 0) as f64,
+                u32::from(state.actor_furniture != 0) as f64,
+                u32::from(state.actor_vehicle != 0) as f64,
+                u32::from(state.drop_items_center) as f64,
+            ])
+        });
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn source_drop_items_center_set(value: u32) -> i32 {
+    if value > 1 {
+        return OUT_OF_RANGE;
+    }
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.source_transfer || state.importing {
+            return OUT_OF_RANGE;
+        }
+        state.drop_items_center = value != 0;
+        OK
+    })
+}
+
+struct AnimalZone {
+    id: u32,
+    x: i32,
+    y: i32,
+    z: i32,
+    width: i32,
+    height: i32,
+}
+thread_local! {
+    // Original DesignationZoneAnimal static initialization/Reset establishes an empty registry.
+    static ANIMAL_ZONES: RefCell<Vec<AnimalZone>> = const { RefCell::new(Vec::new()) };
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn source_animal_zone_count() -> u32 {
+    ANIMAL_ZONES.with(|zones| zones.borrow().len() as u32)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn source_animal_zone_for_square(x: i32, y: i32, z: i32) -> f64 {
+    ANIMAL_ZONES.with(|zones| {
+        zones
+            .borrow()
+            .iter()
+            .find(|zone| {
+                x >= zone.x
+                    && x < zone.x.wrapping_add(zone.width)
+                    && y >= zone.y
+                    && y < zone.y.wrapping_add(zone.height)
+                    && z == zone.z
+            })
+            .map_or(0.0, |zone| zone.id as f64)
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn source_animal_zone_import(count: u32) -> i32 {
+    if count != 0 {
+        return UNSUPPORTED;
+    }
+    ANIMAL_ZONES.with(|zones| zones.borrow_mut().clear());
+    OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn worn_group_get() -> u32 {
+    ITEMS.with(|items| items.borrow().worn_group)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn worn_group_set(group: u32) -> i32 {
+    if !BODY_LOCATIONS.with(|registry| registry.borrow().group(group).is_some()) {
+        return OUT_OF_RANGE;
+    }
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if !items.worn.is_empty()
+            || items.importing
+            || items.source_transfer
+            || items.transaction_owner != 0
+        {
+            return OUT_OF_RANGE;
+        }
+        items.worn_group = group;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn worn_count() -> u32 {
+    ITEMS.with(|items| items.borrow().worn.len() as u32)
+}
+
+/// Scratch: exact uint32 item ID and canonical body-location token, as f64.
+#[unsafe(no_mangle)]
+pub extern "C" fn worn_read(index: u32) -> i32 {
+    ITEMS.with(|items| {
+        let items = items.borrow();
+        let Some(id) = items.worn.get(index as usize) else {
+            return OUT_OF_RANGE;
+        };
+        let item = items.live.iter().find(|item| item.id == *id).unwrap();
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..2].copy_from_slice(&[*id as f64, item.slot as f64])
+        });
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn worn_item_get(location: u32) -> f64 {
+    ITEMS.with(|items| {
+        let items = items.borrow();
+        items
+            .worn
+            .iter()
+            .find(|id| {
+                items
+                    .live
+                    .iter()
+                    .any(|item| item.id == **id && item.slot == location)
+            })
+            .copied()
+            .map(f64::from)
+            .unwrap_or(0.0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn worn_item_set(location: u32, id: u32) -> i32 {
+    ITEMS.with(|items| items.borrow_mut().set_worn(location, id))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn worn_remove(id: u32) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if items.importing || items.source_transfer || items.transaction_owner != 0 {
+            return OUT_OF_RANGE;
+        }
+        items.remove_worn(id);
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn worn_clear() -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if items.importing || items.source_transfer || items.transaction_owner != 0 {
+            return OUT_OF_RANGE;
+        }
+        for item in &mut items.live {
+            item.slot = 0;
+        }
+        items.worn.clear();
+        OK
+    })
 }
 
 /// Exact f64 IDs avoid signed i32 aliases at the JS/WASM boundary; zero is nil.
@@ -1634,7 +3755,12 @@ pub extern "C" fn hand_item_get(slot: u32) -> f64 {
 pub extern "C" fn hand_item_set(slot: u32, id: u32) -> i32 {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
-        if slot > 1 || items.importing || items.transaction_owner != 0 || !items.valid_held(id) {
+        if slot > 1
+            || items.importing
+            || items.source_transfer
+            || items.transaction_owner != 0
+            || !items.valid_held(id)
+        {
             return OUT_OF_RANGE;
         }
         items.held[slot as usize] = id;
@@ -1648,6 +3774,7 @@ pub extern "C" fn hand_items_restore(primary: u32, secondary: u32) -> i32 {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
         if items.importing
+            || items.source_transfer
             || items.transaction_owner != 0
             || !items.valid_held(primary)
             || !items.valid_held(secondary)
@@ -1662,8 +3789,7 @@ pub extern "C" fn hand_items_restore(primary: u32, secondary: u32) -> i32 {
 pub extern "C" fn source_hands_slot_set(slot: u32) -> i32 {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
-        // The private host supplies its canonical named-slot interner token;
-        // that registry token outlives definition rollback just as in JS.
+        // The host forwards a native canonical identity token.
         items.hands_slot = slot;
         OK
     })
@@ -1741,6 +3867,9 @@ pub extern "C" fn item_definition_register(
         Ok(weight) => weight,
         Err(code) => return code,
     };
+    if slot != 0 && !BODY_LOCATIONS.with(|registry| registry.borrow().identity_valid(slot)) {
+        return OUT_OF_RANGE;
+    }
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
         let index = id as usize;
@@ -1757,13 +3886,12 @@ pub extern "C" fn item_definition_register(
             || (index < items.definitions.len() && override_existing == 0)
             || items.live.iter().any(|item| {
                 item.definition == id
-                    && (item.condition > condition_max
-                        || item.count > stack_limit
-                        || (item.slot != 0 && item.slot != slot))
+                    && (item.condition > condition_max || item.count > stack_limit)
             })
         {
             return OUT_OF_RANGE;
         }
+        let old = items.definitions.get(index);
         let row = ItemDefinition {
             owner,
             condition_max,
@@ -1773,6 +3901,16 @@ pub extern "C" fn item_definition_register(
             condition_lower_chance_one_in: chance,
             weight,
             awkward_gloves: awkward_gloves != 0,
+            can_equip: 0,
+            bag: old.is_some_and(|row| row.bag),
+            capacity: old.map_or(0, |row| row.capacity),
+            reduction: old.map_or(0, |row| row.reduction),
+            max_item_size: old.map_or(0.0, |row| row.max_item_size),
+            type_token: old.map_or(0, |row| row.type_token),
+            category: old.map_or(0, |row| row.category),
+            only_category: old.map_or(0, |row| row.only_category),
+            accept_function: old.map_or(0, |row| row.accept_function),
+            graph_flags: old.map_or(0, |row| row.graph_flags),
         };
         if index == items.definitions.len() {
             items.definitions.push(row);
@@ -1793,7 +3931,7 @@ pub extern "C" fn item_definition_register(
     })
 }
 
-/// Scratch: owner, conditionMax, slot, stackLimit, removeOnBroken, chance, weight.
+/// Scratch: owner, conditionMax, slot, stackLimit, removeOnBroken, chance, weight, awkwardGloves, canBeEquipped.
 #[unsafe(no_mangle)]
 pub extern "C" fn item_definition_read(id: u32) -> i32 {
     ITEMS.with(|items| {
@@ -1803,7 +3941,7 @@ pub extern "C" fn item_definition_read(id: u32) -> i32 {
         };
         SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
-            scratch[..7].copy_from_slice(&[
+            scratch[..9].copy_from_slice(&[
                 row.owner as f64,
                 row.condition_max as f64,
                 row.slot as f64,
@@ -1811,8 +3949,47 @@ pub extern "C" fn item_definition_read(id: u32) -> i32 {
                 u32::from(row.remove_on_broken) as f64,
                 row.condition_lower_chance_one_in as f64,
                 row.weight as f64,
+                u32::from(row.awkward_gloves) as f64,
+                row.can_equip as f64,
             ]);
         });
+        OK
+    })
+}
+
+/// Separate preferred non-clothing equip location; definition registration arity stays unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_equip_set(id: u32, owner: u32, location: u32) -> i32 {
+    if location != 0 && !BODY_LOCATIONS.with(|registry| registry.borrow().identity_valid(location))
+    {
+        return OUT_OF_RANGE;
+    }
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        let index = id as usize;
+        if owner == 0
+            || items.frozen
+            || items.importing
+            || items.source_transfer
+            || (items.transaction_owner != 0 && items.transaction_owner != owner)
+            || items
+                .definitions
+                .get(index)
+                .is_none_or(|row| row.owner != owner)
+        {
+            return OUT_OF_RANGE;
+        }
+        if items.transaction_owner != 0
+            && index < items.transaction_start
+            && !items
+                .journal
+                .iter()
+                .any(|(old_index, _)| *old_index == index)
+        {
+            let row = items.definitions[index];
+            items.journal.push((index, row));
+        }
+        items.definitions[index].can_equip = location;
         OK
     })
 }
@@ -1821,7 +3998,12 @@ pub extern "C" fn item_definition_read(id: u32) -> i32 {
 pub extern "C" fn item_definition_begin(owner: u32) -> i32 {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
-        if owner == 0 || items.frozen || items.transaction_owner != 0 || items.importing {
+        if owner == 0
+            || items.frozen
+            || items.transaction_owner != 0
+            || items.importing
+            || items.source_transfer
+        {
             return OUT_OF_RANGE;
         }
         items.transaction_owner = owner;
@@ -1881,13 +4063,13 @@ pub extern "C" fn item_count() -> u32 {
     ITEMS.with(|items| items.borrow().live.len() as u32)
 }
 
-/// Scratch: id, definition ordinal, location, x, y, condition, count, worn slot, weight, actualWeight.
+/// Scratch: id, definition, owner, x, y, condition, count, slot, weight, actualWeight, internalContainer, worldObject.
 fn write_item(item: &Item) {
     SCRATCH.with(|scratch| {
-        scratch.borrow_mut()[..10].copy_from_slice(&[
+        scratch.borrow_mut()[..12].copy_from_slice(&[
             item.id as f64,
             item.definition as f64,
-            item.location as f64,
+            item.owner_container as f64,
             item.x,
             item.y,
             item.condition as f64,
@@ -1895,6 +4077,8 @@ fn write_item(item: &Item) {
             item.slot as f64,
             item.weight as f64,
             item.actual_weight as f64,
+            item.internal_container as f64,
+            u32::from(item.world_object) as f64,
         ]);
     });
 }
@@ -1932,7 +4116,7 @@ pub extern "C" fn source_world_item_count(x: i32, y: i32, z: i32) -> u32 {
             .iter()
             .filter(|item| {
                 z == 0
-                    && item.location == 0
+                    && item.world_object
                     && item.x.floor() == x as f64
                     && item.y.floor() == y as f64
             })
@@ -1949,7 +4133,7 @@ pub extern "C" fn source_world_item_get(x: i32, y: i32, z: i32, index: u32) -> f
             .iter()
             .filter(|item| {
                 z == 0
-                    && item.location == 0
+                    && item.world_object
                     && item.x.floor() == x as f64
                     && item.y.floor() == y as f64
             })
@@ -1968,33 +4152,73 @@ pub extern "C" fn item_spawn(definition: u32, x: f64, y: f64, count: u32, condit
     if !x.is_finite() || !y.is_finite() {
         return NONFINITE;
     }
+    if !item_position_valid(x, y) {
+        return OUT_OF_RANGE;
+    }
     let next = ENGINE.with(|engine| engine.borrow().next_item_id);
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
-        let Some(row) = items.definitions.get(definition as usize) else {
+        let Some(row) = items.definitions.get(definition as usize).copied() else {
             return OUT_OF_RANGE;
-        };
-        let weight = row.weight;
-        let item = Item {
-            id: next as u32,
-            definition,
-            location: 0,
-            x,
-            y,
-            condition,
-            count,
-            slot: 0,
-            weight,
-            actual_weight: weight,
         };
         if next > u32::MAX as u64
             || items.live.len() >= MAX_ITEMS
             || items.transaction_owner != 0
             || items.importing
-            || !items.valid(&item)
+            || items.source_transfer
+            || condition < 0
+            || condition > row.condition_max
+            || count == 0
+            || count > row.stack_limit
+            || items.containers.len() + 2 > MAX_CONTAINERS
+            || items.next_container + u64::from(row.bag) > u32::MAX as u64
         {
             return OUT_OF_RANGE;
         }
+        if row.graph_flags & 4 != 0 {
+            return UNSUPPORTED;
+        }
+        let floor = match items.floor((x.floor() as i32, y.floor() as i32, 0)) {
+            Ok(id) => id,
+            Err(code) => return code,
+        };
+        let internal = if row.bag {
+            let id = items.next_container as u32;
+            items.next_container += 1;
+            items.containers.push(Container {
+                id,
+                kind: 3,
+                parent_kind: 0,
+                parent_id: 0,
+                containing_item: next as u32,
+                capacity: row.capacity,
+                reduction: row.reduction,
+                xyz: (0, 0, 0),
+                flags: 0,
+                definition,
+                type_token: row.type_token,
+                only_category: row.only_category,
+                accept_function: row.accept_function,
+            });
+            id
+        } else {
+            0
+        };
+        let item = Item {
+            id: next as u32,
+            definition,
+            owner_container: floor,
+            internal_container: internal,
+            world_object: true,
+            x,
+            y,
+            condition,
+            count,
+            slot: 0,
+            weight: row.weight,
+            actual_weight: row.weight,
+            source_flags: 0,
+        };
         items.live.push(item);
         items.last_id = item.id;
         mutate(|engine| engine.next_item_id += 1);
@@ -2010,7 +4234,7 @@ pub extern "C" fn item_pickup(id: u32) -> i32 {
 fn change_item(id: u32, change: impl FnOnce(&mut Items, usize) -> i32) -> i32 {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
-        if items.importing || items.transaction_owner != 0 {
+        if items.importing || items.source_transfer || items.transaction_owner != 0 {
             return OUT_OF_RANGE;
         }
         let Some(index) = items.live.iter().position(|item| item.id == id) else {
@@ -2023,18 +4247,13 @@ fn change_item(id: u32, change: impl FnOnce(&mut Items, usize) -> i32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn item_wear(id: u32) -> i32 {
     change_item(id, |items, index| {
-        let item = items.live[index];
-        let slot = items.definitions[item.definition as usize].slot;
-        if item.location != 1 || slot == 0 {
-            return OUT_OF_RANGE;
-        }
-        for old in &mut items.live {
-            if old.slot == slot {
-                old.slot = 0;
-            }
-        }
-        items.live[index].slot = slot;
-        OK
+        let definition = items.definitions[items.live[index].definition as usize];
+        let slot = if definition.slot != 0 {
+            definition.slot
+        } else {
+            definition.can_equip
+        };
+        items.set_worn(slot, id)
     })
 }
 
@@ -2045,11 +4264,18 @@ pub extern "C" fn item_wearing_awkward_gloves(hands_slot: u32) -> u32 {
     }
     ITEMS.with(|items| {
         let items = items.borrow();
-        u32::from(items.live.iter().any(|item| {
-            item.slot == hands_slot
-                && item.location == 1
-                && items.definitions[item.definition as usize].awkward_gloves
-        }))
+        u32::from(
+            items
+                .worn
+                .iter()
+                .find_map(|id| {
+                    items
+                        .live
+                        .iter()
+                        .find(|item| item.id == *id && item.slot == hands_slot)
+                })
+                .is_some_and(|item| items.definitions[item.definition as usize].awkward_gloves),
+        )
     })
 }
 
@@ -2059,7 +4285,7 @@ pub extern "C" fn item_unequip(id: u32) -> i32 {
         if items.live[index].slot == 0 {
             return OUT_OF_RANGE;
         }
-        items.live[index].slot = 0;
+        items.remove_worn(id);
         OK
     })
 }
@@ -2073,15 +4299,21 @@ pub extern "C" fn item_drop(id: u32, x: f64, y: f64) -> i32 {
         return OUT_OF_RANGE;
     }
     change_item(id, |items, index| {
-        let item = &mut items.live[index];
-        if item.location != 1 {
+        if items.live[index].owner_container != PLAYER_INVENTORY {
             return OUT_OF_RANGE;
         }
-        item.location = 0;
+        let floor = match items.floor((x.floor() as i32, y.floor() as i32, 0)) {
+            Ok(id) => id,
+            Err(code) => return code,
+        };
+        let item = &mut items.live[index];
+        item.owner_container = floor;
+        item.world_object = true;
         item.slot = 0;
         item.x = x;
         item.y = y;
         items.clear_held(id);
+        items.remove_worn(id);
         OK
     })
 }
@@ -2094,8 +4326,22 @@ pub extern "C" fn item_set_condition(id: u32, condition: i32) -> i32 {
             return OUT_OF_RANGE;
         }
         if condition == 0 && definition.remove_on_broken {
+            if items.live[index].internal_container != 0 {
+                return UNSUPPORTED;
+            }
+            items
+                .retired_source_flags
+                .retain(|(old, _)| actions::source_flags_needed(*old));
+            if actions::source_flags_needed(id) {
+                if items.retired_source_flags.len() == MAX_ITEMS * 3 {
+                    return OUT_OF_RANGE;
+                }
+                let flags = items.live[index].source_flags;
+                items.retired_source_flags.push((id, flags));
+            }
             items.live.remove(index);
             items.clear_held(id);
+            items.remove_worn(id);
         } else {
             items.live[index].condition = condition;
         }
@@ -2131,10 +4377,20 @@ pub extern "C" fn item_set_actual_weight(id: u32, actual_weight: f64) -> i32 {
 pub extern "C" fn item_import_begin() -> i32 {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
-        if items.importing || items.transaction_owner != 0 {
+        if items.importing || items.source_transfer || items.transaction_owner != 0 {
             return OUT_OF_RANGE;
         }
         items.staged.clear();
+        items.staged_containers.clear();
+        items.staged_next_container = items.next_container;
+        items.staged_policy = (
+            items.organized,
+            items.disorganized,
+            items.equipped_multiplier,
+        );
+        items.staged_drop_items_center = items.drop_items_center;
+        items.staged_worn.clear();
+        items.explicit_worn = false;
         items.importing = true;
         OK
     })
@@ -2145,6 +4401,9 @@ pub extern "C" fn item_import_abort() {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
         items.staged.clear();
+        items.staged_containers.clear();
+        items.staged_worn.clear();
+        items.explicit_worn = false;
         items.importing = false;
     });
 }
@@ -2153,7 +4412,7 @@ pub extern "C" fn item_import_abort() {
 pub extern "C" fn item_import_stage(
     id: u32,
     definition: u32,
-    location: u32,
+    owner_container: u32,
     x: f64,
     y: f64,
     condition: i32,
@@ -2161,19 +4420,25 @@ pub extern "C" fn item_import_stage(
     slot: u32,
     weight: f64,
     actual_weight: f64,
+    internal_container: u32,
+    world_object: u32,
 ) -> i32 {
     ITEMS.with(|items| {
         let mut items = items.borrow_mut();
         let (Ok(weight), Ok(actual_weight)) = (item_weight(weight), item_weight(actual_weight))
         else {
             items.staged.clear();
+            items.staged_worn.clear();
+            items.explicit_worn = false;
             items.importing = false;
             return BAD_FORMAT;
         };
         let item = Item {
             id,
             definition,
-            location,
+            owner_container,
+            internal_container,
+            world_object: world_object == 1,
             x,
             y,
             condition,
@@ -2181,20 +4446,64 @@ pub extern "C" fn item_import_stage(
             slot,
             weight,
             actual_weight,
+            source_flags: 0,
         };
+        if items
+            .definitions
+            .get(definition as usize)
+            .is_some_and(|row| row.graph_flags & 4 != 0)
+        {
+            items.abort_import();
+            return UNSUPPORTED;
+        }
         if !items.importing
             || items.staged.len() >= MAX_ITEMS
+            || world_object > 1
             || !items.valid(&item)
-            || items
-                .staged
-                .iter()
-                .any(|old| old.id == id || (slot != 0 && old.slot == slot))
+            || items.staged.iter().any(|old| old.id == id)
         {
-            items.staged.clear();
-            items.importing = false;
+            items.abort_import();
             return BAD_FORMAT;
         }
         items.staged.push(item);
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_worn_begin() -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if !items.importing || items.explicit_worn {
+            return OUT_OF_RANGE;
+        }
+        items.explicit_worn = true;
+        items.staged_worn.clear();
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_worn_stage(id: u32) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        if !items.importing || !items.explicit_worn {
+            return OUT_OF_RANGE;
+        }
+        if items.staged_worn.len() >= MAX_ITEMS
+            || items.staged_worn.contains(&id)
+            || !items
+                .staged
+                .iter()
+                .any(|item| item.id == id && item.slot != 0)
+        {
+            items.staged.clear();
+            items.staged_worn.clear();
+            items.explicit_worn = false;
+            items.importing = false;
+            return BAD_FORMAT;
+        }
+        items.staged_worn.push(id);
         OK
     })
 }
@@ -2206,9 +4515,32 @@ pub extern "C" fn item_import_commit() -> i32 {
         if !items.importing {
             return OUT_OF_RANGE;
         }
-        // Revalidate membership if the world changed during staging.
-        if !items.staged.iter().all(|item| items.valid(item)) {
-            return OUT_OF_RANGE;
+        if !items.valid_graph(
+            &items.staged,
+            &items.staged_containers,
+            items.staged_next_container,
+        ) {
+            return BAD_FORMAT;
+        }
+        if !items.explicit_worn {
+            items.staged_worn.clear();
+            BODY_LOCATIONS.with(|registry| {
+                let registry = registry.borrow();
+                let group = registry.group(items.worn_group).unwrap();
+                let Items {
+                    staged,
+                    staged_worn,
+                    ..
+                } = &mut *items;
+                for member in &group.locations {
+                    for item in staged.iter().filter(|item| item.slot == member.id) {
+                        staged_worn.push(item.id);
+                    }
+                }
+            });
+        }
+        if !items.valid_worn(&items.staged, &items.staged_worn) {
+            return BAD_FORMAT;
         }
         let next = items
             .staged
@@ -2216,15 +4548,80 @@ pub extern "C" fn item_import_commit() -> i32 {
             .map(|item| item.id as u64 + 1)
             .max()
             .unwrap_or(1);
-        let Items { live, staged, .. } = &mut *items;
+        let Items {
+            live,
+            staged,
+            worn,
+            containers,
+            staged_containers,
+            staged_worn,
+            ..
+        } = &mut *items;
         std::mem::swap(live, staged);
+        std::mem::swap(containers, staged_containers);
+        std::mem::swap(worn, staged_worn);
         items.staged.clear();
+        items.staged_containers.clear();
+        items.next_container = items.staged_next_container;
+        (
+            items.organized,
+            items.disorganized,
+            items.equipped_multiplier,
+        ) = items.staged_policy;
+        items.drop_items_center = items.staged_drop_items_center;
+        items.retired_source_flags.clear();
+        items.attached.clear();
+        items.staged_worn.clear();
+        items.explicit_worn = false;
         items.importing = false;
         items.held = [0; 2];
         mutate(|engine| engine.next_item_id = engine.next_item_id.max(next));
         actions::invalidate();
         OK
     })
+}
+
+#[cfg(test)]
+fn begin_actor_container_fixture() -> i32 {
+    let status = item_import_begin();
+    if status == OK {
+        ITEMS.with(|items| {
+            items
+                .borrow_mut()
+                .staged_containers
+                .push(Container::actor())
+        });
+    }
+    status
+}
+
+#[cfg(test)]
+fn stage_floor_container_fixture(id: u32, x: i32, y: i32) {
+    SCRATCH.with(|scratch| {
+        *scratch.borrow_mut() = [
+            id as f64, 2.0, 2.0, 0.0, 0.0, 50.0, 0.0, x as f64, y as f64, 0.0, 0.0, 0.0,
+        ];
+    });
+    assert_eq!(container_import_stage(), OK);
+    assert_eq!(container_import_policy_stage(id, 2, 0, 0), OK);
+    let (next, (organized, disorganized, multiplier), drop_center) = ITEMS.with(|items| {
+        let items = items.borrow();
+        (
+            items.staged_next_container.max(id as u64 + 1),
+            items.staged_policy,
+            items.staged_drop_items_center,
+        )
+    });
+    assert_eq!(
+        container_import_allocator(
+            next as f64,
+            u32::from(organized),
+            u32::from(disorganized),
+            multiplier as f64,
+            u32::from(drop_center),
+        ),
+        OK
+    );
 }
 
 #[unsafe(no_mangle)]
@@ -2260,19 +4657,493 @@ mod tests {
     const DT: f64 = 1.0 / 60.0;
 
     #[test]
+    fn synthetic_upper_edge_floor_items_spawn_import_and_drop_at_inclusive_bounds() {
+        for (x, y) in [(10.0, 5.0), (5.0, 10.0), (10.0, 10.0)] {
+            reset();
+            assert_eq!(
+                item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+                OK
+            );
+            assert_eq!(item_spawn(0, x, y, 1, 100), OK);
+            let id = item_last_id();
+            let floor = ITEMS.with(|items| items.borrow().live[0].owner_container);
+            assert_eq!(source_world_item_get(x as i32, y as i32, 0, 0), id as f64);
+            assert_eq!(begin_actor_container_fixture(), OK);
+            stage_floor_container_fixture(floor, x as i32, y as i32);
+            assert_eq!(
+                item_import_stage(id, 0, floor, x, y, 100, 1, 0, 1.0, 1.0, 0, 1),
+                OK
+            );
+            assert_eq!(item_import_commit(), OK);
+            ITEMS.with(|items| {
+                let mut items = items.borrow_mut();
+                items.live[0].owner_container = PLAYER_INVENTORY;
+                items.live[0].world_object = false;
+            });
+            assert_eq!(item_drop(id, 10.01, y), OUT_OF_RANGE);
+            assert_eq!(item_drop(id, x, 10.01), OUT_OF_RANGE);
+            assert_eq!(item_drop(id, x, y), OK);
+            assert_eq!(source_world_item_get(x as i32, y as i32, 0, 0), id as f64);
+            ITEMS.with(|items| {
+                let items = items.borrow();
+                assert_eq!((items.live[0].x, items.live[0].y), (x, y));
+            });
+            assert_eq!(item_spawn(0, 10.01, y, 1, 100), OUT_OF_RANGE);
+        }
+    }
+
+    #[test]
+    fn graph_import_rejects_cycles_atomically_and_preserves_overcapacity_order() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(
+            item_definition_container_set(0, 1, 1, 1, 50, 0.0, 1, 1, 0, 0, 0),
+            OK
+        );
+        assert_eq!(item_spawn(0, 5.0, 5.0, 1, 100), OK);
+        let shell = item_last_id();
+        let (floor, bag) = ITEMS.with(|state| {
+            let state = state.borrow();
+            let item = state.live[0];
+            (item.owner_container, item.internal_container)
+        });
+        assert!(bag > floor && floor > PLAYER_INVENTORY);
+        assert_eq!(item_import_begin(), OK);
+        ITEMS.with(|state| {
+            let mut state = state.borrow_mut();
+            state.staged_containers = state.containers.clone();
+            state.staged = state.live.clone();
+            state.staged[0].owner_container = bag;
+        });
+        assert_eq!(item_import_commit(), BAD_FORMAT);
+        assert_eq!(container_item_get(floor, 0), shell as f64);
+        item_import_abort();
+        assert_eq!(item_import_begin(), OK);
+        ITEMS.with(|state| {
+            let mut state = state.borrow_mut();
+            state.staged_containers = state.containers.clone();
+            state.staged = state.live.clone();
+            let mut child = state.staged[0];
+            child.id = shell + 1;
+            child.internal_container = bag + 1;
+            child.owner_container = bag;
+            child.world_object = false;
+            child.actual_weight = 100.0;
+            state.staged.push(child);
+            let mut inner = *state.container(bag).unwrap();
+            inner.id = bag + 1;
+            inner.containing_item = child.id;
+            state.staged_containers.push(inner);
+            state.staged_next_container = bag as u64 + 2;
+        });
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(container_item_get(bag, 0), (shell + 1) as f64);
+        assert_eq!(container_contains(floor, shell + 1, 0), 0);
+        assert_eq!(container_contains(floor, shell + 1, 1), 1);
+        assert_eq!(container_is_inside(bag + 1, shell), 1);
+        assert_eq!(source_world_item_count(5, 5, 0), 1);
+        assert_eq!(container_next_id(), (bag + 2) as f64);
+    }
+
+    #[test]
+    fn graph_weights_discount_outer_contents_once_and_admission_rounds_old_load() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(
+            item_definition_container_set(0, 1, 1, 10, 50, 2.0, 1, 1, 0, 0, 0),
+            OK
+        );
+        assert_eq!(
+            item_definition_register(1, 1, 100, 0, 1, 0, 0, 0, 0.005, 0),
+            OK
+        );
+        for definition in [0, 0, 1] {
+            assert_eq!(item_spawn(definition, 5.0, 5.0, 1, 100), OK);
+        }
+        ITEMS.with(|state| {
+            let mut state = state.borrow_mut();
+            let outer = state.live[0].internal_container;
+            let inner = state.live[1].internal_container;
+            state.live[0].owner_container = PLAYER_INVENTORY;
+            state.live[0].world_object = false;
+            state.live[1].owner_container = outer;
+            state.live[1].world_object = false;
+            state.live[2].owner_container = inner;
+            state.live[2].world_object = false;
+            state.held[0] = state.live[0].id;
+            assert_eq!(state.contents_weight(outer), 1.0_f32 + 0.005_f32);
+            assert_eq!(
+                state.capacity_weight(),
+                1.0_f32 * 0.3 + (1.0_f32 + 0.005_f32) * 0.5
+            );
+            assert!(state.has_room_weight(inner, 1, 2.0, 2.0).unwrap());
+            assert!(!state.has_room_weight(inner, 1, 2.00001, 2.00001).unwrap());
+        });
+    }
+
+    fn body_text(value: &str) {
+        assert!(value.len() <= 96);
+        SCRATCH.with(|scratch| {
+            let mut words = scratch.borrow_mut();
+            let bytes =
+                unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), 96) };
+            bytes[..value.len()].copy_from_slice(value.as_bytes());
+        });
+    }
+
+    fn location(value: &str) -> u32 {
+        body_text(value);
+        let token = body_location_lookup(value.len() as u32);
+        assert!(token > 0);
+        token as u32
+    }
+
+    #[test]
+    fn canonical_registry_and_group_rules_preserve_original_identity_and_direction() {
+        reset();
+        let belt = location("BeltExtra");
+        assert_eq!(location("BASE:BELTEXTRA"), belt);
+        let forearm = location("ForeArm_Left");
+        assert_eq!(body_location_read(forearm, 0), 17);
+        assert_eq!(body_location_count(), 114);
+        body_text("MakeUp_EyesShadow");
+        assert!(body_location_lookup(17) > 0);
+        body_text("mod:");
+        assert_eq!(body_location_canonical(4), OUT_OF_RANGE);
+        assert_eq!(body_location_canonical(97), OUT_OF_RANGE);
+        body_text("FOO:Mixed:PATH");
+        assert_eq!(body_location_canonical(14), 14);
+        body_text("mod:Custom");
+        let custom = body_location_register(10) as u32;
+        assert!(custom > 114);
+        assert_eq!(location("MOD:CUSTOM"), custom);
+        assert_eq!(body_group_location_index(1, belt), -1);
+        assert_eq!(body_group_multi_get(1, belt), OUT_OF_RANGE);
+        assert_eq!(worn_item_set(belt, 0), OUT_OF_RANGE);
+        assert_eq!(body_group_location_add(1, belt), OK);
+        assert_eq!(body_group_location_add(1, forearm), OK);
+        assert_eq!(body_group_location_add(1, belt), OK);
+        assert_eq!(body_group_location_count(1), 2);
+        assert_eq!(body_group_relation_set(1, belt, custom, 1), OK);
+        assert_eq!(body_group_relation_get(1, belt, custom, 1), 1);
+        assert_eq!(body_group_relation_set(1, belt, custom, 2), OK);
+        assert_eq!(body_group_relation_get(1, belt, custom, 2), 1);
+        assert_eq!(body_group_relation_set(1, forearm, belt, 3), OK);
+        assert_eq!(body_group_relation_get(1, forearm, belt, 0), 1);
+        assert_eq!(body_group_relation_get(1, belt, forearm, 0), 0);
+        assert_eq!(body_group_relation_set(1, belt, forearm, 0), OK);
+        assert_eq!(body_group_relation_get(1, forearm, belt, 0), 1);
+        assert_eq!(body_group_relation_get(1, forearm, belt, 1), 0);
+        assert_eq!(body_group_move(1, forearm, 0), OK);
+        assert_eq!(body_group_location_at(1, 0), forearm);
+        assert_eq!(body_group_move(1, belt, -1), OK);
+        assert_eq!(body_locations_reset(), OK);
+        assert_eq!(body_group_count(), 0);
+        assert_eq!(body_group_location_at(1, 0), forearm);
+        assert_eq!(worn_group_get(), 1);
+        assert_eq!(body_group_total_count(), 1);
+        assert_eq!(body_group_active(1), 0);
+        body_text("Human");
+        let fresh = body_group_get(5, 1);
+        assert!(fresh > 1);
+        assert_eq!(body_group_location_count(fresh as u32), 0);
+    }
+
+    #[test]
+    fn worn_order_is_distinct_from_inventory_and_nil_evicts_exclusives() {
+        reset();
+        let shoes = location("Shoes");
+        let hands = location("Hands");
+        assert_eq!(body_group_location_add(1, shoes), OK);
+        assert_eq!(body_group_location_add(1, hands), OK);
+        assert_eq!(body_group_multi_set(1, shoes, 1), OK);
+        assert_eq!(
+            item_definition_register(0, 1, 10, hands, 1, 1, 1, 0, 10.0, 1),
+            OK
+        );
+        assert_eq!(begin_actor_container_fixture(), OK);
+        for id in [1, 2, 3] {
+            assert_eq!(
+                item_import_stage(id, 0, 1, 5.0, 5.0, 10, 1, 0, 10.0, 10.0, 0, 0),
+                OK
+            );
+        }
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(worn_item_set(shoes, 1), OK);
+        assert_eq!(worn_item_set(shoes, 2), OK);
+        assert_eq!(worn_item_set(shoes, 1), OK);
+        assert_eq!(worn_item_get(shoes), 2.0);
+        assert_eq!(ITEMS.with(|s| s.borrow().worn.clone()), vec![2, 1]);
+        assert_eq!(
+            ITEMS.with(|s| s.borrow().live.iter().map(|i| i.id).collect::<Vec<_>>()),
+            vec![1, 2, 3]
+        );
+        assert_eq!(worn_item_set(shoes, 0), OK);
+        assert_eq!(worn_count(), 2);
+        assert_eq!(item_wear(3), OK);
+        assert_eq!(body_group_relation_set(1, shoes, hands, 0), OK);
+        assert_eq!(worn_item_set(shoes, 0), OK);
+        assert_eq!(worn_count(), 2);
+        assert_eq!(worn_item_get(hands), 0.0);
+        assert_eq!(item_unequip(2), OK);
+        assert_eq!(item_set_condition(1, 0), OK);
+        assert_eq!(worn_count(), 0);
+        assert_eq!(item_wear(3), OK);
+        assert_eq!(item_drop(3, 5.0, 5.0), OK);
+        assert_eq!(worn_count(), 0);
+    }
+
+    #[test]
+    fn preferred_equip_location_rolls_back_and_single_slots_replace_in_render_order() {
+        reset();
+        let shoes = location("Shoes");
+        let hands = location("Hands");
+        assert_eq!(
+            BODY_LOCATIONS.with(|r| r.borrow().lookup("base:hands")),
+            Some(36)
+        );
+        assert_eq!(ITEMS.with(|items| items.borrow().hands_slot), hands);
+        assert_eq!(body_group_location_add(1, shoes), OK);
+        assert_eq!(body_group_location_add(1, hands), OK);
+        assert_eq!(
+            item_definition_register(0, 1, 10, 0, 1, 0, 0, 0, 1.0, 1),
+            OK
+        );
+        assert_eq!(item_definition_equip_set(0, 1, hands), OK);
+        assert_eq!(item_definition_begin(1), OK);
+        assert_eq!(item_definition_equip_set(0, 1, shoes), OK);
+        assert_eq!(item_definition_rollback(1), OK);
+        assert_eq!(item_definition_read(0), OK);
+        assert_eq!(SCRATCH.with(|s| s.borrow()[8]), hands as f64);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        for id in [1, 2, 3] {
+            assert_eq!(
+                item_import_stage(id, 0, 1, 5.0, 5.0, 10, 1, 0, 1.0, 1.0, 0, 0),
+                OK
+            );
+        }
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(item_wear(1), OK);
+        assert_eq!(worn_item_set(shoes, 2), OK);
+        assert_eq!(worn_read(0), OK);
+        assert_eq!(SCRATCH.with(|s| s.borrow()[0]), 2.0);
+        assert_eq!(item_wear(3), OK);
+        assert_eq!(worn_item_get(hands), 3.0);
+        assert_eq!(worn_item_get(shoes), 2.0);
+        assert_eq!(worn_count(), 2);
+        assert_eq!(item_wearing_awkward_gloves(hands), 1);
+        assert_eq!(worn_remove(99), OK);
+        assert_eq!(worn_clear(), OK);
+        assert_eq!(worn_count(), 0);
+        assert_eq!(item_wearing_awkward_gloves(hands), 0);
+    }
+
+    #[test]
+    fn legacy_import_orders_slots_stably_and_explicit_order_survives_group_move() {
+        reset();
+        let shoes = location("Shoes");
+        let hands = location("Hands");
+        assert_eq!(body_group_location_add(1, shoes), OK);
+        assert_eq!(body_group_location_add(1, hands), OK);
+        assert_eq!(body_group_multi_set(1, shoes, 1), OK);
+        assert_eq!(
+            item_definition_register(0, 1, 10, hands, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(begin_actor_container_fixture(), OK);
+        for (id, slot) in [(3, hands), (2, shoes), (1, shoes)] {
+            assert_eq!(
+                item_import_stage(id, 0, 1, 5.0, 5.0, 10, 1, slot, 1.0, 1.0, 0, 0),
+                OK
+            );
+        }
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(
+            ITEMS.with(|items| items.borrow().worn.clone()),
+            vec![2, 1, 3]
+        );
+        assert_eq!(body_group_move(1, hands, 0), OK);
+        assert_eq!(body_group_location_at(1, 0), hands);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        for (id, slot) in [(3, hands), (2, shoes), (1, shoes)] {
+            assert_eq!(
+                item_import_stage(id, 0, 1, 5.0, 5.0, 10, 1, slot, 1.0, 1.0, 0, 0),
+                OK
+            );
+        }
+        assert_eq!(item_import_worn_begin(), OK);
+        for id in [2, 1, 3] {
+            assert_eq!(item_import_worn_stage(id), OK);
+        }
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(
+            ITEMS.with(|items| items.borrow().worn.clone()),
+            vec![2, 1, 3]
+        );
+        assert_eq!(worn_item_get(shoes), 2.0);
+        assert_eq!(body_locations_reset(), OK);
+        assert_eq!(item_unequip(2), OK);
+        assert_eq!(worn_item_get(shoes), 1.0);
+    }
+
+    #[test]
+    fn explicit_snapshots_preserve_directional_and_changed_registry_rule_states() {
+        reset();
+        let shoes = location("Shoes");
+        let hands = location("Hands");
+        assert_eq!(body_group_location_add(1, shoes), OK);
+        assert_eq!(body_group_location_add(1, hands), OK);
+        assert_eq!(body_group_relation_set(1, shoes, hands, 3), OK);
+        assert_eq!(
+            item_definition_register(0, 1, 10, shoes, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(begin_actor_container_fixture(), OK);
+        for id in [1, 2, 3] {
+            assert_eq!(
+                item_import_stage(id, 0, 1, 5.0, 5.0, 10, 1, 0, 1.0, 1.0, 0, 0),
+                OK
+            );
+        }
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(worn_item_set(shoes, 1), OK);
+        assert_eq!(worn_item_set(hands, 2), OK);
+        for pass in 0..2 {
+            if pass == 1 {
+                assert_eq!(body_group_multi_set(1, shoes, 1), OK);
+                assert_eq!(worn_item_set(shoes, 3), OK);
+                assert_eq!(worn_item_set(hands, 2), OK);
+                assert_eq!(body_group_multi_set(1, shoes, 0), OK);
+                assert_eq!(body_group_relation_set(1, shoes, hands, 0), OK);
+            }
+            let (rows, order) = ITEMS.with(|items| {
+                let items = items.borrow();
+                (items.live.clone(), items.worn.clone())
+            });
+            assert_eq!(begin_actor_container_fixture(), OK);
+            for item in rows {
+                assert_eq!(
+                    item_import_stage(
+                        item.id,
+                        item.definition,
+                        item.owner_container,
+                        item.x,
+                        item.y,
+                        item.condition,
+                        item.count,
+                        item.slot,
+                        item.weight as f64,
+                        item.actual_weight as f64,
+                        item.internal_container,
+                        u32::from(item.world_object),
+                    ),
+                    OK
+                );
+            }
+            assert_eq!(item_import_worn_begin(), OK);
+            for id in &order {
+                assert_eq!(item_import_worn_stage(*id), OK);
+            }
+            assert_eq!(item_import_commit(), OK);
+            assert_eq!(ITEMS.with(|items| items.borrow().worn.clone()), order);
+            assert_eq!(worn_item_get(shoes), 1.0);
+            assert_eq!(worn_item_get(hands), 2.0);
+            assert_eq!(worn_count(), if pass == 0 { 2 } else { 3 });
+        }
+    }
+
+    #[test]
+    fn explicit_worn_import_is_atomic_and_enforces_group_not_definition_slot() {
+        reset();
+        let shoes = location("Shoes");
+        let hands = location("Hands");
+        assert_eq!(body_group_location_add(1, shoes), OK);
+        assert_eq!(body_group_location_add(1, hands), OK);
+        assert_eq!(body_group_multi_set(1, shoes, 1), OK);
+        assert_eq!(
+            item_definition_register(0, 1, 10, hands, 1, 0, 1, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(begin_actor_container_fixture(), OK);
+        for id in [1, u32::MAX] {
+            assert_eq!(
+                item_import_stage(id, 0, 1, 5.0, 5.0, 10, 1, shoes, 1.0, 1.0, 0, 0),
+                OK
+            );
+        }
+        assert_eq!(item_import_worn_begin(), OK);
+        assert_eq!(item_import_worn_stage(u32::MAX), OK);
+        assert_eq!(item_import_worn_stage(1), OK);
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(worn_item_get(shoes), u32::MAX as f64);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        assert_eq!(
+            item_import_stage(2, 0, 1, 5.0, 5.0, 10, 1, shoes, 1.0, 1.0, 0, 0),
+            OK
+        );
+        assert_eq!(item_import_worn_begin(), OK);
+        assert_eq!(item_import_commit(), BAD_FORMAT);
+        assert_eq!(worn_item_get(shoes), u32::MAX as f64);
+        item_import_abort();
+        assert_eq!(body_group_multi_set(1, shoes, 0), OK);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        for id in [2, 3] {
+            assert_eq!(
+                item_import_stage(id, 0, 1, 5.0, 5.0, 10, 1, shoes, 1.0, 1.0, 0, 0),
+                OK
+            );
+        }
+        assert_eq!(item_import_commit(), BAD_FORMAT);
+        assert_eq!(item_count(), 2);
+        item_import_abort();
+        assert_eq!(body_group_multi_set(1, shoes, 1), OK);
+        assert_eq!(body_group_relation_set(1, shoes, hands, 0), OK);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        assert_eq!(
+            item_import_stage(2, 0, 1, 5.0, 5.0, 10, 1, shoes, 1.0, 1.0, 0, 0),
+            OK
+        );
+        assert_eq!(
+            item_import_stage(3, 0, 1, 5.0, 5.0, 10, 1, hands, 1.0, 1.0, 0, 0),
+            OK
+        );
+        assert_eq!(item_import_commit(), BAD_FORMAT);
+        item_import_abort();
+        assert_eq!(begin_actor_container_fixture(), OK);
+        assert_eq!(
+            item_import_stage(2, 0, 1, 5.0, 5.0, 10, 1, shoes, 1.0, 1.0, 0, 0),
+            OK
+        );
+        assert_eq!(item_import_worn_begin(), OK);
+        assert_eq!(item_import_worn_stage(9), BAD_FORMAT);
+        assert_eq!(item_import_commit(), OUT_OF_RANGE);
+        assert_eq!(worn_item_get(shoes), u32::MAX as f64);
+        reset();
+        assert_eq!(worn_count(), 0);
+    }
+
+    #[test]
     fn held_items_preserve_full_ids_validate_pairs_and_clear_removed_refs() {
         reset();
         assert_eq!(
             item_definition_register(0, 1, 10, 1, 1, 1, 1, 0, 10.0, 0),
             OK
         );
-        assert_eq!(item_import_begin(), OK);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        let floor = container_next_id() as u32;
+        stage_floor_container_fixture(floor, 5, 5);
         assert_eq!(
-            item_import_stage(u32::MAX, 0, 1, 5.0, 5.0, 10, 1, 0, 10.0, 10.0),
+            item_import_stage(u32::MAX, 0, 1, 5.0, 5.0, 10, 1, 0, 10.0, 10.0, 0, 0),
             OK
         );
         assert_eq!(
-            item_import_stage(1, 0, 0, 5.0, 5.0, 10, 1, 0, 10.0, 10.0),
+            item_import_stage(1, 0, floor, 5.0, 5.0, 10, 1, 0, 10.0, 10.0, 0, 1),
             OK
         );
         assert_eq!(item_import_commit(), OK);
@@ -2296,9 +5167,9 @@ mod tests {
         assert_eq!(hand_item_get(0), 0.0);
         assert_eq!(hand_item_get(1), 0.0);
         assert_eq!(hand_items_restore(u32::MAX, 0), OUT_OF_RANGE);
-        assert_eq!(item_import_begin(), OK);
+        assert_eq!(begin_actor_container_fixture(), OK);
         assert_eq!(
-            item_import_stage(u32::MAX, 0, 1, 5.0, 5.0, 10, 1, 0, 10.0, 10.0),
+            item_import_stage(u32::MAX, 0, 1, 5.0, 5.0, 10, 1, 0, 10.0, 10.0, 0, 0),
             OK
         );
         assert_eq!(hand_item_set(0, 0), OUT_OF_RANGE);

@@ -135,9 +135,22 @@
  * @property {function(): void} freezeItemDefinitions Internally seals definition registration.
  * @property {function(): object[]} items Reads detached stable-ID item records.
  * @property {function(number): object|null} getItem Reads one detached live stable-ID item record.
- * @property {function(object[]): void} importItems Atomically replaces item records with explicit IDs.
+ * @property {function(object): void} importInventoryGraph Atomically replaces the ordered item/container graph.
+ * @property {function(): object} exportInventoryGraph Captures native graph, allocator and carry configuration.
+ * @property {function(): object[]} containers Reads detached native containers.
+ * @property {function(number): object|null} getContainer Reads one detached native container.
+ * @property {function(number): object[]} containerItems Reads direct membership in native order.
+ * @property {function(): number} playerInventoryId Reads the native actor root identity.
+ * @property {function(number, number|null): object} containerState Reads native admission and weight state.
+ * @property {function(number): object} itemWeights Reads source-authoritative item weight variants.
  * @property {function(): {capacityWeight: number, capacity: number, maxWeight: number}} inventoryState Reads detached native flat-player carry state.
  * @property {function(string): object|null} wornItem Reads the item worn at an exact body location.
+ * @property {import('../types/mod-api').ModEquipmentOperation} equipmentOperation Private native registry and worn bridge.
+ * @property {function(): import('../types/mod-api').ModWornItem[]} wornItems Native worn/render order.
+ * @property {function(string,number|null): void} setWornItem Commits explicit original worn location.
+ * @property {function(): boolean} canSaveEquipmentState Actual native equipment snapshot support.
+ * @property {function(): import('../types/mod-api').ModEquipmentState} saveEquipmentState Portable canonical registry and worn order.
+ * @property {function(import('../types/mod-api').ModEquipmentState): void} loadEquipmentState Restores registry on a staged fresh engine.
  * @property {function(): boolean} isWearingAwkwardGloves Reads native tagged hands equipment.
  * @property {function(): import('../types/mod-api').ModHandItems} getHandItems Actual stable held refs.
  * @property {function('primary'|'secondary', number|null): void} setHandItem Commit one real held slot.
@@ -250,6 +263,7 @@ const REASONS = new Map([
     [-2, 'value outside the accepted range'],
     [-3, 'blocked'],
     [-4, 'malformed input'],
+    [-5, 'unsupported original facility'],
 ]);
 
 /**
@@ -356,6 +370,38 @@ function requireInteger(value, name, min, max) {
 
     return value;
 }
+
+/**
+ * Validate and return a stable native container identity.
+ *
+ * @param {number} value - Candidate container ID.
+ * @returns {number} Positive uint32 container ID.
+ */
+const containerId = (value) => requireInteger(value, 'container ID', 1, 0xFF_FF_FF_FF);
+
+/**
+ * Validate and return a stable native item identity.
+ *
+ * @param {number} value - Candidate item ID.
+ * @returns {number} Positive uint32 item ID.
+ */
+const itemId = (value) => requireInteger(value, 'item ID', 1, 0xFF_FF_FF_FF);
+
+/**
+ * Convert an optional actor identity to its native encoding.
+ *
+ * @param {number|null} value - Actor ID, zero, or null for no actor.
+ * @returns {number} Native actor token in [0, 1].
+ */
+const actorId = (value) => value === null ? 0 : requireInteger(value, 'actor ID', 0, 1);
+
+/**
+ * Validate a native container policy result.
+ *
+ * @param {number} value - Native result.
+ * @returns {number} Policy result in [-1, 1].
+ */
+const policyResult = (value) => requireInteger(value, 'container policy result', -1, 1);
 
 /**
  * Rejects invalid Java-float weights at full host precision before staging.
@@ -741,6 +787,8 @@ async function createEngine(source) {
                 break;
             case 'pickup':
                 return actions.requestPickup(action.id);
+            case 'transferItem':
+                return actions.requestTransfer(action.id, action.sourceContainerId, action.destinationContainerId);
             case 'wear':
             case 'unequip': {
                 const name = `item_${action.type}`;
@@ -749,6 +797,18 @@ async function createEngine(source) {
                 requireAccepted(api[name](requireInteger(action.id, 'item id', 1, 0xFF_FF_FF_FF)), action.type);
                 break;
             }
+            case 'wornSet':
+                equipmentOperation('wornSet', action.locationToken, action.id);
+                break;
+            case 'wornRemove':
+                equipmentOperation('wornRemove', action.id);
+                break;
+            case 'wornClear':
+                equipmentOperation('wornClear');
+                break;
+            case 'wornGroupSet':
+                equipmentOperation('wornGroupSet', action.groupToken);
+                break;
             case 'drop':
                 requireOptional('drop', ['item_drop']);
                 requireAccepted(api.item_drop(requireInteger(action.id, 'item id', 1, 0xFF_FF_FF_FF),
@@ -836,7 +896,13 @@ async function createEngine(source) {
      */
     function step(seconds) {
         requireCoordinate(seconds, 'step seconds');
+        const heldBefore = handObservers.size > 0 ? getHandItems() : null;
+
         requireAccepted(api.step(seconds), `step(${seconds})`);
+
+        if (heldBefore) {
+            notifyHandItems(heldBefore);
+        }
     }
 
     /**
@@ -852,7 +918,13 @@ async function createEngine(source) {
         }
 
         requireOptional('frameStep', ['frame_step']);
+        const heldBefore = handObservers.size > 0 ? getHandItems() : null;
+
         requireAccepted(api.frame_step(seconds), 'frameStep');
+
+        if (heldBefore) {
+            notifyHandItems(heldBefore);
+        }
     }
 
     /**
@@ -862,15 +934,20 @@ async function createEngine(source) {
         const heldBefore = handObservers.size > 0 ? getHandItems() : null;
 
         api.reset();
+        transferHandState = null;
         doorIds = [null];
         doorOrdinals.clear();
         definitionMetadata.length = 0;
         definitionOrdinals.clear();
         ownerIds.clear();
         ownerNames.length = 1;
-        slotIds.clear();
-        slotNames.length = 1;
         definitionTransaction = null;
+        policyIds.clear();
+        policyNames.length = 1;
+
+        for (const name of ['inventory', 'floor', 'container']) {
+            intern(name, policyIds, policyNames);
+        }
 
         if (heldBefore) {
             notifyHandItems(heldBefore);
@@ -1235,6 +1312,7 @@ async function createEngine(source) {
         });
         const squareIds = new Set();
         const squareReachRows = [];
+        const squareFloorRows = [];
         const squareRows = squares.map((row) => {
             requireMoodleObject(row, 'Door square');
             const x = requireInteger(row.x, 'square x', -25_600, 25_855);
@@ -1248,6 +1326,22 @@ async function createEngine(source) {
 
             squareIds.add(id);
             squareReachRows.push(row.reachWalls === undefined ? null : reachMask(row.reachWalls, 'square reachWalls'));
+            const floorKeys = ['floorFlags', 'stairTypes', 'slopeDirection', 'slopeMin', 'slopeMax'];
+
+            if (floorKeys.some((key) => Object.hasOwn(row, key))) {
+                const min = requireCoordinate(row.slopeMin, 'slope minimum');
+                const max = requireCoordinate(row.slopeMax, 'slope maximum');
+
+                if (min < 0 || min > 1 || max < 0 || max > 1) {
+                    throw new RangeError('Slope heights must be within [0,1].');
+                }
+
+                squareFloorRows.push([x, y, z, requireInteger(row.floorFlags, 'floor flags', 0, 31),
+                    requireInteger(row.stairTypes, 'stair types', 0, 63), requireInteger(row.slopeDirection, 'slope direction', 0, 9),
+                    min, max]);
+            } else {
+                squareFloorRows.push(null);
+            }
 
             return [x, y, z, requireInteger(row.roomId, 'square roomId', -1, Number.MAX_SAFE_INTEGER),
                 doorFlags(row, squareBooleanNames), doorMask(row.independentWalls, 'square independentWalls'),
@@ -1263,6 +1357,10 @@ async function createEngine(source) {
 
         if (curtainRows.some((mask) => mask !== null)) {
             requireOptional('importDoors curtainCapabilities', ['door_import_curtain_eligibility']);
+        }
+
+        if (squareFloorRows.some((row) => row !== null)) {
+            requireOptional('importDoors floor metadata', ['door_square_floor_stage']);
         }
 
         scratch('importDoors');
@@ -1289,6 +1387,10 @@ async function createEngine(source) {
 
                 if (squareReachRows[index] !== null) {
                     requireAccepted(api.door_square_reach_stage(row[0], row[1], row[2], squareReachRows[index]), 'importDoors square reachWalls');
+                }
+
+                if (squareFloorRows[index] !== null) {
+                    requireAccepted(api.door_square_floor_stage(...squareFloorRows[index]), 'importDoors floor metadata');
                 }
             }
 
@@ -1512,9 +1614,426 @@ async function createEngine(source) {
     const definitionOrdinals = new Map();
     const ownerIds = new Map();
     const ownerNames = [null];
-    const slotIds = new Map();
-    const slotNames = [null];
+    const policyIds = new Map();
+    const policyNames = [null];
+
+    for (const name of ['inventory', 'floor', 'container']) {
+        intern(name, policyIds, policyNames);
+    }
+
+    /**
+     * Resolve a portable source policy name to a runtime-only native token.
+     *
+     * @param {string|null|undefined} value - Source policy spelling, or no policy.
+     * @param {string} label - Validation context for the policy name.
+     * @param {boolean} [fold=false] - Lowercase the spelling before interning.
+     * @returns {number} Native token; zero represents no policy.
+     */
+    function policyToken(value, label, fold = false) {
+        if (value === null || value === undefined) {
+            return 0;
+        }
+
+        requireName(value, label);
+
+        return intern(fold ? value.toLowerCase() : value, policyIds, policyNames);
+    }
+
+    /**
+     * Resolve a runtime token to its source policy name without defaulting missing metadata.
+     *
+     * @param {number} token - Native policy token, with zero representing absence.
+     * @returns {string|null} Policy spelling or null for token zero.
+     */
+    function policyName(token) {
+        if (token === 0) {
+            return null;
+        }
+
+        if (!policyNames[token]) {
+            throw new Error('Native container policy metadata is unavailable.');
+        }
+
+        return policyNames[token];
+    }
+
     let definitionTransaction = null;
+
+    const equipmentExports = Object.freeze({
+        count: 'body_location_count', read: 'body_location_read',
+        groupCount: 'body_group_count', groupAt: 'body_group_at', groupName: 'body_group_name',
+        groupTotalCount: 'body_group_total_count', groupActive: 'body_group_active', groupDetach: 'body_group_detach',
+        locationCount: 'body_group_location_count', locationAt: 'body_group_location_at',
+        locationIndex: 'body_group_location_index', locationAdd: 'body_group_location_add',
+        multiSet: 'body_group_multi_set', multiGet: 'body_group_multi_get',
+        relationSet: 'body_group_relation_set', relationGet: 'body_group_relation_get',
+        relationCount: 'body_group_relation_count', relationAt: 'body_group_relation_at',
+        move: 'body_group_move', reset: 'body_locations_reset',
+        wornGroupGet: 'worn_group_get', wornGroupSet: 'worn_group_set',
+        wornCount: 'worn_count', wornRead: 'worn_read', wornGet: 'worn_item_get',
+        wornSet: 'worn_item_set', wornRemove: 'worn_remove', wornClear: 'worn_clear',
+    });
+    const equipmentStatusOperations = new Set([
+        'groupDetach', 'locationAdd', 'multiSet', 'relationSet', 'move', 'reset',
+        'wornGroupSet', 'wornRead', 'wornSet', 'wornRemove', 'wornClear',
+    ]);
+    const equipmentEncoder = new TextEncoder();
+    const equipmentDecoder = new TextDecoder('utf-8', { fatal: true });
+
+    /**
+     * Native identity/rule bridge; tokens never leave portable persistence.
+     *
+     * @param {string} op - Exact native operation name.
+     * @param {...(string|number|boolean|null)} args - Operation-specific scalar arguments.
+     * @returns {string|number|boolean|object|null} Detached native result.
+     */
+    function equipmentOperation(op, ...args) {
+        if (op === 'at') {
+            if (args.length !== 1) {
+                throw new TypeError('at requires one argument.');
+            }
+
+            return requireInteger(args[0], 'body location index', 0, equipmentOperation('count') - 1) + 1;
+        }
+
+        let name = equipmentExports[op];
+
+        if (['lookup', 'register', 'canonical', 'groupGet'].includes(op)) {
+            if (args.length < 1 || args.length > (op === 'groupGet' ? 2 : 1)) {
+                throw new TypeError(`${op} requires ${op === 'groupGet' ? 'one or two' : 'one'} arguments.`);
+            }
+
+            name = op === 'groupGet' ? 'body_group_get' : `body_location_${op}`;
+            requireOptional(op, [name]);
+            const bytes = equipmentEncoder.encode(requireName(args[0], op));
+            const view = scratch(op);
+
+            if (bytes.length > view.byteLength) {
+                throw new RangeError(`${op} exceeds the native 96-byte text capacity.`);
+            }
+
+            new Uint8Array(view.buffer, view.byteOffset, view.byteLength).set(bytes);
+
+            if (op === 'groupGet' && args[1] !== undefined && typeof args[1] !== 'boolean') {
+                throw new TypeError('groupGet create must be boolean.');
+            }
+
+            const result = api[name](bytes.length, Number(args[1] ?? false));
+
+            requireResult(result, op, 0, op === 'canonical' ? 96 : 0xFF_FF_FF_FF);
+
+            if (op === 'canonical') {
+                const output = scratch(op);
+
+                requireInteger(result, 'canonical byte count', 0, output.byteLength);
+
+                return equipmentDecoder.decode(new Uint8Array(output.buffer, output.byteOffset, result));
+            }
+
+            return result || null;
+        }
+
+        if (op === 'initialized') {
+            name = args.length ? 'body_registry_set_initialized' : 'body_registry_initialized';
+        }
+
+        if (!name) {
+            throw new TypeError(`Unknown equipment operation: ${op}.`);
+        }
+
+        requireOptional(op, [name]);
+
+        if (args.length !== api[name].length) {
+            throw new TypeError(`${op} requires ${api[name].length} arguments.`);
+        }
+
+        const numeric = args.map((arg, index) => {
+            if (['multiSet', 'initialized'].includes(op) && index === args.length - 1) {
+                if (typeof arg !== 'boolean') {
+                    throw new TypeError(`${op} enabled must be boolean.`);
+                }
+
+                return Number(arg);
+            }
+
+            if (op === 'wornSet' && index === 1 && arg === null) {
+                return 0;
+            }
+
+            return requireInteger(arg, `${op} argument ${index}`,
+                op === 'move' && index === 2 ? -2_147_483_648 : 0, 0xFF_FF_FF_FF);
+        });
+        const result = api[name](...numeric);
+
+        if (op === 'locationIndex' && result === -1) {
+            return -1;
+        }
+
+        if (equipmentStatusOperations.has(op) || (op === 'initialized' && args.length)) {
+            requireAccepted(result, op);
+        } else {
+            requireResult(result, op, 0, 0xFF_FF_FF_FF);
+        }
+
+        if (op === 'read' || op === 'groupName') {
+            const view = scratch(op);
+
+            requireInteger(result, `${op} byte count`, 0, view.byteLength);
+
+            return equipmentDecoder.decode(new Uint8Array(view.buffer, view.byteOffset, result));
+        }
+
+        if (op === 'wornRead') {
+            const view = scratch(op);
+
+            return { id: view.getFloat64(0, true), location: view.getFloat64(8, true) };
+        }
+
+        if (['multiGet', 'relationGet', 'groupActive', 'initialized'].includes(op)) {
+            return args.length && op === 'initialized' ? args[0] : result !== 0;
+        }
+
+        if (['groupAt', 'locationAt', 'relationAt', 'wornGet'].includes(op)) {
+            return result || null;
+        }
+
+        return result;
+    }
+
+    /**
+     * Resolve an existing canonical identity without creating it.
+     *
+     * @param {string} name - Original or canonical location spelling.
+     * @returns {number} Authoritative native token.
+     */
+    function requireBodyLocation(name) {
+        const token = equipmentOperation('lookup', name);
+
+        if (token === null) {
+            throw new RangeError(`Unknown bodyLocation: ${name}.`);
+        }
+
+        return token;
+    }
+
+    /**
+     * Decode a native identity into its portable canonical spelling.
+     *
+     * @param {number} token - Native identity or zero for no location.
+     * @returns {string|null} Canonical location or absence.
+     */
+    function bodyLocationName(token) {
+        return token === 0 ? null : equipmentOperation('read', token, 0);
+    }
+
+    /**
+     * Ordered equipment traversal independent of inventory insertion order.
+     *
+     * @returns {import('../types/mod-api').ModWornItem[]} Detached ordered records.
+     */
+    function wornItems() {
+        return Array.from({ length: equipmentOperation('wornCount') }, (_, index) => {
+            const { id, location } = equipmentOperation('wornRead', index);
+
+            return { id, bodyLocation: bodyLocationName(location) };
+        });
+    }
+
+    /**
+     * Set an explicit original worn location.
+     *
+     * @param {string} bodyLocation - Original or canonical location spelling.
+     * @param {number|null} id - Stable inventory identity, or clear.
+     */
+    function setWornItem(bodyLocation, id) {
+        equipmentOperation('wornSet', requireBodyLocation(bodyLocation), id);
+    }
+
+    /**
+     * Probe actual native portable registry and worn support.
+     *
+     * @returns {boolean} Whether the complete native equipment ABI is present.
+     */
+    function canSaveEquipmentState() {
+        if (typeof api.body_location_lookup !== 'function') {
+            return false;
+        }
+
+        requireOptional('equipment save', [...Object.values(equipmentExports),
+            'body_registry_initialized', 'body_location_register', 'body_group_get']);
+
+        return true;
+    }
+
+    /**
+     * Canonical names plus snapshot-local group indices, never native tokens.
+     *
+     * @returns {import('../types/mod-api').ModEquipmentState} Detached portable state.
+     */
+    function saveEquipmentState() {
+        if (!canSaveEquipmentState()) {
+            throw new Error('saveEquipmentState is unsupported by this engine module.');
+        }
+
+        const locations = Array.from({ length: equipmentOperation('count') }, (_, index) => ({
+            id: bodyLocationName(index + 1), translationName: equipmentOperation('read', index + 1, 1),
+        }));
+        const groups = Array.from({ length: equipmentOperation('groupTotalCount') }, (_, index) => {
+            const group = index + 1;
+
+            return {
+                name: equipmentOperation('groupName', group),
+                active: equipmentOperation('groupActive', group),
+                locations: Array.from({ length: equipmentOperation('locationCount', group) }, (_, ordinal) => {
+                    const token = equipmentOperation('locationAt', group, ordinal);
+                    /**
+                     * Capture one ordered native relation list.
+                     *
+                     * @param {number} kind - Exclusive, hide or alternate relation kind.
+                     * @returns {string[]} Portable canonical target identities.
+                     */
+                    const relations = (kind) => Array.from({
+                        length: equipmentOperation('relationCount', group, token, kind),
+                    }, (_, at) => bodyLocationName(equipmentOperation('relationAt', group, token, kind, at)));
+
+                    return {
+                        id: bodyLocationName(token), multiItem: equipmentOperation('multiGet', group, token),
+                        exclusive: relations(0), hide: relations(1), alternate: relations(2),
+                    };
+                }),
+            };
+        });
+
+        return {
+            version: 1, initialized: equipmentOperation('initialized'), locations, groups,
+            wornGroup: equipmentOperation('wornGroupGet') - 1, wornOrder: wornItems().map(({ id }) => id),
+        };
+    }
+
+    /**
+     * Restore on the fresh staged engine before definitions and atomic item import.
+     *
+     * @param {import('../types/mod-api').ModEquipmentState} state - Complete portable state.
+     */
+    function loadEquipmentState(state) {
+        requireMoodleObject(state, 'Equipment state');
+
+        if (state.version !== 1 || typeof state.initialized !== 'boolean'
+            || !Array.isArray(state.locations) || state.locations.length > 4_096
+            || !Array.isArray(state.groups) || !state.groups.length || state.groups.length > 4_096
+            || !Array.isArray(state.wornOrder) || state.wornOrder.length > 4_096
+            || state.groups[0]?.name !== 'Human') {
+            throw new TypeError('Invalid equipment state.');
+        }
+
+        requireInteger(state.wornGroup, 'saved worn group', 0, state.groups.length - 1);
+        const ids = new Set();
+
+        for (const location of state.locations) {
+            requireMoodleObject(location, 'Equipment location');
+            requireName(location.id, 'equipment canonical ID');
+            requireName(location.translationName, 'equipment translation name');
+
+            if (ids.has(location.id)) {
+                throw new TypeError('Duplicate equipment identity.');
+            }
+
+            ids.add(location.id);
+        }
+
+        const activeNames = new Set();
+
+        for (const group of state.groups) {
+            requireMoodleObject(group, 'Equipment group');
+            requireName(group.name, 'equipment group name');
+
+            if (typeof group.active !== 'boolean' || !Array.isArray(group.locations)
+                || group.locations.length > 4_096 || (group.active && activeNames.has(group.name))) {
+                throw new TypeError('Invalid equipment group.');
+            }
+
+            if (group.active) {
+                activeNames.add(group.name);
+            }
+
+            const members = new Set();
+
+            for (const member of group.locations) {
+                if (!member || !ids.has(member.id) || members.has(member.id) || typeof member.multiItem !== 'boolean'
+                    || ['exclusive', 'hide', 'alternate'].some((key) => !Array.isArray(member[key])
+                        || member[key].length > 4_096 || new Set(member[key]).size !== member[key].length
+                        || member[key].some((id) => !ids.has(id)))) {
+                    throw new TypeError('Invalid equipment group member.');
+                }
+
+                members.add(member.id);
+            }
+        }
+
+        const worn = new Set();
+
+        for (const id of state.wornOrder) {
+            requireInteger(id, 'saved worn ID', 1, 0xFF_FF_FF_FF);
+
+            if (worn.has(id)) {
+                throw new TypeError('Duplicate saved worn ID.');
+            }
+
+            worn.add(id);
+        }
+
+        if (definitionMetadata.length || equipmentOperation('wornCount') || items().length
+            || equipmentOperation('groupTotalCount') !== 1 || equipmentOperation('locationCount', 1)) {
+            throw new Error('Equipment restore requires a fresh staged engine.');
+        }
+
+        for (const location of state.locations) {
+            const token = equipmentOperation('lookup', location.id)
+                ?? equipmentOperation('register', location.translationName);
+
+            if (bodyLocationName(token) !== location.id
+                || equipmentOperation('read', token, 1) !== location.translationName) {
+                throw new TypeError('Equipment identity does not match its canonical translation.');
+            }
+        }
+
+        if (equipmentOperation('count') !== state.locations.length) {
+            throw new TypeError('Equipment snapshot omits native identities.');
+        }
+
+        const groups = state.groups.map((group, index) => {
+            const token = index === 0 ? 1 : equipmentOperation('groupGet', group.name, true);
+
+            if (token !== index + 1) {
+                throw new TypeError('Equipment snapshot group order conflicts with active group identity.');
+            }
+
+            for (const member of group.locations) {
+                equipmentOperation('locationAdd', token, requireBodyLocation(member.id));
+            }
+
+            for (const member of group.locations) {
+                const from = requireBodyLocation(member.id);
+
+                equipmentOperation('multiSet', token, from, member.multiItem);
+
+                for (const [kind, key] of [[3, 'exclusive'], [1, 'hide'], [2, 'alternate']]) {
+                    for (const id of member[key]) {
+                        equipmentOperation('relationSet', token, from, requireBodyLocation(id), kind);
+                    }
+                }
+            }
+
+            if (!group.active) {
+                equipmentOperation('groupDetach', token);
+            }
+
+            return token;
+        });
+
+        equipmentOperation('wornGroupSet', groups[state.wornGroup]);
+        equipmentOperation('initialized', state.initialized);
+    }
 
     /**
      * Resolves a public definition identity to its private dense ordinal.
@@ -1543,21 +2062,33 @@ async function createEngine(source) {
         requireOptional('itemDefinitions', ['item_definition_read']);
         requireAccepted(api.item_definition_read(ordinal), 'itemDefinitions');
         const view = scratch('itemDefinitions');
+        const values = Array.from({ length: 9 }, (_, index) => view.getFloat64(index * 8, true));
         const metadata = definitionMetadata[ordinal];
 
         if (!metadata) {
             throw new Error('Item definition metadata is unavailable.');
         }
 
+        requireOptional('itemDefinitions', ['item_definition_container_read']);
+        requireAccepted(api.item_definition_container_read(ordinal), 'itemDefinitions container');
+        const bagView = scratch('itemDefinitions container');
+        const bag = Array.from({ length: 9 }, (_, index) => bagView.getFloat64(index * 8, true));
+
         return {
             ...structuredClone(metadata),
-            owner: ownerNames[view.getFloat64(0, true)],
-            conditionMax: view.getFloat64(8, true),
-            bodyLocation: slotNames[view.getFloat64(16, true)],
-            stackLimit: view.getFloat64(24, true),
-            removeOnBroken: view.getFloat64(32, true) !== 0,
-            conditionLowerChanceOneIn: view.getFloat64(40, true),
-            weight: view.getFloat64(48, true),
+            owner: ownerNames[values[0]],
+            conditionMax: values[1],
+            bodyLocation: bodyLocationName(values[2]),
+            stackLimit: values[3],
+            removeOnBroken: values[4] !== 0,
+            conditionLowerChanceOneIn: values[5],
+            weight: values[6],
+            canBeEquipped: bodyLocationName(values[8]),
+            isBag: bag[0] !== 0, capacity: bag[1], weightReduction: bag[2], maxItemSize: bag[3],
+            containerType: policyName(bag[4]), category: policyName(bag[5]),
+            onlyAcceptCategory: policyName(bag[6]), acceptItemFunction: policyName(bag[7]),
+            lightWhenAttached: (bag[8] & 1) !== 0, fakeEquipped: (bag[8] & 2) !== 0,
+            unsupportedSubtype: (bag[8] & 4) !== 0,
         };
     }
 
@@ -1571,13 +2102,9 @@ async function createEngine(source) {
      * @returns {object} Detached resolved definition read back from WASM.
      */
     function registerItemDefinition(definition, { owner, override = false } = {}) {
-        requireOptional('registerItemDefinition', ['item_definition_register', 'item_definition_read', 'inventory_state_read']);
+        requireOptional('registerItemDefinition', ['item_definition_register', 'item_definition_read', 'inventory_state_read',
+            'item_definition_equip_set', 'item_definition_container_set', 'item_definition_container_read']);
         scratch('registerItemDefinition');
-        const nativeHands = typeof api.queue_capability === 'function' && api.queue_capability() === 1;
-
-        if (nativeHands) {
-            requireOptional('registerItemDefinition hands registry', ['source_hands_slot_set']);
-        }
 
         if (definition === null || typeof definition !== 'object' || Array.isArray(definition)) {
             throw new TypeError('Item definition must be an object.');
@@ -1596,6 +2123,10 @@ async function createEngine(source) {
             requireName(bodyLocation, 'bodyLocation');
         }
 
+        const canBeEquipped = definition.canBeEquipped ?? null;
+        const slot = bodyLocation === null ? 0 : requireBodyLocation(bodyLocation);
+        const equipSlot = canBeEquipped === null ? 0 : requireBodyLocation(canBeEquipped);
+
         const conditionMax = requireInteger(definition.conditionMax, 'conditionMax', 1, 0x7F_FF_FF_FF);
         const stackLimit = requireInteger(definition.stackLimit, 'stackLimit', 1, 0xFF_FF_FF_FF);
         const chance = requireInteger(definition.conditionLowerChanceOneIn,
@@ -1612,21 +2143,76 @@ async function createEngine(source) {
         }
 
         metadata.tags = Array.from(tags, itemTagResourceLocation);
+        const itemType = definition.type?.toLowerCase().replace(/^base:/u, '') ?? 'normal';
+        const isBag = definition.isBag ?? itemType === 'container';
+
+        if (typeof isBag !== 'boolean') {
+            throw new TypeError('isBag must be a boolean.');
+        }
+
+        const capacity = requireInteger(definition.capacity ?? 0, 'capacity', -0x80_00_00_00, 0x7F_FF_FF_FF);
+        const reduction = requireInteger(definition.weightReduction ?? 0, 'weightReduction', -0x80_00_00_00, 0x7F_FF_FF_FF);
+        const maxItemSize = requireCoordinate(definition.maxItemSize ?? 0, 'maxItemSize');
+
+        if (Math.abs(maxItemSize) > 3.402_823_466_385_288_6e38) {
+            throw new RangeError('maxItemSize must fit finite f32.');
+        }
+
+        const typeToken = policyToken(definition.containerType ?? (isBag ? definition.fullType.slice(definition.fullType.lastIndexOf('.') + 1) : null), 'containerType');
+        let sourceCategory = definition.sourceCategory ?? definition.category;
+
+        if (sourceCategory === null || sourceCategory === undefined) {
+            if (isBag) {
+                sourceCategory = 'Container';
+            } else if (itemType === 'clothing') {
+                sourceCategory = 'Clothing';
+            } else {
+                sourceCategory = 'Item';
+            }
+        }
+
+        requireName(sourceCategory, 'sourceCategory');
+        metadata.sourceCategory = sourceCategory;
+        const categoryToken = policyToken(sourceCategory, 'category', true);
+        const onlyCategory = policyToken(definition.onlyAcceptCategory, 'onlyAcceptCategory', true);
+        const acceptFunction = policyToken(definition.acceptItemFunction, 'acceptItemFunction');
+        const declaredUnsupported = definition.unsupportedSubtype ?? false;
+
+        if (typeof declaredUnsupported !== 'boolean') {
+            throw new TypeError('unsupportedSubtype must be boolean.');
+        }
+
+        /**
+         * Detect unsupported ammo, fluid, or component fields recursively.
+         *
+         * @param {object[]|undefined} fields - Parsed source fields and nested children.
+         * @returns {boolean} Whether any field requires an unsupported subtype facility.
+         */
+        const unsupportedFields = (fields) => Array.isArray(fields) && fields.some((field) => field && (
+            /^(?:ammo|fluid|component)/iu.test(field.name ?? '')
+            || (/^(?:ammo|fluid)/iu.test(field.value ?? '') && Array.isArray(field.children))
+            || unsupportedFields(field.children)));
+        const flags = doorFlags({
+            lightWhenAttached: definition.lightWhenAttached ?? metadata.tags.includes('base:lightwhenattached'),
+            fakeEquipped: definition.fakeEquipped ?? (isBag && metadata.tags.includes('base:keyring')),
+            unsupportedSubtype: declaredUnsupported || !['normal', 'item', 'clothing', 'container'].includes(itemType)
+                || Boolean(definition.ammoType) || unsupportedFields(metadata.rawFields)
+                || ['CandleLit', 'Lantern_HurricaneLit'].includes(definition.fullType.slice(definition.fullType.lastIndexOf('.') + 1)),
+        }, ['lightWhenAttached', 'fakeEquipped', 'unsupportedSubtype']);
 
         for (const key of ['owner', 'conditionMax', 'stackLimit', 'removeOnBroken', 'conditionLowerChanceOneIn', 'weight']) {
             delete metadata[key];
         }
 
         const ownerId = intern(owner, ownerIds, ownerNames);
-        const slot = bodyLocation === null ? 0 : intern(bodyLocation, slotIds, slotNames);
 
         requireAccepted(api.item_definition_register(ordinal, ownerId, conditionMax, slot,
             stackLimit, Number(definition.removeOnBroken), chance, Number(override), weight,
             Number(metadata.tags.includes('base:awkwardgloves'))), 'registerItemDefinition');
-
-        if (nativeHands) {
-            requireAccepted(api.source_hands_slot_set(slotIds.get('base:hands') ?? 0), 'registerItemDefinition hands registry');
-        }
+        requireOptional('registerItemDefinition CanBeEquipped', ['item_definition_equip_set']);
+        requireAccepted(api.item_definition_equip_set(ordinal, ownerId, equipSlot), 'registerItemDefinition CanBeEquipped');
+        requireAccepted(api.item_definition_container_set(ordinal, ownerId, Number(isBag), capacity, reduction,
+            maxItemSize, typeToken, categoryToken, onlyCategory, acceptFunction, flags), 'registerItemDefinition container');
 
         if (definitionTransaction && ordinal < definitionTransaction.start
             && !definitionTransaction.journal.has(ordinal)) {
@@ -1727,20 +2313,26 @@ async function createEngine(source) {
      */
     function readItemRecord() {
         const view = scratch('items');
-        const ordinal = view.getFloat64(8, true);
+        const values = Array.from({ length: 12 }, (_, index) => view.getFloat64(index * 8, true));
+        const ordinal = values[1];
 
         if (!definitionMetadata[ordinal]) {
             throw new Error('Item definition metadata is unavailable.');
         }
 
+        requireOptional('items source state', ['item_source_state_read']);
+        requireAccepted(api.item_source_state_read(values[0]), 'items source state');
+        const stateView = scratch('items source state');
+        const favorite = stateView.getFloat64(0, true) !== 0;
+        const consumed = stateView.getFloat64(8, true) !== 0;
+
         return {
-            id: view.getFloat64(0, true),
-            fullType: definitionMetadata[ordinal].fullType,
-            location: view.getFloat64(16, true) === 0 ? 'ground' : 'inventory',
-            x: view.getFloat64(24, true), y: view.getFloat64(32, true),
-            condition: view.getFloat64(40, true), count: view.getFloat64(48, true),
-            bodyLocation: slotNames[view.getFloat64(56, true)],
-            weight: view.getFloat64(64, true), actualWeight: view.getFloat64(72, true),
+            id: values[0], fullType: definitionMetadata[ordinal].fullType, definitionOrdinal: ordinal,
+            ownerContainerId: values[2], internalContainerId: values[10] || null,
+            worldPosition: values[11] ? { x: values[3], y: values[4], z: 0 } : null,
+            condition: values[5], count: values[6],
+            bodyLocation: bodyLocationName(values[7]), weight: values[8], actualWeight: values[9],
+            favorite, consumed,
         };
     }
 
@@ -1786,6 +2378,8 @@ async function createEngine(source) {
     /** @type {import('../types/mod-api').ModHandItemChanged[]} */
     const pendingHandEvents = [];
     let notifyingHands = false;
+    // Observation snapshot only; native retains transaction/ownership and rollback authority.
+    let transferHandState = null;
 
     /**
      * Checks actual optional held-state native support.
@@ -1928,41 +2522,225 @@ async function createEngine(source) {
     }
 
     /**
-     * Validates host values before staging an atomic explicit-ID replacement.
+     * Decode the current native container row and its detached source policy names.
      *
-     * @param {object[]} records - Detached records using public fullType identities.
+     * @returns {import('../types/mod-api').ModContainer} Detached container record.
      */
-    function importItems(records) {
-        requireOptional('importItems', ['item_import_begin', 'item_import_stage', 'item_import_commit', 'item_import_abort', 'inventory_state_read']);
+    function readContainerRecord() {
+        const view = scratch('containers');
+        const row = Array.from({ length: 12 }, (_, index) => view.getFloat64(index * 8, true));
 
-        if (!Array.isArray(records)) {
-            throw new TypeError('importItems requires an array.');
+        requireAccepted(api.container_policy_read(row[0]), 'container policy');
+        const policy = scratch('container policy');
+        const tokens = [0, 1, 2].map((index) => policy.getFloat64(index * 8, true));
+
+        return {
+            id: row[0], kind: [null, 'actor', 'floor', 'bag'][row[1]],
+            parentKind: [null, 'actor', 'square'][row[2]], parentId: row[2] ? row[3] : null,
+            containingItemId: row[4] || null, capacity: row[5], weightReduction: row[6],
+            worldPosition: row[1] === 2 ? { x: row[7], y: row[8], z: row[9] } : null,
+            explored: (row[10] & 1) !== 0, looted: (row[10] & 2) !== 0, definitionOrdinal: row[11],
+            type: policyName(tokens[0]), onlyAcceptCategory: policyName(tokens[1]),
+            acceptItemFunction: policyName(tokens[2]),
+        };
+    }
+
+    /**
+     * Read detached containers in native allocation order.
+     *
+     * @returns {import('../types/mod-api').ModContainer[]} Native-ordered detached container records.
+     */
+    function containers() {
+        requireOptional('containers', ['container_count', 'container_read', 'container_policy_read']);
+
+        return Array.from({ length: requireResult(api.container_count(), 'container count', 1, 8_193) }, (_, index) => {
+            requireAccepted(api.container_read(index), 'containers');
+
+            return readContainerRecord();
+        });
+    }
+
+    /**
+     * Read a native container by stable identity.
+     *
+     * @param {number} id - Positive uint32 container identity.
+     * @returns {import('../types/mod-api').ModContainer|null} Detached record or null when absent.
+     */
+    function getContainer(id) {
+        requireOptional('getContainer', ['container_read_id', 'container_policy_read']);
+        const status = api.container_read_id(requireInteger(id, 'container ID', 1, 0xFF_FF_FF_FF));
+
+        if (status === -2) {
+            return null;
         }
 
-        if (records.length > 4_096) {
-            throw new RangeError('importItems exceeds the project item capacity of 4096.');
+        requireAccepted(status, 'getContainer');
+
+        return readContainerRecord();
+    }
+
+    /**
+     * Read direct item membership in native remove-and-append order.
+     *
+     * @param {number} id - Positive uint32 container identity.
+     * @returns {import('../types/mod-api').ModItem[]} Detached direct member records.
+     */
+    function containerItems(id) {
+        requireOptional('containerItems', ['container_item_count', 'container_item_get']);
+        requireInteger(id, 'container ID', 1, 0xFF_FF_FF_FF);
+        const count = requireResult(api.container_item_count(id), 'containerItems', 0, 4_096);
+
+        return Array.from({ length: count }, (_, index) => getItem(requireResult(
+            api.container_item_get(id, index), 'container item ID', 1, 0xFF_FF_FF_FF)));
+    }
+
+    /**
+     * Read the actual native actor-root inventory identity.
+     *
+     * @returns {number} Positive uint32 player inventory container ID.
+     */
+    function playerInventoryId() {
+        requireOptional('playerInventoryId', ['player_inventory_id']);
+
+        return requireResult(api.player_inventory_id(), 'player inventory ID', 1, 0xFF_FF_FF_FF);
+    }
+
+    /**
+     * Actor-relative admission state is separate from internal stored capacity.
+     *
+     * @param {number} id - Positive uint32 container identity.
+     * @param {number|null} [actorId=null] - Actor identity 1, or null for no actor.
+     * @returns {{capacity: number, effectiveCapacity: number, contentsWeight: number, capacityWeight: number, maxWeight: number}} Detached native capacity and weight scalars.
+     */
+    function containerState(id, actorId = null) {
+        requireOptional('containerState', ['container_state_read']);
+        requireAccepted(api.container_state_read(requireInteger(id, 'container ID', 1, 0xFF_FF_FF_FF),
+            actorId === null ? 0 : requireInteger(actorId, 'actor ID', 1, 1)), 'containerState');
+        const view = scratch('containerState');
+
+        return Object.fromEntries(['capacity', 'effectiveCapacity', 'contentsWeight', 'capacityWeight', 'maxWeight']
+            .map((name, index) => [name, view.getFloat64(index * 8, true)]));
+    }
+
+    /**
+     * Source-authoritative bag shell and contents weight variants.
+     *
+     * @param {number} id - Positive uint32 item identity.
+     * @returns {{actualWeight: number, contentsWeight: number, unequippedWeight: number, equippedWeight: number, hotbarEquippedWeight: number, wrapperEffectiveCapacity: number}} Detached native item weight and wrapper capacity scalars.
+     */
+    function itemWeights(id) {
+        requireOptional('itemWeights', ['item_weights_read']);
+        requireAccepted(api.item_weights_read(requireInteger(id, 'item ID', 1, 0xFF_FF_FF_FF)), 'itemWeights');
+        const view = scratch('itemWeights');
+
+        return Object.fromEntries(['actualWeight', 'contentsWeight', 'unequippedWeight', 'equippedWeight',
+            'hotbarEquippedWeight', 'wrapperEffectiveCapacity'].map((name, index) => [name, view.getFloat64(index * 8, true)]));
+    }
+
+    /**
+     * Capture portable policy names, membership order and exact native allocator/configuration.
+     *
+     * @returns {object} Detached versioned inventory graph with ordered items, containers, and carry configuration.
+     */
+    function exportInventoryGraph() {
+        requireOptional('exportInventoryGraph', ['container_next_id', 'container_config_read']);
+        const containerRows = containers();
+        const itemRows = items();
+
+        api.container_config_read();
+        const view = scratch('container configuration');
+
+        return {
+            version: 1, containers: containerRows, items: itemRows,
+            nextContainerId: requireResult(api.container_next_id(), 'next container ID', 2, 0x1_00_00_00_00),
+            organized: view.getFloat64(0, true) !== 0, disorganized: view.getFloat64(8, true) !== 0,
+            equippedMultiplier: view.getFloat64(16, true), dropItemsOnSquareCenter: view.getFloat64(24, true) !== 0,
+            wornOrder: wornItems().map(({ id }) => id),
+        };
+    }
+
+    /**
+     * Full-precision host validation precedes the single native graph staging transaction.
+     *
+     * @param {object} graph - Versioned inventory graph previously captured by exportInventoryGraph.
+     * @returns {void} Atomically replaces the native inventory graph after validation.
+     */
+    function importInventoryGraph(graph) {
+        requireOptional('importInventoryGraph', ['item_import_begin', 'item_import_stage', 'item_import_commit',
+            'item_import_abort', 'container_import_stage', 'container_import_policy_stage', 'container_import_allocator',
+            'item_import_source_state']);
+        requireMoodleObject(graph, 'Inventory graph');
+
+        if (graph.version !== 1 || !Array.isArray(graph.containers) || graph.containers.length < 1
+            || graph.containers.length > 8_193 || !Array.isArray(graph.items) || graph.items.length > 4_096
+            || typeof graph.organized !== 'boolean' || typeof graph.disorganized !== 'boolean'
+            || typeof graph.dropItemsOnSquareCenter !== 'boolean') {
+            throw new TypeError('Invalid inventory graph shape.');
         }
 
-        // Full host precision validation precedes even the first staging call.
-        const numeric = Array.from(records, (record) => {
-            if (record === null || typeof record !== 'object' || Array.isArray(record)) {
-                throw new TypeError('Imported item must be an object.');
+        const next = requireInteger(graph.nextContainerId, 'next container ID', 2, 0x1_00_00_00_00);
+        const multiplier = requireItemWeight(graph.equippedMultiplier, 'equipped multiplier');
+        const containerRows = graph.containers.map((record) => {
+            requireMoodleObject(record, 'Imported container');
+            const kind = ['actor', 'floor', 'bag'].indexOf(record.kind) + 1;
+            const parent = [null, 'actor', 'square'].indexOf(record.parentKind);
+
+            if (!kind || parent === -1 || typeof record.explored !== 'boolean' || typeof record.looted !== 'boolean') {
+                throw new TypeError('Invalid container kind, parent or flags.');
             }
 
+            const world = record.worldPosition;
+
+            if ((kind === 2) !== (world !== null)) {
+                throw new TypeError('Only floor containers have a world square.');
+            }
+
+            if (world !== null) {
+                requireMoodleObject(world, 'Container world position');
+            }
+
+            const row = [
+                requireInteger(record.id, 'container ID', 1, 0xFF_FF_FF_FF), kind, parent,
+                parent === 0 ? 0 : requireInteger(record.parentId, 'container parent ID', 0, 0xFF_FF_FF_FF),
+                record.containingItemId === null ? 0 : requireInteger(record.containingItemId, 'containing item ID', 1, 0xFF_FF_FF_FF),
+                requireInteger(record.capacity, 'container capacity', -0x80_00_00_00, 0x7F_FF_FF_FF),
+                requireInteger(record.weightReduction, 'container reduction', 0, 100),
+                world === null ? 0 : requireInteger(world.x, 'floor x', -0x80_00_00_00, 0x7F_FF_FF_FF),
+                world === null ? 0 : requireInteger(world.y, 'floor y', -0x80_00_00_00, 0x7F_FF_FF_FF),
+                world === null ? 0 : requireInteger(world.z, 'floor z', 0, 0),
+                Number(record.explored) | (Number(record.looted) << 1),
+                requireInteger(record.definitionOrdinal, 'container definition', 0, Math.max(0, definitionMetadata.length - 1)),
+            ];
+
+            return {
+                row, policy: [row[0], policyToken(record.type, 'container type'),
+                    policyToken(record.onlyAcceptCategory, 'onlyAcceptCategory', true), policyToken(record.acceptItemFunction, 'acceptItemFunction')],
+            };
+        });
+        const numeric = graph.items.map((record) => {
+            requireMoodleObject(record, 'Imported item');
             const ordinal = definitionOrdinal(record.fullType);
 
-            if (record.location !== 'ground' && record.location !== 'inventory') {
-                throw new TypeError('Item location must be ground or inventory.');
+            if (record.definitionOrdinal !== undefined && record.definitionOrdinal !== ordinal) {
+                throw new TypeError('Item definition ordinal conflicts with fullType.');
             }
 
-            let slot = 0;
+            if (typeof record.favorite !== 'boolean' || typeof record.consumed !== 'boolean') {
+                throw new TypeError('Item favorite and consumed flags must be booleans.');
+            }
 
-            if (record.bodyLocation !== null) {
-                requireName(record.bodyLocation, 'bodyLocation');
-                slot = slotIds.get(record.bodyLocation);
+            const world = record.worldPosition;
 
-                if (slot === undefined) {
-                    throw new RangeError(`Unknown bodyLocation: ${record.bodyLocation}.`);
+            if (world !== null) {
+                requireMoodleObject(world, 'Item world position');
+                requireInteger(world.z, 'item world z', 0, 0);
+
+                for (const axis of ['x', 'y']) {
+                    requireCoordinate(world[axis], `item world ${axis}`);
+
+                    if (world[axis] < -0x80_00_00_00 || world[axis] >= 0x80_00_00_00) {
+                        throw new RangeError('Item world coordinate outside square range.');
+                    }
                 }
             }
 
@@ -1971,23 +2749,62 @@ async function createEngine(source) {
                 : undefined;
 
             return [
-                requireInteger(record.id, 'item id', 1, 0xFF_FF_FF_FF), ordinal,
-                record.location === 'ground' ? 0 : 1,
-                requireCoordinate(record.x, 'item x'), requireCoordinate(record.y, 'item y'),
+                requireInteger(record.id, 'item ID', 1, 0xFF_FF_FF_FF), ordinal,
+                requireInteger(record.ownerContainerId, 'item owner container', 1, 0xFF_FF_FF_FF),
+                world === null ? 0 : world.x, world === null ? 0 : world.y,
                 requireInteger(record.condition, 'condition', 0, 0x7F_FF_FF_FF),
-                requireInteger(record.count, 'count', 1, 0xFF_FF_FF_FF), slot,
+                requireInteger(record.count, 'count', 1, 0xFF_FF_FF_FF),
+                record.bodyLocation === null ? 0 : requireBodyLocation(record.bodyLocation),
                 requireItemWeight(Object.hasOwn(record, 'weight') ? record.weight : defaultWeight, 'weight'),
                 requireItemWeight(Object.hasOwn(record, 'actualWeight') ? record.actualWeight : defaultWeight, 'actualWeight'),
+                record.internalContainerId === null ? 0 : requireInteger(record.internalContainerId, 'internal container ID', 1, 0xFF_FF_FF_FF),
+                Number(world !== null),
             ];
         });
 
-        requireAccepted(api.item_import_begin(), 'importItems');
+        if (graph.wornOrder !== undefined && (!Array.isArray(graph.wornOrder) || graph.wornOrder.length > 4_096)) {
+            throw new TypeError('Worn order must be a bounded array.');
+        }
+
+        const order = graph.wornOrder?.map((id) => requireInteger(id, 'worn item ID', 1, 0xFF_FF_FF_FF));
+
+        if (order !== undefined) {
+            requireOptional('importInventoryGraph worn order', ['item_import_worn_begin', 'item_import_worn_stage']);
+        }
+
+        scratch('importInventoryGraph');
+        requireAccepted(api.item_import_begin(), 'importInventoryGraph');
         try {
-            for (const row of numeric) {
-                requireAccepted(api.item_import_stage(...row), 'importItems record');
+            requireAccepted(api.container_import_allocator(next, Number(graph.organized), Number(graph.disorganized), multiplier,
+                Number(graph.dropItemsOnSquareCenter)),
+            'importInventoryGraph allocator');
+
+            for (const { row, policy } of containerRows) {
+                const view = scratch('importInventoryGraph container');
+
+                for (const [index, value] of row.entries()) {
+                    view.setFloat64(index * 8, value, true);
+                }
+
+                requireAccepted(api.container_import_stage(), 'importInventoryGraph container');
+                requireAccepted(api.container_import_policy_stage(...policy), 'importInventoryGraph policy');
             }
 
-            requireAccepted(api.item_import_commit(), 'importItems commit');
+            for (const [index, row] of numeric.entries()) {
+                requireAccepted(api.item_import_stage(...row), 'importInventoryGraph item');
+                requireAccepted(api.item_import_source_state(row[0], Number(graph.items[index].favorite)
+                | (Number(graph.items[index].consumed) << 1)), 'importInventoryGraph item source state');
+            }
+
+            if (order !== undefined) {
+                requireAccepted(api.item_import_worn_begin(), 'importInventoryGraph worn order');
+
+                for (const id of order) {
+                    requireAccepted(api.item_import_worn_stage(id), 'importInventoryGraph worn record');
+                }
+            }
+
+            requireAccepted(api.item_import_commit(), 'importInventoryGraph commit');
         } finally {
             api.item_import_abort();
         }
@@ -2000,10 +2817,10 @@ async function createEngine(source) {
      * @returns {object|null} Detached worn record, or no equipment.
      */
     function wornItem(bodyLocation) {
-        requireOptional('wornItem', ['item_count', 'item_read']);
-        requireName(bodyLocation, 'bodyLocation');
+        const token = requireBodyLocation(bodyLocation);
+        const id = equipmentOperation('wornGet', token);
 
-        return items().find((item) => item.bodyLocation === bodyLocation) ?? null;
+        return id === null ? null : getItem(id);
     }
 
     /**
@@ -2016,7 +2833,7 @@ async function createEngine(source) {
             throw new TypeError('isWearingAwkwardGloves is unsupported by this engine module.');
         }
 
-        return api.item_wearing_awkward_gloves(slotIds.get('base:hands') ?? 0) !== 0;
+        return api.item_wearing_awkward_gloves(requireBodyLocation('base:hands')) !== 0;
     }
 
     /**
@@ -2326,6 +3143,7 @@ async function createEngine(source) {
         return {
             version: 1,
             injurySeverity: INJURY_SEVERITIES[api.body_injury_severity()],
+            ...(typeof api.body_metabolic_target_get === 'function' ? { metabolicTarget: getMetabolicTarget() } : {}),
             parts: bodyParts().map((part) => ({
                 id: part.id, ...Object.fromEntries(BODY_FIELDS.map((name) => [name, part[name]])),
             })),
@@ -2342,6 +3160,11 @@ async function createEngine(source) {
             'body_import_commit', 'body_import_abort', 'body_part_input_limit']);
         requireMoodleObject(state, 'Body state');
         const keys = ['version', 'injurySeverity', 'parts'];
+        const hasMetabolic = Object.hasOwn(state, 'metabolicTarget');
+
+        if (hasMetabolic) {
+            keys.push('metabolicTarget');
+        }
 
         if (state.version !== 1 || Object.keys(state).length !== keys.length
             || keys.some((key) => !Object.hasOwn(state, key))
@@ -2350,6 +3173,16 @@ async function createEngine(source) {
         }
 
         const severity = injurySeverity(state.injurySeverity);
+        const metabolic = hasMetabolic ? requireCoordinate(state.metabolicTarget, 'saved metabolic target') : undefined;
+
+        if (hasMetabolic) {
+            requireOptional('loadBodyState metabolic target', ['body_import_metabolic_stage']);
+
+            if (metabolic < -1 || metabolic > 10.300_000_190_734_863) {
+                throw new RangeError('Saved metabolic target outside native range.');
+            }
+        }
+
         const rows = new Map();
 
         for (const row of state.parts) {
@@ -2370,6 +3203,10 @@ async function createEngine(source) {
         try {
             for (const [index, value] of words.entries()) {
                 requireAccepted(api.body_import_stage(index, value), 'loadBodyState');
+            }
+
+            if (hasMetabolic) {
+                requireAccepted(api.body_import_metabolic_stage(metabolic), 'loadBodyState metabolic target');
             }
 
             requireAccepted(api.body_import_commit(), 'loadBodyState commit');
@@ -2402,10 +3239,12 @@ async function createEngine(source) {
         ['queue_action_new', [1, 2_147_483_647]],
         ['queue_length', [0, 128]], ['queue_get', [1, 2_147_483_647]], ['queue_current', [0, 2_147_483_647]],
         ['queue_request_pickup', [1, 2_147_483_647]], ['queue_request_door', [1, 2_147_483_647]],
+        ['queue_request_transfer', [1, 2_147_483_647]],
         ['queue_request_walk', [1, 2_147_483_647]], ['queue_remove', [1, 2_147_483_647]], ['queue_lookup', [0, 128]],
         ['queue_group_new', [1, 2_147_483_647]], ['queue_group_length', [0, 512]],
         ['queue_group_get', [1, 2_147_483_647]], ['queue_group_remove', [1, 2_147_483_647]],
         ['queue_group_item_length', [0, 20]], ['queue_group_item_get', [1, 4_294_967_295]],
+        ['queue_group_item_source_get', [1, 4_294_967_295]],
         ['queue_group_item_remove', [1, 4_294_967_295]], ['queue_event_read', [0, 1]],
         ['queue_save_size', [1, 1_048_576]], ['queue_save_read', [0, 4_096]],
         ['source_retrigger_get', [0, 2_147_483_647]], ['source_path_result', [0, 2]],
@@ -2452,9 +3291,10 @@ async function createEngine(source) {
         const view = extensionScratch('queue', 4_096);
         const row = Array.from({ length: 16 }, (_, index) => view.getFloat64(index * 8, true));
         const flags = row[13];
+        const transfer = row[1] === 3 || row[1] === 5 ? transferRead(id) : {};
 
         return {
-            id: row[0], kind: ['walk', 'door', 'grab', 'getUp'][row[1] - 1], origin: ['sdk', 'lua'][row[2]],
+            id: row[0], kind: ['walk', 'door', 'grab', 'getUp', 'transfer'][row[1] - 1], origin: ['sdk', 'lua'][row[2]],
             target: Object.freeze({
                 id: row[1] === 2 || (row[1] === 4 && row[3] !== 0xFF_FF_FF_FF)
                     ? doorIds[row[3]]
@@ -2464,6 +3304,8 @@ async function createEngine(source) {
             rawTime: row[7], maxTime: row[8], currentTime: row[9], lastTime: row[10],
             prevLastTime: row[11], delta: row[12], started: (flags & 1) !== 0,
             flags, portable: row[15] !== 0, groupCount: row[14],
+            allowMissingItems: (flags & 1_024) !== 0,
+            ...transfer,
         };
     }
 
@@ -2471,20 +3313,23 @@ async function createEngine(source) {
      * Read a detached native group and its ordered item identities.
      *
      * @param {number} id - Stable group ID.
-     * @returns {{id: number, actionId: number, rawTime: number, itemCount: number, fullType: string|null, itemIds: readonly number[]}} Detached native group.
+     * @returns {{id: number, actionId: number, rawTime: number, itemCount: number, fullType: string|null, itemIds: number[], sourceContainerIds: number[]}} Detached frozen native group and frozen accepted per-item source references.
      */
     function groupRead(id) {
-        queueCall('groupRead', 'queue_group_read', id);
+        queueCall('groupRead', 'queue_group_read', requireInteger(id, 'group ID', 1, 0x7F_FF_FF_FF));
         const view = extensionScratch('queue', 4_096);
         const row = Array.from({ length: 4 }, (_, index) => view.getFloat64(index * 8, true));
 
         requireInteger(row[3], 'group item count', 0, 20);
         const itemIds = Array.from({ length: row[3] }, (_, index) => queueCall('groupItemGet', 'queue_group_item_get', id, index));
+        const sourceContainerIds = Array.from({ length: row[3] }, (_, index) =>
+            queueCall('groupItemSourceGet', 'queue_group_item_source_get', id, index));
         const first = itemIds.length ? getItem(itemIds[0]) : null;
 
         return Object.freeze({
             id: row[0], actionId: row[1], rawTime: row[2], itemCount: row[3],
             fullType: first?.fullType ?? null, itemIds: Object.freeze(itemIds),
+            sourceContainerIds: Object.freeze(sourceContainerIds),
         });
     }
 
@@ -2507,10 +3352,19 @@ async function createEngine(source) {
             const groups = Array.from({ length: row.groupCount }, (_, groupIndex) => {
                 const group = groupRead(queueCall('groupGet', 'queue_group_get', row.id, groupIndex));
 
-                return Object.freeze({ id: group.id, rawTime: group.rawTime, fullType: group.fullType, itemIds: group.itemIds });
+                return Object.freeze({
+                    id: group.id, rawTime: group.rawTime, fullType: group.fullType,
+                    itemIds: group.itemIds, sourceContainerIds: group.sourceContainerIds,
+                });
             });
             const record = {
                 id: row.id, kind: row.kind, origin: row.origin, target: row.target,
+                ...(row.sourceContainerId === undefined
+                    ? {}
+                    : {
+                            sourceContainerId: row.sourceContainerId, destinationContainerId: row.destinationContainerId,
+                            floorPosition: row.floorPosition,
+                        }),
                 rawTime: row.rawTime, maxTime: row.maxTime, currentTime: row.currentTime,
                 lastTime: row.lastTime, prevLastTime: row.prevLastTime, delta: row.delta, started: row.started,
             };
@@ -2548,6 +3402,18 @@ async function createEngine(source) {
          */
         requestPickup: (id) => acceptance(queueCall('requestPickup', 'queue_request_pickup',
             requireInteger(id, 'item id', 1, 0xFF_FF_FF_FF))),
+        /**
+         * Admit immutable source/destination intent, not transfer completion.
+         *
+         * @param {number} id - Positive uint32 item identity.
+         * @param {number} sourceContainerId - Positive uint32 source container identity.
+         * @param {number} destinationContainerId - Positive uint32 destination container identity.
+         * @returns {import('../types/mod-api').ModQueueAcceptance} Accepted admission and current queue state.
+         */
+        requestTransfer: (id, sourceContainerId, destinationContainerId) => acceptance(queueCall(
+            'requestTransfer', 'queue_request_transfer', requireInteger(id, 'item ID', 1, 0xFF_FF_FF_FF),
+            requireInteger(sourceContainerId, 'source container ID', 1, 0xFF_FF_FF_FF),
+            requireInteger(destinationContainerId, 'destination container ID', 1, 0xFF_FF_FF_FF))),
         requestDoor: toggleDoor,
         /**
          * Admit a walk to an exact source-square coordinate.
@@ -2576,7 +3442,7 @@ async function createEngine(source) {
     });
 
     const timingFields = ['multiplier', 'bias', 'perObject', 'slowHalf', 'slowQuarter', 'slowEighth', 'instant'];
-    const traitIds = ['base:dextrous', 'base:allthumbs'];
+    const traitIds = ['base:dextrous', 'base:allthumbs', 'base:hemophobic', 'base:organized', 'base:disorganized'];
 
     /**
      * Resolve a supported canonical trait to its native ordinal.
@@ -2630,7 +3496,11 @@ async function createEngine(source) {
                 fpsMultiplier: row[3], elapsedSeconds: row[4], slowMultiplier: row[5],
                 slowHalf: row[6] !== 0, slowQuarter: row[7] !== 0, slowEighth: row[8] !== 0,
                 instant: row[9] !== 0, gameMode: getGameMode(), gameMultiplier: row[13],
-                traits: Object.freeze({ 'base:dextrous': row[10] !== 0, 'base:allthumbs': row[11] !== 0 }),
+                traits: Object.freeze({
+                    'base:dextrous': row[10] !== 0, 'base:allthumbs': row[11] !== 0,
+                    'base:hemophobic': row[14] !== 0,
+                    'base:organized': sourceTiming.hasTrait('base:organized'), 'base:disorganized': sourceTiming.hasTrait('base:disorganized'),
+                }),
             });
         },
         /**
@@ -2664,8 +3534,11 @@ async function createEngine(source) {
          * @returns {boolean} Whether the actor has the trait.
          */
         hasTrait: (id) => {
-            requireOptional('hasTrait', ['source_trait_get']);
-            const value = api.source_trait_get(traitIndex(id));
+            const index = traitIndex(id);
+            const name = index < 3 ? 'source_trait_get' : 'container_trait_get';
+
+            requireOptional('hasTrait', [name]);
+            const value = api[name](index < 3 ? index : index - 3);
 
             requireResult(value, 'hasTrait', 0, 1);
 
@@ -2682,8 +3555,11 @@ async function createEngine(source) {
                 throw new TypeError('trait enabled must be boolean.');
             }
 
-            requireOptional('setTrait', ['source_trait_set']);
-            requireAccepted(api.source_trait_set(traitIndex(id), Number(enabled)), 'setTrait');
+            const index = traitIndex(id);
+            const name = index < 3 ? 'source_trait_set' : 'container_trait_set';
+
+            requireOptional('setTrait', [name]);
+            requireAccepted(api[name](index < 3 ? index : index - 3, Number(enabled)), 'setTrait');
         },
         getGameMode,
         /**
@@ -2766,8 +3642,680 @@ async function createEngine(source) {
         });
     }
 
+    /**
+     * Read immutable source and destination container references for a queued transfer.
+     *
+     * @param {number} actionId - Positive native queued action identity.
+     * @returns {object} Detached transfer references and optional destination floor position.
+     */
+    function transferRead(actionId) {
+        queueCall('transferRead', 'queue_transfer_read', requireInteger(actionId, 'action ID', 1, 0x7F_FF_FF_FF));
+        const view = extensionScratch('queue', 4_096);
+        const sourceContainerId = view.getFloat64(0, true);
+        const destinationContainerId = view.getFloat64(8, true);
+        const floorPosition = { x: view.getFloat64(16, true), y: view.getFloat64(24, true), z: view.getFloat64(32, true) };
+
+        return {
+            sourceContainerId, destinationContainerId,
+            floorPosition: getContainer(destinationContainerId)?.kind === 'floor' ? Object.freeze(floorPosition) : null,
+        };
+    }
+
+    /**
+     * Read a validated numeric native container query result.
+     *
+     * @param {string} label - Host-facing operation label.
+     * @param {string} name - Native export name.
+     * @param {number[]} args - Native scalar arguments.
+     * @param {number} [max=1] - Maximum accepted native result.
+     * @returns {number} Validated native query value.
+     */
+    function containerQuery(label, name, args, max = 1) {
+        requireOptional(label, [name]);
+
+        return requireResult(api[name](...args), label, 0, max);
+    }
+
+    /**
+     * Raise the native metabolic target only when the requested value exceeds it.
+     *
+     * @param {number} value - Finite target representable as a native f32.
+     * @returns {void} Applies the source setter's raise-only behavior.
+     */
+    function setMetabolicTarget(value) {
+        requireCoordinate(value, 'metabolic target');
+
+        if (Math.abs(value) > 3.402_823_466_385_288_6e38) {
+            throw new RangeError('Metabolic target must fit finite f32.');
+        }
+
+        requireOptional('setMetabolicTarget', ['body_metabolic_target_set']);
+        requireAccepted(api.body_metabolic_target_set(value), 'setMetabolicTarget');
+    }
+
+    /**
+     * Read the current native metabolic target.
+     *
+     * @returns {number} Finite native metabolic target.
+     */
+    function getMetabolicTarget() {
+        requireOptional('getMetabolicTarget', ['body_metabolic_target_get']);
+
+        return requireCoordinate(api.body_metabolic_target_get(), 'native metabolic target');
+    }
+
+    /**
+     * Read authenticated native floor, stair, and slope facts for one square.
+     *
+     * @param {import('../types/mod-api').ModWorldCoordinates} coords - Signed-int32 square coordinates.
+     * @returns {object} Detached floor flags, stair types, slope direction, and heights.
+     */
+    function squareFloorState(coords) {
+        requireMoodleObject(coords, 'Source square coordinates');
+        requireOptional('squareFloorState', ['source_square_floor_read']);
+        requireAccepted(api.source_square_floor_read(
+            requireInteger(coords.x, 'square x', -0x80_00_00_00, 0x7F_FF_FF_FF),
+            requireInteger(coords.y, 'square y', -0x80_00_00_00, 0x7F_FF_FF_FF),
+            requireInteger(coords.z, 'square z', -0x80_00_00_00, 0x7F_FF_FF_FF)), 'squareFloorState');
+        const view = extensionScratch('queue', 4_096);
+        const flags = view.getFloat64(0, true);
+        const stairs = view.getFloat64(8, true);
+        const direction = view.getFloat64(16, true);
+
+        if (direction === 9 && !(flags & 1) && !stairs) {
+            throw new Error('squareFloorState: unsupported original facility (malformed slope direction).');
+        }
+
+        return {
+            flags, stairTypes: stairs, slopeDirection: direction,
+            slopeMin: view.getFloat64(24, true), slopeMax: view.getFloat64(32, true),
+            solidFloor: (flags & 1) !== 0 || stairs !== 0 || direction !== 0,
+            solid: (flags & 2) !== 0, solidTrans: (flags & 4) !== 0, stairs: stairs !== 0,
+        };
+    }
+
+    /**
+     * Original edge dispatch checks N/W locally and S/E on the adjacent native square.
+     *
+     * @param {import('../types/mod-api').ModWorldCoordinates} from - Loaded source square.
+     * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Target square, or null for no target.
+     * @returns {boolean} Whether the original directional edge dispatch finds a window.
+     */
+    function squareWindowTo(from, to) {
+        const fromState = squareFloorState(from);
+
+        if (to === null) {
+            return false;
+        }
+
+        squareFloorState(to);
+
+        if (from.x === to.x && from.y === to.y && from.z === to.z) {
+            return false;
+        }
+
+        /**
+         * Read a window edge flag from the source square or a loaded offset square.
+         *
+         * @param {import('../types/mod-api').ModWorldCoordinates} coords - Base square coordinates.
+         * @param {number} mask - Native window edge flag mask.
+         * @param {number} [dx=0] - Tile offset along x.
+         * @param {number} [dy=0] - Tile offset along y.
+         * @returns {boolean} Whether the loaded square has the requested edge flag.
+         */
+        const edge = (coords, mask, dx = 0, dy = 0) => {
+            if (dx === 0 && dy === 0 && coords === from) {
+                return (fromState.flags & mask) !== 0;
+            }
+
+            const target = { x: coords.x + dx, y: coords.y + dy, z: coords.z };
+
+            if (!getSquare(target.x, target.y, target.z)) {
+                return false;
+            }
+
+            return (squareFloorState(target).flags & mask) !== 0;
+        };
+
+        return (from.x > to.x && (edge(from, 16) || edge(to, 16, 1)))
+            || (from.x < to.x && (edge(to, 16) || edge(from, 16, 1)))
+            || (from.y > to.y && (edge(from, 8) || edge(to, 8, 0, 1)))
+            || (from.y < to.y && (edge(to, 8) || edge(from, 8, 0, 1)));
+    }
+
+    /**
+     * Original staircase bounding spans and destination HasStairs, not adjacency guesses.
+     *
+     * @param {import('../types/mod-api').ModWorldCoordinates} from - Loaded source staircase square.
+     * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Candidate square, or null for no target.
+     * @returns {boolean} Whether the target lies in the original stair span and has stairs.
+     */
+    function squareSameStaircase(from, to) {
+        const { stairTypes } = squareFloorState(from);
+
+        if (!to || from.z !== to.z) {
+            return false;
+        }
+
+        let x1 = from.x;
+        let x2 = from.x;
+        let y1 = from.y;
+        let y2 = from.y;
+
+        if (stairTypes & 1) {
+            y2 += 2;
+        } else if (stairTypes & 2) {
+            y1 -= 1;
+            y2 += 1;
+        } else if (stairTypes & 4) {
+            y1 -= 2;
+        } else if (stairTypes & 8) {
+            x2 += 2;
+        } else if (stairTypes & 16) {
+            x1 -= 1;
+            x2 += 1;
+        } else if (stairTypes & 32) {
+            x1 -= 2;
+        } else {
+            return false;
+        }
+
+        if (to.x < x1 || to.x > x2 || to.y < y1 || to.y > y2 || !getSquare(to.x, to.y, to.z)) {
+            return false;
+        }
+
+        return squareFloorState(to).stairs;
+    }
+
+    /**
+     * Original f32 lerp/division sites; stairs need actual render-chunk configuration.
+     *
+     * @param {import('../types/mod-api').ModWorldCoordinates} coords - Loaded source square.
+     * @param {number} dx - Finite fractional x position, clamped to [0, 1] after f32 conversion.
+     * @param {number} dy - Finite fractional y position, clamped to [0, 1] after f32 conversion.
+     * @param {boolean|undefined} fboRenderChunk - Actual render-chunk setting, required for stairs.
+     * @returns {number} Apparent elevation using the original f32 arithmetic.
+     */
+    function squareApparentZ(coords, dx, dy, fboRenderChunk) {
+        const state = squareFloorState(coords);
+
+        if (state.slopeDirection === 9) {
+            throw new Error('squareApparentZ: unsupported original facility (malformed slope direction).');
+        }
+
+        const f = Math.fround;
+        const x = Math.min(1, Math.max(0, f(requireCoordinate(dx, 'square fractional x'))));
+        const y = Math.min(1, Math.max(0, f(requireCoordinate(dy, 'square fractional y'))));
+        /**
+         * Interpolate with the original Java-float rounding at each arithmetic site.
+         *
+         * @param {number} a - Starting height.
+         * @param {number} b - Ending height.
+         * @param {number} t - Interpolation fraction.
+         * @returns {number} Interpolated f32 height.
+         */
+        const lerp = (a, b, t) => f(f(a) + f(f(f(b) - f(a)) * t));
+
+        if (state.stairs) {
+            if (typeof fboRenderChunk !== 'boolean') {
+                throw new TypeError('squareApparentZ: unsupported original facility (render-chunk configuration).');
+            }
+
+            const shift = fboRenderChunk ? f(0.1) : 0;
+            let low;
+            let high;
+            let t;
+
+            if (state.stairTypes & 1) {
+                low = f(f(0.666_6) + shift);
+                high = 1;
+                t = f(1 - y);
+            } else if (state.stairTypes & 8) {
+                low = f(f(0.666_6) + shift);
+                high = 1;
+                t = f(1 - x);
+            } else if (state.stairTypes & 2) {
+                low = f(f(0.333_3) + shift);
+                high = f(f(0.666_6) + shift);
+                t = f(1 - y);
+            } else if (state.stairTypes & 16) {
+                low = f(f(0.333_3) + shift);
+                high = f(f(0.666_6) + shift);
+                t = f(1 - x);
+            } else if (state.stairTypes & 4) {
+                low = f(0.01);
+                high = f(f(0.333_3) + shift);
+                t = f(1 - y);
+            } else {
+                low = f(0.01);
+                high = f(f(0.333_3) + shift);
+                t = f(1 - x);
+            }
+
+            return f(f(coords.z) + lerp(low, high, t));
+        }
+
+        const direction = state.slopeDirection;
+
+        if (direction === 0 || direction > 4) {
+            return f(coords.z);
+        }
+
+        const t = [null, f(1 - y), y, f(1 - x), x][direction];
+        const height = f(lerp(Math.round(state.slopeMin * 100), Math.round(state.slopeMax * 100), t) / 100);
+
+        return f(f(coords.z) + Math.max(0, height));
+    }
+
     const sourceActions = {
         actionRead, groupRead,
+        getMetabolicTarget, setMetabolicTarget,
+        /**
+         * Read native actor transfer posture and drop-position options.
+         *
+         * @returns {{shouldBeTurning: boolean, sittingOnFurniture: boolean, seatedInVehicle: boolean, dropItemsOnSquareCenter: boolean}} Detached native transfer flags.
+         */
+        actorTransferState: () => {
+            requireOptional('actorTransferState', ['source_actor_transfer_state_read']);
+            requireAccepted(api.source_actor_transfer_state_read(), 'actorTransferState');
+            const view = scratch('actorTransferState');
+
+            return Object.fromEntries(['shouldBeTurning', 'sittingOnFurniture', 'seatedInVehicle', 'dropItemsOnSquareCenter']
+                .map((name, index) => [name, view.getFloat64(index * 8, true) !== 0]));
+        },
+        /**
+         * Read whether the actor should turn before the original transfer helper runs.
+         *
+         * @returns {boolean} Native turning flag.
+         */
+        actorShouldBeTurning: () => sourceActions.actorTransferState().shouldBeTurning,
+        /**
+         * Read whether the actor is sitting on furniture.
+         *
+         * @returns {boolean} Native furniture-seating flag.
+         */
+        actorSittingOnFurniture: () => sourceActions.actorTransferState().sittingOnFurniture,
+        /**
+         * Read whether the actor is seated in a vehicle.
+         *
+         * @returns {boolean} Native vehicle-seating flag.
+         */
+        actorSeatedInVehicle: () => sourceActions.actorTransferState().seatedInVehicle,
+        /**
+         * Read whether floor drops use the square center.
+         *
+         * @returns {boolean} Native drop-position option.
+         */
+        dropItemsOnSquareCenter: () => sourceActions.actorTransferState().dropItemsOnSquareCenter,
+        /**
+         * Set the native floor-drop centering option.
+         *
+         * @param {boolean} value - Whether floor drops use the square center.
+         * @returns {void} Updates the native drop-position option.
+         */
+        setDropItemsOnSquareCenter: (value) => {
+            if (typeof value !== 'boolean') {
+                throw new TypeError('Drop-items-center option must be boolean.');
+            }
+
+            requireOptional('setDropItemsOnSquareCenter', ['source_drop_items_center_set']);
+            requireAccepted(api.source_drop_items_center_set(Number(value)), 'setDropItemsOnSquareCenter');
+        },
+        /**
+         * Resolve the native animal-zone identity for a source square.
+         *
+         * @param {import('../types/mod-api').ModWorldCoordinates} coords - Signed-int32 square coordinates.
+         * @returns {number|null} Positive uint32 zone identity, or null when absent.
+         */
+        animalZoneForSquare: (coords) => {
+            requireOptional('animalZoneForSquare', ['source_animal_zone_for_square']);
+            const id = api.source_animal_zone_for_square(
+                requireInteger(coords.x, 'animal-zone x', -0x80_00_00_00, 0x7F_FF_FF_FF),
+                requireInteger(coords.y, 'animal-zone y', -0x80_00_00_00, 0x7F_FF_FF_FF),
+                requireInteger(coords.z, 'animal-zone z', -0x80_00_00_00, 0x7F_FF_FF_FF));
+
+            return requireResult(id, 'animalZoneForSquare', 0, 0xFF_FF_FF_FF) || null;
+        },
+        /**
+         * Draw a native random value for the currently authorized transfer event.
+         *
+         * @param {number} action - Positive signed-int32 source action identity.
+         * @param {number} item - Positive uint32 item identity authorized by the event.
+         * @param {number} token - Positive uint32 current event token.
+         * @param {number} min - Nonnegative finite f32 lower bound.
+         * @param {number} max - Finite f32 upper bound, no smaller than min.
+         * @param {boolean} integer - Whether to use native integer random mode.
+         * @returns {number} Finite native random result.
+         */
+        transferRandom: (action, item, token, min, max, integer) => {
+            if (typeof integer !== 'boolean') {
+                throw new TypeError('Transfer random integer mode must be boolean.');
+            }
+
+            requireCoordinate(min, 'random minimum');
+            requireCoordinate(max, 'random maximum');
+
+            if (min < 0 || max > 3.402_823_466_385_288_6e38 || max < min) {
+                throw new RangeError('Transfer random bounds must fit ordered nonnegative finite f32.');
+            }
+
+            requireOptional('transferRandom', ['queue_transfer_random']);
+            const value = api.queue_transfer_random(requireInteger(action, 'action ID', 1, 0x7F_FF_FF_FF),
+                itemId(item), requireInteger(token, 'event token', 1, 0xFF_FF_FF_FF), min, max, Number(integer));
+
+            if (value < 0) {
+                requireAccepted(value, 'transferRandom');
+            }
+
+            return requireCoordinate(value, 'transfer random result');
+        },
+        squareFloorState, squareWindowTo, squareSameStaircase, squareApparentZ,
+        /**
+         * Read the actor's original overlay sprite name.
+         *
+         * @returns {string|null} Resolved native overlay name, or null for no overlay.
+         */
+        actorOverlaySprite: () => {
+            requireOptional('actorOverlaySprite', ['source_actor_overlay_get']);
+
+            return policyName(requireResult(api.source_actor_overlay_get(), 'actor overlay token', 0, 0xFF_FF_FF_FF));
+        },
+        /**
+         * Read native equipment membership for a live item.
+         *
+         * @param {number} id - Positive uint32 item identity.
+         * @returns {{worn: boolean, held: boolean, attached: boolean}} Detached equipment flags.
+         */
+        itemEquipmentState: (id) => {
+            requireOptional('itemEquipmentState', ['item_equipment_state_read']);
+            requireAccepted(api.item_equipment_state_read(itemId(id)), 'itemEquipmentState');
+            const view = scratch('itemEquipmentState');
+
+            return {
+                worn: view.getFloat64(0, true) !== 0, held: view.getFloat64(8, true) !== 0,
+                attached: view.getFloat64(16, true) !== 0,
+            };
+        },
+        /**
+         * Read an item's original source flag, optionally setting it first.
+         *
+         * @param {number} id - Positive uint32 item identity.
+         * @param {'favorite'|'consumed'} field - Source state flag to access.
+         * @param {boolean} [enabled] - New flag value; omission leaves the flag unchanged.
+         * @returns {boolean} Native flag value after any requested mutation.
+         */
+        itemSourceState: (id, field, enabled) => {
+            const index = ['favorite', 'consumed'].indexOf(field);
+
+            if (index === -1) {
+                throw new RangeError('Unsupported item source state.');
+            }
+
+            if (enabled !== undefined) {
+                if (typeof enabled !== 'boolean') {
+                    throw new TypeError('Item source state must be boolean.');
+                }
+
+                requireOptional('itemSourceState', ['item_source_state_set']);
+                requireAccepted(api.item_source_state_set(itemId(id), index, Number(enabled)), 'itemSourceState');
+            }
+
+            requireOptional('itemSourceState', ['item_source_state_read']);
+            requireAccepted(api.item_source_state_read(itemId(id)), 'itemSourceState');
+
+            return scratch('itemSourceState').getFloat64(index * 8, true) !== 0;
+        },
+        containerRead: getContainer, containerState, itemWeights, transferRead,
+        /**
+         * Read original ordered child inventory weight, distinct from raw/reduced contents.
+         *
+         * @param {number} id - Positive uint32 bag item identity.
+         * @returns {number} Native f32 accumulation using the shell's source equipment state.
+         */
+        itemInventoryWeight: (id) => {
+            requireOptional('itemInventoryWeight', ['item_inventory_weight_read']);
+            requireAccepted(api.item_inventory_weight_read(itemId(id)), 'itemInventoryWeight');
+
+            return scratch('itemInventoryWeight').getFloat64(0, true);
+        },
+        /**
+         * Read a bag item's native internal or actor-relative effective capacity.
+         *
+         * @param {number} id - Positive uint32 bag item identity.
+         * @param {number|null} actor - Actor token 0 or 1, or null for no actor.
+         * @param {boolean} effective - Whether to read effective rather than stored capacity.
+         * @returns {number} Native capacity scalar.
+         */
+        itemContainerCapacity: (id, actor, effective) => {
+            if (typeof effective !== 'boolean') {
+                throw new TypeError('Effective capacity selector must be boolean.');
+            }
+
+            requireOptional('itemContainerCapacity', ['item_container_capacity']);
+            requireAccepted(api.item_container_capacity(itemId(id), actorId(actor), Number(effective)), 'itemContainerCapacity');
+
+            return scratch('itemContainerCapacity').getFloat64(0, true);
+        },
+        /**
+         * Count a native container's direct ordered item members.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @returns {number} Direct member count in [0, 4096].
+         */
+        containerItemCount: (id) => containerQuery('containerItemCount', 'container_item_count', [containerId(id)], 4_096),
+        /**
+         * Read an item identity by its native direct-membership index.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @param {number} index - Zero-based member index in [0, 4095].
+         * @returns {number} Native item identity.
+         */
+        containerItemGet: (id, index) => containerQuery('containerItemGet', 'container_item_get',
+            [containerId(id), requireInteger(index, 'container item index', 0, 4_095)], 0xFF_FF_FF_FF),
+        /**
+         * Query native direct or recursive item membership.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @param {number} item - Positive uint32 item identity.
+         * @param {boolean} recurse - Whether to search nested bag inventories.
+         * @returns {boolean} Whether the item belongs to the requested inventory scope.
+         */
+        containerContains: (id, item, recurse) => {
+            if (typeof recurse !== 'boolean') {
+                throw new TypeError('recursive contains must be boolean.');
+            }
+
+            return containerQuery('containerContains', 'container_contains', [containerId(id), itemId(item), Number(recurse)]) === 1;
+        },
+        /**
+         * Query the native containment relation between a container and a bag item.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @param {number} item - Positive uint32 candidate containing item identity.
+         * @returns {boolean} Whether the container is inside the item.
+         */
+        containerIsInside: (id, item) => containerQuery('containerIsInside', 'container_is_inside', [containerId(id), itemId(item)]) === 1,
+        /**
+         * Resolve a container's native outermost inventory identity.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @returns {number} Native outermost container identity.
+         */
+        containerOutermost: (id) => containerQuery('containerOutermost', 'container_outermost', [containerId(id)], 0xFF_FF_FF_FF),
+        /**
+         * Read the original item root, which excludes a direct floor owner.
+         *
+         * @param {number} id - Positive uint32 live item identity.
+         * @returns {number|null} Actor root or outer bag interior, or null for a direct world item.
+         */
+        itemOutermostContainer: (id) => containerQuery('itemOutermostContainer', 'item_outermost_container',
+            [itemId(id)], 0xFF_FF_FF_FF) || null,
+        /**
+         * Resolve the actor owning a native container.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @returns {number} Native actor token, zero when there is no actor owner.
+         */
+        containerActorOwner: (id) => containerQuery('containerActorOwner', 'container_actor_owner', [containerId(id)]),
+        /**
+         * Resolve the native floor inventory for a supported ground-level square.
+         *
+         * @param {number} x - Signed-int32 tile x coordinate.
+         * @param {number} y - Signed-int32 tile y coordinate.
+         * @param {number} z - Supported elevation, exactly zero.
+         * @returns {number} Native floor container identity.
+         */
+        floorContainer: (x, y, z) => containerQuery('floorContainer', 'source_floor_container', [
+            requireInteger(x, 'floor x', -0x80_00_00_00, 0x7F_FF_FF_FF),
+            requireInteger(y, 'floor y', -0x80_00_00_00, 0x7F_FF_FF_FF), requireInteger(z, 'floor z', 0, 0),
+        ], 0xFF_FF_FF_FF),
+        /**
+         * Query original item admission with a resolved source policy result.
+         *
+         * @param {number} id - Positive uint32 destination container identity.
+         * @param {number} item - Positive uint32 incoming item identity.
+         * @param {number} [policy=-1] - Native policy result in [-1, 1].
+         * @returns {boolean} Whether the native container allows the item.
+         */
+        containerItemAllowed: (id, item, policy = -1) => containerQuery('containerItemAllowed', 'container_item_allowed',
+            [containerId(id), itemId(item), policyResult(policy)]) === 1,
+        /**
+         * Query actor-relative room for an item using original admission policy.
+         *
+         * @param {number} id - Positive uint32 destination container identity.
+         * @param {number|null} actor - Actor token 0 or 1, or null for no actor.
+         * @param {number} item - Positive uint32 incoming item identity.
+         * @param {number} [policy=-1] - Native policy result in [-1, 1].
+         * @returns {boolean} Whether the native container has room for the item.
+         */
+        containerHasRoomItem: (id, actor, item, policy = -1) => containerQuery('containerHasRoomItem', 'container_has_room_item',
+            [containerId(id), actorId(actor), itemId(item), policyResult(policy)]) === 1,
+        /**
+         * Query actor-relative room for incoming weight and a floor-weight adjustment.
+         *
+         * @param {number} id - Positive uint32 destination container identity.
+         * @param {number|null} actor - Actor token 0 or 1, or null for no actor.
+         * @param {number} weight - Nonnegative finite f32 incoming weight.
+         * @param {number} [floorDelta=0] - Nonnegative finite f32 floor-weight adjustment.
+         * @returns {boolean} Whether the native capacity predicate accepts the weight.
+         */
+        containerHasRoomWeight: (id, actor, weight, floorDelta = 0) => containerQuery('containerHasRoomWeight', 'container_has_room_weight',
+            [containerId(id), actorId(actor), requireItemWeight(weight, 'incoming weight'), requireItemWeight(floorDelta, 'floor weight delta')]) === 1,
+        /**
+         * Query whether original native policy permits removing an item.
+         *
+         * @param {number} id - Positive uint32 source container identity.
+         * @param {number} item - Positive uint32 item identity.
+         * @returns {boolean} Whether removal is allowed.
+         */
+        containerRemoveAllowed: (id, item) => containerQuery('containerRemoveAllowed', 'container_remove_allowed',
+            [containerId(id), itemId(item)]) === 1,
+        /**
+         * Set a supported native container state flag.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @param {number} field - Native flag selector, 0 or 1.
+         * @param {boolean} value - New flag value.
+         * @returns {number} Zero after the native mutation is accepted.
+         */
+        containerSetFlags: (id, field, value) => {
+            if (typeof value !== 'boolean') {
+                throw new TypeError('container flag must be boolean.');
+            }
+
+            requireOptional('containerSetFlags', ['container_flags_set']);
+            requireAccepted(api.container_flags_set(containerId(id), requireInteger(field, 'container flag field', 0, 1),
+                Number(value)), 'containerSetFlags');
+
+            return 0;
+        },
+        /**
+         * Apply the original native floating-point weight correction.
+         *
+         * @param {number} weight - Nonnegative finite f32 weight.
+         * @returns {number} Native corrected weight.
+         */
+        floatingPointCorrection: (weight) => {
+            requireOptional('floatingPointCorrection', ['source_floating_point_correction']);
+
+            return api.source_floating_point_correction(requireItemWeight(weight, 'weight'));
+        },
+        /**
+         * Bind immutable source and destination references to a native source action.
+         *
+         * @param {number} action - Positive signed-int32 source action identity.
+         * @param {number} source - Positive uint32 source container identity.
+         * @param {number} destination - Positive uint32 destination container identity.
+         * @returns {number} Accepted native status.
+         */
+        actionBindTransfer: (action, source, destination) => queueCall('actionBindTransfer', 'queue_action_bind_transfer',
+            requireInteger(action, 'action ID', 1, 0x7F_FF_FF_FF), containerId(source), containerId(destination)),
+        /**
+         * Capture held refs before an authorized helper can remove equipment.
+         *
+         * @param {number} action - Native source action ID.
+         * @param {number} group - Native source group ID.
+         * @param {number} item - Stable item identity authorized by the event.
+         * @param {number} token - Current native event token.
+         * @param {number} [policy=-1] - Resolved original admission result.
+         * @returns {number} Accepted native status.
+         */
+        transferBegin: (action, group, item, token, policy = -1) => {
+            const before = handObservers.size > 0 ? getHandItems() : null;
+            const result = queueCall('transferBegin', 'queue_transfer_begin',
+                requireInteger(action, 'action ID', 1, 0x7F_FF_FF_FF), requireInteger(group, 'group ID', 1, 0x7F_FF_FF_FF),
+                itemId(item), requireInteger(token, 'event token', 1, 0xFF_FF_FF_FF), policyResult(policy));
+
+            transferHandState = { action, item, token, before };
+
+            return result;
+        },
+        /**
+         * Dispatch one helper operation within the native transfer authorization.
+         *
+         * @param {number} action - Positive signed-int32 source action identity.
+         * @param {number} item - Positive uint32 authorized item identity.
+         * @param {number} token - Positive uint32 current event token.
+         * @param {number} operation - Native transfer operation selector in [1, 8].
+         * @param {number} container - Uint32 container identity, or zero when unused.
+         * @param {number} x - Finite transfer x coordinate.
+         * @param {number} y - Finite transfer y coordinate.
+         * @param {number} z - Supported elevation, exactly zero.
+         * @returns {number} Accepted native status.
+         */
+        transferOperation: (action, item, token, operation, container, x, y, z) => queueCall('transferOperation', 'queue_transfer_operation',
+            requireInteger(action, 'action ID', 1, 0x7F_FF_FF_FF), itemId(item),
+            requireInteger(token, 'event token', 1, 0xFF_FF_FF_FF), requireInteger(operation, 'transfer operation', 1, 8),
+            requireInteger(container, 'transfer container ID', 0, 0xFF_FF_FF_FF),
+            requireCoordinate(x, 'transfer x'), requireCoordinate(y, 'transfer y'), requireInteger(z, 'transfer z', 0, 0)),
+        /**
+         * Publish held deltas only after native commits the supported helper.
+         *
+         * @param {number} action - Native source action ID.
+         * @param {number} item - Authorized item identity.
+         * @param {number} token - Native event token.
+         * @param {boolean|number} success - Strict boolean or native zero/one completion.
+         * @returns {number} Accepted native finish status; rollback emits no held event.
+         */
+        transferFinish: (action, item, token, success) => {
+            if (typeof success !== 'boolean' && success !== 0 && success !== 1) {
+                throw new TypeError('transfer success must be boolean.');
+            }
+
+            const previous = transferHandState;
+            const result = queueCall('transferFinish', 'queue_transfer_finish', requireInteger(action, 'action ID', 1, 0x7F_FF_FF_FF),
+                itemId(item), requireInteger(token, 'event token', 1, 0xFF_FF_FF_FF), Number(success));
+
+            if (previous?.action === action && previous.item === item && previous.token === token) {
+                transferHandState = null;
+
+                if (success && previous.before) {
+                    notifyHandItems(previous.before);
+                }
+            }
+
+            return result;
+        },
         /**
          * Query the native slot, including detached source actions awaiting a final event reply.
          *
@@ -2795,7 +4343,7 @@ async function createEngine(source) {
             const origin = view.getFloat64(16, true);
 
             if (view.getFloat64(0, true) !== id || !Number.isInteger(origin) || origin < 0 || origin > 1
-                || !Number.isInteger(kind) || kind < 1 || kind > 4) {
+                || !Number.isInteger(kind) || kind < 1 || kind > 5) {
                 throw new Error('actionExists: invalid native action record.');
             }
 
@@ -3139,6 +4687,7 @@ async function createEngine(source) {
         groupLength: 'queue_group_length', groupGet: 'queue_group_get', groupInsert: 'queue_group_insert',
         groupRemove: 'queue_group_remove', groupItemLength: 'queue_group_item_length',
         groupItemGet: 'queue_group_item_get', groupItemInsert: 'queue_group_item_insert',
+        groupItemSourceGet: 'queue_group_item_source_get',
         groupItemRemove: 'queue_group_item_remove', start: 'queue_start', eventReply: 'queue_event_reply',
         commitItem: 'queue_commit_item', commitDoor: 'queue_commit_door',
         worldItemCount: 'source_world_item_count', worldItemGet: 'source_world_item_get',
@@ -3191,7 +4740,14 @@ async function createEngine(source) {
                 }
             }
 
-            return queueCall(method, name, ...args);
+            const result = queueCall(method, name, ...args);
+
+            if (method === 'eventReply' && transferHandState?.action === args[0] && transferHandState.token === args[2]) {
+                // Native reply rolls back an unfinished helper; retire its observation snapshot silently.
+                transferHandState = null;
+            }
+
+            return result;
         };
     }
 
@@ -3295,10 +4851,13 @@ async function createEngine(source) {
     return Object.freeze({
         snapshot, command, setSpeed, step, frameStep, reset, actions, sourceActions, sourceTiming,
         canSaveQueueState, saveQueueState, loadQueueState,
+        equipmentOperation, wornItems, setWornItem, canSaveEquipmentState, saveEquipmentState, loadEquipmentState,
         worldImportCell, navFlags, worldBounds, saveState, loadState, worldReset,
         registerItemDefinition, itemDefinitions, beginItemDefinitionRegistration,
         commitItemDefinitionRegistration, rollbackItemDefinitionRegistration, freezeItemDefinitions,
-        items, getItem, inventoryState, importItems, wornItem, isWearingAwkwardGloves, getHealth, isDead,
+        items, getItem, inventoryState, exportInventoryGraph, importInventoryGraph,
+        containers, getContainer, containerItems, playerInventoryId, containerState, itemWeights,
+        wornItem, isWearingAwkwardGloves, getHealth, isDead,
         getHandItems, setHandItem, observeHandItems, canSaveHandState, saveHandState, loadHandState,
         moodles, moodleInputLimits, saveMoodleState, loadMoodleState, resetMoodleState,
         importDoors, getSquare, isBlockedTo, doors, doorRevision, toggleDoor, saveDoorState, loadDoorState,

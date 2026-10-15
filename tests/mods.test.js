@@ -60,7 +60,15 @@ function manifestSource(id) {
  */
 async function newEngine() {
     try {
-        return await createEngine(await readFile(wasmUrl));
+        const engine = await createEngine(await readFile(wasmUrl));
+        const equipment = engine.equipmentOperation;
+        const human = equipment('groupGet', 'Human', true);
+
+        for (const name of ['Shoes', 'Hands']) {
+            equipment('locationAdd', human, equipment('lookup', name));
+        }
+
+        return engine;
     } catch (cause) {
         throw new Error(`tests need engine/target/wasm32-unknown-unknown/release/pz_engine.wasm; run npm run build first (${cause.message})`);
     }
@@ -1099,7 +1107,7 @@ export function activate(api) {
     assert.deepEqual(engine.items(), before);
     unveto();
     api.items.pickup(id);
-    assert.equal(api.items.get(id).location, 'ground', 'accepted request has not transferred yet');
+    assert.notEqual(api.items.get(id).worldPosition, null, 'accepted request has not transferred yet');
     completeActions(engine);
     api.items.wear(id);
     assert.equal(api.items.worn('Shoes').id, id);
@@ -1109,9 +1117,10 @@ export function activate(api) {
     assert.equal(api.items.worn('Shoes'), null);
     api.items.drop(id, 6, 5);
     assert.deepEqual(api.items.get(id), {
-        id, fullType: 'Fixture.Shoes', location: 'ground', x: 6, y: 5,
-        condition: 0, count: 1, bodyLocation: null,
-        weight: 1, actualWeight: 1,
+        id, fullType: 'Fixture.Shoes', definitionOrdinal: 0,
+        ownerContainerId: 3, internalContainerId: null,
+        worldPosition: { x: 6, y: 5, z: 0 }, condition: 0, count: 1, bodyLocation: null,
+        weight: 1, actualWeight: 1, favorite: false, consumed: false,
     });
     assert.equal(api.items.get(4_294_967_295), null);
     const record = api.items.list()[0];
@@ -2045,11 +2054,11 @@ export function activate(api) {
     const result = api.actions.requestPickup(id);
 
     assert.equal(result.accepted, true);
-    assert.equal(api.items.get(id).location, 'ground');
+    assert.notEqual(api.items.get(id).worldPosition, null);
     assert.ok(Object.isFrozen(result.state.current));
     assert.equal(admissions, 1);
     completeActions(engine);
-    assert.equal(api.items.get(id).location, 'inventory');
+    assert.equal(api.items.get(id).ownerContainerId, 1);
     assert.equal(admissions, 1, 'completion never resubmits the command hooks');
     const seconds = [];
 
@@ -2087,7 +2096,7 @@ test('protected original core preflight resolves ordinary hooks without a second
     assert.deepEqual(result, { type: 'pickup', id: second });
     assert.equal(calls, 1);
     assert.deepEqual(engine.actions.getState(), { current: null, pending: [] }, 'source hook resolution cannot create SDK work');
-    assert.ok(engine.items().every((item) => item.location === 'ground'));
+    assert.ok(engine.items().every((item) => item.worldPosition !== null));
     assert.deepEqual(host.diagnostics().mods, [], 'core is not represented as an installed user mod');
     assert.equal(host.diagnostics().core.id, 'pz-base-game');
     assert.equal(host.diagnostics().counts.modSubmitted, 0);
@@ -2122,7 +2131,7 @@ test('source context hooks cannot publish admission after disposing its protecte
     });
     assert.throws(() => host.sourcePreflight({ type: 'pickup', id }, 'pz-base-game'), { stage: 'api' });
     assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
-    assert.equal(engine.items()[0].location, 'ground');
+    assert.notEqual(engine.items()[0].worldPosition, null);
 });
 
 test('both public action cancellation surfaces have identical real native movement effects', async () => {
@@ -2209,7 +2218,7 @@ export function activate(api) {
         assert.deepEqual(fx.seen, [], 'cancellation still bypasses every veto hook');
         assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
         assert.equal(engine.sourceActions.eventRead(), null);
-        assert.equal(engine.items().find((item) => item.id === itemId).location, 'ground');
+        assert.notEqual(engine.getItem(itemId).worldPosition, null);
         const stopped = engine.snapshot();
 
         assert.equal(stopped.action, 0, 'the ABI1 primitive finally still hard-cancels on typed refusal');
@@ -2226,10 +2235,12 @@ test('held SDK and source mutations share vetoes and attributed actual postcommi
     const engine = await newEngine();
 
     engine.registerItemDefinition(footwear, { owner: 'base' });
-    engine.importItems([{
-        id: 0xFF_FF_FF_FF, fullType: footwear.fullType, location: 'inventory',
-        x: 5, y: 5, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 10, actualWeight: 10,
-    }]);
+    engine.importInventoryGraph({
+        ...engine.exportInventoryGraph(), items: [{
+            id: 0xFF_FF_FF_FF, fullType: footwear.fullType, definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+            worldPosition: null, favorite: false, consumed: false, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 10, actualWeight: 10,
+        }], wornOrder: undefined,
+    });
     const host = createModHost(engine);
 
     t.after(() => host.dispose());
@@ -2277,10 +2288,12 @@ test('throwing private equipment observer cannot veto committed host notificatio
     const engine = await newEngine();
 
     engine.registerItemDefinition(footwear, { owner: 'base' });
-    engine.importItems([1, 2].map((id) => ({
-        id, fullType: footwear.fullType, location: 'inventory',
-        x: 5, y: 5, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
-    })));
+    engine.importInventoryGraph({
+        ...engine.exportInventoryGraph(), items: [1, 2].map((id) => ({
+            id, fullType: footwear.fullType, definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+            worldPosition: null, favorite: false, consumed: false, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
+        })), wornOrder: undefined,
+    });
     const nativeObserverFailure = new Error('private observer failed');
     const privateErrors = [];
 
@@ -2321,10 +2334,12 @@ test('source equipment owner unload refuses hook-rewritten native mutations befo
     const engine = await newEngine();
 
     engine.registerItemDefinition(footwear, { owner: 'base' });
-    engine.importItems([{
-        id: 1, fullType: footwear.fullType, location: 'inventory',
-        x: 5, y: 5, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
-    }]);
+    engine.importInventoryGraph({
+        ...engine.exportInventoryGraph(), items: [{
+            id: 1, fullType: footwear.fullType, definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+            worldPosition: null, favorite: false, consumed: false, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
+        }], wornOrder: undefined,
+    });
     engine.setHandItem('primary', 1);
     const host = createModHost(engine);
 
@@ -2346,7 +2361,7 @@ export function activate() {}`));
     assert.throws(() => host.sourceSetHandItem('primary', null, 'fx-held-rewrite'),
         (error) => error.modId === 'fx-held-rewrite' && error.stage === 'api');
     assert.deepEqual(engine.getHandItems(), { primary: 1, secondary: null });
-    assert.equal(engine.items()[0].location, 'inventory');
+    assert.equal(engine.items()[0].ownerContainerId, 1);
     assert.deepEqual(events, []);
     assert.equal(host.diagnostics().counts.committed, 0);
 });
@@ -2355,10 +2370,12 @@ test('source equipment remains committed when its owner is unloaded by a postcom
     const engine = await newEngine();
 
     engine.registerItemDefinition(footwear, { owner: 'base' });
-    engine.importItems([{
-        id: 1, fullType: footwear.fullType, location: 'inventory',
-        x: 5, y: 5, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
-    }]);
+    engine.importInventoryGraph({
+        ...engine.exportInventoryGraph(), items: [{
+            id: 1, fullType: footwear.fullType, definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+            worldPosition: null, favorite: false, consumed: false, condition: footwear.conditionMax, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
+        }], wornOrder: undefined,
+    });
     const host = createModHost(engine);
 
     t.after(() => host.dispose());
@@ -2374,4 +2391,230 @@ export function activate() {}`));
     assert.equal(host.diagnostics().counts.committed, 1);
     assert.equal(host.diagnostics().mods.length, 0);
     assert.equal(host.diagnostics().errors.length, 0);
+});
+
+test('worn SDK and original numeric operations share vetoes and replacements without changing return contracts', async (t) => {
+    const engine = await newEngine();
+    const equipment = engine.equipmentOperation;
+    const shoes = equipment('lookup', 'Shoes');
+    const group = equipment('groupGet', 'Human', true);
+
+    equipment('locationAdd', group, shoes);
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    engine.importInventoryGraph({
+        ...engine.exportInventoryGraph(), items: [1, 0xFF_FF_FF_FF].map((id) => ({
+            id, fullType: footwear.fullType, definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+            worldPosition: null, favorite: false, consumed: false, condition: footwear.conditionMax, count: 1, bodyLocation: null,
+        })), wornOrder: undefined,
+    });
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-worn')}
+export function activate(api) {
+  fx.api = api;
+  assert.throws(() => api.equipment.operation('wornSet', ${shoes}, 1), /synchronous activate/);
+  assert.throws(() => api.items.setWornItem('Shoes', 1), /synchronous activate/);
+}`));
+    const api = fx.api;
+    const seen = [];
+    const unveto = host.api.hooks.beforeAction((action) => {
+        seen.push(action);
+
+        return false;
+    });
+
+    assert.equal(api.equipment.operation('wornSet', shoes, 1), 0);
+    assert.equal(api.items.setWornItem('Shoes', 1), undefined);
+    assert.equal(host.coreApi.equipment.operation('wornSet', shoes, 1), 0);
+    assert.deepEqual(api.items.wornItems(), []);
+    assert.deepEqual(seen, [
+        { type: 'wornSet', locationToken: shoes, id: 1 },
+        { type: 'wornSet', locationToken: shoes, id: 1 },
+        { type: 'wornSet', locationToken: shoes, id: 1 },
+    ]);
+    unveto();
+    const unrewrite = host.api.hooks.beforeAction((action) => {
+        if (action.type === 'wornSet') {
+            return { ...action, id: 0xFF_FF_FF_FF };
+        }
+
+        return undefined;
+    });
+
+    assert.equal(host.coreApi.equipment.operation('wornSet', shoes, 1), 0);
+    assert.deepEqual(api.items.wornItems(), [{ id: 0xFF_FF_FF_FF, bodyLocation: 'base:shoes' }]);
+    unrewrite();
+    const block = host.api.hooks.beforeAction(() => false);
+
+    assert.equal(api.equipment.operation('wornRemove', 0xFF_FF_FF_FF), 0);
+    assert.equal(api.equipment.operation('wornClear'), 0);
+    assert.equal(api.equipment.operation('wornGroupSet', group), 0);
+    assert.deepEqual(api.items.wornItems(), [{ id: 0xFF_FF_FF_FF, bodyLocation: 'base:shoes' }]);
+    block();
+    assert.equal(api.equipment.operation('wornRemove', 0xFF_FF_FF_FF), 0);
+    assert.deepEqual(api.items.wornItems(), []);
+    assert.equal(api.equipment.operation('wornRemove', 0xFF_FF_FF_FF), 0, 'absent remove remains a native no-op');
+    assert.equal(api.equipment.operation('wornGroupSet', group), 0);
+    assert.equal(api.items.setWornItem('Shoes', 1), undefined);
+    assert.equal(api.equipment.operation('wornClear'), 0);
+    assert.deepEqual(api.items.wornItems(), []);
+    let registryCalls = 0;
+    const registryVeto = host.api.hooks.beforeAction(() => {
+        registryCalls += 1;
+
+        return false;
+    });
+
+    assert.equal(api.equipment.operation('register', 'Fixture:WornLocation') > 0, true);
+    assert.equal(registryCalls, 0, 'registry writes retain their original direct semantics');
+    registryVeto();
+});
+
+test('malformed worn ingress never runs hooks and hook-time worn submissions cannot reenter native mutation', async (t) => {
+    const engine = await newEngine();
+    const shoes = engine.equipmentOperation('lookup', 'Shoes');
+    const group = engine.equipmentOperation('groupGet', 'Human', true);
+
+    engine.equipmentOperation('locationAdd', group, shoes);
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    engine.importInventoryGraph({
+        ...engine.exportInventoryGraph(), items: [{
+            id: 1, fullType: footwear.fullType, definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+            worldPosition: null, favorite: false, consumed: false, condition: footwear.conditionMax, count: 1, bodyLocation: null,
+        }], wornOrder: undefined,
+    });
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-worn-ingress')}
+export function activate(api) { fx.api = api; }`));
+    const api = fx.api;
+    let calls = 0;
+    const unhook = host.api.hooks.beforeAction(() => {
+        calls += 1;
+    });
+    const invalid = [
+        ['wornSet', shoes], ['wornSet', shoes, 1, 2], ['wornSet', shoes, undefined],
+        ['wornSet', -1, 1], ['wornSet', shoes, 0x1_00_00_00_00], ['wornSet', shoes, '1'],
+        ['wornRemove'], ['wornRemove', 1.5], ['wornClear', 1],
+        ['wornGroupSet'], ['wornGroupSet', Number.NaN],
+        [new Object('wornClear')],
+    ];
+
+    for (const args of invalid) {
+        assert.throws(() => api.equipment.operation(...args), (error) => error.name === 'ModError' && error.modId === 'fx-worn-ingress');
+    }
+
+    assert.throws(() => api.items.setWornItem('Shoes', -1), (error) => error.modId === 'fx-worn-ingress');
+    assert.throws(() => api.items.setWornItem('MissingLocation', 1), (error) => error.modId === 'fx-worn-ingress');
+    assert.equal(calls, 0);
+    assert.deepEqual(api.items.wornItems(), []);
+    unhook();
+    const unreenter = host.api.hooks.beforeAction(() => {
+        assert.throws(() => api.equipment.operation('wornSet', shoes, 1), /while beforeAction hooks are resolving/);
+        assert.throws(() => api.equipment.operation('wornClear'), /while beforeAction hooks are resolving/);
+        assert.throws(() => api.equipment.operation('wornRemove', 1), /while beforeAction hooks are resolving/);
+        assert.throws(() => api.equipment.operation('wornGroupSet', group), /while beforeAction hooks are resolving/);
+        assert.throws(() => api.items.setWornItem('Shoes', 1), /while beforeAction hooks are resolving/);
+
+        return false;
+    });
+
+    assert.equal(api.equipment.operation('wornSet', shoes, 1), 0);
+    assert.deepEqual(api.items.wornItems(), []);
+    unreenter();
+    api.items.setWornItem('Shoes', 1);
+    const before = api.items.wornItems();
+
+    assert.throws(() => api.equipment.operation('wornSet', 0xFF_FF_FF_FF, 1), (error) => error.modId === 'fx-worn-ingress' && error.cause instanceof RangeError);
+    assert.throws(() => api.equipment.operation('wornGroupSet', group), (error) => error.modId === 'fx-worn-ingress' && error.cause instanceof RangeError);
+    assert.deepEqual(api.items.wornItems(), before, 'native rejection is atomic');
+});
+
+test('worn owner unload refuses hook replacements and leaves captured equipment handles inert', async (t) => {
+    const engine = await newEngine();
+    const shoes = engine.equipmentOperation('lookup', 'Shoes');
+    const group = engine.equipmentOperation('groupGet', 'Human', true);
+
+    engine.equipmentOperation('locationAdd', group, shoes);
+    engine.registerItemDefinition(footwear, { owner: 'base' });
+    engine.importInventoryGraph({
+        ...engine.exportInventoryGraph(), items: [{
+            id: 1, fullType: footwear.fullType, definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+            worldPosition: null, favorite: false, consumed: false, condition: footwear.conditionMax, count: 1, bodyLocation: null,
+        }], wornOrder: undefined,
+    });
+    const host = createModHost(engine);
+
+    t.after(() => host.dispose());
+    await host.load(moduleUrl(`${manifestSource('fx-worn-owner')}
+export function activate(api) { fx.api = api; }`));
+    const api = fx.api;
+
+    host.api.hooks.beforeAction((action) => {
+        if (action.type === 'wornSet') {
+            host.unload('fx-worn-owner');
+
+            return { type: 'drop', id: 1, x: 5, y: 5 };
+        }
+    });
+    assert.throws(() => api.equipment.operation('wornSet', shoes, 1),
+        (error) => error.modId === 'fx-worn-owner' && error.stage === 'api');
+    assert.equal(engine.getItem(1).ownerContainerId, 1);
+    assert.deepEqual(engine.wornItems(), []);
+    assert.throws(() => api.equipment.operation('wornClear'), /inert/);
+    assert.throws(() => api.equipment.operation('register', 'InactiveLocation'), /inert/);
+    assert.throws(() => api.items.setWornItem('Shoes', 1), /inert/);
+    assert.throws(() => api.items.wornItems(), /inert/);
+    assert.equal(engine.equipmentOperation('lookup', 'InactiveLocation'), null);
+});
+
+test('SDK container transfer applies item permissions and attributed acceptance hooks before native completion', async () => {
+    const engine = await newEngine();
+    const host = createModHost(engine);
+
+    await host.load(moduleUrl(`${manifestSource('fx-graph')}
+export function activate(api) {
+  fx.api = api;
+  api.items.definitions.register({...${JSON.stringify(footwear)}, fullType:'Fixture.Bag', bodyLocation:null,
+    type:'Container', capacity:20, weightReduction:50, maxItemSize:10});
+  api.items.definitions.register(${JSON.stringify(footwear)});
+}`));
+    const api = fx.api;
+    const bag = api.items.spawn({ fullType: 'Fixture.Bag', x: 5, y: 5 }).snapshot.id;
+    const item = api.items.spawn({ fullType: footwear.fullType, x: 5, y: 5 }).snapshot.id;
+    const source = api.items.get(item).ownerContainerId;
+    const destination = api.items.get(bag).internalContainerId;
+
+    assert.equal(api.items.playerInventoryId(), 1);
+    assert.equal(api.items.getContainer(destination).kind, 'bag');
+    assert.deepEqual(api.items.containerItems(destination), []);
+    const unveto = host.api.hooks.beforeAction((action) => action.type === 'transferItem' ? false : undefined);
+    const veto = api.items.transferItem({ id: item, sourceContainerId: source, destinationContainerId: destination });
+
+    assert.equal(veto.accepted, false);
+    assert.equal(veto.submittedBy, 'fx-graph');
+    assert.equal(api.items.get(item).ownerContainerId, source);
+    unveto();
+    const accepted = api.items.transferItem({ id: item, sourceContainerId: source, destinationContainerId: destination });
+
+    assert.equal(accepted.accepted, true);
+    assert.equal(accepted.submittedBy, 'fx-graph');
+    assert.equal(accepted.state.current.sourceContainerId, source);
+    assert.equal(accepted.state.current.destinationContainerId, destination);
+    assert.deepEqual(accepted.state.current.groups[0].sourceContainerIds, [source]);
+    assert.ok(Object.isFrozen(accepted.state.current.groups[0].sourceContainerIds));
+    assert.equal(api.items.get(item).ownerContainerId, source, 'queue acceptance is not completion');
+    completeActions(engine);
+    assert.deepEqual(api.items.containerItems(destination).map(({ id }) => id), [item]);
+    assert.equal(api.items.itemWeights(bag).contentsWeight, 1);
+    assert.equal(api.items.containerState(destination, 1).contentsWeight, 1);
+    assert.throws(() => api.items.transferItem({
+        id: item, sourceContainerId: destination,
+        destinationContainerId: 0x1_00_00_00_00,
+    }), { modId: 'fx-graph', stage: 'action' });
+    host.unload('fx-graph');
+    assert.throws(() => api.items.containers(), { modId: 'fx-graph' });
+    host.dispose();
 });

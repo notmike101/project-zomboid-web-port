@@ -143,6 +143,7 @@ struct Square {
     interaction_properties: u16,
     reach_walls: u8,
     reach_known: bool,
+    floor: Option<Floor>,
 }
 impl Square {
     fn solid(self) -> bool {
@@ -151,6 +152,14 @@ impl Square {
     fn vehicle(self) -> bool {
         self.flags & 16 != 0
     }
+}
+#[derive(Clone, Copy, PartialEq)]
+struct Floor {
+    flags: u32,
+    stairs: u32,
+    direction: u32,
+    min: f32,
+    max: f32,
 }
 struct Doors {
     rows: Vec<Door>,
@@ -586,6 +595,15 @@ thread_local! {
     static STAGING: RefCell<Option<(Doors, bool)>> = const { RefCell::new(None) };
     static RESTORE: RefCell<Option<DoorRestore>> = const { RefCell::new(None) };
 }
+pub(super) fn rng_state() -> u64 {
+    DOORS.with(|state| state.borrow().rng)
+}
+pub(super) fn restore_rng(state: u64) {
+    DOORS.with(|doors| doors.borrow_mut().rng = state);
+}
+pub(super) fn random(bound: u64) -> u64 {
+    DOORS.with(|state| state.borrow_mut().random(bound))
+}
 fn integer(value: f64, min: f64, max: f64) -> bool {
     value.is_finite() && value.fract() == 0.0 && (min..=max).contains(&value)
 }
@@ -745,6 +763,7 @@ pub extern "C" fn door_square_stage() -> i32 {
                 interaction_properties: w[10] as u16,
                 reach_walls: 0,
                 reach_known: false,
+                floor: None,
             },
         );
         OK
@@ -768,6 +787,71 @@ pub extern "C" fn door_square_reach_stage(x: i32, y: i32, z: i32, mask: u32) -> 
         }
         square.reach_walls = mask as u8;
         square.reach_known = true;
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn door_square_floor_stage(
+    x: i32,
+    y: i32,
+    z: i32,
+    flags: u32,
+    stairs: u32,
+    direction: u32,
+    min: f64,
+    max: f64,
+) -> i32 {
+    if flags & !31 != 0
+        || stairs & !63 != 0
+        || direction > 9
+        || !min.is_finite()
+        || !max.is_finite()
+        || !(0.0..=1.0).contains(&min)
+        || !(0.0..=1.0).contains(&max)
+    {
+        return BAD_FORMAT;
+    }
+    STAGING.with(|stage| {
+        let mut stage = stage.borrow_mut();
+        let Some((state, _)) = stage.as_mut() else {
+            return BAD_FORMAT;
+        };
+        let Some(square) = state.squares.get_mut(&(x, y, z)) else {
+            return BAD_FORMAT;
+        };
+        if square.floor.is_some() {
+            return BAD_FORMAT;
+        }
+        square.floor = Some(Floor {
+            flags,
+            stairs,
+            direction,
+            min: min as f32,
+            max: max as f32,
+        });
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn source_square_floor_read(x: i32, y: i32, z: i32) -> i32 {
+    DOORS.with(|state| {
+        let state = state.borrow();
+        let Some(floor) = state
+            .squares
+            .get(&(x, y, z))
+            .and_then(|square| square.floor)
+        else {
+            return OUT_OF_RANGE;
+        };
+        let sprite = state.sprite_facts.get(&(x, y, z)).copied().unwrap_or(0);
+        let flags = floor.flags | ((sprite & 24) >> 2) | ((sprite & 64) >> 6);
+        super::actions::row(&[
+            flags as f64,
+            floor.stairs as f64,
+            floor.direction as f64,
+            floor.min as f64,
+            floor.max as f64,
+        ]);
         OK
     })
 }
@@ -1399,6 +1483,46 @@ mod tests {
             result
         }
     }
+    #[test]
+    fn floor_facts_publish_atomically_and_preserve_source_float_heights() {
+        reset();
+        assert_eq!(source_square_floor_read(0, 0, 0), OUT_OF_RANGE);
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(stage_square((0, 0, 0), 0.0), OK);
+        assert_eq!(
+            door_square_floor_stage(0, 0, 0, 32, 0, 0, 0.0, 0.0),
+            BAD_FORMAT
+        );
+        assert_eq!(
+            door_square_floor_stage(0, 0, 0, 0, 64, 0, 0.0, 0.0),
+            BAD_FORMAT
+        );
+        assert_eq!(
+            door_square_floor_stage(0, 0, 0, 0, 0, 10, 0.0, 0.0),
+            BAD_FORMAT
+        );
+        assert_eq!(
+            door_square_floor_stage(0, 0, 0, 0, 0, 0, f64::NAN, 0.0),
+            BAD_FORMAT
+        );
+        assert_eq!(
+            door_square_floor_stage(1, 0, 0, 0, 0, 0, 0.0, 0.0),
+            BAD_FORMAT
+        );
+        assert_eq!(door_square_floor_stage(0, 0, 0, 25, 33, 8, 0.13, 0.97), OK);
+        assert_eq!(
+            door_square_floor_stage(0, 0, 0, 0, 0, 0, 0.0, 0.0),
+            BAD_FORMAT
+        );
+        assert_eq!(source_square_floor_read(0, 0, 0), OUT_OF_RANGE);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_square_floor_read(0, 0, 0), OK);
+        let values = unsafe {
+            std::slice::from_raw_parts(super::super::actions::queue_scratch_ptr().cast::<f64>(), 5)
+        };
+        assert_eq!(values, &[25.0, 33.0, 8.0, 0.13_f32 as f64, 0.97_f32 as f64]);
+        assert_eq!(source_square_floor_read(1, 0, 0), OUT_OF_RANGE);
+    }
 
     fn import_squares(squares: &[(SquareKey, u16)]) {
         reset();
@@ -1552,13 +1676,19 @@ mod tests {
                 OK
             );
             assert_eq!(crate::item_spawn(0, 1.5, 0.5, 1, 100), OK);
+            assert_eq!(crate::item_read_id(crate::item_last_id()), OK);
+            let owner = SCRATCH.with(|scratch| scratch.borrow()[2]);
             assert_eq!(
                 crate::actions::queue_request_pickup(crate::item_last_id()),
                 pickup
             );
             assert_eq!(crate::actions::queue_length(), 0);
-            assert_eq!(crate::item_read(0), OK);
-            assert_eq!(SCRATCH.with(|scratch| scratch.borrow()[2]), 0.0);
+            assert_eq!(crate::item_read_id(crate::item_last_id()), OK);
+            SCRATCH.with(|scratch| {
+                let item = scratch.borrow();
+                assert_eq!(item[2], owner);
+                assert_eq!(item[11], 1.0);
+            });
         }
     }
     #[test]
@@ -1910,6 +2040,49 @@ mod tests {
         assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 1);
         assert_eq!(commit_toggle(1), OK);
         assert_eq!(blocked((0, 0, 0), (-1, 0, 0)), 1);
+    }
+
+    #[test]
+    fn source_floor_queries_follow_current_door_sprites_without_changing_raw_windows() {
+        reset();
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        for key in [(0, 0, 0), (0, -1, 0), (-1, 0, 0)] {
+            assert_eq!(stage_square(key, 0.0), OK);
+        }
+        assert_eq!(door_square_floor_stage(0, 0, 0, 24, 0, 0, 0.0, 0.0), OK);
+        put(&[
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            NORTH as f64,
+            -1.0,
+            -1.0,
+            -1.0,
+            0.0,
+            0.0,
+            0.0,
+            88.0,
+        ]);
+        assert_eq!(door_import_stage(), OK);
+        assert_eq!(door_import_reach_properties(1, 0, 0, 0, 0), OK);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_square_floor_read(0, 0, 0), OK);
+        assert_eq!(
+            unsafe { *super::super::actions::queue_scratch_ptr().cast::<f64>() },
+            31.0
+        );
+        ENGINE.with(|engine| {
+            let mut engine = engine.borrow_mut();
+            engine.x = 0.5;
+            engine.y = 0.5;
+        });
+        assert_eq!(commit_toggle(1), OK);
+        assert_eq!(source_square_floor_read(0, 0, 0), OK);
+        assert_eq!(
+            unsafe { *super::super::actions::queue_scratch_ptr().cast::<f64>() },
+            24.0
+        );
     }
 
     #[test]

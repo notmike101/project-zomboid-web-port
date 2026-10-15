@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 import { createEngine } from '../src/engine.js';
+import { parseItemDefinitions } from '../src/item-definitions.js';
 import { assertDoorRefused, completeActions, completeQueueRequest, importPickupSquares } from './queue-test-helpers.js';
 
 /**
@@ -44,8 +45,16 @@ const moduleBytes = await readModuleBytes();
  *
  * @returns {Promise<import('../src/engine.js').Engine>} Fresh engine handle.
  */
-function engine() {
-    return createEngine(moduleBytes);
+async function engine() {
+    const subject = await createEngine(moduleBytes);
+    const e = subject.equipmentOperation;
+    const group = e('groupGet', 'Human', true);
+
+    for (const name of ['Shoes', 'Hands']) {
+        e('locationAdd', group, e('lookup', name));
+    }
+
+    return subject;
 }
 
 /**
@@ -606,7 +615,7 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.freezeItemDefinitions(),
         () => subject.items(),
         () => subject.getItem(1),
-        () => subject.importItems([]),
+        () => subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [], wornOrder: undefined }),
         () => subject.inventoryState(),
         () => subject.wornItem('base:shoes'),
         () => subject.isWearingAwkwardGloves(),
@@ -883,7 +892,15 @@ test('invalid state envelopes and semantic refusals leave every state word untou
 function shoe(fullType = 'Base.Shoe', extra = {}) {
     return {
         fullType, bodyLocation: 'base:shoes', conditionMax: 30, stackLimit: 1,
+        canBeEquipped: null,
         removeOnBroken: false, conditionLowerChanceOneIn: 20, weight: 1, tags: [],
+        isBag: extra.type?.toLowerCase().replace(/^base:/u, '') === 'container',
+        capacity: 0, weightReduction: 0, maxItemSize: 0,
+        containerType: extra.type?.toLowerCase().replace(/^base:/u, '') === 'container' ? 'container' : null,
+        category: extra.type?.toLowerCase().replace(/^base:/u, '') === 'container' ? 'container' : 'item',
+        sourceCategory: extra.type?.toLowerCase().replace(/^base:/u, '') === 'container' ? 'Container' : 'Item',
+        onlyAcceptCategory: null, acceptItemFunction: null,
+        lightWhenAttached: false, fakeEquipped: false, unsupportedSubtype: false,
         source: { file: 'clothing.txt', model: 'Boots_Ground' }, ...extra,
     };
 }
@@ -898,14 +915,14 @@ test('native direct item reads and square collections retain live ownership and 
     const records = subject.items();
 
     records[0].id = 0xFF_FF_FF_FF;
-    subject.importItems(records);
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: records, wornOrder: undefined });
     const id = records[0].id;
     const read = subject.getItem(id);
 
     assert.equal(subject.getItem(spawned), null);
     assert.deepEqual(read, records[0]);
-    read.x = 999;
-    assert.equal(subject.getItem(id).x, -1.5);
+    read.worldPosition.x = 999;
+    assert.equal(subject.getItem(id).worldPosition.x, -1.5);
     assert.equal(subject.sourceActions.worldItemCount(-2, 5, 0), 1);
     assert.equal(subject.sourceActions.worldItemGet(-2, 5, 0, 0), id);
     assert.equal(subject.sourceActions.worldItemCount(-1, 5, 0), 0);
@@ -921,18 +938,18 @@ test('native direct item reads and square collections retain live ownership and 
         assert.throws(() => subject.getItem(invalid), TypeError);
     }
 
-    subject.importItems([{ ...records[0], location: 'inventory' }]);
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [{ ...records[0], ownerContainerId: 1, worldPosition: null }], wornOrder: undefined });
     subject.command({ type: 'drop', id, x: 6.5, y: 5.5 });
     assert.equal(subject.sourceActions.worldItemCount(-2, 5, 0), 0);
     assert.equal(subject.sourceActions.worldItemGet(6, 5, 0, 0), id);
-    assert.equal(subject.getItem(id).x, 6.5);
-    subject.importItems([{ ...records[0], location: 'inventory' }]);
+    assert.equal(subject.getItem(id).worldPosition.x, 6.5);
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [{ ...records[0], ownerContainerId: 1, worldPosition: null }], wornOrder: undefined });
     assert.equal(subject.sourceActions.worldItemCount(6, 5, 0), 0);
-    assert.equal(subject.getItem(id).location, 'inventory');
-    subject.importItems([]);
+    assert.equal(subject.getItem(id).ownerContainerId, 1);
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [], wornOrder: undefined });
     assert.equal(subject.getItem(id), null);
-    subject.importItems(records);
-    assert.equal(subject.getItem(id).location, 'ground');
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: records, wornOrder: undefined });
+    assert.notEqual(subject.getItem(id).worldPosition, null);
     subject.reset();
     assert.equal(subject.getItem(id), null);
     assert.equal(subject.sourceActions.worldItemCount(-2, 5, 0), 0);
@@ -1013,7 +1030,7 @@ test('native pickup rounds current f32 weight to nearest hundredth rather than c
         if (accepted) {
             subject.command({ type: 'pickup', id: small });
             completeActions(subject);
-            assert.equal(subject.items()[1].location, 'inventory');
+            assert.equal(subject.items()[1].ownerContainerId, 1);
         } else {
             const before = subject.items();
 
@@ -1072,7 +1089,7 @@ test('native live base and actual weights remain independent across definition o
     const orderedRestore = await engine();
 
     orderedRestore.registerItemDefinition(shoe('Base.Ordered', { weight: 0 }), { owner: 'base' });
-    orderedRestore.importItems(ordered.items());
+    orderedRestore.importInventoryGraph(ordered.exportInventoryGraph());
     orderedRestore.loadState(ordered.saveState());
     assert.equal(orderedRestore.inventoryState().capacityWeight, 16_777_218,
         'save item order must preserve the source float summation order');
@@ -1112,7 +1129,7 @@ test('native item weight restore and definition rollback refuse malformed overfl
     const restored = await engine();
 
     restored.registerItemDefinition(subject.itemDefinitions()[0], { owner: 'base' });
-    restored.importItems(records);
+    restored.importInventoryGraph(subject.exportInventoryGraph());
     restored.loadState(subject.saveState());
     assert.deepEqual(restored.items(), records);
     assert.equal(restored.isWearingAwkwardGloves(), true);
@@ -1126,7 +1143,7 @@ test('native item weight restore and definition rollback refuse malformed overfl
 
         for (const field of ['weight', 'actualWeight']) {
             assert.throws(() => restored.command({ type: field === 'weight' ? 'setWeight' : 'setActualWeight', id, [field]: value }));
-            assert.throws(() => restored.importItems([records[0], { ...records[0], id: 2, [field]: value }]));
+            assert.throws(() => restored.importInventoryGraph({ ...restored.exportInventoryGraph(), items: [records[0], { ...records[0], id: 2, [field]: value }], wornOrder: undefined }));
             assert.deepEqual(restored.items(), records);
             assert.deepEqual(restored.saveState(), actor);
         }
@@ -1136,7 +1153,7 @@ test('native item weight restore and definition rollback refuse malformed overfl
 
     delete legacy.weight;
     delete legacy.actualWeight;
-    restored.importItems([legacy]);
+    restored.importInventoryGraph({ ...restored.exportInventoryGraph(), items: [legacy], wornOrder: undefined });
     assert.equal(restored.items()[0].weight, 1.25);
     assert.equal(restored.items()[0].actualWeight, 1.25);
     const defaultDefinition = shoe('Base.Default');
@@ -1152,8 +1169,8 @@ test('native item weight restore and definition rollback refuse malformed overfl
     assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1.25, 0), 0);
     assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
     assert.equal(api.item_import_begin(), 0);
-    assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 30, 1, 0, 2.5, 0.5), 0);
-    assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 30, 1, 0, 1, Number.MAX_VALUE), 0);
+    assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 30, 1, 0, 2.5, 0.5, 0, 0), 0);
+    assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 30, 1, 0, 1, Number.MAX_VALUE, 0, 0), 0);
     assert.notEqual(api.item_import_commit(), 0);
     assert.equal(api.item_count(), 1);
     assert.equal(api.item_read(0), 0);
@@ -1170,8 +1187,8 @@ test('native item weight restore and definition rollback refuse malformed overfl
         assert.equal(live.getFloat64(64, true), 1.25);
         assert.equal(live.getFloat64(72, true), 1.25);
         assert.equal(api.item_import_begin(), 0);
-        assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 30, 1, 0, 2.5, 0.5), 0);
-        assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 30, 1, 0, 1, value), 0);
+        assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 30, 1, 0, 2.5, 0.5, 0, 0), 0);
+        assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 30, 1, 0, 1, value, 0, 0), 0);
         assert.notEqual(api.item_import_commit(), 0);
         assert.equal(api.item_count(), 1);
         assert.equal(api.item_read(0), 0);
@@ -1237,8 +1254,8 @@ test('equipment replacement and broken-item policy preserve stable IDs and movem
     assert.deepEqual(subject.saveState().values.slice(0, 10), before);
     subject.command({ type: 'unequip', id: first });
     subject.command({ type: 'drop', id: first, x: 6, y: 5 });
-    assert.equal(subject.items()[0].location, 'ground');
-    assert.equal(subject.items()[0].x, 6);
+    assert.notEqual(subject.items()[0].worldPosition, null);
+    assert.equal(subject.items()[0].worldPosition.x, 6);
     assert.equal(subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id, second + 1);
     subject.step(STEP);
     assert.equal(subject.snapshot().action, MOVING);
@@ -1316,6 +1333,7 @@ test('native awkward-glove ingress rejects nonboolean flags without changing def
     const { instance } = await WebAssembly.instantiate(moduleBytes, {});
     const api = instance.exports;
 
+    assert.equal(api.body_group_location_add(api.worn_group_get(), 1), 0);
     assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1, 1), 0);
     assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
     const id = api.item_last_id();
@@ -1344,11 +1362,11 @@ test('explicit-ID import is atomic, detached and advances the exhausted sentinel
 
     subject.registerItemDefinition(shoe(), { owner: 'base' });
     const record = {
-        id: 40, fullType: 'Base.Shoe', location: 'inventory',
-        x: 5, y: 5, count: 1, condition: 12, bodyLocation: 'base:shoes',
+        id: 40, fullType: 'Base.Shoe', definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+        worldPosition: null, favorite: false, consumed: false, count: 1, condition: 12, bodyLocation: 'base:shoes',
     };
 
-    subject.importItems([record]);
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [record], wornOrder: undefined });
     const before = subject.items();
     const state = subject.saveState();
 
@@ -1356,11 +1374,11 @@ test('explicit-ID import is atomic, detached and advances the exhausted sentinel
         { ...record, id: 41, condition: 31 },
         { ...record, id: 41, fullType: 'Missing.Shoe' },
         { ...record, id: 41, bodyLocation: 'other:slot' },
-        { ...record, id: 41, x: Infinity },
+        { ...record, id: 41, worldPosition: { x: Infinity, y: 5, z: 0 } },
         { ...record, id: 41, count: 2 },
         { ...record, id: 40 },
     ]) {
-        assert.throws(() => subject.importItems([record, bad]));
+        assert.throws(() => subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [record, bad], wornOrder: undefined }));
         assert.deepEqual(subject.items(), before);
         assert.deepEqual(subject.saveState(), state);
     }
@@ -1374,10 +1392,10 @@ test('explicit-ID import is atomic, detached and advances the exhausted sentinel
     invalidCounter.values[11] = 40;
     assert.throws(() => subject.loadState(invalidCounter), RangeError);
     assert.deepEqual(subject.saveState(), state);
-    subject.importItems([{ ...record, id: 4_294_967_295 }]);
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [{ ...record, id: 4_294_967_295 }], wornOrder: undefined });
     assert.equal(subject.saveState().values[11], 4_294_967_296);
     assert.throws(() => subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }));
-    subject.importItems([]);
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [], wornOrder: undefined });
     assert.throws(() => subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }));
     assert.equal(subject.saveState().values[11], 4_294_967_296);
 });
@@ -1398,7 +1416,7 @@ test('saved counters continue stable IDs and scalar health without a legacy acto
     const restored = await engine();
 
     restored.registerItemDefinition(shoe(), { owner: 'base' });
-    restored.importItems(original.items());
+    restored.importInventoryGraph(original.exportInventoryGraph());
     restored.loadState(original.saveState());
     assert.equal(restored.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id, id + 1);
     restored.worldReset();
@@ -1444,7 +1462,7 @@ test('item boundaries refuse malformed values and pickup resolves real source ad
     subject.command({ type: 'pickup', id });
     assert.deepEqual(subject.items(), before, 'admission is not an immediate transfer');
     completeActions(subject);
-    assert.equal(subject.items()[0].location, 'inventory', 'a solid item tile still has a reachable adjacent actor square');
+    assert.equal(subject.items()[0].ownerContainerId, 1, 'a solid item tile still has a reachable adjacent actor square');
     subject.command({ type: 'drop', id, x: 7, y: 7 });
     const ground = subject.items();
 
@@ -1452,7 +1470,7 @@ test('item boundaries refuse malformed values and pickup resolves real source ad
     assert.equal(subject.actions.getState().current.kind, 'walk', 'far pickup queues genuine travel before transfer');
     assert.deepEqual(subject.items(), ground);
     completeActions(subject);
-    assert.equal(subject.items()[0].location, 'inventory');
+    assert.equal(subject.items()[0].ownerContainerId, 1);
     assert.ok(subject.snapshot().x !== 5 || subject.snapshot().y !== 5);
     subject.command({ type: 'drop', id, x: 3, y: 3 });
     importPickupSquares(subject, 5, 5, [
@@ -1472,11 +1490,12 @@ test('numeric WASM staging cannot publish a valid prefix after a later invalid r
     const { instance } = await WebAssembly.instantiate(moduleBytes, {});
     const api = instance.exports;
 
+    assert.equal(api.body_group_location_add(api.worn_group_get(), 1), 0);
     assert.equal(api.item_definition_register(0, 1, 30, 1, 1, 0, 20, 0, 1, 0), 0);
     assert.equal(api.item_spawn(0, 5, 5, 1, 30), 0);
     assert.equal(api.item_import_begin(), 0);
-    assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 20, 1, 1, 1, 1), 0);
-    assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 31, 1, 0, 1, 1), 0);
+    assert.equal(api.item_import_stage(50, 0, 1, 5, 5, 20, 1, 1, 1, 1, 0, 0), 0);
+    assert.notEqual(api.item_import_stage(51, 0, 1, 5, 5, 31, 1, 0, 1, 1, 0, 0), 0);
     assert.notEqual(api.item_import_commit(), 0);
     assert.equal(api.item_count(), 1);
     assert.equal(api.item_read(0), 0);
@@ -1498,19 +1517,23 @@ test('live references refuse incompatible overrides and unloaded world holes ref
     const subject = await engine();
 
     subject.registerItemDefinition(shoe(), { owner: 'base' });
-    subject.importItems([{
-        id: 7, fullType: 'Base.Shoe', location: 'inventory',
-        x: 5, y: 5, condition: 30, count: 1, bodyLocation: 'base:shoes',
-    }]);
+    subject.importInventoryGraph({
+        ...subject.exportInventoryGraph(), items: [{
+            id: 7, fullType: 'Base.Shoe', definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+            worldPosition: null, favorite: false, consumed: false, condition: 30, count: 1, bodyLocation: 'base:shoes',
+        }], wornOrder: undefined,
+    });
     const before = subject.itemDefinitions();
 
     subject.beginItemDefinitionRegistration('mod');
 
-    for (const extra of [{ conditionMax: 6 }, { bodyLocation: 'base:hat' }]) {
-        assert.throws(() => subject.registerItemDefinition(shoe('Base.Shoe', extra),
-            { owner: 'mod', override: true }));
-        assert.deepEqual(subject.itemDefinitions(), before);
-    }
+    assert.throws(() => subject.registerItemDefinition(shoe('Base.Shoe', { conditionMax: 6 }),
+        { owner: 'mod', override: true }));
+    assert.deepEqual(subject.itemDefinitions(), before);
+    subject.registerItemDefinition(shoe('Base.Shoe', { bodyLocation: 'base:hat' }),
+        { owner: 'mod', override: true });
+    assert.equal(subject.getItem(7).bodyLocation, 'base:shoes',
+        'preferred definition changes must not rewrite explicit actual worn membership');
 
     subject.rollbackItemDefinitionRegistration('mod');
     subject.worldImportCell(0, 0, cellBytes());
@@ -1520,7 +1543,7 @@ test('live references refuse incompatible overrides and unloaded world holes ref
     assert.throws(() => subject.command({ type: 'drop', id: 7, x: 300, y: 5 }));
     assert.deepEqual(subject.items(), itemsBefore);
     subject.command({ type: 'drop', id: 7, x: 530, y: 5 });
-    assert.equal(subject.items()[0].x, 530);
+    assert.equal(subject.items()[0].worldPosition.x, 530);
 });
 
 test('the final uint32 ID is usable once and equipment commands leave a live heading intact', async () => {
@@ -2827,14 +2850,14 @@ test('source trait and live slow motion govern queued stable-ID pickup completio
     const accepted = subject.command({ type: 'pickup', id });
 
     assert.equal(accepted.accepted, true);
-    assert.equal(subject.items().find((item) => item.id === id).location, 'ground');
+    assert.notEqual(subject.items().find((item) => item.id === id).worldPosition, null);
     assert.equal(subject.actions.getState().current.maxTime, 24, 'Dextrous halves the source 48-unit request');
 
     for (let frame = 0; frame < 30; frame += 1) {
         subject.frameStep(STEP);
     }
 
-    assert.equal(subject.items().find((item) => item.id === id).location, 'ground');
+    assert.notEqual(subject.items().find((item) => item.id === id).worldPosition, null);
     assert.ok(Math.abs(subject.actions.getState().current.currentTime - 12) < 0.000_1);
     subject.sourceTiming.set('slowHalf', false);
 
@@ -2842,7 +2865,7 @@ test('source trait and live slow motion govern queued stable-ID pickup completio
         subject.frameStep(STEP);
     }
 
-    assert.equal(subject.items().find((item) => item.id === id).location, 'inventory');
+    assert.equal(subject.items().find((item) => item.id === id).ownerContainerId, 1);
     assert.deepEqual(subject.actions.getState().pending, []);
     assert.equal(subject.actions.getState().current, null);
 });
@@ -2866,9 +2889,9 @@ test('native grouped pickup retains first duration, twenty-item boundaries, part
     assert.deepEqual(state.current.groups.map((group) => group.itemIds.length), [20, 1]);
     assert.equal(state.current.groups[0].rawTime, 48, 'later heavier item does not replace first group time');
     assert.ok(Object.isFrozen(state) && Object.isFrozen(state.current) && Object.isFrozen(state.current.groups[0].itemIds));
-    assert.equal(subject.items().filter((item) => item.location === 'inventory').length, 0);
+    assert.equal(subject.containerItems(1).length, 0);
     completeActions(subject);
-    assert.equal(subject.items().filter((item) => item.location === 'inventory').length, 21);
+    assert.equal(subject.containerItems(1).length, 21);
     assert.equal(subject.inventoryState().capacityWeight, 22);
 
     const extra = Array.from({ length: 3 }, () => subject.command({ type: 'spawnItem', fullType: 'Base.Grouped', x: 5, y: 5 }).id);
@@ -2881,8 +2904,8 @@ test('native grouped pickup retains first duration, twenty-item boundaries, part
     }
 
     completeActions(subject);
-    assert.deepEqual(extra.map((id) => subject.items().find((item) => item.id === id).location),
-        ['inventory', 'ground', 'ground'], 'source prefix stops at first invalid carry item');
+    assert.deepEqual(extra.map((id) => subject.getItem(id).worldPosition === null),
+        [true, false, false], 'source prefix stops at first invalid carry item');
 });
 
 test('native queue portable bytes resume stable IDs, live timing and progress and bad staging is atomic', async () => {
@@ -2901,7 +2924,7 @@ test('native queue portable bytes resume stable IDs, live timing and progress an
     const restored = await engine();
 
     restored.registerItemDefinition(shoe('Base.Queued'), { owner: 'base' });
-    restored.importItems(subject.items());
+    restored.importInventoryGraph(subject.exportInventoryGraph());
     restored.loadState(subject.saveState());
     restored.loadQueueState(bytes);
     assert.deepEqual(restored.actions.getState(), before);
@@ -2918,7 +2941,7 @@ test('native queue portable bytes resume stable IDs, live timing and progress an
 
     restored.actions.requestPickup(next);
     restored.actions.cancel();
-    assert.equal(restored.items().find((item) => item.id === next).location, 'ground');
+    assert.notEqual(restored.getItem(next).worldPosition, null);
     assert.deepEqual(restored.actions.getState(), { current: null, pending: [] });
 });
 
@@ -2937,7 +2960,7 @@ test('queued progress preserves source NaN bits without JSON null and explicit c
     assert.ok(Number.isNaN(subject.actions.getState().current.currentTime));
     assert.deepEqual(subject.saveQueueState(), bytes);
     subject.command({ type: 'cancel' });
-    assert.equal(subject.items()[0].location, 'ground');
+    assert.notEqual(subject.items()[0].worldPosition, null);
     assert.equal(subject.actions.getState().current, null);
     assert.throws(() => subject.sourceTiming.hasTrait('base:unknown'), /Unsupported source trait/u);
     assert.throws(() => subject.sourceTiming.set('unknown', 1), /Unsupported source timing/u);
@@ -3125,16 +3148,22 @@ test('real held item pair preserves MAX IDs, exact carry state and silent atomic
     const subject = await engine();
 
     subject.registerItemDefinition(shoe('Base.Held', { removeOnBroken: true }), { owner: 'base' });
-    subject.importItems([
-        {
-            id: 0xFF_FF_FF_FF, fullType: 'Base.Held', location: 'inventory', x: 5, y: 5,
-            condition: 10, count: 1, bodyLocation: null, weight: 10, actualWeight: 10,
-        },
-        {
-            id: 1, fullType: 'Base.Held', location: 'ground', x: 5, y: 5,
-            condition: 10, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
-        },
-    ]);
+    const floorId = subject.sourceActions.floorContainer(5, 5, 0);
+
+    subject.importInventoryGraph({
+        ...subject.exportInventoryGraph(), items: [
+            {
+                id: 0xFF_FF_FF_FF, fullType: 'Base.Held', definitionOrdinal: 0, ownerContainerId: 1,
+                internalContainerId: null, worldPosition: null, favorite: false, consumed: false,
+                condition: 10, count: 1, bodyLocation: null, weight: 10, actualWeight: 10,
+            },
+            {
+                id: 1, fullType: 'Base.Held', definitionOrdinal: 0, ownerContainerId: floorId,
+                internalContainerId: null, worldPosition: { x: 5, y: 5, z: 0 }, favorite: false, consumed: false,
+                condition: 10, count: 1, bodyLocation: null, weight: 1, actualWeight: 1,
+            },
+        ], wornOrder: undefined,
+    });
     const events = [];
     const observerErrors = [];
     const off = subject.observeHandItems((event) => events.push(event), (cause) => observerErrors.push(cause));
@@ -3170,8 +3199,9 @@ test('real held item pair preserves MAX IDs, exact carry state and silent atomic
     assert.deepEqual(subject.getHandItems(), { primary: null, secondary: null });
     const records = subject.items();
 
-    records[0].location = 'inventory';
-    subject.importItems(records);
+    records[0].ownerContainerId = 1;
+    records[0].worldPosition = null;
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: records, wornOrder: undefined });
     subject.loadHandState(saved);
     subject.command({ type: 'setCondition', id: 0xFF_FF_FF_FF, condition: 0 });
     assert.deepEqual(subject.getHandItems(), { primary: null, secondary: null });
@@ -3180,7 +3210,7 @@ test('real held item pair preserves MAX IDs, exact carry state and silent atomic
         { slot: 'primary', playerIndex: 0, itemId: null },
         { slot: 'secondary', playerIndex: 0, itemId: null },
     ]);
-    subject.importItems([records[0]]);
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [records[0]], wornOrder: undefined });
     subject.loadHandState(saved);
     subject.worldReset();
     assert.deepEqual(subject.saveHandState(), saved, 'world-only reset preserves inventory and held refs');
@@ -3193,4 +3223,452 @@ test('real held item pair preserves MAX IDs, exact carry state and silent atomic
     ]);
     off();
     assert.deepEqual(observerErrors, []);
+});
+
+test('native equipment canonicalizes without definition-created identities and imports worn order atomically', async () => {
+    const subject = await createEngine(moduleBytes);
+    const e = subject.equipmentOperation;
+    const shoes = e('lookup', 'Shoes');
+    const hands = e('lookup', 'BASE:Hands');
+    const group = e('groupGet', 'Human', true);
+
+    assert.equal(e('groupCount'), 1);
+    assert.equal(e('groupAt', 0), group);
+    assert.equal(e('groupName', group), 'Human');
+    assert.equal(e('count'), 114);
+    assert.equal(e('read', shoes, 0), 'base:shoes');
+    assert.equal(e('lookup', 'base:SHOES'), shoes);
+    assert.equal(e('canonical', 'Fixture:Path:Second'), 'fixture:path:second');
+    assert.equal(e('canonical', ' Shoes '), 'base: shoes ', 'native resource canonicalization does not trim');
+    assert.throws(() => e('canonical', 'é'.repeat(49)), /96-byte/u);
+    assert.throws(() => e('canonical', 'x'.repeat(96)), 'namespacing must report native output overflow');
+    assert.throws(() => e('register', 'Base:Custom'));
+    assert.equal(e('lookup', 'Unknown'), null);
+    assert.throws(() => subject.registerItemDefinition(shoe('Base.Unknown', { bodyLocation: 'Unknown' }), { owner: 'base' }));
+    subject.registerItemDefinition(shoe('Base.Ordered', { bodyLocation: 'Hands', canBeEquipped: 'Shoes' }), { owner: 'base' });
+    assert.equal(e('lookup', 'Unknown'), null);
+    assert.equal(e('locationCount', group), 0, 'definitions must not add group membership');
+    e('locationAdd', group, shoes);
+    e('locationAdd', group, hands);
+    e('multiSet', group, shoes, true);
+    assert.equal(e('locationCount', group), 2);
+    assert.equal(e('locationIndex', group, hands), 1);
+    assert.equal(e('multiGet', group, shoes), true);
+    e('relationSet', group, shoes, hands, 1);
+    assert.equal(e('relationGet', group, shoes, hands, 1), true);
+    assert.equal(e('relationCount', group, shoes, 1), 1);
+    assert.equal(e('relationAt', group, shoes, 1, 0), hands);
+    assert.equal(e('initialized', true), true);
+    assert.equal(e('initialized'), true);
+    const rows = [1, 0xFF_FF_FF_FF].map((id) => ({
+        id, fullType: 'Base.Ordered', definitionOrdinal: 0, ownerContainerId: 1, internalContainerId: null,
+        worldPosition: null, favorite: false, consumed: false,
+        condition: 30, count: 1, bodyLocation: 'Shoes', weight: 1, actualWeight: 1,
+    }));
+
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: rows, wornOrder: [0xFF_FF_FF_FF, 1] });
+    assert.equal(subject.itemDefinitions()[0].canBeEquipped, 'base:shoes');
+    assert.equal(subject.wornItem('BASE:Shoes').id, 0xFF_FF_FF_FF);
+    assert.deepEqual(subject.wornItems(), [
+        { id: 0xFF_FF_FF_FF, bodyLocation: 'base:shoes' }, { id: 1, bodyLocation: 'base:shoes' },
+    ]);
+    assert.throws(() => subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: rows, wornOrder: [1, 1] }));
+    assert.deepEqual(subject.wornItems().map(({ id }) => id), [0xFF_FF_FF_FF, 1]);
+    assert.throws(() => subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: rows, wornOrder: [1] }));
+    assert.deepEqual(subject.items().map(({ id }) => id), [1, 0xFF_FF_FF_FF]);
+    subject.importInventoryGraph({
+        ...subject.exportInventoryGraph(), items: [
+            { ...rows[0], bodyLocation: 'Hands' }, rows[1],
+        ], wornOrder: [1, 0xFF_FF_FF_FF],
+    });
+    assert.deepEqual(subject.wornItems(), [
+        { id: 1, bodyLocation: 'base:hands' }, { id: 0xFF_FF_FF_FF, bodyLocation: 'base:shoes' },
+    ], 'explicit snapshot order is structural state, not a replay against current render indices');
+    e('multiSet', group, shoes, false);
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: rows, wornOrder: [0xFF_FF_FF_FF, 1] });
+    assert.deepEqual(subject.wornItems().map(({ id }) => id), [0xFF_FF_FF_FF, 1],
+        'a later multi-item rule change does not invalidate captured coexistence');
+    assert.throws(() => subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: rows, wornOrder: undefined }), 'legacy inferred import still applies current group multiplicity');
+    assert.deepEqual(subject.wornItems().map(({ id }) => id), [0xFF_FF_FF_FF, 1]);
+});
+
+test('ordered native graph retains nested identities, direct membership and allocator across atomic restore', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Fixture.Bag', {
+        bodyLocation: null, type: 'Container', capacity: 20, weightReduction: 50,
+        maxItemSize: 10, containerType: 'bag', weight: 1,
+    }), { owner: 'fixture' });
+    subject.registerItemDefinition(shoe('Fixture.Load', { bodyLocation: null, weight: 2 }), { owner: 'fixture' });
+    const bagIds = [0, 1, 2].map(() => subject.command({ type: 'spawnItem', fullType: 'Fixture.Bag', x: 5, y: 5 }).id);
+    const load = subject.command({ type: 'spawnItem', fullType: 'Fixture.Load', x: 5, y: 5 }).id;
+    const interiors = bagIds.map((id) => subject.getItem(id).internalContainerId);
+    const graph = subject.exportInventoryGraph();
+
+    for (const [index, item] of graph.items.entries()) {
+        item.ownerContainerId = index === 0 ? 1 : interiors[index - 1];
+        item.worldPosition = null;
+    }
+
+    subject.importInventoryGraph(graph);
+    assert.deepEqual(subject.containerItems(1).map(({ id }) => id), [bagIds[0]]);
+    assert.deepEqual(subject.containerItems(interiors[2]).map(({ id }) => id), [load]);
+    assert.equal(subject.sourceActions.containerContains(1, load, false), false);
+    assert.equal(subject.sourceActions.containerContains(1, load, true), true);
+    assert.equal(subject.sourceActions.containerIsInside(interiors[2], bagIds[0]), true);
+    assert.equal(subject.sourceActions.containerActorOwner(interiors[2]), 1);
+    assert.equal(subject.sourceActions.containerOutermost(interiors[2]), 1);
+    assert.equal(subject.itemWeights(bagIds[0]).contentsWeight, 4);
+    assert.equal(subject.itemWeights(bagIds[0]).unequippedWeight, 5);
+    const snapshot = subject.exportInventoryGraph();
+
+    for (const change of [
+        (copy) => {
+            copy.items[0].ownerContainerId = interiors[2];
+        },
+        (copy) => {
+            copy.items[3].ownerContainerId = 0x1_00_00_00_00;
+        },
+        (copy) => {
+            copy.items[3].actualWeight = -Number.MIN_VALUE;
+        },
+        (copy) => {
+            copy.containers[0].capacity = 2 ** 31;
+        },
+        (copy) => {
+            copy.nextContainerId = 1;
+        },
+    ]) {
+        const malformed = structuredClone(snapshot);
+
+        change(malformed);
+        assert.throws(() => subject.importInventoryGraph(malformed));
+        assert.deepEqual(subject.exportInventoryGraph(), snapshot);
+    }
+
+    const restored = await engine();
+
+    for (const definition of subject.itemDefinitions()) {
+        restored.registerItemDefinition(definition, { owner: definition.owner });
+    }
+
+    restored.importInventoryGraph(snapshot);
+    assert.deepEqual(restored.exportInventoryGraph(), snapshot);
+    const fresh = restored.command({ type: 'spawnItem', fullType: 'Fixture.Bag', x: 5, y: 5 }).id;
+
+    assert.equal(restored.getItem(fresh).internalContainerId, snapshot.nextContainerId);
+});
+
+test('source bag fields are case insensitive and Capacity observes Weight at its authored position', async () => {
+    const records = parseItemDefinitions(`module Fixture {
+        item Before { type=Container, capacity=60, weight=10, weightreduction=150, maxitemsize=-1, }
+        item After { Type=Container, Weight=10, Capacity=60, WeightReduction=-3, MaxItemSize=2.125, }
+    }`, 'fixture-authored');
+
+    assert.deepEqual(records.map(({ capacity, weightReduction, maxItemSize }) => ({ capacity, weightReduction, maxItemSize })),
+        [{ capacity: 49, weightReduction: 150, maxItemSize: -1 }, { capacity: 40, weightReduction: -3, maxItemSize: 2.125 }]);
+    const subject = await engine();
+
+    for (const record of records) {
+        subject.registerItemDefinition(shoe(record.fullType, { bodyLocation: null, ...record }), { owner: 'fixture' });
+    }
+
+    assert.deepEqual(subject.itemDefinitions().map(({ capacity, weightReduction }) => ({ capacity, weightReduction })),
+        [{ capacity: 49, weightReduction: 100 }, { capacity: 40, weightReduction: 0 }]);
+    const original = subject.itemDefinitions();
+
+    subject.beginItemDefinitionRegistration('override');
+    subject.registerItemDefinition(shoe('Fixture.Before', {
+        bodyLocation: null, type: 'Container', capacity: 7, weightReduction: 2, maxItemSize: 1,
+        onlyAcceptCategory: 'Clothing', acceptItemFunction: 'Fixture.accept',
+    }), { owner: 'override', override: true });
+    assert.equal(subject.itemDefinitions()[0].onlyAcceptCategory, 'clothing');
+    subject.rollbackItemDefinitionRegistration('override');
+    assert.deepEqual(subject.itemDefinitions(), original);
+});
+
+test('native authored floor metadata drives original window, staircase and apparent-elevation queries', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+    const squares = doorSquares({
+        '10:10': { floorFlags: 9, stairTypes: 0, slopeDirection: 0, slopeMin: 0, slopeMax: 0 },
+        '11:10': { floorFlags: 17, stairTypes: 0, slopeDirection: 0, slopeMin: 0, slopeMax: 0 },
+        '12:10': { floorFlags: 0, stairTypes: 1, slopeDirection: 0, slopeMin: 0, slopeMax: 0 },
+        '12:11': { floorFlags: 0, stairTypes: 2, slopeDirection: 0, slopeMin: 0, slopeMax: 0 },
+        '12:12': { floorFlags: 0, stairTypes: 4, slopeDirection: 0, slopeMin: 0, slopeMax: 0 },
+        '13:10': { floorFlags: 0, stairTypes: 0, slopeDirection: 1, slopeMin: 0.25, slopeMax: 0.75 },
+    }).map((row) => ({ floorFlags: 1, stairTypes: 0, slopeDirection: 0, slopeMin: 0, slopeMax: 0, ...row }));
+
+    subject.importDoors([], { squares });
+    const q = subject.sourceActions;
+    const from = { x: 10, y: 10, z: 0 };
+
+    assert.equal(q.squareFloorState(from).solidFloor, true);
+    assert.equal(q.squareWindowTo(from, { x: 10, y: 9, z: 0 }), true);
+    assert.equal(q.squareWindowTo(from, { x: 11, y: 10, z: 0 }), true);
+    assert.equal(q.squareWindowTo(from, from), false);
+    assert.equal(q.squareWindowTo(from, { x: 9, y: 10, z: 0 }), false);
+    assert.equal(q.squareFloorState({ x: 12, y: 10, z: 0 }).solidFloor, true);
+    assert.equal(q.squareSameStaircase({ x: 12, y: 10, z: 0 }, { x: 12, y: 12, z: 0 }), true);
+    assert.equal(q.squareSameStaircase({ x: 12, y: 12, z: 0 }, { x: 12, y: 10, z: 0 }), true);
+    assert.equal(q.squareSameStaircase({ x: 12, y: 10, z: 0 }, from), false);
+    assert.equal(q.squareApparentZ(from, 0.5, 0.5), 0);
+    assert.equal(q.squareApparentZ({ x: 13, y: 10, z: 0 }, 0.5, 0.25), 0.625);
+    assert.equal(q.squareApparentZ({ x: 12, y: 10, z: 0 }, 0.5, 0.5, false), 0.833_299_994_468_689);
+    assert.equal(q.squareApparentZ({ x: 12, y: 10, z: 0 }, 0.5, 0.5, true), 0.883_300_006_389_617_9);
+    const state = q.squareFloorState(from);
+
+    assert.throws(() => subject.importDoors([], { squares: [{ ...squares[0], floorFlags: 2 ** 32 }] }));
+    assert.deepEqual(q.squareFloorState(from), state);
+    subject.importDoors([], { squares: doorSquares() });
+    assert.throws(() => q.squareFloorState(from), /squareFloorState/u, 'missing source facts are not invented empty flags');
+});
+
+test('native bag policy resolves real keyring/attachment tags and refuses unsupported source weight facilities', async () => {
+    const subject = await engine();
+    const keyring = shoe('Fixture.Keyring', {
+        type: 'Container', bodyLocation: null, capacity: 10, weight: 2, tags: ['base:keyring'],
+        fakeEquipped: undefined,
+    });
+    const attached = shoe('Fixture.Attached', {
+        bodyLocation: null, weight: 10, tags: ['base:lightwhenattached'], lightWhenAttached: undefined,
+    });
+
+    subject.registerItemDefinition(keyring, { owner: 'fixture' });
+    subject.registerItemDefinition(attached, { owner: 'fixture' });
+    const ringId = subject.command({ type: 'spawnItem', fullType: keyring.fullType, x: 5, y: 5 }).id;
+    const attachedId = subject.command({ type: 'spawnItem', fullType: attached.fullType, x: 5, y: 5 }).id;
+
+    assert.equal(subject.itemDefinitions()[0].fakeEquipped, true);
+    assert.equal(subject.itemWeights(attachedId).hotbarEquippedWeight, 3);
+    subject.command({ type: 'pickup', id: ringId });
+    completeActions(subject);
+    assert.ok(near(subject.inventoryState().capacityWeight, 0.6), 'direct actor keyring uses original fake-equipped authority');
+
+    for (const [type, raw] of [
+        ['Container', 'component FluidContainer { Capacity = 1, }'],
+        ['base:clothing', 'AmmoType = Base.Bullets,'],
+        ['Custom.Clothing', ''],
+    ]) {
+        const [definition] = parseItemDefinitions(`module Fixture { item Unsupported${subject.itemDefinitions().length} {
+            Type = ${type}, ${raw}
+        } }`, 'authored-unsupported');
+
+        const registered = subject.registerItemDefinition(shoe(definition.fullType, { bodyLocation: null, ...definition }), { owner: 'fixture' });
+        const before = subject.exportInventoryGraph();
+        const actor = subject.saveState();
+
+        assert.equal(registered.unsupportedSubtype, true);
+        assert.throws(() => subject.command({ type: 'spawnItem', fullType: definition.fullType, x: 5, y: 5 }),
+            /unsupported original facility/u);
+        assert.deepEqual(subject.exportInventoryGraph(), before);
+        assert.deepEqual(subject.saveState(), actor, 'unavailable weight facilities refuse before allocating an item');
+        const target = type === 'Container' ? ringId : attachedId;
+        const previous = subject.itemDefinitions().find(({ fullType }) => fullType === subject.getItem(target).fullType);
+        const override = { ...previous, ...definition, fullType: previous.fullType };
+
+        delete override.unsupportedSubtype;
+        subject.beginItemDefinitionRegistration('fixture');
+        try {
+            assert.throws(() => subject.registerItemDefinition(override, { owner: 'fixture', override: true }),
+                /outside the accepted range/u, 'native authority also refuses introducing unavailable weights into a live instance');
+        } finally {
+            subject.rollbackItemDefinitionRegistration('fixture');
+        }
+
+        assert.deepEqual(subject.itemDefinitions().find(({ fullType }) => fullType === previous.fullType), previous);
+        assert.equal(subject.itemWeights(target).actualWeight, previous.weight);
+        assert.deepEqual(subject.exportInventoryGraph(), before);
+    }
+});
+
+test('signed stored bag capacity stays distinct from source wrapper limits without colliding with native errors', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Fixture.SignedBag', {
+        type: 'Container', bodyLocation: null, capacity: -1, weight: 2,
+    }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.SignedBag', x: 5, y: 5 }).id;
+    const container = subject.getItem(id).internalContainerId;
+
+    assert.equal(subject.getContainer(container).capacity, -1);
+    assert.equal(subject.sourceActions.itemContainerCapacity(id, 1, false), -1);
+    assert.equal(subject.containerState(container, 1).capacity, -1);
+    const before = subject.itemDefinitions();
+
+    for (const invalid of [-(2 ** 31) - 1, 2 ** 31, 0.5, Infinity]) {
+        assert.throws(() => subject.registerItemDefinition(shoe('Fixture.BadBag', {
+            type: 'Container', bodyLocation: null, capacity: invalid,
+        }), { owner: 'fixture' }));
+        assert.deepEqual(subject.itemDefinitions(), before);
+    }
+
+    subject.importInventoryGraph(subject.exportInventoryGraph());
+    assert.equal(subject.sourceActions.itemContainerCapacity(id, 0, false), -1);
+    assert.throws(() => subject.sourceActions.itemContainerCapacity(0xFF_FF_FF_FF, 1, false), /outside the accepted range/u);
+});
+
+test('original bag inventory-weight getter discounts ordered children only when the shell is source equipped', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Fixture.InventoryWeightBag', {
+        type: 'Container', bodyLocation: null, capacity: 20, weight: 2, weightReduction: 50,
+        tags: ['base:keyring'], fakeEquipped: undefined,
+    }), { owner: 'fixture' });
+    subject.registerItemDefinition(shoe('Fixture.InventoryWeightLoad', { bodyLocation: null, weight: 4 }), { owner: 'fixture' });
+    const bag = subject.command({ type: 'spawnItem', fullType: 'Fixture.InventoryWeightBag', x: 5, y: 5 }).id;
+    const load = subject.command({ type: 'spawnItem', fullType: 'Fixture.InventoryWeightLoad', x: 5, y: 5 }).id;
+    const graph = subject.exportInventoryGraph();
+
+    graph.items[1].ownerContainerId = subject.getItem(bag).internalContainerId;
+    graph.items[1].worldPosition = null;
+    subject.importInventoryGraph(graph);
+    assert.equal(subject.sourceActions.itemInventoryWeight(bag), 4);
+    assert.equal(subject.itemWeights(bag).contentsWeight, 4);
+    subject.command({ type: 'pickup', id: bag });
+    completeActions(subject);
+    assert.ok(near(subject.sourceActions.itemInventoryWeight(bag), 1.2));
+    assert.equal(subject.itemWeights(bag).contentsWeight, 4, 'contents weight is not an alias of equipped-child inventory weight');
+    assert.deepEqual(subject.containerItems(subject.getItem(bag).internalContainerId).map(({ id }) => id), [load]);
+});
+
+test('native SDK kind5 residency and step/frame completion publish held-item deltas exactly once', async () => {
+    const [stepSubject, frameSubject] = await Promise.all([engine(), engine()]);
+
+    for (const [frame, subject] of [[false, stepSubject], [true, frameSubject]]) {
+        subject.registerItemDefinition(shoe('Fixture.ObserverBag', { type: 'Container', bodyLocation: null, capacity: 20 }), { owner: 'fixture' });
+        subject.registerItemDefinition(shoe('Fixture.ObserverItem', { bodyLocation: null }), { owner: 'fixture' });
+        const bag = subject.command({ type: 'spawnItem', fullType: 'Fixture.ObserverBag', x: 5, y: 5 }).id;
+        const item = subject.command({ type: 'spawnItem', fullType: 'Fixture.ObserverItem', x: 5, y: 5 }).id;
+        const graph = subject.exportInventoryGraph();
+
+        graph.items[1].ownerContainerId = 1;
+        graph.items[1].worldPosition = null;
+        subject.importInventoryGraph(graph);
+        subject.setHandItem('primary', item);
+        subject.setHandItem('secondary', item);
+        const events = [];
+
+        subject.observeHandItems((event) => events.push(event), (cause) => {
+            throw cause;
+        });
+        const destination = subject.getItem(bag).internalContainerId;
+        const accepted = subject.actions.requestTransfer(item, 1, destination);
+
+        assert.equal(subject.sourceActions.actionExists(accepted.actionId), true, 'actual native kind5 slot must remain readable');
+        assert.deepEqual(events, [], 'admission is not a held-state commit');
+
+        for (let index = 0; index < 10_000 && subject.sourceActions.actionExists(accepted.actionId); index += 1) {
+            if (frame) {
+                subject.frameStep(STEP);
+            } else {
+                subject.step(STEP);
+            }
+        }
+
+        assert.equal(subject.sourceActions.actionExists(accepted.actionId), false);
+        assert.equal(subject.getItem(item).ownerContainerId, destination);
+        assert.deepEqual(events, [
+            { slot: 'primary', playerIndex: 0, itemId: null },
+            { slot: 'secondary', playerIndex: 0, itemId: null },
+        ]);
+    }
+});
+
+test('native source helper emits held transitions only after successful finish and never after rollback', async () => {
+    const [rollbackSubject, committedSubject] = await Promise.all([engine(), engine()]);
+
+    for (const [success, subject] of [[false, rollbackSubject], [true, committedSubject]]) {
+        subject.registerItemDefinition(shoe('Fixture.SourceObserverBag', { type: 'Container', bodyLocation: null, capacity: 20 }), { owner: 'fixture' });
+        subject.registerItemDefinition(shoe('Fixture.SourceObserverItem', { bodyLocation: null }), { owner: 'fixture' });
+        const bag = subject.command({ type: 'spawnItem', fullType: 'Fixture.SourceObserverBag', x: 5, y: 5 }).id;
+        const item = subject.command({ type: 'spawnItem', fullType: 'Fixture.SourceObserverItem', x: 5, y: 5 }).id;
+        const graph = subject.exportInventoryGraph();
+
+        graph.items[1].ownerContainerId = 1;
+        graph.items[1].worldPosition = null;
+        subject.importInventoryGraph(graph);
+        subject.setHandItem('primary', item);
+        subject.setHandItem('secondary', item);
+        const events = [];
+
+        subject.observeHandItems((event) => events.push(event), (cause) => {
+            throw cause;
+        });
+        const q = subject.sourceActions;
+        const destination = subject.getItem(bag).internalContainerId;
+        const action = q.newAction(5, 1, item, 5, 5, 0, 0);
+
+        q.actionBindTransfer(action, 1, destination);
+        const group = q.groupNew(action, 0);
+
+        q.groupItemInsert(group, 0, item);
+        q.groupInsert(action, 0, group);
+        q.insert(0, action);
+        q.start(action, 0, 1);
+        let performed = false;
+
+        for (let index = 0; index < 100 && !performed; index += 1) {
+            subject.step(STEP);
+            q.dispatch((event) => {
+                assert.equal(q.actionExists(action), true);
+
+                if (event.event === 1) {
+                    return 1;
+                }
+
+                if (event.event !== 5) {
+                    return 0;
+                }
+
+                q.transferBegin(action, group, item, event.token, 1);
+                q.transferOperation(action, item, event.token, 1, 1, 0, 0, 0);
+                q.transferOperation(action, item, event.token, 2, destination, 0, 0, 0);
+                q.transferOperation(action, item, event.token, 5, 1, 0, 0, 0);
+                assert.deepEqual(subject.getHandItems(), { primary: null, secondary: null });
+                assert.deepEqual(events, [], 'intermediate helper operations are not committed notifications');
+                q.transferFinish(action, item, event.token, success);
+                performed = true;
+
+                return success ? 0 : -4;
+            });
+        }
+
+        assert.equal(performed, true, 'real native event5 must authorize the helper transaction');
+        assert.equal(subject.getItem(item).ownerContainerId, success ? destination : 1);
+        assert.deepEqual(subject.getHandItems(), success ? { primary: null, secondary: null } : { primary: item, secondary: item });
+        assert.deepEqual(events, success
+            ? [
+                    { slot: 'primary', playerIndex: 0, itemId: null },
+                    { slot: 'secondary', playerIndex: 0, itemId: null },
+                ]
+            : []);
+    }
+});
+
+test('item and container roots retain the original ground-bag distinction', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Fixture.RootBag', { type: 'Container', bodyLocation: null, capacity: 20 }), { owner: 'fixture' });
+    subject.registerItemDefinition(shoe('Fixture.RootLoad', { bodyLocation: null }), { owner: 'fixture' });
+    const bag = subject.command({ type: 'spawnItem', fullType: 'Fixture.RootBag', x: 5, y: 5 }).id;
+    const item = subject.command({ type: 'spawnItem', fullType: 'Fixture.RootLoad', x: 5, y: 5 }).id;
+    const floor = subject.getItem(bag).ownerContainerId;
+    const interior = subject.getItem(bag).internalContainerId;
+    const graph = subject.exportInventoryGraph();
+
+    graph.items[1].ownerContainerId = interior;
+    graph.items[1].worldPosition = null;
+    subject.importInventoryGraph(graph);
+    assert.equal(subject.sourceActions.itemOutermostContainer(bag), null);
+    assert.equal(subject.sourceActions.itemOutermostContainer(item), interior);
+    assert.equal(subject.sourceActions.containerOutermost(interior), floor);
+    assert.equal(subject.sourceActions.containerActorOwner(interior), 0);
+    subject.command({ type: 'pickup', id: bag });
+    completeActions(subject);
+    assert.equal(subject.sourceActions.itemOutermostContainer(bag), 1);
+    assert.equal(subject.sourceActions.itemOutermostContainer(item), 1);
+    assert.equal(subject.sourceActions.containerOutermost(interior), 1);
+    assert.equal(subject.sourceActions.containerActorOwner(interior), 1);
 });

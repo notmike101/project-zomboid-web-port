@@ -201,6 +201,27 @@ function cell:getGridSquare(x,y,z)
     end
     function square:isWallTo(other) return hostCall('wallTo',coords,other and assert(squareRecords[other],'expected source square')) end
     function square:canReachTo(other) return hostCall('canReachTo',coords,other and assert(squareRecords[other],'expected source square')) end
+    local function floorState() return qa('squareFloorState',coords) end
+    function square:TreatAsSolidFloor() return floorState().solidFloor end
+    function square:isSolid() return floorState().solid end
+    function square:isSolidTrans() return floorState().solidTrans end
+    function square:HasStairs() return floorState().stairs end
+    function square:isWindowTo(other)
+        return qa('squareWindowTo',coords,(assert(squareRecords[other],'expected source square')))
+    end
+    function square:isSameStaircase(x,y,z)
+        return qa('squareSameStaircase',coords,{x=x,y=y,z=z})
+    end
+    function square:getApparentZ(x,y) return hostCall('sourceApparentZ',coords,x,y) end
+    function square:getTotalWeightOfItemsOnFloor()
+        return hostCall('containerState',qa('floorContainer',coords.x,coords.y,coords.z),0).contentsWeight
+    end
+    function square:AddWorldInventoryItem(entry,x,y,z)
+        assert(z==0,'unsupported source world item elevation')
+        transferOperation(entry,4,qa('floorContainer',coords.x,coords.y,coords.z),coords.x+x,coords.y+y,coords.z)
+        return entry
+    end
+    function square:removeWorldObject(value) transferOperation(value:getItem(),3) end
     -- These are live native list views, not copied item/door stores or a frozen floor selection.
     local ground=indexedCollection(
         function() return qa('worldItemCount',coords.x,coords.y,coords.z) end,
@@ -216,6 +237,7 @@ function cell:getGridSquare(x,y,z)
     function square:getObjects() return objects end
     function square:transmitRemoveItemFromSquare(value)
         assert(eventScope and eventScope.event==5 and itemIds[value],'world removal requires a source item perform')
+        -- The original transmit precedes real local removal; it does not mutate ownership.
     end
     return square
 end
@@ -296,24 +318,13 @@ local function highlight(option,values,multiple)
     option.onHighlight=multiple and source.handleGrabWorldItem_onHighlightMultiple or source.handleGrabWorldItem_onHighlight
     option.onHighlightParams={multiple and values or values[1]}
 end
-function inventory:containsTypeRecurse(name)
-    for _,record in ipairs(hostCall('items')) do
-        if record.location=='inventory' and record.fullType:match('%.([^%.]+)$')==name then return true end
-    end
-    return false
-end
-ItemContainer={new=function(name,parent,containingItem)
-    assert(name=='floor' and parent==nil and containingItem==nil,'unsupported original container constructor')
-    local value=nativeObject('ItemContainer')
-    local explored=false
-    local contents={}
-    function value:getParent() return parent end
-    function value:getContainingItem() return containingItem end
-    function value:setExplored(input) assert(rawType(input)=='boolean');explored=input end
-    function value:isExplored() return explored end
-    function value:getItems() return collection(function() return contents end) end
-    return value
-end}
+ItemContainer={
+    new=function(name,parent,containingItem)
+        assert(name=='floor' and parent==nil and containingItem==nil,'unsupported original container constructor')
+        return newFloorView()
+    end,
+    floatingPointCorrection=function(weight) return qa('floatingPointCorrection',weight) end,
+}
 ISWorldObjectContextMenuLogic={}
 function ISWorldObjectContextMenuLogic.fetch(fetch,value,index,doSquare)
     assert(index==0 and doSquare==true,'unsupported source context fetch mode')
@@ -506,7 +517,7 @@ function __pz_context_call(target,name,...)
             if result then assert(result.type=='pickup','unsupported original grab hook replacement action '..tostring(result.type)) end
             if result then
                 local record=assert(hostCall('item',result.id),'source grab hook replacement is unavailable')
-                assert(record.location=='ground','source grab hook replacement is not a ground item')
+                assert(record.worldPosition~=nil,'source grab hook replacement is not a ground world item')
             end
             local targetId=result and result.id or originalId
             permits[#permits+1]={targetId=targetId,cancelled=result==nil}
@@ -565,7 +576,7 @@ local function mirror(menu)
             result[#result+1]={name=option.name,disabled=option.notAvailable==true or option.isDisabled==true,
                 expanded=submenu and submenu:isVisible() or false,children=children}
         end
-        return result
+        if #result>0 then return result end
     end
     local function select(indices)
         return guarded(owner,function()
@@ -602,6 +613,8 @@ function __pz_world_context(request)
     require 'TimedActions/ISWaitWhileGettingUp'
     require 'TimedActions/ISTimedActionQueue'
     require 'TimedActions/ISGrabItemAction'
+    require 'TimedActions/ISInventoryTransferAction'
+    require 'TimedActions/ISTransferAction'
     require 'TimedActions/ISOpenCloseDoor'
     require 'TimedActions/WalkToTimedAction'
     require 'luautils'
@@ -625,8 +638,6 @@ function __pz_world_context(request)
         ISPlayerData[1]=data
     end
     if not data.playerInventory then
-        function inventory:getParent() return player end
-        function inventory:getContainingItem() return nil end
         local floor=ISInventoryPage.GetFloorContainer(0)
         data.playerInventory=ISInventoryPage:new(0,0,320,250,inventory,true,1.5)
         data.lootInventory=ISInventoryPage:new(0,0,320,250,floor,false,1.5)

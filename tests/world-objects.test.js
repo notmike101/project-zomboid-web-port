@@ -656,6 +656,25 @@ test('treats every source slope direction as a floor after ASCII trimming and up
     assert.equal(result.squares[0].solidTrans, true);
 });
 
+test('preserves independently clamped source slope heights as native float values', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const heights = [['33', '67'], ['101', '-1'], ['2147483648', '1.5'], [' +25\u001F', '100']];
+    const tiles = registry(heights.map(([min, max]) => [
+        ['SlopedSurfaceDirection', 'N'],
+        ['SlopedSurfaceHeightMin', min],
+        ['SlopedSurfaceHeightMax', max],
+    ]));
+    const map = await cell({
+        names: [...tiles.keys()],
+        records: [...heights.flatMap((_, index) => [2, -1, index]), -1, 60],
+    });
+    const result = await projectWorldObjects([map], tiles);
+
+    assert.deepEqual(result.squares.slice(0, 4).map(({ slopeMin, slopeMax }) => [slopeMin, slopeMax]), [
+        [Math.fround(0.33), Math.fround(0.67)], [1, 0], [0, 0], [0.25, 1],
+    ]);
+});
+
 // OR-ing per-placement slopes, broad Unicode trimming, or validating a short-circuited slope fails this parser-path check.
 test('decodes only the last square slope property and skips slopes when raw floors or stairs already suffice', async () => {
     const { projectWorldObjects } = await projectionModule();
@@ -672,6 +691,7 @@ test('decodes only the last square slope property and skips slopes when raw floo
     const result = await projectWorldObjects([accepted], tiles);
 
     assert.deepEqual(result.squares.slice(0, 4).map(({ solidFloor }) => solidFloor), [true, true, true, false]);
+    assert.deepEqual(result.squares.slice(0, 3).map(({ slopeDirection }) => slopeDirection), [6, 9, 9]);
     const invalid = await cell({ names, records: [2, -1, 0, -1, 63] });
     const overwritten = await cell({ names, records: [3, -1, 1, 0, -1, 63] });
     const unicodeTrim = await cell({ names, records: [2, -1, 4, -1, 63] });

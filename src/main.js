@@ -5,7 +5,7 @@ import { openMapCell } from './map-tiles.js';
 import { createModManager, parseModPackage, readPackageFile, resolveModOrder } from './mod-manager.js';
 import { createModHost } from './mods.js';
 import { loadNativeGameResources, seedOriginalWearables } from './native-game-resources.js';
-import { bindNativeSession, closeNativeSession, discoverNativePackages, nativePackageFiles, prepareNativeSession } from './native-mod-loader.js';
+import { bindNativeSession, closeNativeSession, discoverNativePackages, initializeOriginalEquipment, nativePackageFiles, prepareNativeSession } from './native-mod-loader.js';
 import { openPack } from './packs.js';
 import { canvasContentBox, createRenderer, worldFromCanvas } from './renderer.js';
 import { createSaveStore } from './saves.js';
@@ -1480,18 +1480,65 @@ function createSessionModHost(binding) {
          */
         getItem: (id) => binding.engine.getItem(id),
         /**
+         * Read native containers in allocation order.
+         *
+         * @returns {import('../types/mod-api').ModContainer[]} Detached container records.
+         */
+        containers: () => binding.engine.containers(),
+        /**
+         * Read one native container by stable identity.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @returns {import('../types/mod-api').ModContainer|null} Detached record or absence.
+         */
+        getContainer: (id) => binding.engine.getContainer(id),
+        /**
+         * Read direct item membership in native order.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @returns {import('../types/mod-api').ModItem[]} Detached direct member records.
+         */
+        containerItems: (id) => binding.engine.containerItems(id),
+        /**
+         * Read the native actor-root inventory identity.
+         *
+         * @returns {number} Player inventory container ID.
+         */
+        playerInventoryId: () => binding.engine.playerInventoryId(),
+        /**
+         * Read actor-relative container capacity and weight state.
+         *
+         * @param {number} id - Positive uint32 container identity.
+         * @param {number|null} [actorId=null] - Optional native actor identity.
+         * @returns {import('../types/mod-api').ModContainerState} Detached capacity state.
+         */
+        containerState: (id, actorId = null) => binding.engine.containerState(id, actorId),
+        /**
+         * Read source-authoritative item weight variants.
+         *
+         * @param {number} id - Positive uint32 item identity.
+         * @returns {import('../types/mod-api').ModItemWeights} Detached item weight values.
+         */
+        itemWeights: (id) => binding.engine.itemWeights(id),
+        /**
          * Read this session's native inventory mass and independent capacity limits.
          *
          * @returns {import('../types/mod-api').ModInventoryState} Detached carry state.
          */
         inventoryState: () => binding.engine.inventoryState(),
         /**
-         * Atomically restore explicit item identities in this session.
+         * Atomically restore or capture this session's ordered native inventory graph.
          *
-         * @param {import('../types/mod-api').ModItem[]} records - Complete detached replacement records.
-         * @returns {void} Replaces items after authoritative validation.
+         * @param {import('../types/mod-api').ModInventoryGraph} graph - Complete graph and allocator.
+         * @returns {void} Replaces ownership after native structural validation.
          */
-        importItems: (records) => binding.engine.importItems(records),
+        importInventoryGraph: (graph) => binding.engine.importInventoryGraph(graph),
+        /**
+         * Capture the complete detached native inventory graph.
+         *
+         * @returns {import('../types/mod-api').ModInventoryGraph} Portable graph and allocator state.
+         */
+        exportInventoryGraph: () => binding.engine.exportInventoryGraph(),
         /**
          * Read equipment at an exact body-location identity.
          *
@@ -1499,6 +1546,28 @@ function createSessionModHost(binding) {
          * @returns {import('../types/mod-api').ModItem|null} Worn item or an empty slot.
          */
         wornItem: (bodyLocation) => binding.engine.wornItem(bodyLocation),
+        /**
+         * Forward this session's native registry and equipment operation.
+         *
+         * @param {string} op - Native bridge operation.
+         * @param {...unknown} args - Validated operation operands.
+         * @returns {unknown} Native bridge result.
+         */
+        equipmentOperation: (op, ...args) => binding.engine.equipmentOperation(op, ...args),
+        /**
+         * Read this session's independently ordered worn items.
+         *
+         * @returns {import('../types/mod-api').ModWornItem[]} Detached worn rows.
+         */
+        wornItems: () => binding.engine.wornItems(),
+        /**
+         * Commit explicit native equipment; the host supplies shared hooks.
+         *
+         * @param {string} bodyLocation - Registered location name or alias.
+         * @param {number|null} itemId - Inventory identity or clear.
+         * @returns {void} Commits the native mutation.
+         */
+        setWornItem: (bodyLocation, itemId) => binding.engine.setWornItem(bodyLocation, itemId),
         /**
          * Read this session's native primary and secondary inventory identities.
          *
@@ -1745,7 +1814,9 @@ async function activateSession(staged, namespaces, required) {
 
     targetContext.inputBindings = Object.freeze({ Interact: null });
     const targetMods = createSessionModHost(targetContext);
-    // After boot the committed manager is configuration/reporting only; later transitions load targetMods directly.
+    /* After boot the committed manager is configuration/reporting only; later transitions load targetMods directly.
+       Handles only; playback/lifetime authority remains the actual AudioContext voice registry. */
+    const characterVoices = new Map();
     const targetPackages = packagesActivated ? packages : createModManager(targetMods);
     let targetLua;
     let targetUI;
@@ -1775,9 +1846,9 @@ async function activateSession(staged, namespaces, required) {
             requireUI: true, itemDefinitions: instantiatedItemDefinitions(staged.engine),
         });
 
-        if (resources) {
+        if (resources?.ui) {
             targetUI = renderer.createGameUI();
-            await renderer.initializeGameUI({ ui: targetUI, ...resources });
+            await renderer.initializeGameUI({ ...resources, ui: targetUI });
             const { width, height } = canvasContentBox(canvas);
 
             targetViewportWidth = Math.max(1, Math.trunc(width));
@@ -1801,6 +1872,140 @@ async function activateSession(staged, namespaces, required) {
             sourceWorldContext: {
                 engine: staged.engine,
                 inputBindings: targetContext.inputBindings,
+                /**
+                 * Read authenticated floor and stair metadata for a source square.
+                 *
+                 * @param {import('../types/mod-api').ModWorldCoordinates} coords - Square coordinates.
+                 * @returns {object} Detached floor, stair, and slope facts.
+                 */
+                squareFloorState: (coords) => staged.engine.sourceActions.squareFloorState(coords),
+                /**
+                 * Test the source window relation between two squares.
+                 *
+                 * @param {import('../types/mod-api').ModWorldCoordinates} from - Source square.
+                 * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Destination square or null.
+                 * @returns {boolean} Whether a window edge separates the squares.
+                 */
+                squareWindowTo: (from, to) => staged.engine.sourceActions.squareWindowTo(from, to),
+                /**
+                 * Test whether a destination belongs to the source staircase.
+                 *
+                 * @param {import('../types/mod-api').ModWorldCoordinates} from - Staircase source square.
+                 * @param {import('../types/mod-api').ModWorldCoordinates|null} to - Candidate destination square.
+                 * @returns {boolean} Whether both coordinates are in the same staircase.
+                 */
+                squareSameStaircase: (from, to) => staged.engine.sourceActions.squareSameStaircase(from, to),
+                /**
+                 * Compute source apparent elevation at fractional tile coordinates.
+                 *
+                 * @param {import('../types/mod-api').ModWorldCoordinates} coords - Source square.
+                 * @param {number} dx - Fractional tile x offset.
+                 * @param {number} dy - Fractional tile y offset.
+                 * @returns {number} Apparent elevation.
+                 */
+                squareApparentZ: (coords, dx, dy) => staged.engine.sourceActions.squareApparentZ(coords, dx, dy, resources.sourceFboRenderChunk),
+                /**
+                 * Read the source actor's overlay sprite token.
+                 *
+                 * @returns {string|null} Authenticated overlay name or absence.
+                 */
+                actorOverlaySprite: () => staged.engine.sourceActions.actorOverlaySprite(),
+                /**
+                 * Raise the supported original metabolic target.
+                 *
+                 * @param {string} name - Original target name.
+                 * @returns {void} Applies the native target update.
+                 */
+                actorMetabolicTarget: (name) => {
+                    if (name !== 'LightWork') {
+                        throw new Error(`Unsupported original metabolic target: ${name}`);
+                    }
+
+                    staged.engine.sourceActions.setMetabolicTarget(3.2);
+                },
+                /**
+                 * Read whether the source actor should turn.
+                 *
+                 * @returns {boolean} Native turning flag.
+                 */
+                actorShouldBeTurning: () => staged.engine.sourceActions.actorShouldBeTurning(),
+                /**
+                 * Read whether the source actor sits on furniture.
+                 *
+                 * @returns {boolean} Native furniture state.
+                 */
+                actorSittingOnFurniture: () => staged.engine.sourceActions.actorSittingOnFurniture(),
+                /**
+                 * Read whether the source actor is seated in a vehicle.
+                 *
+                 * @returns {boolean} Native vehicle seating state.
+                 */
+                actorSeatedInVehicle: () => staged.engine.sourceActions.actorSeatedInVehicle(),
+                /**
+                 * Read the source drop-items-at-square-center setting.
+                 *
+                 * @returns {boolean} Native option state.
+                 */
+                dropItemsOnSquareCenter: () => staged.engine.sourceActions.dropItemsOnSquareCenter(),
+                /**
+                 * Read the native animal zone assigned to a square.
+                 *
+                 * @param {import('../types/mod-api').ModWorldCoordinates} coords - Square coordinates.
+                 * @returns {number|null} Zone identity or absence.
+                 */
+                animalZoneForSquare: (coords) => staged.engine.sourceActions.animalZoneForSquare(coords),
+                /**
+                 * Resolve or control an authored original character sound event.
+                 *
+                 * @param {string} operation - Supported emitter operation.
+                 * @param {string|number} value - Sound name or native voice handle.
+                 * @returns {number|boolean|void} Voice ID, playing status, or no value.
+                 */
+                characterEmitter: (operation, value) => {
+                    if (!audio || (operation === 'playSound' && (targetContext !== liveModContext || !audioUnlocked))) {
+                        throw new Error('Original character emitter requires a committed session and unlocked real audio.');
+                    }
+
+                    const active = new Set(audio.diagnostics().activeVoices.map(({ id }) => id));
+
+                    for (const id of characterVoices.keys()) {
+                        if (!active.has(id)) {
+                            characterVoices.delete(id);
+                        }
+                    }
+
+                    if (operation === 'playSound') {
+                        if (typeof value !== 'string' || !baseAudioAssets.has(value)) {
+                            throw new Error(`Unsupported original character sound event: ${String(value)} (no authored decoded clip/backend).`);
+                        }
+
+                        const position = staged.engine.snapshot();
+                        const voice = targetMods.coreApi.audio.play(`base:${value}`, { x: position.x, y: position.y, z: 0 });
+
+                        characterVoices.set(voice.id, { voice, name: value });
+
+                        return voice.id;
+                    }
+
+                    if (operation === 'isPlaying') {
+                        return typeof value === 'string'
+                            ? [...characterVoices.values()].some(({ name }) => name === value)
+                            : characterVoices.has(value);
+                    }
+
+                    if (operation === 'stopSound' || operation === 'stopOrTriggerSound') {
+                        if (!Number.isSafeInteger(value) || value < 0) {
+                            throw new TypeError('Sound handle must be a nonnegative exact integer.');
+                        }
+
+                        characterVoices.get(value)?.voice.stop();
+                        characterVoices.delete(value);
+
+                        return undefined;
+                    }
+
+                    throw new Error(`Unsupported original character emitter operation: ${operation}`);
+                },
                 /**
                  * Check the live imported ground-cell footprint, including valid missing squares.
                  *
@@ -2496,7 +2701,16 @@ function blockStartup(cause) {
 
 try {
     engine = await createEngine(new URL('../engine/pz_engine.wasm', import.meta.url));
-    saves = createSaveStore({ engineSource, appVersion: '0.1.0-preview.1' });
+    saves = createSaveStore({
+        engineSource, appVersion: '0.1.0-preview.1',
+        /**
+         * Initialize original equipment when restoring a legacy snapshot.
+         *
+         * @param {object} targetEngine - Candidate native engine.
+         * @returns {Promise<void>} Completes source registry initialization.
+         */
+        initializeEquipment: (targetEngine) => initializeOriginalEquipment(targetEngine, content),
+    });
     content = await openContentDirectory(undefined, {
         /**
          * Show content transfer progress while the retained session remains paused.
