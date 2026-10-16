@@ -1,6 +1,6 @@
 import {createServer} from 'node:http';
 import {createReadStream} from 'node:fs';
-import {mkdir, readFile, writeFile, stat, realpath} from 'node:fs/promises';
+import {mkdir, readFile, writeFile, stat, realpath, readdir} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
@@ -21,7 +21,7 @@ for (let i = 2; i < process.argv.length; i += 2) {
 if (!['game-jar','media-root','jdk','browser'].every(name => options[name]))
   throw new Error('Required: --game-jar PATH --media-root PATH --jdk JDK25_DIRECTORY --browser CHROMIUM_EXECUTABLE');
 const profile = options.profile || 'graphics';
-if (!['graphics','lua'].includes(profile)) throw new Error('Profile must be graphics or lua');
+if (!['graphics','lua','input'].includes(profile)) throw new Error('Profile must be graphics, lua or input');
 
 const classes = path.join(output, 'classes');
 const tools = path.join(output, 'tools');
@@ -53,6 +53,16 @@ for (const prerequisite of [...Object.entries(options).filter(([name]) => name !
 }
 for (const destination of [classes, tools, ...['host-classes','bridge-classes','GeneratedFloatBridge.java','runtime-view.jar','full-entry.jar','float-bridge.jar','memory-bridge.jar','generated-float-members.tsv','float-bridge-summary.json','view.jar', 'class-manifest.json', 'result.json', 'build.json'].map(name => path.join(output, name))])
   if (!contained(actualOutput, await canonical(destination))) throw new Error('Generated destination escapes output: ' + destination);
+async function validateExisting(directory) {
+  let entries; try {entries=await readdir(directory,{withFileTypes:true});} catch(error) {if(error.code==='ENOENT')return;throw error;}
+  for(const entry of entries) {
+    const file=path.join(directory,entry.name);
+    if(!contained(actualOutput,await canonical(file)))throw new Error('Existing generated entry escapes output: '+file);
+    if(entry.isSymbolicLink())throw new Error('Generated output may not contain links: '+file);
+    if(entry.isDirectory())await validateExisting(file);
+  }
+}
+await validateExisting(output);
 await mkdir(output, {recursive: true});
 await mkdir(classes, {recursive: true});
 await mkdir(tools, {recursive: true});
@@ -101,6 +111,12 @@ try {
     command(executable('jar'), ['--create','--file',path.join(output,'float-bridge.jar'),'-C',bridgeClasses,'.']);
     command(executable('jar'), ['--create','--file',path.join(output,'memory-bridge.jar'),'-C',hostClasses,'.']);
   }
+  if (profile === 'input') {
+    command(executable('javac'), ['--release','17','-cp',gameJar,'-d',classes,path.join(source,'CheerpJInput.java'),path.join(source,'host/port/host/BrowserKeyboard.java')]);
+    command(executable('javac'), ['-d',tools,path.join(source,'PrepareInput.java')]);
+    command(executable('java'), ['-cp',tools,'PrepareInput',path.join(output,'view.jar'),path.join(output,'input-view.jar')]);
+    command(executable('jar'), ['--create','--file',path.join(output,'input-entry.jar'),'-C',classes,'probe/CheerpJInput.class','-C',classes,'port/host/BrowserKeyboard.class']);
+  }
   evidence.viewJarSha256 = await hash(path.join(output, 'view.jar'));
   const manifest = JSON.parse(await readFile(path.join(output, 'class-manifest.json'), 'utf8'));
   evidence.classes = manifest.classes;
@@ -109,7 +125,7 @@ try {
   evidence.gameMethodBodiesUnchanged = manifest.gameMethodBodiesUnchanged;
 
   const routes = new Map([
-    ['/', {file: path.join(source, profile === 'lua' ? 'lua.html' : 'index.html'), type: 'text/html; charset=utf-8'}],
+    ['/', {file: path.join(source, profile === 'lua' ? 'lua.html' : profile === 'input' ? 'input.html' : 'index.html'), type: 'text/html; charset=utf-8'}],
     ['/index.html', {file: path.join(source, 'index.html'), type: 'text/html; charset=utf-8'}],
     ['/view.jar', {file: path.join(output, 'view.jar'), type: 'application/java-archive'}],
     ['/menu.png', {file: png, type: 'image/png'}],
@@ -120,6 +136,10 @@ try {
     for (const name of ['stdlib.lua','media/lua/shared/defines.lua','media/lua/shared/Sandbox/Apocalypse.lua'])
       routes.set('/'+name,{file:path.join(options['media-root'],'..',name),type:'text/plain'});
     evidence.runtimeViewJarSha256=await hash(path.join(output,'runtime-view.jar'));
+  }
+  if (profile === 'input') {
+    routes.set('/keyboard.js',{file:path.join(source,'keyboard.js'),type:'text/javascript'});
+    for(const name of ['input-view.jar','input-entry.jar']) routes.set('/'+name,{file:path.join(output,name),type:'application/java-archive'});
   }
   evidence.profile=profile;
   if (profile === 'lua') evidence.runtimeAdaptations=JSON.parse(await readFile(path.join(output,'float-bridge-summary.json'),'utf8'));
@@ -177,6 +197,12 @@ try {
   page.on('console', message => logs.push(message.type() + ': ' + message.text()));
   page.on('pageerror', error => logs.push('PAGEERROR: ' + error.stack));
   await page.goto(origin, {waitUntil: 'domcontentloaded', timeout: 60000});
+  if (profile === 'input') {
+    for(const [phase,action] of [['press',()=>page.keyboard.down('w')],['release',()=>page.keyboard.up('w')],['focus-press',()=>page.keyboard.down('w')],['blur',()=>page.locator('#outside').focus()]]) {
+      await page.waitForFunction(expected=>window.inputPhase===expected,phase,{timeout:60000}); await action();
+    }
+    await page.keyboard.up('w');
+  }
   await page.waitForFunction(() => window.probeResult, undefined, {timeout: 180000});
   evidence.result = await page.evaluate(() => window.probeResult);
   if (profile === 'lua') evidence.stages=await page.evaluate(() => window.stageResults);
@@ -210,3 +236,5 @@ try {
   console.log(JSON.stringify({...evidence, requests: requests.length, logs: logs.length, resultFile: path.join(output, 'result.json')}, null, 2));
   if (!evidence.pass) process.exitCode = 1;
 }
+
+
