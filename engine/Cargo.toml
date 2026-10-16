@@ -1,0 +1,21 @@
+[package]
+name = "pz_engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Authoritative gameplay rules exposed through a standalone WASM C ABI."
+publish = false
+
+[lib]
+name = "pz_engine"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jiff = { version = "=0.2.37", default-features = false, features = ["std", "tzdb-bundle-always"] }
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"

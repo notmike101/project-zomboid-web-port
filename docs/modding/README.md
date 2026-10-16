@@ -1,0 +1,1157 @@
+# Mod API 0.1.0 (experimental)
+
+A mod is an ES module of plain JavaScript — no compilation, no build step, no
+packaging tool. The host is `src/mods.js`; the same contracts are declared in
+[`../../types/mod-api.d.ts`](../../types/mod-api.d.ts) for editors. The shipped
+sample is [`mods/accessible-walking/main.js`](../../mods/accessible-walking/main.js),
+which imports [`mods/accessible-walking/settings.js`](../../mods/accessible-walking/settings.js)
+and changes the real WASM movement speed.
+
+The host UI integrates externally provisioned multifile packages through `src/mod-manager.js`
+and the root `mod-worker.js` service worker, documented under “Local mod packages” below.
+
+This API is experimental: 0.1.0 may change between previews. Anything not
+documented here does not exist.
+
+## Trust model
+
+Mods are **trusted same-origin code, not sandboxed**. A mod can do anything a
+page script can do. The host's guarantees are about ordering, validation and
+attribution, never containment:
+
+- every mutation still passes WASM validation, and WASM refuses invalid values
+  without changing state;
+- hooks must decide synchronously, so nothing can commit after a command;
+- every failure names the module and stage that caused it;
+- unloading a mod makes its API handle inert, so a captured handle cannot mutate
+  the engine afterwards.
+
+## Module shape
+
+```js
+export const manifest = {
+  id: 'accessible-walking',   // [a-z0-9][a-z0-9._-]{0,63}, unique per host; `host` is reserved
+  version: '0.1.0',           // dotted major.minor.patch, informational
+  apiVersion: '0.1.0',        // must equal the host's MOD_API_VERSION exactly
+  name: 'Accessible walking', // non-empty label for the host UI
+};
+
+export function activate(api) {
+  const previous = api.movement.getState().speed;
+  api.movement.setSpeed(2.25);
+  return () => api.movement.setSpeed(previous); // optional, synchronous
+}
+```
+
+`manifest` and `activate` are the only required exports. Optional
+`manifest.saveSchemaVersion` (default `1`) and module export `migrateSaveData`
+version a mod's saved document, as described below. Other extra exports are
+ignored. A duplicate `id` is rejected while that mod is loaded, and the id
+`host` is refused because the host uses it for page-input attribution in
+`diagnostics().errors` and `submittedBy`.
+
+## Mod API (`api` handed to `activate`)
+
+Each activated mod gets its own frozen handle. After the mod is unloaded every
+method on that handle throws (`stage: 'api'`).
+
+| Member | Result | Notes |
+|---|---|---|
+| `api.version` | `'0.1.0'` | Mod API version, not the mod version. |
+| `api.movement.getState()` | detached `ModSnapshot` | Copy of `{ apiVersion, tick, x, y, speed, action }`. Writing to it changes nothing. |
+| `api.movement.setSpeed(speed)` | `undefined` | World units/second, must be finite and within `[0.1, 10]`. Takes effect on the next engine step. |
+| `api.actions.submit(action)` | `ModCommandResult` | Enters the **same action path as page input**: every live hook resolves before the state changes and the outcome records `submittedBy` as this mod's id. Throws if called while hooks are resolving. |
+| `api.actions.getState()` / `.cancel()` | detached `ModQueueState` | `{current,pending}` native queue; cancel stops queued work and primitive movement immediately, bypassing veto. |
+| `api.actions.requestPickup(id)` / `.requestDoor(id)` / `.requestWalk({x,y,z})` | `ModQueueAcceptance` | `{accepted,actionId,state}` after shared precommit hooks; admission is not completion. Walk coordinates are signed int32 source-square coordinates. |
+| `api.actions.requestTransfer(id, sourceContainerId, destinationContainerId)` | `ModQueueAcceptance` | Immutable native container intent; acceptance is not ownership change or completion. |
+| `api.hooks.beforeAction(callback, { priority = 0 })` | `() => boolean` | Registers a hook; returns unsubscribe (`false` if already withdrawn by unload). |
+| `api.world.getBounds()` | detached `ModWorldBounds` | Reads committed navigation cell extents, not a proposed import. Optional engine capability. |
+| `api.world.getNavFlags(tileX, tileY)` | unsigned number | Reads committed navigation bits at an absolute integer tile. Optional engine capability. |
+| `api.world.getSquare(x, y, z)` | detached `ModWorldSquare` or `null` | Native source-square metadata and current `canStand`. `haveRoof` is boolean when roof authority is known, otherwise `null`. Absent whole-square metadata returns `null` separately. Unsupported capability throws. Coordinates are signed int32 integers. |
+| `api.world.isBlockedTo(from, to)` | boolean | Native source relation between signed-int32 `{ x, y, z }` records. Missing caller errors; `null` or absent other square returns false. Capability/lifecycle failures are attributed `ModError/world`. |
+| `api.world.importNavigationCell(cx, cy, bytes)` | `ModWorldImportResult` | Validates complete navigation bytes, resolves precommit hooks, then imports once. Cancels movement on success; no automatic undo. |
+| `api.world.getDoors()` / `.toggleDoor(id)` | detached `ModDoor[]` / `ModQueueAcceptance` | Exact original stable identities; toggle requests queued work through shared precommit hooks and native reach/collision/lock rules. Mutation is forbidden during activation. |
+| `api.hooks.beforeWorldImport(callback, { priority = 0 })` | `() => boolean` | Synchronous precommit veto with detached coordinates and bytes; unsubscribe/ordering match `beforeAction`. |
+| `api.items.definitions.list()` / `.get(fullType)` | detached `ModItemDefinition[]` / definition or `null` | Numeric fields and owner read from WASM; valid unknown identities return `null`. |
+| `api.items.definitions.register(input, { override = false })` | `ModItemDefinition` | Owner-bound, synchronous activation only; explicit duplicate override; failed activation rolls back touched rows/owners/metadata. No SDK freeze method. |
+| `api.items.list()` / `.get(id)` / `.worn(bodyLocation)` | detached `ModItem[]` / item or `null` | Stable positive u32 IDs; exact body-location identity; valid unknown identities return `null`. |
+| `api.items.spawn(input)` / `.wear(id)` / `.unequip(id)` / `.drop(id, x, y)` / `.setCondition(id, condition)` | `ModCommandResult` | Same shared synchronous action/hook path; successful spawn returns authoritative `snapshot.id`. |
+| `api.items.pickup(id)` / `.transferItem({id,sourceContainerId,destinationContainerId})` | `ModQueueAcceptance` | Same admission contracts as `actions.requestPickup` / `requestTransfer`, not immediate transfers. |
+| `api.items.containers()` / `.getContainer(id)` / `.playerInventoryId()` | detached `ModContainer[]` / container or `null` / number | Stable native container identities, not UI floor projections. |
+| `api.items.containerItems(id)` | detached `ModItem[]` | Direct membership in native insertion order; not a recursive flattened list. |
+| `api.items.containerState(id, actorId = null)` / `.itemWeights(id)` | detached `ModContainerState` / `ModItemWeights` | Native capacity/weight variants; supported actor ID is `1`. |
+| `api.items.inventoryState()` | detached `ModInventoryState` | Player-root `capacityWeight`, carry `capacity` and independently stored `maxWeight`; ordinary initial limits are 50 versus 8, not one threshold. |
+| `api.items.setWeight(id, weight)` / `.setActualWeight(id, actualWeight)` | `ModCommandResult` | Independent live native f32 fields through shared precommit hooks; finite/nonnegative/full-precision f32 range required before conversion. |
+| `api.character.getHealth()` / `.isDead()` / `.setHealth(health)` | number / boolean / `ModCommandResult` | WASM health `[0,100]`; health zero is current port death policy, not native survival fidelity. |
+| `api.character.isWearingAwkwardGloves()` | boolean | Actual native `base:hands` equipment and its definition's `base:awkwardgloves` tag; unsupported native capability throws, never a fabricated false. |
+| `api.character.moodles()` | detached `ModMoodle[]` | Canonical 26-member original registry order and levels `0..4`, statically derived rules over explicit inputs; no invented neutral fallback. |
+| `api.character.moodleInputs()` / `.inputLimits()` | detached named inputs / validation metadata | WASM-owned values/limits; numeric `{min,max,default,integer}` or boolean `{type:'boolean',default}`. |
+| `api.character.setStat(name, value)` / `.setMoodleInputs(inputs)` | `ModCommandResult` | Single stat or atomic partial input update through precommit hooks; exact names/types/full-precision limits required. |
+| `api.character.bodyParts()` / `.bodyPartInputLimits()` | detached `ModBodyPart[]` / native field limits | Seventeen real WASM injury/skin-node records; readonly pain/anatomy derives from native state, not source metadata. |
+| `api.character.thermalActionModifier()` | number | Source float32 cold-hand/arm weighting over actual node temperatures; no constant neutral fallback. |
+| `api.character.setBodyPart(part, values)` / `.setInjurySeverity(severity)` | `ModCommandResult` | Atomic partial native changes through the same precommit hooks; severity is `'low'|'normal'|'high'`. |
+| `api.character.hasTrait(id)` / `.setTrait(id, enabled)` | boolean / `undefined` | Native supported `base:dextrous`/`base:allthumbs` state used by action timing; unsupported identities refuse. |
+| `api.time.getState()` / `.set(field, value)` | detached `ModSourceTimingState` / `undefined` | Native source-action timing; multiplier 0 freezes without cancelling the queue. Fields/types follow the declared timing contract. |
+| `api.time.getGameMode()` / `.setGameMode(mode)` | string / `undefined` | Native action-timing game mode, not a full survival-mode implementation. |
+| `api.ui.readOptions(modOptionsID)` / `.writeOptions(modOptionsID, values)` | detached JSON or `undefined` / `undefined` | This owner's `saveData.nativeUIOptions` entry; preserves other namespace fields, existing schema guard and complete 256 KiB cap; no new UI panel. |
+| `api.audio.load(id, bytes, { override = false })` | `Promise<ModAudioAsset>` | Owner-qualified registration; native decoding consumes the ArrayBuffer. Forbidden during synchronous activation; missing host adapter throws an attributed unsupported error. |
+| `api.audio.play(id, position)` | `ModAudioVoice` | Real positional voice owned by this mod; host must have unlocked audio. Registered qualified shared cues may be played, not replaced or unloaded by another owner. |
+| `api.audio.unload(id)` | boolean | Removes this owner's registration and stops its voices; pending loads cannot re-admit buffers after cleanup. |
+| `api.saveData.read()` | detached JSON value or `undefined` | This manifest id's document; `undefined` means absent, not JSON null. |
+| `api.saveData.write(value)` | `undefined` | Replaces only this manifest id's finite JSON document; whole namespace limited to 256 KiB UTF-8. |
+| `api.events.onTick(callback, { priority = 0 })` | `() => boolean` | Runs synchronously after an executed engine step, with detached `{ seconds, snapshot }`. |
+| `api.events.onCharacterDeath(callback, { priority = 0 })` | `() => boolean` | Detached postcommit `ModCharacterDeathEvent` on an alive→dead transition only; no replay for repeated zero-health writes or restore. |
+
+`ModSnapshot.action` is numeric: `0` idle, `1` travelling to a destination, `2`
+walking a heading. Before navigation import world coordinates are within `[0, 10]`;
+position starts at `(5, 5)`. With navigation active, destinations use the loaded cell
+extents; WASM additionally refuses unloaded tiles, solid destinations and blocked routes.
+
+### Commands
+
+```js
+{ type: 'moveTo', x, y } // destination within authoritative world bounds; refused, never clamped
+{ type: 'walk', x, y }   // any finite signed heading, normalised by WASM; only (0,0) cancels
+{ type: 'requestWalk', x, y, z } // queued exact source-square destination, signed int32 coordinates
+{ type: 'cancel' }       // stops queued work and primitive movement, position unchanged
+{ type: 'toggleDoor', id } // exact original stable string identity, not a numeric item ID
+{ type: 'spawnItem', fullType, x, y } // optional count/condition; omitted values resolved in WASM
+{ type: 'pickup', id }
+{ type: 'transferItem', id, sourceContainerId, destinationContainerId }
+{ type: 'wear', id }
+{ type: 'unequip', id }
+{ type: 'drop', id, x, y }
+{ type: 'setCondition', id, condition }
+{ type: 'setWeight', id, weight }
+{ type: 'setActualWeight', id, actualWeight }
+{ type: 'setHealth', health }
+{ type: 'setCharacterStat', name, value }
+{ type: 'setMoodleInputs', inputs }
+{ type: 'setBodyPart', part: 'Hand_L', values: { scratchTime: 10, skinTemperature: 20 } }
+{ type: 'setInjurySeverity', severity: 'normal' }
+```
+
+Movement actions from browser clicks, keyboard, destination forms, accessible buttons
+and `api.actions.submit` use one shared precommit hook path. Explicit safety cancellation
+deliberately bypasses veto; it cannot be blocked by mods. The host validates known types,
+finite components, and authoritative world bounds for destinations only. Direction components
+may be negative or arbitrarily large/tiny finite numbers. WASM validates original F64 input
+before conversion to F32 state, avoiding boundary-rounding escapes. The page calls
+`mods.frameStep(elapsed)` once per RAF, starting at elapsed 0, rather than draining
+timed actions through a fixed-step catch-up loop.
+
+### Queued admission, grouping and source ownership
+
+`actions.requestPickup(id)`, `requestTransfer(id, sourceContainerId, destinationContainerId)`,
+`requestDoor(stableDoorId)` and `requestWalk({x,y,z})` return
+`{accepted,actionId,state}`. A hook veto returns `accepted:false`/`actionId:null`
+without admitting work; invalid, unsupported or reentrant requests throw attributed
+errors. `items.pickup`, `items.transferItem` and `world.toggleDoor` use the same
+contracts. Through `actions.submit`, `committed` means the engine received the
+request, not that the item moved or door changed.
+
+`state` contains `current` (or `null`) and ordered `pending` actions. Detached
+records expose stable `id`, `kind:'walk'|'door'|'grab'|'getUp'|'transfer'`,
+`origin:'sdk'|'lua'`, target, clocks/progress, `started` and ordered `groups`
+with stable IDs, raw times, full types, `itemIds` and matching `sourceContainerIds`.
+Transfer records also expose bound `sourceContainerId`, `destinationContainerId`
+and nullable `floorPosition`.
+Native item/door queries show completion; there is no public completion callback
+in this API. Accepted work can still stop or refuse at completion-time validation.
+
+Compatible pickups can merge into an existing grab and return the same action ID.
+SDK append can add future groups to a Lua-origin head: WASM retains queue/group
+state while the unchanged resident original Lua action, under its exact owner,
+performs the transfer. Do not replace original callbacks or call private commits.
+Original menu semantics differ deliberately: new `createMenu` refuses speed 0,
+and repeated source grab selections clear earlier work via `luautils.walkAdj`
+without keepActions. Use SDK requests for append, not rewritten source menus.
+
+Grab groups retain each item's real floor-root source, allowing unchanged grouping
+across squares; transfer groups use a common source/destination pair. Event-5
+completion calls the unchanged supported original helpers under native authorization
+for preparation, detach, add and world placement. Failed supported helpers restore
+native ownership/order, world/equipment state and RNG: this atomic rollback is
+**port-safety policy**, not observed original failure semantics. Unsupported
+ammo/fluid/entity-equipment, vehicle, trade, radio and corpse branches refuse before
+detach. These boundaries do not implement full item processing or loot rules.
+
+`time.set('multiplier',0)` freezes source-action progress without STOP;
+`time.set('multiplier',1)` resumes it. `time.set` accepts native numeric
+`multiplier`, `bias`, `perObject` and strict boolean `slowHalf`, `slowQuarter`,
+`slowEighth`, `instant`. Its snapshot also exposes native elapsed/FPS/slow/game
+multipliers, mode and supported traits. Manual pause/Escape, blur and hidden-tab
+safety cancellation stop the queue; automatic 30-second saving freezes without
+cancelling it.
+
+Earlier genuine Chromium/NVIDIA checkpoints proved original grouped grab plus SDK
+append, exact positive-progress current/future-group autosave/reload/resume,
+source/SDK pickup veto and source grab → SDK door → SDK walk FIFO completion.
+The resolved Lua/DOM return-boundary fault no longer blocks source menus:
+genuine original approach/close/open/close completed with original standing
+get-up actions and unique real open/close voices, empty queue and no Lua/audio
+errors. Genuine original GrabAll 26 also proved groups 20+6: initial maximum 14,
+next-group maximum 12, same started action/history with current progress reset,
+then all items in inventory. Trusted Escape stopped an active original GrabAll
+25/groups20+5 with every item still ground; normal pause/resume worked.
+Closed-door heading admission refused without actor movement. These bounded
+proofs do not close full inventory/UI fidelity or any of the 13 full-game gates.
+Exact observations are in [`../STATUS.md`](../STATUS.md).
+
+### Items, containers, equipment and health
+
+[`ModItemDefinitionInput`, `ModItemDefinition`, `ModItemSpawn`, `ModItem`,
+`ModContainer` and `ModAction`](../../types/mod-api.d.ts) are the public records,
+not internal pointers. Definitions include `fullType`, nullable `bodyLocation`,
+independent nullable `canBeEquipped`, `conditionMax`, `stackLimit`, `removeOnBroken`,
+`conditionLowerChanceOneIn`, native f32 `weight`, optional `tags?: readonly string[]`
+and detached source/appearance metadata. Bag fields include `isBag`, `capacity`,
+`weightReduction`, `maxItemSize`, `containerType`, `onlyAcceptCategory` and
+`acceptItemFunction`; returned definitions add the real owner and resolved fields.
+Omitted weight uses the original script-item constructor value 1. Registration is
+legal only inside
+synchronous `activate`, bound to that mod id. Duplicates require `{override:true}`.
+Failed activation restores first-touch native rows (including tooltip factory
+fields and ownership), restores overridden source metadata, and removes appended
+definitions. Items spawned afterward use the restored factory values.
+The application seeds missing original footwear/hands and bags on New/restore
+without replacing saved definitions or owners, then freezes registration before play;
+freezing is not a mod API.
+
+Source semicolon-delimited `Tags` parse into canonical lowercase `namespace:path`
+identities with default namespace `base`; raw fields/provenance remain intact.
+Public registration accepts an optional array of resource-ID strings, validates
+and canonicalizes it before native registration, and clones it on ingress/query;
+omission means an empty list. The parser adds no gameplay defaults. Only original
+wearable seeding applies verified constructor values before authored fields:
+condition maximum/chance 10, weight/run-speed modifier 1 and remove-on-broken true.
+These loader defaults are not new defaults for required public definition fields.
+
+Items contain stable never-reused positive u32 `id`, `fullType`, `definitionOrdinal`,
+`ownerContainerId`, nullable `internalContainerId`, nullable `worldPosition:{x,y,z}`,
+`condition`, `count`, independent live `weight`/`actualWeight`, `favorite`, `consumed`
+and currently worn `bodyLocation` (otherwise `null`). The native ordered graph is
+the sole ownership authority. Each floor root belongs to one real loaded square;
+only items directly owned by that root have real world placement. A bag's internal
+container and descendants never inherit the shell's `worldPosition`.
+
+`containers()` returns actor/floor/bag records with direct parent metadata and,
+for bags, `containingItemId`. Recursive ancestry follows that shell item's
+`ownerContainerId`; `containerItems(id)` returns only direct members in native
+order. Moving a bag retains its shell/internal IDs and descendant ownership.
+Lua `item:getContainer()` returns the actual owner, not the UI floor view. Original
+floor views retain transient presentation IDs, not another ownership list; a floor
+destination is canonicalized to the actual square root before the original action
+constructor runs.
+
+```js
+const destinationContainerId = api.items.playerInventoryId();
+const directItems = api.items.containerItems(destinationContainerId);
+const state = api.items.containerState(destinationContainerId, 1);
+// state: {capacity,effectiveCapacity,contentsWeight,capacityWeight,maxWeight}
+const item = api.items.list().find(({ worldPosition }) => worldPosition !== null);
+if (item) {
+  const { accepted, actionId, state: queue } = api.actions.requestTransfer(
+    item.id, item.ownerContainerId, destinationContainerId,
+  );
+  // Admission only. Read items.get(item.id).ownerContainerId later for ownership.
+}
+```
+
+IDs/counts must be positive u32; condition must be an integer in
+`[0, conditionMax]`; world positions must be finite and pass WASM membership
+validation. Spawn still takes `{fullType,x,y,count?,condition?}`; omitted count
+and condition resolve in WASM from the definition. Wear/unequip change equipment,
+not apparel meshes. Mutations and hook replacements use the shared action pipeline
+and final WASM validation. Detached queries never fake unsupported capabilities.
+
+Equipment uses native canonical body-location identities, ordered groups and
+an independent worn-item order. Original Lua startup declares the Human group
+and its multi-item, exclusive, hide and alternate-model rules before play,
+including headless startup. Equipment snapshots preserve registry identities,
+group order/rules, the bound worn group and worn-item order; legacy saves initialize
+the original rules before importing items. Hide/model rules retain metadata;
+they do not imply apparel rendering support. Duplicate canonical registration
+rejects without mutation: Java's invalid duplicate-input mutation-before-throw
+side effect is intentionally unsupported.
+Restore validates structural membership, exact worn IDs and order, not mutable
+current admission rules against an already valid saved equipment snapshot.
+
+`api.items.wornItems()` returns detached `{id, bodyLocation}` rows in worn order.
+`api.items.setWornItem(bodyLocation, id|null)` submits a shared `wornSet` action
+and returns void. The numeric `api.equipment.operation` bridge supports
+`wornSet(locationToken, id|null)`, `wornRemove(id)`, `wornClear()` and
+`wornGroupSet(groupToken)` through the same hooks; changing the bound group
+requires an empty worn collection. Its compatible return value `0` also covers
+hook veto or replacement and does not prove a mutation committed. Use
+`api.actions.submit` with `wornSet {locationToken,id}`, `wornRemove {id}`,
+`wornClear {}` or `wornGroupSet {groupToken}` for the attributed command result.
+Registry/query operations are live-owner attributed but do not run action hooks.
+
+`itemWeights(id)` returns `{actualWeight,contentsWeight,unequippedWeight,
+equippedWeight,hotbarEquippedWeight,wrapperEffectiveCapacity}`. Native f32 sums
+follow direct insertion order and recurse through bags; count does not multiply
+weight. Unequipped weight is shell actual weight plus unreduced contents. Equipped
+bags apply the equipped multiplier (initially 0.3) to the shell and their clamped
+0–100 weight reduction to contents; ordinary equipped items use the multiplier.
+Player carry sums direct root members using actual worn/held/fake-equipped state.
+Lua bag `getInventoryWeight()` is a separate ordered child sum selected by the
+shell's equipment state, **not** an alias of `getContentsWeight()` or a blanket
+bag-reduction formula.
+
+`containerState` distinguishes raw contents from carry/admission weight. Ordinary
+player pickup checks carry capacity 50, not initial encumbrance `maxWeight` 8.
+Admission corrects the existing weight to the nearest hundredth before adding
+incoming unequipped weight; bag capacity is capped at 50, other container capacity
+at 100 before applicable actor-relative organized/disorganized adjustments.
+Bag max-item-size, category/custom acceptance, cycle prevention, held-bag carry
+and direct-world-bag floor-weight checks remain distinct predicates; a weight
+snapshot alone is not admission. `wrapperEffectiveCapacity` additionally caps the
+bag wrapper by integer `50 - actualWeight`.
+
+Definition overrides affect future instances, not existing live fields.
+`setWeight` and `setActualWeight` are independent. Invalid individual f32 inputs
+refuse atomically; ordered sums of legal inputs may overflow to positive Infinity.
+Save/restore preserves native order, not ID sorting, and accepts structurally valid
+overcapacity graphs rather than replaying mutable admission checks.
+
+The source path includes footwear/hands and bags, not full inventory/loot/use.
+One clothing/bag instance per stack (`stackLimit:1`) is explicit port policy.
+Full original `createInventoryInterface` HUD startup/input, processing, ammo/fluid,
+vehicle/corpse systems and FMOD runtime remain open. Clothing is not connected to
+skinned rendering; static FBX parsing is not ground-item visual acceptance.
+Automatic encumbrance/run-speed/tear and survival dynamics remain unsupported.
+
+`api.character.isWearingAwkwardGloves()` and live Lua
+`player:isWearingAwkwardGloves()` query the actual native item worn on `base:hands`
+and the current definition's `base:awkwardgloves` flag, without an actor flag or
+host-only cached result. Existing definition/item saves retain detached tags;
+restore derives the native flag from validated definitions and worn state.
+Actor format 2/twelve words and ABI 1 stay unchanged. Unsupported native
+capabilities throw attributed errors instead of returning false.
+
+Original-scene public SDK boxing-glove wear/unequip/rewear produced
+true/false/true; trusted Save revision 6/reload retained worn ID 1/condition 10,
+tags and native query. The newer source-menu/queued pickup proof is separate
+from this equipment-state proof; neither establishes visible glove models,
+full inventory, roof visibility or whole-game completion.
+
+Health accepts finite `[0,100]`; `isDead()` currently means health zero.
+`onCharacterDeath` receives detached `{type:'CharacterDeath', submittedBy,
+action, snapshot}` after a successful alive→dead command. Listeners use the tick
+ordering/unsubscribe/synchronous-return rules; failures do not undo death and are
+attributed to `onCharacterDeath`/`onCharacterDeath.late`. The Lua bridge dispatches
+original `OnPlayerDeath` with real player index zero. This is a port health/event
+policy, not native injury, survival or death-avatar animation.
+
+### Body-part state and action modifiers
+
+[`ModBodyPartId`, `ModBodyPartValues`, `ModBodyPart`, `ModBodyPartInputLimits`
+and `ModBodyState`](../../types/mod-api.d.ts) describe real native records.
+Canonical anatomy has 17 parts; `MAX` is a sentinel, not an editable part.
+Mutable fields are `health`, `scratchTime`, `cutTime`, `biteTime`,
+`deepWoundTime`, `stitchTime`, `fractureTime`, `splintFactor`, `burnTime`,
+`woundInfectionLevel`, `additionalPain`, `stiffness`, `bandaged`, `haveBullet`,
+`haveGlass` and `skinTemperature`. Use native `bodyPartInputLimits()` rather
+than guessing ranges. Every full-precision component validates before conversion
+or any commit; unknown fields and malformed updates refuse atomically.
+
+`pain`, `skinSurface` and `distToCore` are readonly. Pain follows source float32
+injury/treatment order: bandaging reduces accumulated wound pain before infection,
+additional pain and stiffness, followed by the source injury-severity pain
+factor. It is not the separate general damage multiplier. Signed additional
+pain remains signed; individually valid fields may produce a derived positive
+Infinity. Derived pain and thermal factors are not saved as extra fields.
+
+The native skin-node constructor starts at 33 °C. Cold timing weights only
+hands, forearms and upper arms using source anatomy; cold feet/torso do not
+silently add an invented action penalty. Live Lua body/part/list/thermal-node
+userdata preserve identity and query this state. Unmodeled inner-node climate
+values, treatment lifecycle methods such as `setBandaged`, and unknown APIs
+refuse instead of returning fabricated values.
+
+These are authoritative explicit injury/skin inputs and derived timing
+prerequisites, not automatic healing, climate/thermal progression, combat or a
+native aggregate-health cutover. The existing scalar health and moodle inputs
+retain their documented separate port policies. Ground pickup now uses queued
+admission and completion, as described above, not an immediate item mutation.
+
+
+### Original door state
+
+`world.getDoors()` returns detached source-bound records, including current panel
+coordinates, original facing, open/lock/barricade state and `toggled`. That flag
+starts false on source import and becomes true after a successful native toggle,
+including every coupled panel; closing again does not reset it. The renderer
+needs this history to choose the original constructor versus toggled sprite
+family, not merely closed versus open art.
+
+Toggles share action validation, attribution and precommit veto with movement
+and item commands. WASM owns adjacency, independent walls, inside unlocking,
+forced locks, coupled double/garage panels and obstruction refusal. An open
+ordinary door does not turn its decorative render wing into a collision wall.
+Queries do not mutate state. Requests are queued; browser SDK FIFO/completion
+and genuine original door-menu approach/open/close/get-up completion are proven,
+with unique real door-open/door-close voices. Lua source-menu calls discard the
+JavaScript UI's HTMLElement return rather than serializing DOM into Wasmoon;
+callbacks, owner attribution and the JavaScript UI API remain unchanged.
+General keys, vehicles and door damage remain unsupported.
+
+### Source squares, standability and blocked relations
+
+`world.getSquare(x, y, z)` reads native source-square metadata, not navigation
+bits or a synthesized tile. Its detached result contains `x`, `y`, `z`,
+`roomId`, `outside`, `solid`, `solidTrans`, `tree`, `vehicleObstructed`,
+`solidFloor`, `haveRoof` and current `canStand`. A missing source square returns
+`null`. A missing native capability throws an attributed `ModError/world`.
+Reads are allowed during activation and use the host's own session engine.
+Imported source elevations are currently `-32..31`. A valid integer query at
+an absent elevation still returns `null`.
+`solidFloor` is the source cached `TreatAsSolidFloor()` result: raw
+`solidfloor` **or** stairs **or** a nonnull slope direction, not only the raw
+sprite property.
+
+`haveRoof` is `true` or `false` only when native roof authority is known.
+Its `null` value means unknown roof authority on an existing square, not an
+absent square. Room identity and `outside` do not establish roof state.
+Per-import roof wire version 1 is negotiated before any metadata rows.
+Old reserved-zero imports remain unknown, not known empty roof columns.
+Calculation scans source levels 31 down to 0 using source solid-floor and
+BlockRain0–3 properties. It applies the prior accumulator before each blocker.
+Only floors establish roofs below. Moving doors retain four current-source
+property snapshots. This query does not implement roof cutaway rendering.
+
+The importer replays initial object membership, constructor priority, attached
+overlays, floor/tree replacement and shared sprite-property mutations before
+aggregating these facts. Actual window/frame stand edges are separate from the
+legacy raw window collision mask; querying standability does not change movement
+or door-reach rules. Door facts follow the actual current sprite, including
+constructor, replacement and toggled-partner history.
+This is metadata-only replay, not entity-component execution or texture-load
+parity. A conditional diamond-floor replacement whose existing floor may have
+unresolved source components refuses import rather than inventing its state.
+
+Native `canStand` follows the source predicate: `solid` refuses first;
+`solidTrans` requires an actual adjacent window or hoppable edge; otherwise
+`solidFloor` decides. North/west edges belong to the current square, south uses
+the southern neighbor's north edge and east uses the eastern neighbor's west
+edge. Missing neighbor metadata cannot supply a static edge. Door participation
+uses the current panel position and current source sprite, including constructor
+versus toggled sprite history. Tree and vehicle fields are exposed facts, not
+substitutes for this predicate's `solid` flag.
+
+`world.isBlockedTo(from, to)` reads the native source relation, independently of
+navigation collision and `canStand`. Supply `{ x, y, z }` signed-int32 records
+(a detached `ModWorldSquare` also works); `to` may be `null`. The caller must
+exist. An absent other square has source-null semantics and returns `false`;
+missing capability still throws, including for a null other square.
+
+The relation tests both endpoint-facing edges and their source east/south
+neighbors. Walls use current `collideN`/`collideW` flags excluding lowercase
+`windowN`/`windowW`; actual blocked windows are separate from raw flags, frames
+and stand edges. Door blockage uses current panel position, fixed facing and
+open/barricaded state. Stair-top checks are directional on the calling square:
+west-top blocks toward lower x, north-top toward lower y. Same-square relation
+is false. This is not a distance/radius test or an intermediate-path trace.
+
+Initial window blockage follows actual constructor and smashed/glass setter
+state, even when later sprite replacement or blueprint properties differ.
+Base square properties aggregate final surviving objects; door properties
+follow their genuine initial and toggled sprite partners on toggle/restore.
+Window runtime actions and player-built thumpables remain unsupported.
+
+Lua `getCell()` returns a stable `IsoCell` facade with
+`getGridSquare(x, y, z)`. Numeric lookup follows the source
+`PZMath.fastfloor(double)` conversion: fractional coordinates floor, Java
+double-to-int saturation precedes the comparison and subtraction wraps as an
+int32. Nonnumeric coordinates refuse. Lookup returns `nil` only when native
+metadata is absent. `player:getCurrentSquare()` uses the actual actor position
+and the current port's actor elevation **0**, not invented multi-floor state.
+`IsoGridSquare` userdata retain identity by integer coordinates and expose
+`getX()`, `getY()`, `getZ()`, `canStand()` and `isBlockedTo(otherSquareOrNil)`,
+each backed by current native facts. Foreign userdata/tables and unsupported
+overloads refuse; retained userdata whose calling square disappears error.
+
+`roomId` is the existing dense canonical source-room identity (`-1` outside
+rooms), not the original packed numeric `RoomID`. Lua `getRoom()`,
+`getBuilding()` and `getRoomID()` coverage is limited to the supported original
+context domain. These geometry queries alone do not establish player-built
+thumpable state or full interaction-gate completion.
+
+
+### Owned positional audio
+
+Audio is presentation, not simulation authority. `load`/`unload` accept this
+manifest's namespace; unqualified IDs gain that prefix, while `base` and `host`
+are reserved. `play` may reference an already registered shared cue, but its
+voice belongs to the calling mod. Unload/disposal stops looping voices and
+withdraws pending registrations without removing another owner's buffers.
+
+The host creates its native AudioContext only on a trusted gesture. Playing
+before unlock or with no injected adapter fails explicitly. Positions use
+finite world coordinates: `(x, y, z)` maps to audio `(x, z, y)`; the port's
+presentation scale is one tile per metre. `volume` is linear `[0,1]`, default 1;
+`loop` defaults false. The returned handle has an idempotent `stop()`.
+Pause, visibility/session replacement and disposal are host-owned. The current
+scene uses three privately provisioned legacy WAV cues; this does not implement
+Build 42 FMOD banks, authored event routing or complete material-specific audio.
+
+Source emitter event handles support play/status/stop; they do not make an event
+intrinsically looping. The original Rummage bank event is a six-parameter one-shot,
+not a loose-file cue. Without a browser FMOD backend, its playback refuses before
+detach; static source sound/member queries are not runtime or baked-clip equivalence.
+
+### Authoritative moodle inputs
+
+`character.moodles()` exposes `ModMoodle` IDs/levels in original registry order.
+Vanilla rules derive from static original Build 42.21.0 evidence; setting an input
+does not implement the native survival process that would change it.
+Lua `MoodleType` uses the shared source-backed 26-member registry, not caller-supplied
+constant overrides. `UNHAPPY` resolves to `base:unhappy`, `DRUNK` to `base:drunk`,
+and underscore-bearing fields retain the registered path without underscores:
+`HAS_A_COLD` → `base:hasacold`, `HEAVY_LOAD` → `base:heavyload`,
+`CANT_SPRINT` → `base:cantsprint`, `NOXIOUS_SMELL` → `base:noxioussmell`,
+`FOOD_EATEN` → `base:foodeaten`. `WINDCHILL` is the actual field name.
+Mixed-case legacy aliases such as `Unhappy`, unknown members, absent character
+capabilities, missing required IDs and invalid levels error explicitly.
+Constants, `Registries.MOODLE_TYPE:values()` and `getMoodleLevel` use the same
+authoritative character domain; resolving a constant never supplies a neutral level.
+The existing opaque string-ID representation is unchanged; custom Java registry
+registration and native `MoodleType` object methods are not implemented.
+
+Static provenance: original JAR SHA-256
+`e1a69eb743ede60b213a0fe7f8b83d4fcab773036d256cc4543a336f3b058a33`,
+`zombie.scripting.objects.MoodleType` field declarations/static initializer
+(offsets `0..205`), `RegistryReset.createLocation`, `ResourceLocation.of`/constructor
+and `Registry.values`/`register`. These establish exact field casing, `base:`
+namespace, English-lowercased paths and registration-order iteration.
+The private original `ISBaseTimedAction.lua:99-123` consumes `UNHAPPY` and `DRUNK`
+before existing native hand-pain and thermal modifiers. Its regression reads
+privately provisioned Lua at runtime and skips when those files are absent;
+no original source bytes are distributed with tests.
+
+`setStat` accepts these numeric character-stat names: `endurance`, `fatigue`,
+`hunger`, `panic`, `sickness`, `boredom`, `unhappiness`, `wetness`, `anger`,
+`stress`, `nicotineWithdrawal`, `thirst`, `pain`, `intoxication`, `temperature`,
+`zombieInfection`, `zombieFever`, `foodSickness`, `discomfort`.
+`setMoodleInputs` accepts an atomic partial map of those names plus `coldStrength`,
+`hasCold`, `fakeInfected`, `bleedingParts`, `neckBleeding`, `capacityWeight`,
+`maxWeight`, `windChill`, `corpseSicknessRate`, `toxicBuilding`,
+`protectedFromToxic`, `corpseImpactEnabled`, `cantSprint`, `healthFromFoodTimer`,
+`standardHealthFromFoodTime`. Use `inputLimits()` for authoritative numeric bounds,
+integer requirements and boolean types rather than guessing thresholds.
+
+Unknown keys, wrong types, nonfinite/out-of-range values and fractional integers
+are refused; full JavaScript precision is checked before ABI conversion.
+The SDK detaches the input map for submission and each hook, revalidates hook
+replacements and commits all accepted inputs atomically in WASM. A rejected map
+changes neither inputs nor hidden timers. Detached input/limit/moodle queries do
+not advance timers. Timers count accepted engine updates, not wall-clock seconds.
+Explicit environmental inputs do not provide native cold/food decay, carried
+weight, weather/corpse/toxic dynamics or thermal chevrons/voices/wiggles.
+
+### Browser save format and moodle continuity
+
+`src/saves.js` writes `pz-web-save` envelope format 6 with a version-2
+`inventoryGraph`, version-1 `worldClock` and integrity-covered native climate.
+Engine ABI 1 and twelve-word actor format 2 remain unchanged.
+Legacy v1–v5 records are authenticated against their original integrity before
+detached migration. V1 preserves its ten actor words, appends health 100/next-ID 1
+and creates an empty actor-root graph. Flat v2 preserves item IDs/order and
+live weights, deriving missing weights from saved definitions. It assigns
+actor/per-square floor roots and replaces flat placement with owner/internal/
+world-position records. Graph version 1 gains constructor-default clothing wetness.
+
+Formats 1–4 contain no clock history. Migration explicitly starts a new source
+timeline at 1993-07-23 09:00 with a 90-minute day, not inferred last-frame history.
+Weatherless formats 1–5 start a deterministic legacy-new-source-weather epoch
+derived from signed integrity. Genuine old-module climate absence in format 6
+also starts an explicit new epoch. Neither case recovers old weather history.
+World bytes, mod schemas/data and revision metadata survive. Reading never
+rewrites storage. Mod namespace migration and native-save compatibility remain separate.
+
+Native climate persists its exact state, last clocks and time zone.
+New worlds receive platform entropy. Existing precipitation restores without
+reseeding, and the persisted zone is not selected again during restoration.
+Missing climate authority remains absent, never invented dry weather.
+
+Restore stages navigation cells → actor core → native world clock → equipment
+registry → definitions → inventory graph → hands → optional moodle/body state.
+Source geometry/door and queue restoration follow. Weather initialization, when
+needed, follows geometry/queue restoration. Clothing wetness persists, but its
+runtime timestamp rebases to restored world age without offline catch-up.
+Graph validation requires valid references, unique IDs/squares, acyclic paired
+bags, exact allocators and ordered worn membership. Structurally valid
+overcapacity saves remain valid. Version-1 `moodleState` retains exact named
+`inputs`, `painTimer`, `painLevel` and `cantSprintTimer`. Missing legacy optional
+state uses fresh-engine defaults. Malformed present state refuses staged restore
+without replacing the live game.
+
+Actual Chromium/nonfallback NVIDIA pause-menu Save and immediate reload retained
+exactly manual revision 146 and all nine item owners. A read immediately after
+the real WASM restore commit matched the authenticated 2331-byte native climate
+state byte for byte. No application failure, Lua errors or timeouts were observed.
+This is save/rendering evidence, not genuine Take All or ownership-transfer
+acceptance. Those paths remain blocked by the missing FMOD HTML5 backend.
+
+Optional version-1 `doorState` is covered by the same integrity hash. It retains
+source identities, current panel positions, locks, per-identity `toggled`,
+revision, seed and RNG state without changing actor words or engine ABI. Scene
+restore imports matching original geometry before applying it, before the first
+draw and mod activation; malformed or mismatched rows fail staged restoration.
+Legacy saves without this field initialize from source. New-world lock rolls use
+the port's nonzero seeded RNG and the original LockedHouses probability table,
+not native CellularAutomaton RNG parity.
+
+Optional version-1 `bodyState` shares the envelope integrity hash and restores
+on the staged engine after actor/moodle state. It retains injury severity and
+exactly one row per canonical part with mutable native fields only; anatomy,
+derived pain and thermal aggregates are never persisted. Missing legacy state
+uses actual constructor defaults. Duplicate/missing/unknown parts, malformed
+fields and unsupported versions refuse before publication without altering the
+live game. Actor format 2/12 words and ABI 1 remain unchanged.
+
+Optional integrity-covered version-2 `queue` stores native bytes, bound container
+references, per-item group sources and exact Lua action-to-owner mappings. Restore
+stages graph/entities/source geometry first, then hydrates supported original
+classes and binds genuine supported continuations after player startup, before
+publication or the first tick. Current/future groups, stable IDs,
+progress/history/delta and timing survive;
+missing exact enabled owners, malformed state or nonportable arbitrary closures
+refuse rather than silently discarding actions. Genuine browser autosave/reload
+retained the exact positive-progress mixed-origin queue at multiplier 0; public
+multiplier 1 completed all six original items without Lua errors. Manual
+pause-menu Save is not this proof because entering pause cancels actions.
+
+Actual browser file-input import of a correctly SHA-256-signed backup containing
+malformed native queue bytes refused while exact current/previous saved records
+and live state remained unchanged. A separately authored native Lua package
+asserted zero-argument `OnPostSave`; the next save captured its previous increment,
+confirming commit before callback delivery. Core's actual scoped `layout.ini`
+header persisted, without claiming general source-file or full HUD compatibility.
+An owned intentional exception after original STOP left queue empty/item ground,
+actor idle, normal pause UI visible and audio suspended/no active voices.
+The retained save was unchanged and no save followed that error.
+
+### `beforeAction` hook
+
+Called synchronously before a host command commits, once per live hook, in
+**ascending `priority` order (lower numbers first), ties broken by registration
+order**. Every live hook sees the command; a hook unsubscribed before its turn
+(by another hook, or because some hook called `dispose()`) never runs. The hook
+receives a **detached copy**; mutating it has no effect.
+
+The hook returns exactly one of:
+
+- `undefined` / `null` — leave the command as it currently stands;
+- a replacement command — validated before commit; an invalid replacement is
+  rejected, attributed to the mod, and the previous value is kept;
+- `false` — cancel the commit.
+- anything else (including a promise) — an error attributed to the mod; the hook
+  contributes nothing. A result whose `then` getter throws is that same error,
+  and the action standing before that hook is what commits.
+
+A hook must not submit while dispatch is in progress: `api.actions.submit`
+during hook resolution throws an attributed `ModError` (`stage: 'action'`) and
+changes nothing. A hook that wants a different action returns a replacement
+command or `false`; a rejected submission is never counted as a command.
+
+**Cancellation wins.** A `false` from any hook cancels the commit even if other
+hooks returned replacements, and a later hook cannot overturn that veto. The
+outcome is therefore independent of priority order; only which replacement wins
+depends on order.
+
+**Cancellation cannot be blocked.** An explicit `{ type: 'cancel' }` — Stop,
+Escape, window blur, pause, tab hidden, mod reload — bypasses hooks entirely and
+goes straight to the engine. Hooks observe and alter queued pickup/door/walk
+admission and other supported commands, not private completion commits.
+
+
+### Navigation queries and import
+
+`getBounds()` returns `{ active, minCx, minCy, maxCx, maxCy, cells }`: inclusive
+cell-index extents of committed navigation. Each cell is **256 × 256 tiles**;
+these are not actor-position limits and holes inside the extents can be unloaded.
+With no imports `active` is false and `cells` is zero. `getNavFlags(tileX, tileY)`
+requires signed int32 integers and returns bits: `1` solid, `2` south wall,
+`4` east wall, `8` floor, `16` water, `32` room. `0xFFFFFFFF` means unloaded,
+not a traversable tile. Both queries are detached/authoritative, callable during
+activation, hooks, ticks and cleanup; no memory addresses or WASM views are exposed.
+
+`importNavigationCell(cx, cy, bytes)` requires integer cell indices in
+`[-100, 100]` and a `Uint8Array` or `DataView` of the complete navigation format:
+header `00 01`, exactly 1024 row-major 8 × 8 records, tag `0..5`; only tag `2`
+carries 64 tile bytes, each using bits `0..0x3F`. Truncation, trailing bytes,
+unknown tags/bits and invalid coordinates are refused **before hooks run**.
+Input bytes and each callback payload `{ cx, cy, bytes }` are detached.
+`beforeWorldImport` callbacks run in ascending finite priority, ties by registration
+order, and return `false` to veto or `undefined`/`null` to leave the import alone.
+No replacement payload is accepted. All still-live callbacks run; cancellation wins,
+and unsubscribing/disposal before a callback's turn prevents it from running.
+Throwing, invalid-return and promise-returning callbacks contribute no veto and are
+attributed rather than breaking other callbacks. Promises are not awaited.
+
+The result is `{ committed, cancelled, submittedBy, cancelledBy?, snapshot }`.
+On veto, neither navigation nor movement is committed; otherwise WASM validates
+and imports the cell, atomically replacing the same coordinate and **cancelling
+movement without relocating the actor**. Engine refusal leaves its existing world
+unchanged and throws `ModError` with stage `world`. Nested imports, action submissions
+(including cancellation) and steps during precommit resolution are refused.
+Imports can otherwise be made from activation, tick callbacks or cleanup. There
+is **no automatic import undo**, including when activation later fails: mods own
+their persistent navigation effects. In the app committed imports are retained in
+the world's save provenance. Unsupported engine extensions throw an attributed
+`world` error; they never return fake flags/bounds or disable original movement.
+
+### Namespaced saved documents and schema migration
+
+`saveData` selects the mod's `manifest.id` automatically; no caller-supplied key
+can select another namespace. `read()` returns detached data (`undefined` only if
+absent); `write(value)` validates and detaches before replacing the backing record
+`{ schemaVersion, data }`. Reads clone before exposure; writes clone before storage.
+Finite numbers, strings, booleans, null, dense arrays and plain data objects are
+accepted. Cycles, undefined (including nested values), functions, BigInt, symbols,
+accessors, sparse arrays, custom objects such as Date/typed arrays, non-enumerable
+object properties and lossy `toJSON` tricks are refused. The **complete record**
+must fit 256 KiB of UTF-8 JSON. Invalid/oversized input never reaches backing writes.
+No namespace is allocated just by reading or loading; absent/disabled mods' opaque
+records remain untouched. There is no automatic write undo on unload/activation failure.
+
+`manifest.saveSchemaVersion` defaults to `1` and must be a positive safe integer.
+When a stored record differs, the host requires the module's pure synchronous export:
+
+```js
+export function migrateSaveData(oldVersion, data) {
+  if (oldVersion !== 1) throw new Error('Unsupported saved schema');
+  return { points: data.score }; // example migration to manifest.saveSchemaVersion = 2
+}
+```
+
+Migration runs **before `activate`**, receives detached old data, and must return
+valid JSON within the same cap. The old record is retained on missing/throwing/async/
+invalid migration; activation is refused (`stage: 'saveData'`) rather than wiping it.
+Successful migration writes the new schema before activation and remains even if
+activation subsequently fails. Both upgrades and downgrades require migration when
+versions differ. A schema changed externally while a mod is loaded makes `read()` and
+`write()` fail, not silently migrate or overwrite. Save API misuse/backing failures throw attributed
+`saveData` errors. Storage callbacks must be synchronous and atomic; a backing that
+mutates then throws cannot be rolled back by this host.
+
+`createModHost(engine)` alone uses **per-host, non-durable memory**. Durable app
+integration passes `{ readModState(id), writeModState(id, record) }`; both callbacks
+are required together, the read returns a record or undefined, and write returns
+nothing. The page owns saving/restoring the envelope and preserving unknown ids;
+the SDK never enumerates or rewrites other namespaces.
+
+### Committed tick events
+
+`mods.step(seconds)` executes one explicit logical engine frame for finite
+seconds in `[0,0.1]`; `mods.frameStep(seconds)` accepts raw nonnegative RAF
+elapsed time, and is the page's clock entry point. Both dispatch `onTick` after
+the accepted native frame, including an elapsed-0 frame; refused frames emit
+nothing. A zero delta is not a cancellation or a command to drain the FIFO.
+Callbacks have finite priority/registration ordering and per-listener detached
+snapshots; commands affect subsequent simulation, not the captured event.
+Listeners added during dispatch start on the next step; withdrawal/disposal before a
+listener's turn skips it. Recursive steps and steps inside precommit hooks throw
+`ModError`/`tick`. Missing engine stepping support also throws, never fabricates an event.
+Listeners return `undefined`/`null` synchronously. Exceptions, other returns and
+promises are attributed (`onTick`, rejected promise `onTick.late`); subsequent listeners
+still run and the completed step is never undone. Unsubscribe returns true once,
+then false; all listeners are withdrawn on failed activation or unload.
+
+### Callback trust limits
+
+These contracts are **not a sandbox or a general transaction**. A veto prevents the
+pending import/action, not arbitrary effects from trusted callback code: callbacks
+can call other permitted API methods, change page globals or directly access page
+services. A synchronous-only result check observes returned promise rejection; it
+cannot halt an async function's body, a scheduled timer or effects before a throw.
+Precommit callbacks and migrations must keep themselves pure; tick callbacks own
+their effects. Inert handles/withdrawn registrations prevent later SDK use after unload,
+not direct browser/global access. Existing `beforeAction` failure/veto semantics are unchanged.
+
+## Host surface
+
+```js
+import { createModHost } from './mods.js';
+const mods = createModHost(engine);
+```
+
+| Member | Behaviour |
+|---|---|
+| `api` | A host-owned handle with the same surface mods get, for parity checks and tests. Errors are attributed to `modId: 'host'`. |
+| `load(url)` → `Promise<{ id, version, name }>` | Imports, validates and activates one module. Throws an attributed error on import, manifest, duplicate-id, API-version or activation failure. |
+| `command(action)` → `ModCommandResult` | Runs host input through hooks, then commits once. Throws for a malformed action (`modId: 'host'`). |
+| `step(seconds)` / `frameStep(seconds)` → `void` | Executes one explicit logical frame / raw-elapsed browser frame, then emits ordered `onTick` callbacks. The page retains scheduling and pause ownership. |
+| `dispose()` → `void` | Unloads every mod: cleanup runs in reverse load order **while the handle is still live**, then the handle goes inert and its hooks are withdrawn. Synchronous; the host stays usable for further `load()` calls. |
+| `diagnostics()` → `ModDiagnostics` | Detached evidence: loaded mods, `hookCount` (action/import/tick registrations), action counters and the last 20 attributed failures. |
+
+`ModCommandResult` is `{ committed, cancelled, submittedBy, modifiedBy,
+cancelledBy?, snapshot }`: whether the engine received a command, who submitted
+it (`'host'` for page input, otherwise the mod id), which mods replaced it
+(dispatch order), the first canceller, and the resulting engine state. Queued
+commands additionally expose `accepted`, `actionId` and `state`; `committed`
+does not assert pickup/door/walk completion.
+
+`ModDiagnostics.errors` entries are `{ modId, stage, message }`. `modId` is the
+mod id, the module URL when the failure happened before a manifest was read, or
+`'host'`. Stages include `load`, `manifest`, `activate`, `cleanup`, `beforeAction`,
+`api`, `action`, `movement`, `items`, `character`, `ui`, `hooks`, `world`, `saveData`,
+`tick`, `beforeWorldImport`, `onTick` and `onCharacterDeath`. `.late` stages record
+rejected returned promises at synchronous boundaries
+(`beforeAction`, `beforeWorldImport`, `onTick`, `onCharacterDeath`, `saveData`, `activate`, `cleanup`):
+they are observed to avoid unhandled rejection, recorded after the fact, and never
+used as deferred command/import/migration/tick decisions.
+
+## Lifecycle and ownership
+
+1. `load(url)` — import → validate manifest → require unique id → require
+   `activate` → validate own saved namespace and migrate incompatible schema.
+2. `activate(api)` runs synchronously. The host records the speed in effect
+   first.
+3. If `activate` throws, or returns something that is neither a function nor
+   nothing, activation is rolled back: the mod is not listed, **its hooks are
+   withdrawn** (including import hooks/tick/death listeners), the **speed is restored** to the recorded value, and owner-scoped item-definition registration is rolled back. The
+   rejection carries `stage: 'activate'`. An `async activate` lands here because
+   its promise is not a cleanup; that rejection is recorded as `activate.late`
+   instead of being left to the page unhandled.
+4. While loaded, the mod owns its own effects. `dispose()` runs each cleanup
+   last-loaded-first, attributing (but never hiding) a throwing cleanup, and
+   always unloads the mod afterwards. A cleanup that returns a value — including
+   a promise — is reported and not awaited; a rejected promise from one is
+   recorded as `cleanup.late` rather than left unhandled.
+5. A mod that fails to clean up after itself is a bug in that mod; the host only
+   guarantees failed-activation registration withdrawal, speed restoration and item-definition rollback,
+   not a transaction over navigation imports, saved documents or page state.
+
+Ownership summary: the page owns the loop, input and UI; the host owns hook
+ordering and unload order; each mod owns its effects and their undo; the WASM
+engine owns the rules and the final say on every value.
+
+## Errors
+
+Every host failure is an `Error` with `name === 'ModError'` and `modId` /
+`stage` properties, e.g. `activate failed for 'fx-boom': activation exploded`.
+Hook exceptions, invalid replacements, promise-returning hooks and throwing
+cleanups are recorded in `diagnostics().errors` instead of breaking the player's
+input: a broken mod must not stop the game. Malformed host input and misuse of a
+mod handle are thrown to the caller.
+
+## Local mod packages (`src/mod-manager.js`)
+
+The directory workflow: copy a package into `content/mods/<folder>`, index that
+content directory, and privately serve it beside the app. `/content/manifest.json`
+lists JavaScript packages as `{root,kind:'javascript',files}`; startup fetches and
+installs those bytes through the existing manager, without a web folder picker.
+New installs are disabled until explicitly enabled; updates preserve the existing
+enabled flag. Enabled packages load in dependency order on startup. The manager
+never rewrites or inlines JavaScript; provisioning does not modify the original game.
+
+After copying a package, rebuild the manifest externally:
+
+```sh
+node scripts/provision-content.mjs --index-only --output content
+```
+
+Use the same directory for `/content/` on a private static host, or the local server's
+`CONTENT_ROOT` mount. Content and proprietary mod assets remain outside Git and app
+releases. Transferring this directory is asset portability; save-backup JSON
+import/export is a separate workflow.
+
+```js
+import { createModManager } from './mod-manager.js';
+
+const packages = createModManager(mods);
+```
+
+| Member | Behaviour |
+|---|---|
+| `install(files)` → `Promise<metadata & { requiresReload }>` | Validates manifest-fetched file-like package records, then stores every file in one transaction. Any validation or storage failure leaves the previously installed package intact. A first install starts `enabled: false`; an update keeps the current flag. |
+| `list()` → `Promise<metadata[]>` | Every installed package, detached, by id. |
+| `setEnabled(id, enabled)` → `Promise<metadata & { requiresReload }>` | Persists whether that package loads next time. Nothing already running is undone. |
+| `remove(id)` → `Promise<void>` | Deletes the record and every stored file; code already loaded stays loaded until the host disposes it. |
+| `activateEnabled({ safeMode = false } = {})` → `Promise<report>` | Loads each enabled package through `mods.load()` in resolved order. `safeMode: true` performs no module import at all. |
+| `diagnostics()` → `ModManagerDiagnostics` | Detached evidence: database, worker, packages, last activation, the last 20 manager failures and `requiresReload`. |
+
+Every manager failure is an `Error` with `name === 'ModManagerError'` plus `modId`,
+`stage` and `ids` (the packages involved). `resolveModOrder(packages, apiVersion)`
+is exported on its own, so the rule set below is testable without a browser.
+
+### Package format
+
+A package is an externally copied/provisioned folder. The content loader supplies
+file-like records (`name`, `size`, `webkitRelativePath`, `arrayBuffer()`) to the manager:
+
+```text
+content/mods/my-mod/
+  mod.json          manifest, required, at the package root
+  main.js           entry module: `manifest` + `activate`
+  lib/util.js       imported as './lib/util.js' from main.js
+  art/tile.png      fetched as './art/tile.png'
+```
+
+`mod.json`:
+
+```json
+{
+  "id": "my-mod",
+  "name": "My mod",
+  "version": "1.0.0",
+  "apiVersion": "0.1.0",
+  "description": "optional",
+  "entry": "main.js",
+  "dependencies": { "util-lib": "1.0.0" },
+  "optionalDependencies": { "fx-pack": "2.0.0" },
+  "conflicts": ["other-walking"],
+  "loadBefore": [],
+  "loadAfter": [],
+  "assets": ["art/tile.png"],
+  "settings": {}
+}
+```
+
+- `id` uses the same pattern the host accepts and `host` is refused; `version` and
+  `apiVersion` are dotted `major.minor.patch`; `entry` is a package-relative `.js`
+  or `.mjs` path that must be one of the provisioned files; `assets` entries must name
+  provisioned files. `description` and `settings` are optional.
+- Dependency versions are **exact dotted versions** — no ranges, no `^`, no
+  wildcards. Anything else is refused at install rather than reinterpreted at load.
+- `dependencies` must be installed **and enabled** at exactly that version;
+  `optionalDependencies` only constrain the version when that package is installed
+  and enabled; `conflicts` refuse the pair outright.
+- `loadBefore` / `loadAfter` are ordering hints and may name packages that are not
+  installed. A required dependency orders too: it loads before what needs it. Among
+  packages ready at the same moment the lowest id goes first, so the order is stable
+  and independent of install order. A cycle — including a mutually dependent pair —
+  is rejected with the ids that form it.
+- `apiVersion` is compared with the host's actual version (`mods.api.version`), never
+  a version baked into the manager, so a package written for another API version is
+  named in the report instead of half-loaded.
+- `settings` is stored for the host UI. API 0.1.0 gives mods no settings channel, so
+  the sample mod still ships its own settings module.
+- Bounds: at most **512 files**, **16 MiB per file**, **64 MiB per package** and
+  **64 KiB for `mod.json`**. Paths are ASCII `[A-Za-z0-9._-]` segments; absolute
+  paths, `..`, backslash escapes, NUL and duplicate targets are refused. Served
+  types: JavaScript, JSON, CSS, WASM, PNG/JPEG/GIF/WebP/ICO and OGG/MP3/WAV/M4A —
+  anything else is refused at install rather than served.
+- There is **no zip parser** in this milestone: packages use the directory workflow;
+  archive packaging/transfer support remains an outstanding capability.
+
+### Storage and serving
+
+Packages live in the dedicated IndexedDB database `pz-mod-packages` (schema 1):
+`packages` keyed by id, and `files` keyed by `[id, revision, path]` with a
+`packageId` index. Install and remove each run in a single transaction.
+
+`mod-worker.js` is a module service worker the manager registers at the application
+root. It intercepts `/__mods__/<id>/<revision>/<path>` and nothing else: the app
+shell, the WASM engine and everything you import stay untouched on the network, and
+no `caches` API is involved. Responses carry the recorded MIME type plus `no-store`
+and `X-Content-Type-Options: nosniff`; a malformed or traversing path, an unknown
+id, a wrong revision or an absent file is a plain 404. The revision is a SHA-256
+digest over every path and file digest, so an update changes every URL the package
+owns and a stale module entry cannot be reused. Native ESM resolution does the rest:
+relative imports and asset URLs inside a package work exactly as written.
+
+The manager registers that worker and waits for real control (`clients.claim()` on
+activation) before loading a stored package. If some other service worker owns the
+origin it says so, because package files would never be served.
+
+### Activation, enable/disable and reload honesty
+
+```js
+const report = await packages.activateEnabled();
+```
+
+`report` is `{ safeMode, apiVersion, order, activated, errors, skipped, disposed }`.
+`errors` entries carry `{ id, modId, stage, message }`, using the host's own
+attribution where one exists. A load or identity failure stops the sequence, and if
+this call had already loaded something the host `dispose()`s it — which also unloads
+any other mod on that host, because API 0.1.0 has no per-mod unload. The loaded
+module's `id` and `version` must match the installed package, or the mismatch is
+reported and the activation unwound. No general state rollback is claimed: a mod
+that failed to undo its own effects is a bug in that mod.
+
+`install`, `setEnabled` and `remove` change the configuration for the **next**
+activation, and their `requiresReload` says whether the running set still matches
+it — the UI shows that rather than pretending an arbitrary live undo.
+`activateEnabled({ safeMode: true })` imports nothing at all, which is how a broken
+package is gotten past at startup.
+
+In the app's **Local mod packages** section, provisioned JavaScript packages and
+native Lua adapters are installed from the content manifest. New packages are
+disabled. Explicitly enable each package's **Enable … after reload** checkbox,
+then use **Reload to apply saved configuration**. Disable or remove stored
+packages through the same manager; configuration changes do not run or unload code
+live. The UI reports actual running identities, activation order, skipped packages
+and attributed errors. Storage and package failures remain separate from GPU errors.
+
+### Native Lua directory packages
+
+`kind:'native-lua'` now uses original `.lua` text through the local Wasmoon VM,
+not JavaScript rewrites. `mod.info` supplies exact, case-sensitive native identity,
+name, `modversion`/`version`, `require`, `loadAfter`, `loadBefore` and `versionMin`.
+The loader selects `common/` plus the highest numeric tree no newer than
+`sourceBuild.version`, replacing common files at matching relative paths. Metadata
+may come from an older compatible tree when the selected code tree has no
+`mod.info`. Packages without version/common trees use their root. Unknown builds
+remain discoverable and disabled; enabling them fails explicitly. Provision the
+**observed installed version** with `--source-build`, never an assumed version.
+An incompatible minimum/tree also refuses activation.
+
+SDK ids are `native-` plus the native id lowercased with unsupported characters
+replaced by `-`; duplicate exact identities and canonical-id collisions are
+refused, including collisions with JavaScript/stored package owners. Native ids
+remain unchanged in VM attribution and metadata. Ordinary three-component numeric
+native versions stay unchanged. Versions outside that SDK grammar use a
+**lossless identity encoding**, not invented semantic compatibility:
+`00.0.<decimal integer of hex 1 followed by the original version's UTF-8 bytes>`.
+The `00.0.*` namespace is reserved, so original versions in that namespace are
+also encoded and cannot alias a different original string. An absent version is
+`00.0.0` and displayed as unspecified. The UI displays the original string; saves
+retain its exact identity. There is no upgrade/version shim.
+Required native ids map to the installed target's exact SDK version and use the
+existing dependency resolver; missing/disabled dependencies and cycles fail before
+any package code runs. Optional ordering edges do not implicitly enable code.
+
+Private IndexedDB packages contain a small SDK adapter and `native.json` with
+selected original Lua text and metadata. Nothing is added to the tracked asset-free
+delivery. Original package file-count/byte limits apply; the serialized descriptor
+also obeys the SDK's 16 MiB single-file limit. Selected enabled sources are all
+preloaded before activation so cross-package require ownership is established.
+Engine `media/lua/{shared,client,server}` files are fetched only for the transitive
+**literal require** graph reachable from those selected sources and registered
+`execute:false`; the engine Lua tree is never eagerly executed or fetched in full.
+The lexical scan skips comments and string bodies; it does not infer aliases,
+shadowing or dynamic control-flow reachability. Engine-source API calls inherit
+the actual initiating native package's public API while retaining engine source
+attribution. Engine callbacks capture that initiator for cleanup and namespace
+ownership; require-only engine roots are not extra active/save owners.
+Dynamic engine require names currently fail honestly rather than synthesizing
+engine APIs. Provision the actual required engine files alongside the startup
+assets; `--startup-only` alone does not include those engine Lua classes.
+
+Source controls are user settings, not a new JavaScript input API. Escape →
+**Keyboard bindings** edits Interact, ToggleInventory and other already-configured
+source actions: primary/alternate keys and Shift/Ctrl/Alt requirements. **Apply live**
+replaces the validated session map without reloading and cancels held-key/gesture
+ownership; existing original `Core` key queries, Save and export see that current
+map. Original key-query and modifier-collision semantics are unchanged. **Clear**
+leaves an action unbound; Interact starts unbound until the user configures it.
+Menu **Save** persists preferences with the game. This editor does not remap
+WASD/arrows or touch movement, and browsers may reserve physical keys. Configured
+ordinary-door Interact, remapped original inventory visibility and Save/reload are
+browser-proven; broader source actions, accessibility and full-game parity are not.
+
+Each game session owns a fresh VM. New/load transitions restore each package's
+public save namespace before its Lua executes. `OnCreatePlayer` and `OnGameStart`
+dispatch once per transition; `OnLoad` dispatches only for a load (including
+recovery/import). Tick/player movement and focused gameplay keyboard events use
+the existing host. Save and live export flush mutable Lua tables before capture.
+Each transition stages a separate host bound directly to its target engine and
+namespace backing while the committed host/VM stays alive. Only after target
+activation, exact-version checks and bootstrap succeed is the prior VM flushed,
+closed and its host disposed. Failure discards only the uncommitted target and
+retains the prior engine, namespaces, callbacks and initialized Lua closure locals.
+No previous mod is re-executed or bootstrapped on rollback. Package consent writes
+and session operations are mutually excluded during staging and initial boot.
+Saved-mod exact-version checks remain in force: disabling a mod does not make its
+old save silently compatible. Stored native identities participate in dependency
+and ordering resolution even when their source root is no longer in the current
+directory index. All enabled descriptors are checked against the current observed
+build; unknown or changed builds refuse cached-source activation until matching
+original sources are rediscovered.
+
+This proves a native execution/save boundary, **not full Workshop feature support
+or Kahlua equivalence**. Unchanged BarefootMoodle/MoodleFramework now use genuine
+WASM footwear/condition and health queries, original registry/levels, and the
+supplied original UI resource closure. Actual Chromium/NVIDIA proof covers
+barefoot → original FlipFlop equip/neutral → degraded/torn, stable ID/condition
+Save/reload, localized bitmap-font hover and original death-handler UI cleanup
+under the port health-zero policy; it does not prove native survival/death animation.
+Hide in Car still needs actual vehicles, ghost-mode state and sandbox options;
+P4HasBeenRead still needs inventory/read-state/context menus and its complete
+resource/option path. Unsupported facilities raise attributed errors rather than
+fake item/UI/Java results.
+
+The host executes original engine bootstrap classes before mods under the real
+initiating package API, and loads genuine private textures, original EN
+translations and Small/Medium/Large single-page bitmap-font resources. EN, 1x,
+32px moodles and player viewport zero are explicit port choices, not native
+default/fidelity claims. Measurement uses original glyph advances/kerning/line
+height; WebGPU draws ordered texture/text/rectangle primitives with clipping.
+Frontmost eligible UI receives pointer down/up/move/wheel/double-click and
+requested key events before gameplay input. Original bounds/visibility/children
+and synchronous callbacks are host-backed, not dummy UI objects.
+
+`PZAPI.ModOptions` supports the supplied tickbox/color-picker creation/get/set/apply
+path. Values use `api.ui.readOptions/writeOptions` under the native package owner's
+save namespace; IDs are nonempty exact strings of at most 128 characters.
+Original registered apply callbacks run owner-attributed through the runtime's
+`applyOptions`, including restored configuration, without synthesizing lifecycle
+events. Actual browser Import/Save/Load/reboot proof restored a nonwhite
+MoodleFramework option from a privately modified/re-signed exported backup using
+the real file input. The genuine original callback visibly changed the torn-icon
+background to green; Save/Load revision 37 and reboot retained that appearance,
+worn ID 1/condition 1 and health 100 without observed Lua errors. This proves
+restored native configuration callbacks/persistence, not option-menu widget editing.
+No new options panel or general Java facility is supplied. Missing resources,
+unsupported fonts/classes/methods, multipage/packed font descriptors and unproven
+moodle constants fail explicitly. Native text shaping/scale tiers, full Java and
+Kahlua APIs, thermal chevrons, voices/wiggles and broader original UI remain gaps.
+
+#### Runnable native proof
+
+After the parent build, `node --test tests/native-mod-loader.test.js` exercises
+independently authored common/numeric overlays (including a code tree with no
+`mod.info`), root-only packages, transitive require-only engine sources, actual
+WASM speed/action changes, dependency/cycle refusal, exact identity collisions,
+unknown/minimum/current-build refusal, stored dependency ownership, inert pseudo-
+requires, engine getter/callback API attribution, namespace restore, callback
+cleanup and retained initialized closures after a failed staged load.
+
+For the actual application path, use an **owned disposable browser profile/origin**
+with working provisioned original startup content and a known observed
+`sourceBuild.version`. On an already-open Puppeteer page:
+
+```js
+const { checkNativePackageReload } = await import('./scripts/check-browser-native.mjs');
+const evidence = await checkNativePackageReload({ page, assert });
+```
+
+The helper appends only independently authored Lua/metadata through request
+interception using the real directory range protocol. It checks default-disabled
+discovery, the existing enable checkbox, reload activation, a native tick changing
+the real WASM walk action, actual app Save, namespace reload and once-only
+bootstrap, failed-load rollback preserving initialized closure state without
+bootstrap replay, racing consent rejection during a delayed engine-source read,
+safe-mode zero execution, and disabling/cleanup with truthful saved-mod mismatch
+refusal. It returns synthetic namespace/provenance metadata only, never
+original cells, source, assets or screenshots. It intentionally leaves the owned
+fixture disabled with its backup retained; use a disposable profile, not a user's
+valuable play session.
+
+**Reload in safe mode** adds `?safe-mods=1` and imports no local packages. Installed
+bytes and configuration remain available, so a broken package can be disabled or
+removed before **Reload normally** removes that parameter. The bundled walking
+example keeps its live toggle when no local packages are active. While local
+packages are active, that toggle is disabled with an explanation: the existing
+host can only dispose all mods, and must not silently unload package hooks.
+
+## What is still deliberately absent
+
+Enabled installed packages load automatically at startup, unless `?safe-mods`
+is present. This is not an origin policy — the trusted loader performs no origin
+or sandbox check of its own, and packages are trusted code. Beyond the package
+manager there is **no zip import, no
+per-mod live unload, no general JavaScript content/asset/animation or FMOD bank/event
+APIs, no JavaScript UI registration and no general settings channel into `activate`**.
+The documented owned positional `api.audio`, namespaced `api.ui` options and
+bounded native Lua UI bridge are exceptions, not a complete presentation/UI SDK.
+Those absent capabilities are
+later M2–M5 work in [`../ROADMAP.md`](../ROADMAP.md); no placeholder APIs exist for
+them now.
+
+Also unchanged from [`../DECISIONS.md`](../DECISIONS.md): the API is delivered at
+this scope only, and the engine ABI stays internal to `src/engine.js`.

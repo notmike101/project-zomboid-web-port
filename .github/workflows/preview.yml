@@ -1,0 +1,31 @@
+name: Asset-free Windows preview
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '26.10.0'
+          cache: npm
+      - name: Install locked prerequisites
+        shell: pwsh
+        run: ./scripts/Windows.ps1 Setup
+      - name: Build and verify contracts
+        shell: pwsh
+        run: ./scripts/Windows.ps1 Check
+      - name: Package identified preview
+        shell: pwsh
+        run: ./scripts/Windows.ps1 Release
+      - name: Upload asset-free preview (not GPU evidence)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: standalone-preview-${{ github.sha }}
+          path: release/
+          if-no-files-found: error
