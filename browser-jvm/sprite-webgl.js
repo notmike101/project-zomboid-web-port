@@ -45,7 +45,7 @@ const floats = (value) => new Float32Array(value.buffer, value.byteOffset, value
  * @returns {object} Owned native callbacks and lifecycle inspection functions.
  */
 export function createSpriteNatives(canvas, report) {
-    const gl = canvas.getContext('webgl2', { alpha: true, antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true });
+    const gl = canvas.getContext('webgl2', { alpha: true, antialias: false, stencil: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
 
     if (!gl) {
         throw new Error('WebGL2 unavailable');
@@ -625,6 +625,58 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         glClear: (mask) => gl.clear(mask),
+        /**
+         * Sets both faces' actual stencil write masks.
+         *
+         * @param {number} mask - Original unsigned stencil bit mask.
+         * @returns {undefined} Completion of the WebGL state update.
+         */
+        glStencilMask: (mask) => gl.stencilMask(mask),
+        /**
+         * Sets both faces' stencil comparison; WebGL retains invalid-enum errors.
+         *
+         * @param {number} comparison - Original comparison enum.
+         * @param {number} reference - Original stencil reference value.
+         * @param {number} mask - Original unsigned comparison bit mask.
+         * @returns {undefined} Completion of the WebGL state update.
+         */
+        glStencilFunc: (comparison, reference, mask) => gl.stencilFunc(comparison, reference, mask),
+        /**
+         * Sets actual stencil operations for stencil failure, depth failure and depth pass.
+         *
+         * @param {number} fail - Stencil-test failure operation.
+         * @param {number} depthFail - Depth-test failure operation.
+         * @param {number} depthPass - Depth-test pass operation.
+         * @returns {undefined} Completion of the WebGL state update.
+         */
+        glStencilOp: (fail, depthFail, depthPass) => gl.stencilOp(fail, depthFail, depthPass),
+        /**
+         * Selects the actual color channels written by rendering and clears.
+         *
+         * @param {boolean} red - Whether to write red.
+         * @param {boolean} green - Whether to write green.
+         * @param {boolean} blue - Whether to write blue.
+         * @param {boolean} alpha - Whether to write alpha.
+         * @returns {undefined} Completion of the WebGL state update.
+         */
+        glColorMask: (red, green, blue, alpha) => gl.colorMask(red, green, blue, alpha),
+        /**
+         * Sets the actual depth clear value, including OpenGL's unit-interval clamping.
+         *
+         * @param {number} depth - Original desktop double-precision clear value.
+         * @returns {undefined} Completion of the WebGL state update.
+         */
+        glClearDepth: (depth) => gl.clearDepth(depth),
+        /**
+         * Sets the actual scissor box; WebGL retains invalid negative-size errors.
+         *
+         * @param {number} x - Left edge in framebuffer pixels.
+         * @param {number} y - Bottom edge in framebuffer pixels.
+         * @param {number} width - Scissor width.
+         * @param {number} height - Scissor height.
+         * @returns {undefined} Completion of the WebGL state update.
+         */
+        glScissor: (x, y, width, height) => gl.scissor(x, y, width, height),
         /**
          * Sets the actual depth comparison function; WebGL retains invalid-enum errors.
          *

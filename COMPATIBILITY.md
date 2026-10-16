@@ -8,6 +8,10 @@ All 47,416 byte-served media files and the original JAR retained their before/af
 
 `verify-media-files.mjs` checks the production handler's lazy directory discovery, range/HEAD behavior, concurrent integrity checks, failed-check rejection, traversal and external-junction containment, reserved listing-name conflicts and unchanged source data. The runner mounts this fallback after its explicit prepared routes and includes dynamically read files in its existing before/after integrity evidence. This qualifies original media discovery and resource access, not all later consumers or whole-game playability.
 
+## Original renderer stencil and write-mask services
+
+The graphics host now implements actual `glStencilMask`, `glStencilFunc`, `glStencilOp`, `glColorMask`, `glClearDepth(double)` and `glScissor` calls, with stencil storage requested on context creation. Twenty WebGL2 checks verify packed depth/stencil FBOs, clipped stencil pixels, preserved masked bits, all three stencil outcomes, color write masks, depth-clear visibility/clamping and actual invalid-enum/size errors. A separate fresh Java 17 browser check invokes all six through the original adapted `GL11C` ABI and observes the resulting WebGL state. Shader and texture readback regressions also pass with stencil enabled. Desktop alpha testing and complete original cell rendering remain unqualified.
+
 ## Current answer
 
 The connected CheerpJ browser-JVM route runs original world/player updates and a bounded nine-chunk walking scene, with complete vanilla script definitions and separately qualified original object rendering. The full survival game remains incomplete. The sections below retain the incremental evidence for both runtime routes; later sections record the connected browser milestones.

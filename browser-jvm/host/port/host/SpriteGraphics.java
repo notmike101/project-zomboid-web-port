@@ -141,6 +141,12 @@ public final class SpriteGraphics {
     public static native void glViewport(int x,int y,int width,int height);
     public static native void glClearColor(float red,float green,float blue,float alpha);
     public static native void glClear(int mask);
+    public static native void glStencilMask(int mask);
+    public static native void glStencilFunc(int function,int reference,int mask);
+    public static native void glStencilOp(int fail,int depthFail,int depthPass);
+    public static native void glColorMask(boolean red,boolean green,boolean blue,boolean alpha);
+    public static native void glClearDepth(double depth);
+    public static native void glScissor(int x,int y,int width,int height);
     public static native void glDepthFunc(int function);
     public static native void glDepthMask(boolean enabled);
     public static native void glDrawArrays(int mode,int first,int count);
