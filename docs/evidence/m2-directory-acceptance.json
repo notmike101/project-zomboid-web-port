@@ -1,0 +1,1304 @@
+{
+  "scope": "Directory startup, game-only presentation and owned native-Lua loader/lifecycle integration; not complete gameplay or unmodified Workshop feature compatibility",
+  "sourceBuild": {
+    "version": "42.21.0",
+    "revision": "4a0e9546ec",
+    "steamBuildId": "25485521"
+  },
+  "checks": {
+    "command": "node --test tests/content-root.test.js && npm run check && npm run build",
+    "rustPassed": 28,
+    "nodePassed": 202,
+    "nodeSkipped": 1,
+    "skipReason": "case-sensitive Linux ambiguity fixture on Windows",
+    "eslint": "zero errors and warnings",
+    "docsLinked": 6,
+    "build": "asset-free dist",
+    "nonFailingNote": "Windows cargo incremental cache finalization Access is denied; checks completed successfully"
+  },
+  "worldReload": {
+    "fullView": {
+      "x": 0,
+      "y": 0,
+      "width": 900,
+      "height": 700,
+      "viewportWidth": 900,
+      "viewportHeight": 700,
+      "scrollWidth": 900,
+      "scrollHeight": 700,
+      "bufferWidth": 1125,
+      "bufferHeight": 875,
+      "pixelRatio": 1.2499999701976776,
+      "chrome": 0,
+      "loadingHidden": true,
+      "errorHidden": true,
+      "menuOpen": false,
+      "diagnosticsHidden": true,
+      "focused": true,
+      "backupInMenu": true
+    },
+    "initial": {
+      "backend": "WebGPU",
+      "character": {
+        "model": "MaleBody.x",
+        "idle": "Bob_Idle.X",
+        "walk": "Bob_Walk.x",
+        "texture": {
+          "name": "MaleBody02a.png",
+          "width": 256,
+          "height": 256,
+          "sourceBytes": 66725,
+          "textureBytes": 262144
+        },
+        "embeddedTextureNames": [
+          "MaleBody02a.png"
+        ],
+        "vertices": 617,
+        "triangles": 916,
+        "bones": 28,
+        "idleTicksPerSecond": 4800,
+        "walkTicksPerSecond": 4800,
+        "calibrated": false,
+        "sourceHeight": 0.980705,
+        "worldHeight": 1.8,
+        "scale": 1.8354143192907142,
+        "animation": "idle",
+        "animationSeconds": 0.059199999928474245,
+        "facingRadians": 0
+      },
+      "tiles": {
+        "cells": 1,
+        "destroyed": false,
+        "loading": false,
+        "textureBytes": 1565428,
+        "textureBudget": 66060288,
+        "cachedChunks": 49,
+        "chunkLimit": 512,
+        "residentSprites": 41,
+        "residentPages": 4,
+        "visiblePlacements": 967,
+        "cachedPlacements": 6765,
+        "visibleMissingPlacements": 958,
+        "renderedInstances": 967,
+        "drawRuns": 790,
+        "visibleSourceAtlasBytes": 16723968,
+        "textureStorage": "original trimmed sprite crops",
+        "missingSprites": [
+          "vegetation_trees_01_8",
+          "vegetation_trees_01_10",
+          "vegetation_trees_01_11",
+          "vegetation_trees_01_9",
+          "vegetation_groundcover_01_23",
+          "vegetation_groundcover_01_19",
+          "vegetation_groundcover_01_21",
+          "vegetation_groundcover_01_18",
+          "vegetation_groundcover_01_22"
+        ],
+        "missingSpriteCount": 9,
+        "errors": [],
+        "deferredSprites": [],
+        "anchor": {
+          "x": 64,
+          "y": 192,
+          "nativeTilePixels": 128
+        },
+        "anchorConfidence": "Original nominal128x256 floor canvas and diamond-top convention; caller-calibratable",
+        "floorCalibration": [
+          {
+            "name": "floors_interior_tilesandwood_01_18",
+            "source": "Tiles2x.floor.pack",
+            "trim": {
+              "xoff": 0,
+              "yoff": 192,
+              "width": 126,
+              "height": 64
+            },
+            "canvas": {
+              "width": 128,
+              "height": 256
+            },
+            "suggestedAnchor": {
+              "x": 64,
+              "y": 192,
+              "nativeTilePixels": 128
+            },
+            "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+          },
+          {
+            "name": "floors_rugs_01_56",
+            "source": "Tiles2x.pack",
+            "trim": {
+              "xoff": 11,
+              "yoff": 198,
+              "width": 112,
+              "height": 57
+            },
+            "canvas": {
+              "width": 128,
+              "height": 256
+            },
+            "suggestedAnchor": {
+              "x": 64,
+              "y": 198,
+              "nativeTilePixels": 128
+            },
+            "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+          },
+          {
+            "name": "floors_interior_tilesandwood_01_41",
+            "source": "Tiles2x.floor.pack",
+            "trim": {
+              "xoff": 0,
+              "yoff": 192,
+              "width": 126,
+              "height": 64
+            },
+            "canvas": {
+              "width": 128,
+              "height": 256
+            },
+            "suggestedAnchor": {
+              "x": 64,
+              "y": 192,
+              "nativeTilePixels": 128
+            },
+            "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+          },
+          {
+            "name": "floors_rugs_01_14",
+            "source": "Tiles2x.pack",
+            "trim": {
+              "xoff": 6,
+              "yoff": 200,
+              "width": 112,
+              "height": 56
+            },
+            "canvas": {
+              "width": 128,
+              "height": 256
+            },
+            "suggestedAnchor": {
+              "x": 64,
+              "y": 200,
+              "nativeTilePixels": 128
+            },
+            "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+          },
+          {
+            "name": "floors_rugs_01_13",
+            "source": "Tiles2x.pack",
+            "trim": {
+              "xoff": 0,
+              "yoff": 195,
+              "width": 120,
+              "height": 61
+            },
+            "canvas": {
+              "width": 128,
+              "height": 256
+            },
+            "suggestedAnchor": {
+              "x": 64,
+              "y": 195,
+              "nativeTilePixels": 128
+            },
+            "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+          },
+          {
+            "name": "floors_rugs_01_12",
+            "source": "Tiles2x.pack",
+            "trim": {
+              "xoff": 6,
+              "yoff": 192,
+              "width": 120,
+              "height": 61
+            },
+            "canvas": {
+              "width": 128,
+              "height": 256
+            },
+            "suggestedAnchor": {
+              "x": 64,
+              "y": 192,
+              "nativeTilePixels": 128
+            },
+            "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+          },
+          {
+            "name": "floors_rugs_01_9",
+            "source": "Tiles2x.pack",
+            "trim": {
+              "xoff": 5,
+              "yoff": 192,
+              "width": 115,
+              "height": 58
+            },
+            "canvas": {
+              "width": 128,
+              "height": 256
+            },
+            "suggestedAnchor": {
+              "x": 64,
+              "y": 192,
+              "nativeTilePixels": 128
+            },
+            "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+          },
+          {
+            "name": "floors_exterior_street_01_14",
+            "source": "Tiles2x.floor.pack",
+            "trim": {
+              "xoff": 0,
+              "yoff": 192,
+              "width": 126,
+              "height": 64
+            },
+            "canvas": {
+              "width": 128,
+              "height": 256
+            },
+            "suggestedAnchor": {
+              "x": 64,
+              "y": 192,
+              "nativeTilePixels": 128
+            },
+            "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+          }
+        ],
+        "packPrecedence": [
+          "JumboTreesBigs2x.pack",
+          "Overlays2x.floor.pack",
+          "Overlays2x.pack",
+          "Tiles2x.floor.pack",
+          "Tiles2x.pack"
+        ],
+        "complete": false
+      }
+    },
+    "committed": {
+      "revision": 83,
+      "x": 128.5,
+      "y": 126.07500457763672,
+      "cells": [
+        {
+          "x": 0,
+          "y": 0
+        }
+      ],
+      "worldHash": "558803680ac7c8f840a8861e7bfab51f502733970b8a9026bfc193f6aa5ef8e1",
+      "mods": [],
+      "modState": {}
+    },
+    "afterBoot": {
+      "revision": 83,
+      "x": 128.5,
+      "y": 126.07500457763672,
+      "cells": [
+        {
+          "x": 0,
+          "y": 0
+        }
+      ],
+      "worldHash": "558803680ac7c8f840a8861e7bfab51f502733970b8a9026bfc193f6aa5ef8e1",
+      "mods": [],
+      "modState": {}
+    },
+    "afterAutosave": {
+      "revision": 85,
+      "x": 128.5,
+      "y": 126.07500457763672,
+      "cells": [
+        {
+          "x": 0,
+          "y": 0
+        }
+      ],
+      "worldHash": "558803680ac7c8f840a8861e7bfab51f502733970b8a9026bfc193f6aa5ef8e1",
+      "mods": [],
+      "modState": {}
+    },
+    "writes": [
+      {
+        "revision": 84,
+        "x": 128.5,
+        "y": 126.07500457763672,
+        "cells": 1,
+        "ready": true
+      },
+      {
+        "revision": 84,
+        "x": 128.5,
+        "y": 126.07500457763672,
+        "cells": 1,
+        "ready": true
+      },
+      {
+        "revision": 84,
+        "x": 128.5,
+        "y": 126.07500457763672,
+        "cells": 1,
+        "ready": true
+      },
+      {
+        "revision": 85,
+        "x": 128.5,
+        "y": 126.07500457763672,
+        "cells": 1,
+        "ready": true
+      },
+      {
+        "revision": 85,
+        "x": 128.5,
+        "y": 126.07500457763672,
+        "cells": 1,
+        "ready": true
+      },
+      {
+        "revision": 85,
+        "x": 128.5,
+        "y": 126.07500457763672,
+        "cells": 1,
+        "ready": true
+      }
+    ],
+    "restored": {
+      "apiVersion": 1,
+      "tick": 124575,
+      "x": 128.5,
+      "y": 126.07500457763672,
+      "speed": 1.5,
+      "action": 0
+    }
+  },
+  "gameplay": {
+    "initial": {
+      "apiVersion": 1,
+      "tick": 133036,
+      "x": 128.5,
+      "y": 126.07500457763672,
+      "speed": 1.5,
+      "action": 0
+    },
+    "paused": {
+      "apiVersion": 1,
+      "tick": 133066,
+      "x": 128.5,
+      "y": 125.37496185302734,
+      "speed": 1.5,
+      "action": 0
+    },
+    "assisted": {
+      "apiVersion": 1,
+      "tick": 133093,
+      "x": 128.5,
+      "y": 124.69992065429688,
+      "speed": 1.5,
+      "action": 2
+    },
+    "pointer": {
+      "apiVersion": 1,
+      "tick": 133094,
+      "x": 128.5,
+      "y": 124.67491912841797,
+      "speed": 1.5,
+      "action": 1
+    },
+    "destination": {
+      "apiVersion": 1,
+      "tick": 133094,
+      "x": 128.5,
+      "y": 124.67491912841797,
+      "speed": 1.5,
+      "action": 1
+    }
+  },
+  "inputVeto": {
+    "pointer": {
+      "mode": "pointer",
+      "before": {
+        "apiVersion": 1,
+        "tick": 30600,
+        "x": 190.5,
+        "y": 189.87515258789062,
+        "speed": 1.5,
+        "action": 2
+      },
+      "veto": {
+        "apiVersion": 1,
+        "tick": 30600,
+        "x": 190.5,
+        "y": 189.87515258789062,
+        "speed": 1.5,
+        "action": 2
+      },
+      "released": {
+        "apiVersion": 1,
+        "tick": 30601,
+        "x": 190.5,
+        "y": 189.85015869140625,
+        "speed": 1.5,
+        "action": 0
+      }
+    },
+    "form": {
+      "mode": "form",
+      "before": {
+        "apiVersion": 1,
+        "tick": 30599,
+        "x": 190.5,
+        "y": 189.900146484375,
+        "speed": 1.5,
+        "action": 2
+      },
+      "veto": {
+        "apiVersion": 1,
+        "tick": 30599,
+        "x": 190.5,
+        "y": 189.900146484375,
+        "speed": 1.5,
+        "action": 0
+      },
+      "released": {
+        "apiVersion": 1,
+        "tick": 30599,
+        "x": 190.5,
+        "y": 189.900146484375,
+        "speed": 1.5,
+        "action": 0
+      }
+    },
+    "toggle": {
+      "mode": "toggle",
+      "before": {
+        "apiVersion": 1,
+        "tick": 30583,
+        "x": 190.5,
+        "y": 190.300048828125,
+        "speed": 1.5,
+        "action": 2
+      },
+      "veto": {
+        "apiVersion": 1,
+        "tick": 30583,
+        "x": 190.5,
+        "y": 190.300048828125,
+        "speed": 1.5,
+        "action": 0
+      },
+      "released": {
+        "apiVersion": 1,
+        "tick": 30583,
+        "x": 190.5,
+        "y": 190.300048828125,
+        "speed": 1.5,
+        "action": 0
+      }
+    }
+  },
+  "freshStartup": {
+    "origin": "http://localhost:4173",
+    "startup": "ready",
+    "sessionReady": true,
+    "cells": [
+      {
+        "x": 0,
+        "y": 0
+      },
+      {
+        "x": 0,
+        "y": 1
+      },
+      {
+        "x": 1,
+        "y": 0
+      },
+      {
+        "x": 1,
+        "y": 1
+      }
+    ],
+    "player": {
+      "apiVersion": 1,
+      "tick": 1482,
+      "x": 190.5,
+      "y": 190.5,
+      "speed": 1.5,
+      "action": 0
+    },
+    "backend": "WebGPU",
+    "adapter": {
+      "vendor": "nvidia",
+      "architecture": "ampere",
+      "device": "",
+      "description": ""
+    },
+    "character": {
+      "model": "MaleBody.x",
+      "idle": "Bob_Idle.X",
+      "walk": "Bob_Walk.x",
+      "texture": {
+        "name": "MaleBody02a.png",
+        "width": 256,
+        "height": 256,
+        "sourceBytes": 66725,
+        "textureBytes": 262144
+      },
+      "embeddedTextureNames": [
+        "MaleBody02a.png"
+      ],
+      "vertices": 617,
+      "triangles": 916,
+      "bones": 28,
+      "idleTicksPerSecond": 4800,
+      "walkTicksPerSecond": 4800,
+      "calibrated": false,
+      "sourceHeight": 0.980705,
+      "worldHeight": 1.8,
+      "scale": 1.8354143192907142,
+      "animation": "idle",
+      "animationSeconds": 12.431000000596075,
+      "facingRadians": 0
+    },
+    "tiles": {
+      "cells": 4,
+      "destroyed": false,
+      "loading": false,
+      "textureBytes": 5801888,
+      "textureBudget": 66060288,
+      "cachedChunks": 36,
+      "chunkLimit": 512,
+      "residentSprites": 163,
+      "residentPages": 30,
+      "visiblePlacements": 1072,
+      "cachedPlacements": 4945,
+      "visibleMissingPlacements": 735,
+      "renderedInstances": 1072,
+      "drawRuns": 955,
+      "visibleSourceAtlasBytes": 120246744,
+      "textureStorage": "original trimmed sprite crops",
+      "missingSprites": [
+        "vegetation_trees_01_8",
+        "vegetation_trees_01_10",
+        "vegetation_trees_01_11",
+        "vegetation_trees_01_9",
+        "vegetation_groundcover_01_23",
+        "vegetation_groundcover_01_19",
+        "vegetation_groundcover_01_21",
+        "vegetation_groundcover_01_18",
+        "vegetation_groundcover_01_22"
+      ],
+      "missingSpriteCount": 9,
+      "errors": [],
+      "deferredSprites": [],
+      "anchor": {
+        "x": 64,
+        "y": 192,
+        "nativeTilePixels": 128
+      },
+      "anchorConfidence": "Original nominal128x256 floor canvas and diamond-top convention; caller-calibratable",
+      "floorCalibration": [
+        {
+          "name": "floors_interior_tilesandwood_01_18",
+          "source": "Tiles2x.floor.pack",
+          "trim": {
+            "xoff": 0,
+            "yoff": 192,
+            "width": 126,
+            "height": 64
+          },
+          "canvas": {
+            "width": 128,
+            "height": 256
+          },
+          "suggestedAnchor": {
+            "x": 64,
+            "y": 192,
+            "nativeTilePixels": 128
+          },
+          "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+        },
+        {
+          "name": "floors_rugs_01_56",
+          "source": "Tiles2x.pack",
+          "trim": {
+            "xoff": 11,
+            "yoff": 198,
+            "width": 112,
+            "height": 57
+          },
+          "canvas": {
+            "width": 128,
+            "height": 256
+          },
+          "suggestedAnchor": {
+            "x": 64,
+            "y": 198,
+            "nativeTilePixels": 128
+          },
+          "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+        },
+        {
+          "name": "floors_interior_tilesandwood_01_41",
+          "source": "Tiles2x.floor.pack",
+          "trim": {
+            "xoff": 0,
+            "yoff": 192,
+            "width": 126,
+            "height": 64
+          },
+          "canvas": {
+            "width": 128,
+            "height": 256
+          },
+          "suggestedAnchor": {
+            "x": 64,
+            "y": 192,
+            "nativeTilePixels": 128
+          },
+          "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+        },
+        {
+          "name": "floors_rugs_01_14",
+          "source": "Tiles2x.pack",
+          "trim": {
+            "xoff": 6,
+            "yoff": 200,
+            "width": 112,
+            "height": 56
+          },
+          "canvas": {
+            "width": 128,
+            "height": 256
+          },
+          "suggestedAnchor": {
+            "x": 64,
+            "y": 200,
+            "nativeTilePixels": 128
+          },
+          "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+        },
+        {
+          "name": "floors_rugs_01_13",
+          "source": "Tiles2x.pack",
+          "trim": {
+            "xoff": 0,
+            "yoff": 195,
+            "width": 120,
+            "height": 61
+          },
+          "canvas": {
+            "width": 128,
+            "height": 256
+          },
+          "suggestedAnchor": {
+            "x": 64,
+            "y": 195,
+            "nativeTilePixels": 128
+          },
+          "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+        },
+        {
+          "name": "floors_rugs_01_12",
+          "source": "Tiles2x.pack",
+          "trim": {
+            "xoff": 6,
+            "yoff": 192,
+            "width": 120,
+            "height": 61
+          },
+          "canvas": {
+            "width": 128,
+            "height": 256
+          },
+          "suggestedAnchor": {
+            "x": 64,
+            "y": 192,
+            "nativeTilePixels": 128
+          },
+          "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+        },
+        {
+          "name": "floors_rugs_01_9",
+          "source": "Tiles2x.pack",
+          "trim": {
+            "xoff": 5,
+            "yoff": 192,
+            "width": 115,
+            "height": 58
+          },
+          "canvas": {
+            "width": 128,
+            "height": 256
+          },
+          "suggestedAnchor": {
+            "x": 64,
+            "y": 192,
+            "nativeTilePixels": 128
+          },
+          "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+        },
+        {
+          "name": "floors_exterior_street_01_14",
+          "source": "Tiles2x.floor.pack",
+          "trim": {
+            "xoff": 0,
+            "yoff": 192,
+            "width": 126,
+            "height": 64
+          },
+          "canvas": {
+            "width": 128,
+            "height": 256
+          },
+          "suggestedAnchor": {
+            "x": 64,
+            "y": 192,
+            "nativeTilePixels": 128
+          },
+          "confidence": "Original floor trim and nominal canvas; diamond-top anchor, not diamond centre"
+        }
+      ],
+      "packPrecedence": [
+        "JumboTreesBigs2x.pack",
+        "Overlays2x.floor.pack",
+        "Overlays2x.pack",
+        "Tiles2x.floor.pack",
+        "Tiles2x.pack"
+      ],
+      "complete": false
+    },
+    "layout": {
+      "x": 0,
+      "y": 0,
+      "width": 1252,
+      "height": 1222,
+      "viewportWidth": 1252,
+      "viewportHeight": 1222,
+      "chrome": 0,
+      "menuOpen": false
+    }
+  },
+  "resize": {
+    "viewport": {
+      "width": 900,
+      "height": 700
+    },
+    "canvas": {
+      "x": 0,
+      "y": 0,
+      "width": 900,
+      "height": 700
+    },
+    "buffer": {
+      "width": 1125,
+      "height": 875,
+      "pixelRatio": 1.2499999701976776
+    },
+    "scroll": {
+      "width": 900,
+      "height": 700
+    },
+    "menuOpen": false
+  },
+  "unavailableContent": {
+    "startup": "blocked",
+    "paused": true,
+    "sessionReady": false,
+    "errorVisible": true,
+    "error": "Failed to fetch Copy original files into content/ and run node scripts/provision-content.mjs --source \"C:/Games/steam/steamapps/common/ProjectZomboid\" --startup-only, then serve with the content server and reload. No session or save was started.",
+    "chrome": 0,
+    "retainedSaveHashBefore": "9d866530e252c782df470a42182fd9fbf1ee55bb463357c862d717696e4e3779",
+    "retainedSaveHashAfter": "9d866530e252c782df470a42182fd9fbf1ee55bb463357c862d717696e4e3779"
+  },
+  "luaWasm": {
+    "engine": {
+      "apiVersion": 1,
+      "tick": 1,
+      "x": 5.025000095367432,
+      "y": 5,
+      "speed": 1.5,
+      "action": 0
+    },
+    "runtime": {
+      "interpreter": "wasmoon",
+      "interpreterVersion": "1.16.0",
+      "luaVersion": "Lua 5.4",
+      "nativeDialect": "Kahlua2/Lua 5.1 (partial compatibility)",
+      "sandboxed": false,
+      "executions": 10,
+      "timeouts": 0,
+      "durationMs": 1.7999999523162842,
+      "memoryBytes": 104270,
+      "memoryLimitBytes": 33554432,
+      "packages": [
+        {
+          "id": "lua-browser-proof",
+          "nativeId": "lua-browser-proof",
+          "active": true,
+          "paths": [
+            "media/lua/client/browser-proof.lua"
+          ]
+        }
+      ],
+      "supportedEvents": [
+        "OnTick",
+        "OnPlayerUpdate",
+        "OnPlayerMove",
+        "OnGameStart",
+        "OnLoad",
+        "OnCreatePlayer",
+        "OnKeyPressed",
+        "OnKeyReleased",
+        "OnKeyKeepPressed"
+      ],
+      "errors": [],
+      "gaps": [
+        "Lua 5.4 is not full Lua 5.1/Kahlua equivalence",
+        "Kahlua/Lua bytecode",
+        "Java classes and shipped Java mods",
+        "UI/inventory/radio/vehicle/texture/translation systems",
+        "Kahlua debugger/coroutine call frames",
+        "Sandbox options and multiplayer",
+        "Native engine Lua classes must be supplied as real sources"
+      ]
+    },
+    "saveData": {
+      "lua-browser-proof": {
+        "schemaVersion": 1,
+        "data": {
+          "nativePlayerData": {
+            "total": 5050,
+            "starts": 1,
+            "moves": 1
+          }
+        }
+      }
+    },
+    "errors": [],
+    "scope": "Synthetic original-style Lua source ran in real browser WASM and persisted lifecycle/movement results through public API; native package discovery/engine API coverage and existing unmodified Workshop mod verification remain incomplete"
+  },
+  "visualProof": "Fresh screenshots inspected only in host temporary directory; original pixels are not stored here",
+  "limits": [
+    "9 authored vegetation sprite names unresolved in current startup banks",
+    "Character scale not calibrated to native reference",
+    "Ground-floor simulation only",
+    "No physical mobile or second-device acceptance"
+  ],
+  "remainingSpriteBankCoverage": [
+    {
+      "name": "Tiles1x.pack",
+      "size": 43709914,
+      "pages": 38,
+      "sprites": 16220,
+      "readBytes": 1327116,
+      "maxRead": 16384,
+      "matchedMissing": [],
+      "vegetationEntryCount": 139
+    },
+    {
+      "name": "JumboTrees2x.pack",
+      "size": 8931229,
+      "pages": 12,
+      "sprites": 110,
+      "readBytes": 8870390,
+      "maxRead": 16384,
+      "matchedMissing": [],
+      "vegetationEntryCount": 0
+    }
+  ],
+  "reviewCorrectionChecks": {
+    "atomicPublication": {
+      "red": "Old direct-final copy failed expected ENOENT at hard-interruption boundary",
+      "green": "Content-directory suite:6 pass/1 Linux-only skip; real filesystem SIGKILL covers media/mods and rerun"
+    },
+    "luaOwnership": {
+      "red": "5 genuine VM regressions failed for pending state, reservation transfer and invalid API after failed cleanup",
+      "green": "Lua runtime suite:14 pass, including all5 added regressions"
+    },
+    "hostNamespacesRed": {
+      "origin": "http://packages.localhost:4173",
+      "source": "Provisioned browser-proof1.0.0 four-file module wrote initialized7 in activate; committed save revision3 had modState:{}",
+      "actual": {
+        "keys": [
+          "id",
+          "current",
+          "previous"
+        ],
+        "currentKeys": [
+          "format",
+          "formatVersion",
+          "id",
+          "revision",
+          "updatedAt",
+          "application",
+          "engine",
+          "world",
+          "contentPacks",
+          "mods",
+          "modState",
+          "settings",
+          "integrity"
+        ],
+        "modState": {},
+        "mods": [
+          {
+            "id": "browser-proof",
+            "version": "1.0.0",
+            "apiVersion": "0.1.0"
+          }
+        ]
+      },
+      "helperLimitation": "Initial helper call timed out at Puppeteer visibility evaluation, not an assertion; independent actual IDB observation confirms state loss"
+    },
+    "hostNamespacesGreen": {
+      "initialization": {
+        "activated": {
+          "schemaVersion": 1,
+          "data": {
+            "initialized": 7
+          }
+        },
+        "explicitlyLoaded": {
+          "schemaVersion": 1,
+          "data": {
+            "initialized": 7
+          }
+        },
+        "rebooted": {
+          "schemaVersion": 1,
+          "data": {
+            "initialized": 7
+          }
+        },
+        "initialized": {
+          "schemaVersion": 1,
+          "data": {
+            "initialized": 7
+          }
+        }
+      },
+      "schemaMigration": {
+        "activated": {
+          "schemaVersion": 2,
+          "data": {
+            "initialized": 8,
+            "migrated": true
+          }
+        },
+        "explicitlyLoaded": {
+          "schemaVersion": 2,
+          "data": {
+            "initialized": 8,
+            "migrated": true
+          }
+        },
+        "rebooted": {
+          "schemaVersion": 2,
+          "data": {
+            "initialized": 8,
+            "migrated": true
+          }
+        },
+        "initialized": {
+          "schemaVersion": 2,
+          "data": {
+            "initialized": 7
+          }
+        }
+      },
+      "packageVersion": "1.0.0",
+      "migrationScope": "Schema 1 to 2 under the existing exact package-version compatibility contract; mismatched package versions correctly block automatic restoration."
+    },
+    "missingSavedGeometry": {
+      "feedback": "Saved navigation cell 1,1 is missing required original geometry: media/maps/challengemaps/Tutorial/1_1.lotheader, media/maps/challengemaps/Tutorial/world_1_1.lotpack. Provision every saved cell's lotheader and lotpack files. Retained browser saves were not replaced. Provision the local content directory, correct enabled mods, or explicitly choose New session.",
+      "beforeHash": "90c00139d9a9c0ca04604e627bba8f3d285f4078dc402216a78db24c080b1e6c",
+      "afterHash": "90c00139d9a9c0ca04604e627bba8f3d285f4078dc402216a78db24c080b1e6c"
+    },
+    "pendingGpuFailure": {
+      "error": "WebGPU device lost (destroyed): Device was destroyed. Reload the page to recover.",
+      "hidden": false,
+      "menu": false,
+      "failed": true,
+      "paused": true,
+      "engine": {
+        "apiVersion": 1,
+        "tick": 0,
+        "x": 190.5,
+        "y": 190.5,
+        "speed": 3.25,
+        "action": 0
+      }
+    },
+    "runtimeTileFailure": {
+      "feedback": "Required original tile content is unavailable: chunk:0:20:21: Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503); chunk:0:20:22: Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503); chunk:0:20:23: Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503); chunk:0:20:24: Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503); chunk:0:20:25: Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503); chunk:0:20:26: Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503); chunk:0:20:27: Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503). Provision the missing content and reload the page.",
+      "engine": {
+        "apiVersion": 1,
+        "tick": 140,
+        "x": 185.5,
+        "y": 190.5,
+        "speed": 3.25,
+        "action": 0
+      },
+      "paused": true,
+      "errors": [
+        {
+          "source": "chunk:0:20:21",
+          "message": "Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503)"
+        },
+        {
+          "source": "chunk:0:20:22",
+          "message": "Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503)"
+        },
+        {
+          "source": "chunk:0:20:23",
+          "message": "Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503)"
+        },
+        {
+          "source": "chunk:0:20:24",
+          "message": "Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503)"
+        },
+        {
+          "source": "chunk:0:20:25",
+          "message": "Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503)"
+        },
+        {
+          "source": "chunk:0:20:26",
+          "message": "Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503)"
+        },
+        {
+          "source": "chunk:0:20:27",
+          "message": "Error: Content range requires HTTP 206; server ignored or refused the range for media/maps/challengemaps/Tutorial/world_0_0.lotpack (HTTP 503)"
+        }
+      ]
+    },
+    "browserLuaCleanup": {
+      "interpreter": "wasmoon",
+      "healthy": {
+        "schemaVersion": 1,
+        "data": {
+          "nativePlayerData": {
+            "good": {
+              "count": 2
+            }
+          }
+        }
+      },
+      "broken": {
+        "schemaVersion": 1,
+        "data": {
+          "nativePlayerData": {
+            "bad": {
+              "count": 1
+            }
+          }
+        }
+      },
+      "action": 0,
+      "cleanupErrors": [
+        {
+          "modId": "broken",
+          "stage": "cleanup"
+        }
+      ],
+      "nativeErrors": [
+        {
+          "modId": "broken",
+          "path": "<save>"
+        }
+      ],
+      "scope": "Actual browser engine and Lua WASM; synthetic packages. Failed backing write disposes broken callback while healthy callback advances; retained broken save is unchanged."
+    },
+    "browserHarness": "Named spawned handles share one owned Chromium target; tests explicitly navigate origin to isolate IndexedDB. Hold CDP focus emulation through each helper so background-tab RAF and viewport actions run."
+  },
+  "nativePackageIntegration": {
+    "scope": "Independently authored unchanged Lua; real application manager/VM/WASM/save path, not an existing Workshop feature",
+    "nativeGameProcessPreflight": {
+      "count": 0,
+      "method": "PowerShell process inspection for ProjectZomboid executables and game/server Java command lines"
+    },
+    "observedNumericSourceBuild": "42.21.0",
+    "browser": {
+      "id": "native-nativeloaderproof",
+      "nativeVersion": "proof-a",
+      "before": {
+        "revision": 1,
+        "mods": [
+          {
+            "id": "native-nativeloaderproof",
+            "version": "00.0.103708614365424993",
+            "apiVersion": "0.1.0"
+          }
+        ],
+        "namespace": {
+          "creates": 1,
+          "loads": 0,
+          "starts": 1,
+          "ticks": 15
+        }
+      },
+      "after": {
+        "revision": 2,
+        "mods": [
+          {
+            "id": "native-nativeloaderproof",
+            "version": "00.0.103708614365424993",
+            "apiVersion": "0.1.0"
+          }
+        ],
+        "namespace": {
+          "creates": 2,
+          "loads": 1,
+          "starts": 2,
+          "ticks": 18
+        }
+      },
+      "afterRollback": {
+        "revision": 4,
+        "mods": [
+          {
+            "id": "native-nativeloaderproof",
+            "version": "00.0.103708614365424993",
+            "apiVersion": "0.1.0"
+          }
+        ],
+        "namespace": {
+          "creates": 2,
+          "failLoad": false,
+          "loads": 1,
+          "starts": 2,
+          "ticks": 42
+        }
+      },
+      "safeModeSkipped": true,
+      "disabledCleanup": true,
+      "retainedClosureRollback": true,
+      "racingConsentRejected": true
+    }
+  },
+  "isolatedHostJavaScriptMigration": {
+    "scope": "Existing owned browser-proof package version 1.0.0; seeded integrity-valid schema 1 fixture, current isolated host implementation",
+    "result": {
+      "activated": {
+        "schemaVersion": 2,
+        "data": {
+          "initialized": 8,
+          "migrated": true
+        }
+      },
+      "explicitlyLoaded": {
+        "schemaVersion": 2,
+        "data": {
+          "initialized": 8,
+          "migrated": true
+        }
+      },
+      "rebooted": {
+        "schemaVersion": 2,
+        "data": {
+          "initialized": 8,
+          "migrated": true
+        }
+      },
+      "initialized": {
+        "schemaVersion": 2,
+        "data": {
+          "initialized": 7
+        }
+      }
+    }
+  },
+  "isolatedHostGameOnlySurface": {
+    "scope": "Fresh actual metadata and visual inspection after session transitions; screenshot temporary/untracked",
+    "viewport": {
+      "width": 900,
+      "height": 700,
+      "dpr": 1.2499999701976776
+    },
+    "canvas": {
+      "x": 0,
+      "y": 0,
+      "width": 900,
+      "height": 700,
+      "bufferWidth": 1125,
+      "bufferHeight": 875
+    },
+    "scroll": {
+      "width": 900,
+      "height": 700
+    },
+    "menuOpen": false,
+    "diagnosticsVisible": false,
+    "backend": "WebGPU",
+    "ready": true,
+    "failed": false,
+    "renderedInstances": 1265,
+    "residentSprites": 160,
+    "residentPages": 30,
+    "textureBytes": 5558916,
+    "sourceMissingSpriteCount": 9,
+    "actor": {
+      "apiVersion": 1,
+      "tick": 7512,
+      "x": 190.5,
+      "y": 187.73739624023438,
+      "speed": 3.25,
+      "action": 0
+    }
+  },
+  "integratedDeliveryChecks": {
+    "canonicalContentRootTestsPassed": 8,
+    "realWindowsShortNameAlias": true,
+    "deliveryTestsPassed": 9,
+    "teardownRootFix": "One fixture finalizer awaits owned preview server exit before removing its working directory; no suppression or retry",
+    "productionRelease": {
+      "path": "release/0.1.0-preview.1-ae37f0b17641",
+      "version": "0.1.0-preview.1",
+      "revision": "ae37f0b17641e7eafc7983d84a000fb53c737bb0",
+      "assetFreeAudit": true,
+      "filesVerified": 26,
+      "totalApplicationBytes": 917025,
+      "dependencyLicenses": [
+        {
+          "path": "licenses/lua.txt",
+          "bytes": 1294,
+          "sha256": "0cd55b0f241d9d40ceb477e3bdc74ed4a9bea4e6ad31f8106f7877c8814e4e95"
+        },
+        {
+          "path": "licenses/wasmoon.txt",
+          "bytes": 1074,
+          "sha256": "9ed9226c0138819a0859cf3c55a3414b4a186a17a4eaf4b5a51ceed7937615ac"
+        }
+      ],
+      "privateContentPackaged": false
+    },
+    "hostedWindowsCI": {
+      "id": 38333092993,
+      "url": "https://github.com/notmike101/project-zomboid-web-port/actions/runs/38333092993",
+      "headSha": "ae37f0b17641e7eafc7983d84a000fb53c737bb0",
+      "conclusion": "success",
+      "verifiedSteps": [
+        "locked setup",
+        "build and verify contracts",
+        "package identified preview",
+        "upload asset-free preview"
+      ],
+      "scope": "Synthetic Windows contracts/delivery; not browser GPU or physical-device proof",
+      "optionalAnnotations": "App token checks read permission unavailable (403); successful run and job results observed",
+      "artifact": {
+        "id": 11783268359,
+        "name": "standalone-preview-ae37f0b17641e7eafc7983d84a000fb53c737bb0",
+        "sizeInBytes": 300631,
+        "digest": "sha256:57b0f6908754e02acafda86dc8212f598d78c11dbf822c0a9dca78dc8a363754",
+        "expired": false
+      }
+    },
+    "sourceProvenance": {
+      "revision": "ae37f0b17641e7eafc7983d84a000fb53c737bb0",
+      "repository": "notmike101/project-zomboid-web-port",
+      "private": true,
+      "linkedAuthor": "agent-notmike101[bot]",
+      "linkedCommitter": "agent-notmike101[bot]",
+      "email": "337478082+agent-notmike101[bot]@users.noreply.github.com"
+    }
+  }
+}

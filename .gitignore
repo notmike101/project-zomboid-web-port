@@ -24,3 +24,10 @@ imports/
 *.dds
 *.zip
 *.pzsave
+*.lbc
+*.class
+*.so
+*.dylib
+*.lotheader
+*.lotpack
+*.tiles

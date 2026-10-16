@@ -1,26 +1,62 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Project Zomboid Web Port — M1 proof</title><link rel="stylesheet" href="./src/style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Project Zomboid</title><link rel="stylesheet" href="./src/style.css"></head>
 <body>
-<header><h1>Project Zomboid Web Port</h1><p>M1 architecture proof · Not a playable recreation yet</p></header>
-<main>
-<section aria-labelledby="world-heading"><h2 id="world-heading">Standalone WASM world</h2>
-<p id="world-help">Import a real game PNG, then tap the world to travel without holding a key. This synthetic plane uses imported art as a marker, not a character animation. Escape or Stop cancels immediately.</p>
-<canvas id="world" width="960" height="600" tabindex="0" aria-label="Movement destination surface" aria-describedby="world-help">Use the direction or destination controls below instead of the canvas.</canvas>
-<p id="state" role="status" aria-live="polite">Starting WebGPU and WASM…</p>
+<canvas id="world" width="960" height="600" tabindex="0" aria-label="Game world" aria-describedby="world-help">Use the movement assistance controls in the pause menu.</canvas>
+<p id="world-help" class="sr-only">Move with WASD or arrow keys. Click or tap a destination to travel. Escape cancels movement and opens the pause menu. Space stops movement. Resume returns keyboard focus to the game.</p>
+<p id="state" class="sr-only" role="status" aria-live="polite">Loading game…</p>
+<div id="loading" role="status">Loading game…</div>
 <p id="error" role="alert" hidden></p>
-</section>
-<aside aria-label="Game controls">
-<section><h2>Local content</h2><label>Import gameplay PNG <input id="image" type="file" accept="image/png,.png"></label><p id="asset">No content imported. Bytes stay on this device, in memory only.</p></section>
-<section><h2>Movement assistance</h2><p>WASD/arrow keys: manual takeover while world is focused. Direction buttons toggle walking; no sustained press required.</p>
-<div class="directions"><button data-walk="0,-1">Walk north</button><button data-walk="-1,0">Walk west</button><button data-walk="1,0">Walk east</button><button data-walk="0,1">Walk south</button></div>
-<button id="stop" class="stop">Stop (Escape)</button><button id="pause" aria-pressed="false">Pause simulation</button>
-<form id="destination"><label>Destination X (0–10) <input id="target-x" type="number" min="0" max="10" step="0.1" value="7" required></label><label>Destination Y (0–10) <input id="target-y" type="number" min="0" max="10" step="0.1" value="5" required></label><button>Travel to destination</button></form>
-</section>
-<section><h2>JavaScript example mod</h2><label><input id="mod" type="checkbox" disabled> Accessible walking (speed 2.25 instead of 1.5)</label><p id="mod-status">Disabled. Trusted bundled multifile ES module; changes the WASM movement rule.</p></section>
-<section><h2>Execution evidence</h2><button id="refresh">Refresh diagnostics</button><pre id="diagnostics" aria-label="Backend and engine diagnostics"></pre></section>
-</aside>
-</main>
-<footer>Prototype gaps: collision, original world, characters/animations, inventory, zombies, combat, audio, saves, content packs and local mod manager are not implemented. Native game is not a runtime dependency.</footer>
+<button id="open-pause" type="button" aria-label="Pause game" aria-haspopup="dialog" aria-controls="pause-menu" aria-expanded="false" hidden>Pause</button>
+<dialog id="pause-menu" aria-labelledby="pause-heading">
+<h1 id="pause-heading">Paused</h1>
+<button id="pause" type="button" disabled autofocus>Resume</button>
+<button id="stop" type="button">Stop movement</button>
+<fieldset id="session-controls" disabled><legend>Save game</legend>
+<button id="save-now" type="button" disabled>Save</button>
+<button id="load-save" type="button">Load save</button>
+<button id="export-save" type="button">Export backup</button>
+<label>Import backup <input id="import-save" type="file" accept=".json,application/json"></label>
+<button id="new-session" type="button">New session</button>
+</fieldset>
+<p id="save-status" role="status" aria-live="polite">Loading retained save…</p>
+<details id="keyboard-settings"><summary>Keyboard bindings</summary>
+<p id="keyboard-help">Edit existing source actions. Unbound disables that key; Clear removes both keys and modifiers. Key names identify native physical keys, not your keyboard layout. The browser or operating system may reserve some keys and shortcuts.</p>
+<form id="keyboard-bindings" aria-describedby="keyboard-help keyboard-status">
+<fieldset id="keyboard-controls" disabled><legend>Source keyboard binding</legend>
+<label for="keyboard-action">Action</label><select id="keyboard-action" required></select>
+<label for="keyboard-primary">Primary key</label><select id="keyboard-primary" required></select>
+<label for="keyboard-alternate">Alternate key</label><select id="keyboard-alternate" required></select>
+<label for="keyboard-shift"><input id="keyboard-shift" type="checkbox"> Require Shift</label>
+<label for="keyboard-ctrl"><input id="keyboard-ctrl" type="checkbox"> Require Ctrl</label>
+<label for="keyboard-alt"><input id="keyboard-alt" type="checkbox"> Require Alt</label>
+<button id="keyboard-apply" type="submit">Apply binding</button>
+<button id="keyboard-clear" type="button">Clear binding</button>
+</fieldset>
+</form>
+<p id="keyboard-status" role="status" aria-live="polite">Load a session to edit its keyboard bindings. Apply changes live; Save retains applied bindings after reload.</p>
+</details>
+<details id="movement-settings"><summary>Movement assistance</summary>
+<p>Choose a direction to walk without holding a key, or enter a destination. Selecting movement resumes the game.</p>
+<div class="directions"><button data-walk="0,-1" aria-pressed="false">Walk north</button><button data-walk="-1,0" aria-pressed="false">Walk west</button><button data-walk="1,0" aria-pressed="false">Walk east</button><button data-walk="0,1" aria-pressed="false">Walk south</button></div>
+<form id="destination"><label>Destination X <input id="target-x" type="number" min="0" max="10" step="any" value="7" required></label><label>Destination Y <input id="target-y" type="number" min="0" max="10" step="any" value="5" required></label><button>Travel</button></form>
+</details>
+<details><summary>Mods</summary>
+<label><input id="mod" type="checkbox" disabled> Accessible walking</label><p id="mod-status" role="status">Disabled</p>
+<p>Enable only trusted mods. Mods can access this page and its saves. Changes to installed mods apply after reloading.</p>
+<fieldset id="package-controls" disabled><legend>Installed mods</legend>
+<ul id="package-list" aria-label="Installed mods"></ul>
+<button id="package-reload" type="button">Reload to apply changes</button>
+</fieldset>
+<p id="package-status" role="status" aria-live="polite">Loading mods…</p>
+<p id="package-reload-status"></p>
+<p id="package-error" role="alert" hidden></p>
+<p><a id="package-safe-mode" href="?safe-mods=1">Reload without local mods</a> · <a id="package-normal-mode" href="?">Reload with enabled mods</a></p>
+</details>
+</dialog>
+<output id="diagnostics" hidden></output>
+<output id="package-activation" hidden></output>
+<output id="visual-status" hidden></output>
 <script type="module" src="./src/main.js"></script>
-</body></html>
+</body>
+</html>

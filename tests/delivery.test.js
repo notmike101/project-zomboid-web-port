@@ -1,10 +1,11 @@
 /**
- * @file Delivery boundary tests: staging copies only approved real files, and the
- * preview server refuses anything whose real path leaves its root.
+ * @file Delivery boundary tests: staging and releases copy only approved real
+ * files, and the preview server refuses paths outside its root.
  */
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { applicationFiles, stageApplication } from '../scripts/build.mjs';
 
 const serveScript = fileURLToPath(new URL('../scripts/serve.mjs', import.meta.url));
+const releaseScript = fileURLToPath(new URL('../scripts/release.mjs', import.meta.url));
 const secretBytes = 'SYNTHETIC_PRIVACY_PROBE_ONLY';
 const approvedHtml = '<!doctype html>approved index';
 const approvedWasm = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 127, 3, 2, 1, 0, 7, 10, 1, 6, 97, 110, 115, 119, 101, 114, 0, 0, 10, 6, 1, 4, 0, 65, 42, 11]);
@@ -167,6 +169,125 @@ test('a selected symbolic link cannot deliver a private file', async (t) => {
 });
 
 /**
+ * Run a real Git command in an isolated delivery fixture.
+ *
+ * @param {string} root - Fixture checkout directory.
+ * @param {string[]} args - Git arguments.
+ * @returns {string} Successful command output.
+ */
+function git(root, args) {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+
+    assert.equal(result.status, 0, result.stderr);
+
+    return result.stdout.trim();
+}
+
+/**
+ * Stage approved files, including the real dependency licenses, in a clean checkout.
+ *
+ * @param {import('node:test').TestContext} context - Test that owns the checkout.
+ * @returns {Promise<{root: string, outside: string, revision: string}>} Release fixture.
+ */
+async function makeReleaseFixture(context) {
+    const { root, outside } = await makeFixture(context);
+
+    await writeSources(root);
+    await Promise.all(applicationFiles.filter((file) => file.target.startsWith('dist/licenses/')).map(async (file) => {
+        await put(root, file.source, await readFile(new URL(`../${file.source}`, import.meta.url)));
+    }));
+    await put(root, '.gitignore', '/dist/\n/release/\n/node_modules/\n/engine/target/\n/private/\n');
+    await put(root, 'private/original-assets.json', secretBytes);
+    await stageApplication(root);
+    git(root, ['-c', 'init.templateDir=', 'init']);
+    git(root, ['add', '.']);
+    git(root, ['-c', 'user.name=Delivery Test', '-c', 'user.email=delivery@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=.git/hooks', 'commit', '-m', 'release fixture']);
+
+    return { root, outside, revision: git(root, ['rev-parse', 'HEAD']) };
+}
+
+/**
+ * Execute the production release CLI against the fixture filesystem and checkout.
+ *
+ * @param {string} root - Fixture checkout directory.
+ * @returns {import('node:child_process').SpawnSyncReturns<string>} Release process result.
+ */
+function runRelease(root) {
+    return spawnSync(process.execPath, [releaseScript], { cwd: root, encoding: 'utf8' });
+}
+
+test('a real release includes both dependency licenses with audited bytes and never overwrites output', async (t) => {
+    const { root, revision } = await makeReleaseFixture(t);
+    const stagedPaths = await listFiles(join(root, 'dist'), join(root, 'dist'));
+    const result = runRelease(root);
+
+    assert.equal(result.status, 0, result.stderr);
+    const directory = join(root, 'release', `0.1.0-preview.1-${revision.slice(0, 12)}`);
+    const manifestBytes = await readFile(join(directory, 'release-manifest.json'));
+    const manifest = JSON.parse(manifestBytes.toString());
+
+    assert.equal(manifest.revision, revision);
+    assert.equal(manifest.assetFree, true);
+    assert.deepEqual(manifest.files.map((file) => file.path), stagedPaths);
+    assert.deepEqual(await listFiles(directory, directory), [...stagedPaths, 'release-manifest.json'].sort());
+    assert.equal(stagedPaths.includes('licenses/lua.txt'), true);
+    assert.equal(stagedPaths.includes('licenses/wasmoon.txt'), true);
+    assert.equal(stagedPaths.includes('licenses/rust.txt'), true);
+    assert.equal(stagedPaths.includes('build.json'), true);
+    await Promise.all(manifest.files.map(async (file) => {
+        const expectedBytes = await readFile(join(root, 'dist', file.path));
+        const releasedBytes = await readFile(join(directory, file.path));
+
+        assert.deepEqual(releasedBytes, expectedBytes, file.path);
+        assert.equal(file.bytes, expectedBytes.length, file.path);
+        assert.equal(file.sha256, createHash('sha256').update(expectedBytes).digest('hex'), file.path);
+        assert.equal(releasedBytes.includes(secretBytes), false, file.path);
+    }));
+
+    const repeated = runRelease(root);
+
+    assert.notEqual(repeated.status, 0);
+    assert.match(repeated.stderr, /EEXIST/u);
+    assert.deepEqual(await readFile(join(directory, 'release-manifest.json')), manifestBytes);
+});
+
+test('a release rejects private files even when their extension is otherwise shipped', async (t) => {
+    await Promise.all(['licenses/private.txt', 'private.json', 'src/private.js', 'engine/private.wasm'].map(async (path) => {
+        const { root } = await makeReleaseFixture(t);
+
+        await put(root, `dist/${path}`, secretBytes);
+        const result = runRelease(root);
+
+        assert.notEqual(result.status, 0, path);
+        assert.match(result.stderr, /Release rejects unknown content/u, path);
+        assert.equal((await readdir(root)).includes('release'), false, path);
+    }));
+});
+
+test('a release refuses a dirty source checkout', async (t) => {
+    const { root } = await makeReleaseFixture(t);
+
+    await put(root, 'index.html', secretBytes);
+    const result = runRelease(root);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Release requires a clean committed source checkout/u);
+    assert.equal((await readdir(root)).includes('release'), false);
+});
+
+test('a release refuses a junction to private content', async (t) => {
+    const { root, outside } = await makeReleaseFixture(t);
+
+    await put(outside, 'private.json', secretBytes);
+    await makeOutsideLink(outside, join(root, 'dist', 'private'));
+    const result = runRelease(root);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Release rejects symbolic link/u);
+    assert.equal((await readdir(root)).includes('release'), false);
+});
+
+/**
  * Read the preview server readiness line and report the address it really bound.
  *
  * @param {import('node:child_process').ChildProcess} child - Running server process.
@@ -252,4 +373,96 @@ test('the preview server stays inside dist and never follows a link out', { time
     assert.equal(await statusOf(`${base}privacy-probe/secret.txt`), 404, 'a link out of dist is refused');
     assert.equal(await statusOf(`${base}%2e%2e%2fprivate%2fsecret.txt`), 404, 'encoded traversal is refused');
     assert.equal(await statusOf(`${base}missing.js`), 404);
+});
+
+test('content URLs stream bounded ranges only from the separate approved root', { timeout: 15_000 }, async (t) => {
+    const fixture = await mkdtemp(join(tmpdir(), 'pz-content-server-'));
+    const root = join(fixture, 'app');
+    const outside = join(fixture, 'private');
+    const content = join(root, 'approved-content');
+
+    await put(root, 'dist/index.html', approvedHtml);
+    await put(content, 'manifest.json', '{"format":"pz-web-content-directory"}');
+    await put(content, 'media/texturepacks/Example pack.pack', '0123456789');
+    await put(content, 'media/body.png', new Uint8Array([1, 2, 3]));
+    await put(content, 'ProjectZomboid64.exe', secretBytes);
+    await put(content, 'media/private.jar', secretBytes);
+    await put(content, 'saves/player.bin', secretBytes);
+    await put(outside, 'secret.pack', secretBytes);
+    await makeOutsideLink(outside, join(content, 'media', 'linked'));
+    const child = spawn(process.execPath, [serveScript], {
+        cwd: root, env: { ...process.env, HOST: '127.0.0.1', PORT: '0', CONTENT_ROOT: content },
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    t.after(async () => {
+        if (child.exitCode === null && child.signalCode === null) {
+            const exited = once(child, 'exit', { signal: AbortSignal.timeout(3_000) });
+
+            child.kill('SIGKILL');
+            await exited;
+        }
+
+        child.stdout.destroy();
+        child.stderr.destroy();
+        await rm(fixture, { recursive: true, force: true });
+    });
+    const base = `http://${await readAddress(child)}`;
+    const url = `${base}/content/media/texturepacks/Example%20pack.pack`;
+    const range = await fetch(url, { headers: { Range: 'bytes=2-5' } });
+
+    assert.equal(range.status, 206);
+    assert.equal(range.headers.get('content-range'), 'bytes 2-5/10');
+    assert.equal(range.headers.get('content-length'), '4');
+    assert.equal(range.headers.get('accept-ranges'), 'bytes');
+    assert.equal(await range.text(), '2345');
+    const head = await fetch(url, { method: 'HEAD', headers: { Range: 'bytes=2-5' } });
+
+    assert.equal(head.status, 206);
+    assert.equal(head.headers.get('content-length'), '4');
+    assert.equal(await head.text(), '');
+    const suffix = await fetch(url, { headers: { Range: 'bytes=-3' } });
+    const open = await fetch(url, { headers: { Range: 'bytes=8-' } });
+
+    assert.equal(await suffix.text(), '789');
+    assert.equal(await open.text(), '89');
+
+    for (const value of ['bytes=10-', 'bytes=7-2', 'bytes=0-1,3-4', 'bytes=-0', 'garbage']) {
+        // eslint-disable-next-line no-await-in-loop -- Exercise each independent range rejection serially.
+        const response = await fetch(url, { headers: { Range: value } });
+
+        assert.equal(response.status, 416);
+        assert.equal(response.headers.get('content-range'), 'bytes */10');
+        // eslint-disable-next-line no-await-in-loop -- Drain each rejected response before the next request.
+        assert.equal(await response.text(), '');
+    }
+
+    const png = await fetch(`${base}/content/media/body.png`);
+
+    assert.equal(png.headers.get('content-type'), 'image/png');
+    await png.arrayBuffer();
+    await put(content, 'media/anims_X/Bob/Bob_Idle.X', 'synthetic-animation');
+    const actualCase = await fetch(`${base}/content/media/anims_X/Bob/Bob_Idle.X`);
+
+    assert.equal(actualCase.status, 200);
+    assert.equal(await actualCase.text(), 'synthetic-animation');
+
+    if (process.platform === 'linux') {
+        assert.equal(await statusOf(`${base}/content/media/anims_X/Bob/Bob_Idle.x`), 404);
+    }
+
+    for (const path of ['media/linked/secret.pack', '%2e%2e%2fprivate%2fsecret.pack', 'ProjectZomboid64.exe', 'media/private.jar', 'saves/player.bin']) {
+        // eslint-disable-next-line no-await-in-loop -- Check each privacy boundary independently.
+        assert.equal(await statusOf(`${base}/content/${path}`), 404);
+    }
+
+    assert.equal(await statusOf(`${base}/approved-content/manifest.json`), 404);
+    assert.equal(await statusOf(`${base}/content/manifest.json`), 200);
+    assert.equal(await statusOf(`${base}/`), 200);
+    await put(root, 'dist/ProjectZomboid64.exe', secretBytes);
+    assert.equal(await statusOf(`${base}/ProjectZomboid64.exe`), 404);
+    await rm(content, { recursive: true, force: true });
+    await put(outside, 'manifest.json', '{"private":true}');
+    await symlink(outside, content, 'junction');
+    assert.equal(await statusOf(`${base}/content/manifest.json`), 404, 'a linked content root is never approved');
 });

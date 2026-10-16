@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdir, readFile, mkdir, cp, writeFile } from 'node:fs/promises';
-import { join, extname } from 'node:path';
+import { join, relative } from 'node:path';
 
-const allowed = new Set(['.html', '.js', '.css', '.json', '.wasm']);
+import { applicationFiles } from './build.mjs';
+
+const allowed = new Set([...applicationFiles.map((file) => relative('dist', file.target).replaceAll('\\', '/')), 'build.json']);
 const files = [];
 
 /**
@@ -21,6 +23,7 @@ async function inspect(directory) {
      */
     async function inspectEntry(entry) {
         const path = join(directory, entry.name);
+        const target = relative('dist', path).replaceAll('\\', '/');
 
         if (entry.isSymbolicLink()) {
             throw new Error(`Release rejects symbolic link: ${path}`);
@@ -29,14 +32,14 @@ async function inspect(directory) {
         if (entry.isDirectory()) {
             await inspect(path);
         } else {
-            if (!entry.isFile() || !allowed.has(extname(path))) {
+            if (!entry.isFile() || !allowed.has(target)) {
                 throw new Error(`Release rejects unknown content: ${path}`);
             }
 
             const bytes = await readFile(path);
 
             files.push({
-                path: path.replaceAll('\\', '/').replace(/^dist\//u, ''), bytes: bytes.length,
+                path: target, bytes: bytes.length,
                 sha256: createHash('sha256').update(bytes).digest('hex'),
             });
         }
