@@ -4,17 +4,26 @@ import java.lang.classfile.ClassFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.ArrayList;
 import java.util.TreeMap;
 import java.util.zip.ZipFile;
 
 /** Reads class-file metadata only. It never loads or initializes the inspected classes. */
 public final class GenericMetadataTool {
     public static void main(String[] args) throws Exception {
-        if (args.length < 4) throw new IllegalArgumentException("game.jar adapter-classes output.json class-name...");
+        if (args.length < 4) throw new IllegalArgumentException("game.jar adapter-classes output.json class-name... | @names-file");
+        var names = new ArrayList<String>();
+        for (int i = 3; i < args.length; i++) {
+            if (args[i].startsWith("@")) names.addAll(Files.readAllLines(Path.of(args[i].substring(1))));
+            else names.add(args[i]);
+        }
+        for (String name : names) {
+            if (!name.matches("[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)*"))
+                throw new IllegalArgumentException("Invalid metadata class name: " + name);
+        }
         Map<String, String> metadata = new TreeMap<>();
         try (ZipFile jar = new ZipFile(args[0])) {
-            for (int i = 3; i < args.length; i++) {
-                String name = args[i];
+            for (String name : names) {
                 String resource = name.replace('.', '/') + ".class";
                 Path adapter = Path.of(args[1]).resolve(resource);
                 byte[] bytes;
