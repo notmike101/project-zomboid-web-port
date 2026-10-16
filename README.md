@@ -135,6 +135,7 @@ node browser-jvm/verify-clipper.mjs
 node browser-jvm/verify-lighting.mjs
 node browser-jvm/verify-lighting-vertical.mjs
 node browser-jvm/verify-lighting-world.mjs
+node browser-jvm/verify-native-long.mjs
 ~~~
 
 The shader qualification uses the `PZ_BROWSER` executable set above. Nine cases check actual WebGL2 compilation and exact pixels with Chromium's SwiftShader backend, including overload selection, integer arithmetic, legacy color varyings, uniform-dependent globals across composed units and legacy texture sampling with an original sampler named `texture`. A separate source check now compiles and links twelve original scene shader pairs, including both cutaway shaders. These checks do not establish physical-GPU or complete GLSL conformance.

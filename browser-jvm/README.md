@@ -128,6 +128,10 @@ The vendor display-mode query now reports one windowed mode using the actual Web
 
 The pinned CheerpJ4.3 Java17 runtime has a missing aligned two-byte store for byte arrays. `unsafe-short-repair.js` repairs that runtime boundary without changing original game serialization. It checks the exact `Unsafe.putShort` export source, preserves native byte order, delegates other receivers, and rejects a replaced installed wrapper. The full `cj3.js` SHA-256 (`5bcf00711009cbb12b858dcbea865cfe0e9d652cfc95f55ad20a600724462644`) records provenance; the enforced guard is the exact export source. A changed export requires requalification.
 
+`native-long-return.js` separately preserves exact native `jlong` results at the qualified `CJ3Library.restart` continuation. The original LiveConnect conversion does not accept scalar JavaScript BigInt: returning one from a native long callback otherwise supplies zero. The adapter delegates conversion and only replaces an actual declared-long continuation result, preserving the signed 64-bit JNI word before queued Java execution resumes. It guards the exact restart export and continuation shape, delegates other return types, and checks idempotence/tampering. This module is available for host services but is not installed by public play yet. Scalar JavaScript-to-Java long **method arguments** retain the original conversion boundary; exact helper arguments must use a separately qualified representation such as decimal strings.
+
+Run `node browser-jvm/verify-native-long.mjs` with `PZ_JDK` and `PZ_BROWSER` set. Its standalone authored Java17 fixture needs no game JAR and verifies 26 synchronous/asynchronous long returns, signed extrema, values beyond JavaScript's exact-number range, native 64-bit wrapping, five delegated types, Java catch/finally, idempotence and tamper rejection. It also requires the actual loaded runtime hash above, zero denied requests/logged errors, unchanged adapter bytes and browser cleanup. The runtime hash is enforced by this qualification; the production installer enforces its export/state guards.
+
 After preparing the play profile, run the JVM/browser comparison with:
 
 ```powershell
