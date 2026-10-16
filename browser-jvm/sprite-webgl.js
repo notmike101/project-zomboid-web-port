@@ -634,6 +634,20 @@ export function createSpriteNatives(canvas, report) {
          */
         glClear: (mask) => gl.clear(mask),
         /**
+         * Sets the actual depth comparison function; WebGL retains invalid-enum errors.
+         *
+         * @param {number} comparison - Original OpenGL depth comparison enum.
+         * @returns {undefined} Completion of the WebGL state update.
+         */
+        glDepthFunc: (comparison) => gl.depthFunc(comparison),
+        /**
+         * Sets whether actual depth-buffer writes are enabled.
+         *
+         * @param {boolean} enabled - Original depth write mask.
+         * @returns {undefined} Completion of the WebGL state update.
+         */
+        glDepthMask: (enabled) => gl.depthMask(enabled),
+        /**
          * Executes the selected glDrawArrays operation against the actual WebGL context.
          *
          * @param {number} mode - Numeric mode argument for the declared operation.
@@ -1074,6 +1088,42 @@ export function createSpriteNatives(canvas, report) {
          */
         glTexParameteri: (target, name, value) => gl.texParameteri(target, name, value),
         /**
+         * Computes the Java buffer extent using the current actual 2D unpack state.
+         * The final row needs its pixels but no trailing alignment padding.
+         *
+         * @param {number} width - Image width in pixels.
+         * @param {number} height - Image height in pixels.
+         * @param {number} format - Qualified RED or RGBA format.
+         * @param {number} type - Qualified UNSIGNED_BYTE pixel type.
+         * @returns {number} Required byte extent, including leading skips and row padding.
+         */
+        textureByteCount: (width, height, format, type) => {
+            if (![width, height].every((size) => Number.isInteger(size) && size >= 0)) {
+                throw new RangeError('Invalid texture dimensions');
+            }
+
+            if (type !== gl.UNSIGNED_BYTE || ![gl.RED, gl.RGBA].includes(format)) {
+                throw new Error('Unsupported texture buffer format');
+            }
+
+            if (width === 0 || height === 0) {
+                return 0;
+            }
+
+            const channels = format === gl.RED ? 1 : 4;
+            const alignment = gl.getParameter(gl.UNPACK_ALIGNMENT);
+            const rowPixels = gl.getParameter(gl.UNPACK_ROW_LENGTH) || width;
+            const stride = Math.ceil(rowPixels * channels / alignment) * alignment;
+            const count = gl.getParameter(gl.UNPACK_SKIP_ROWS) * stride
+                + gl.getParameter(gl.UNPACK_SKIP_PIXELS) * channels + (height - 1) * stride + width * channels;
+
+            if (!Number.isSafeInteger(count) || count > 2_147_483_647) {
+                throw new RangeError('Texture buffer extent exceeds Java array capacity');
+            }
+
+            return count;
+        },
+        /**
          * Performs the texture bytes operation for the owned browser runtime.
          *
          * @param {number} target - Numeric target argument for the declared operation.
@@ -1090,11 +1140,13 @@ export function createSpriteNatives(canvas, report) {
             const color = format === gl.RGBA && type === gl.UNSIGNED_BYTE && [gl.RGBA, gl.RGBA8].includes(internal);
             const depth = data === null && format === gl.DEPTH_COMPONENT && type === gl.UNSIGNED_SHORT && internal === gl.DEPTH_COMPONENT16;
 
-            if (!color && !depth) {
+            const red = format === gl.RED && type === gl.UNSIGNED_BYTE && [gl.RED, gl.R8].includes(internal);
+
+            if (!color && !depth && !red) {
                 throw new Error('Unsupported texture format');
             }
 
-            gl.texImage2D(target, level, internal, w, h, border, format, type, bytes(data));
+            gl.texImage2D(target, level, red ? gl.R8 : internal, w, h, border, format, type, bytes(data));
         },
         /**
          * Performs the read pixels operation for the owned browser runtime.

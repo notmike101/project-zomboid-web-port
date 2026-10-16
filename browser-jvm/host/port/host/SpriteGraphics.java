@@ -97,6 +97,8 @@ public final class SpriteGraphics {
     public static native void glViewport(int x,int y,int width,int height);
     public static native void glClearColor(float red,float green,float blue,float alpha);
     public static native void glClear(int mask);
+    public static native void glDepthFunc(int function);
+    public static native void glDepthMask(boolean enabled);
     public static native void glDrawArrays(int mode,int first,int count);
 
     public static native int glCreateShader(int type);
@@ -140,9 +142,10 @@ public final class SpriteGraphics {
     public static native void glBindTexture(int target,int id);
     public static native void glDeleteTextures(int id);
     public static native void glTexParameteri(int target,int name,int value);
-    public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,ByteBuffer data){int count=data==null?0:pixelCount(width,height,format,type);byte[] bytes=null;if(data!=null){if(data.remaining()<count)throw new IllegalArgumentException("Texture buffer too short");bytes=new byte[count];for(int i=0;i<count;i++)bytes[i]=data.get(data.position()+i);}textureBytes(target,level,internal,width,height,border,format,type,bytes);}
+    public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,ByteBuffer data){int count=data==null?0:textureByteCount(width,height,format,type);byte[] bytes=null;if(data!=null){if(data.remaining()<count)throw new IllegalArgumentException("Texture buffer too short");bytes=new byte[count];for(int i=0;i<count;i++)bytes[i]=data.get(data.position()+i);}textureBytes(target,level,internal,width,height,border,format,type,bytes);}
     /** The original FBO allocation uses this typed-null overload; client IntBuffer pixels remain unsupported. */
     public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,IntBuffer data){if(data!=null)throw new UnsupportedOperationException("IntBuffer texture uploads are outside the bounded browser backend");textureBytes(target,level,internal,width,height,border,format,type,null);}
+    private static native int textureByteCount(int width,int height,int format,int type);
     private static native void textureBytes(int target,int level,int internal,int width,int height,int border,int format,int type,byte[] data);
     public static void glReadPixels(int x,int y,int width,int height,int format,int type,ByteBuffer data){int count=pixelCount(width,height,format,type);if(data.isReadOnly())throw new ReadOnlyBufferException();if(data.remaining()<count)throw new IllegalArgumentException("Readback buffer too short");byte[] bytes=new byte[count];for(int i=0;i<count;i++)bytes[i]=data.get(data.position()+i);readPixels(x,y,width,height,format,type,bytes);for(int i=0;i<count;i++)data.put(data.position()+i,bytes[i]);}
     private static native void readPixels(int x,int y,int width,int height,int format,int type,byte[] data);
