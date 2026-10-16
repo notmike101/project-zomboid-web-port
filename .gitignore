@@ -9,6 +9,7 @@ node_modules/
 *.wasm-runtime.js
 *.wasm.map
 *.teavmdbg
+*.teadbg
 
 # Local handoff and historical report contain machine-specific prerequisite paths.
 HANDOFF.md

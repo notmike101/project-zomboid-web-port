@@ -23,6 +23,8 @@ The six probes compare 64 cases and 424 raw output bit patterns with the JVM.
 These counts are behavioral checks, not a percentage of game coverage.
 The browser-save probe adds real browser filesystem persistence without replacing gameplay calculations or the original record format.
 
+See [COMPATIBILITY.md](COMPATIBILITY.md) for measured results and [PORTING.md](PORTING.md) for the route toward a playable slice.
+
 ## Prerequisites
 
 - Windows and Node.js 22 or newer.
