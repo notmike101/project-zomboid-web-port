@@ -1,3 +1,5 @@
+import { createRagdollDefinitions } from './ragdoll-definitions.js';
+
 /**
  * Copies absolute bytes from an original Java transport buffer.
  *
@@ -51,6 +53,7 @@ function integer(value, name) {
  * @returns {object} Native callbacks and inspectable owned geometry state.
  */
 export function createBrowserPhysics() {
+    const ragdolls = createRagdollDefinitions();
     const chunks = new Map();
     const maps = new Map();
     const collision = new Map();
@@ -317,6 +320,7 @@ export function createBrowserPhysics() {
             simulation: simulation && { ...simulation },
             dynamicBodies: { vehicles: vehicles.size, objects: dynamicObjects.size },
             vehicleDefinitions: [...vehicleDefinitions].map(([name, values]) => ({ name, values: [...values] })),
+            ragdollDefinitions: ragdolls.snapshot(),
             collision: [...collision].map(([square, flags]) => ({ square, flags })),
             populationChunks: [...populationChunks],
             clipperContainers: { allocations: clipperAllocations, clears: clipperClears },
@@ -479,6 +483,7 @@ export function createBrowserPhysics() {
     return {
         initialize, setLevels, submit, snapshot, setCollisionChunk, setCollisionSquares, collisionAt, stepSimulation, defineVehicleScript,
         natives: {
+            ...ragdolls.natives,
             /**
              * Registers genuine original script metadata independently of dynamic bodies.
              *

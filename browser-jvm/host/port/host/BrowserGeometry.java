@@ -69,7 +69,7 @@ public final class BrowserGeometry {
         if (cell == null || world.currentCell != cell) {
             throw new IllegalArgumentException("Expected current original cell");
         }
-        Session session = new Session();
+        Session session = new Session(cell);
         try {
             loadTextures();
             IsoSpriteManager sprites = IsoSpriteManager.instance;
@@ -92,6 +92,7 @@ public final class BrowserGeometry {
                     || world.getMetaGrid().getMaxX() != 1) {
                 throw new AssertionError("Original bounded map metadata differs");
             }
+            zombie.iso.areas.isoregion.IsoRegions.init();
             prewarmStreams();
             // Original IsoWorld boot supports selecting its real Java pathfinding backend.
             DebugOptions.instance.pathfindUseNativeCode.setValue(false);
@@ -115,41 +116,25 @@ public final class BrowserGeometry {
                 if (dx != 0 || dy != 0) requestChunk(session, map, 19 + dx, 19 + dy, middle + dx, middle + dy);
             }
             long end = System.currentTimeMillis() + 60000;
-            while (!allLoaded(session.chunks) && System.currentTimeMillis() < end) {
-                map.processAllLoadGridSquare();
+            while ((WorldStreamer.instance.isBusy() || !allQueued(session.chunks))
+                    && System.currentTimeMillis() < end) {
                 Thread.sleep(10);
             }
-            if (!allLoaded(session.chunks)) throw new AssertionError("Original chunk neighborhood never completed");
-            stage("nine-chunks-loaded");
-            stage("physics-upload-before");
-            for (IsoChunk loaded : session.chunks) {
-                int mapX = middle + loaded.wx - 19, mapY = middle + loaded.wy - 19;
-                if (map.getChunk(mapX, mapY) != loaded)
-                    throw new AssertionError("Original loaded chunk is not bound to its chunk map");
-                loaded.updatePhysicsForLevel(0);
-                int floors = 0;
-                for (int y = 0; y < IsoChunkMap.CHUNK_SIZE_IN_SQUARES; y++)
-                    for (int x = 0; x < IsoChunkMap.CHUNK_SIZE_IN_SQUARES; x++) {
-                        IsoGridSquare ground = cell.getGridSquare(loaded.wx * IsoChunkMap.CHUNK_SIZE_IN_SQUARES + x,
-                                loaded.wy * IsoChunkMap.CHUNK_SIZE_IN_SQUARES + y, 0);
-                        if (ground == null || ground.getChunk() != loaded)
-                            throw new AssertionError("Original ground square is absent or bound to another chunk");
-                        if (ground.getFloor() != null && ground.TreatAsSolidFloor()) floors++;
-                    }
-                session.groundFloorCount += floors;
-                stage("chunk-" + loaded.wx + "-" + loaded.wy + "-ground-floors-" + floors);
+            if (WorldStreamer.instance.isBusy() || !allQueued(session.chunks))
+                throw new AssertionError("Original raw chunk neighborhood never completed");
+            List<IsoChunk> ready = new ArrayList<>();
+            IsoChunk.loadGridSquare.copyTo(ready);
+            for (IsoChunk requested : session.chunks) {
+                if (!ready.contains(requested) || !map.setChunkDirect(requested, false))
+                    throw new AssertionError("Original queued chunk registration failed");
             }
-            stage("physics-upload-after");
+            map.calculateZExtentsForChunkMap();
             IsoGridSquare square = cell.getGridSquare(153, 158, 0);
-            if (square == null) throw new AssertionError("Original square not registered");
-            if (square.getFloor() == null) throw new AssertionError("No installed map floor at spawn");
-            stage("floor-recalc-before");
-            square.RecalcAllWithNeighbours(true);
-            stage("floor-recalc-after");
-            if (!square.TreatAsSolidFloor()) throw new AssertionError("Original floor absent");
+            if (square == null || square.getFloor() == null || !square.TreatAsSolidFloor())
+                throw new AssertionError("Original raw map spawn floor absent");
             session.chunk = session.chunks.get(0);
             session.spawnSquare = square;
-            stage("session-ready");
+            stage("raw-neighborhood-registered-before-player");
             return session;
         } catch (Exception | Error failure) {
             try {
@@ -167,6 +152,10 @@ public final class BrowserGeometry {
         session.chunks.add(chunk);
     }
 
+    private static boolean allQueued(List<IsoChunk> chunks) {
+        for (IsoChunk chunk : chunks) if (!IsoChunk.loadGridSquare.contains(chunk)) return false;
+        return true;
+    }
     private static boolean allLoaded(List<IsoChunk> chunks) {
         for (IsoChunk chunk : chunks) if (!chunk.loaded) return false;
         return true;
@@ -241,15 +230,73 @@ public final class BrowserGeometry {
         private boolean pathfinding;
         private boolean physics;
         private boolean closed;
+        private boolean activated;
+        private final IsoCell cell;
         private IsoChunk chunk;
         private final List<IsoChunk> chunks = new ArrayList<>();
         private int groundFloorCount;
         private IsoGridSquare spawnSquare;
 
+        private Session(IsoCell cell) {
+            this.cell = cell;
+        }
+
         public IsoChunk getChunk() { return chunk; }
         public List<IsoChunk> getChunks() { return List.copyOf(chunks); }
         public int getGroundFloorCount() { return groundFloorCount; }
         public IsoGridSquare getSpawnSquare() { return spawnSquare; }
+
+        /** Completes original chunk activation only after the real player has been registered. */
+        public void activate() {
+            if (closed) throw new IllegalStateException("Geometry session closed");
+            if (activated) return;
+            var player = zombie.characters.IsoPlayer.getInstance();
+            if (IsoWorld.instance.currentCell != cell || player == null || player.getCell() != cell
+                    || player.getSquare() != spawnSquare) {
+                throw new IllegalStateException("Original player must own the loaded spawn square before activation");
+            }
+            if (!allQueued(chunks)) throw new AssertionError("Original activation queue lost a requested chunk");
+            IsoChunkMap map = cell.getChunkMap(0);
+            // loaded already became true in original setChunkDirect; it cannot indicate activation.
+            map.processAllLoadGridSquare();
+            for (IsoChunk loaded : chunks) {
+                if (IsoChunk.loadGridSquare.contains(loaded))
+                    throw new AssertionError("Original chunk activation did not consume its queue entry");
+            }
+            if (!allLoaded(chunks)) throw new AssertionError("Original activated neighborhood is incomplete");
+            stage("nine-chunks-activated-after-player");
+            stage("physics-upload-before");
+            int totalFloors = 0;
+            int middle = IsoChunkMap.chunkGridWidth / 2;
+            for (IsoChunk loaded : chunks) {
+                int mapX = middle + loaded.wx - 19, mapY = middle + loaded.wy - 19;
+                if (map.getChunk(mapX, mapY) != loaded)
+                    throw new AssertionError("Original loaded chunk is not bound to its chunk map");
+                loaded.updatePhysicsForLevel(0);
+                int floors = 0;
+                for (int y = 0; y < IsoChunkMap.CHUNK_SIZE_IN_SQUARES; y++)
+                    for (int x = 0; x < IsoChunkMap.CHUNK_SIZE_IN_SQUARES; x++) {
+                        IsoGridSquare ground = cell.getGridSquare(loaded.wx * IsoChunkMap.CHUNK_SIZE_IN_SQUARES + x,
+                                loaded.wy * IsoChunkMap.CHUNK_SIZE_IN_SQUARES + y, 0);
+                        if (ground == null || ground.getChunk() != loaded)
+                            throw new AssertionError("Original ground square is absent or bound to another chunk");
+                        if (ground.getFloor() != null && ground.TreatAsSolidFloor()) floors++;
+                    }
+                totalFloors += floors;
+                stage("chunk-" + loaded.wx + "-" + loaded.wy + "-ground-floors-" + floors);
+            }
+            stage("physics-upload-after");
+            if (totalFloors != 576) throw new AssertionError("Original neighborhood ground floors incomplete");
+            if (cell.getGridSquare(153, 158, 0) != spawnSquare || spawnSquare.getFloor() == null)
+                throw new AssertionError("Original spawn square changed during activation");
+            stage("floor-recalc-before");
+            spawnSquare.RecalcAllWithNeighbours(true);
+            stage("floor-recalc-after");
+            if (!spawnSquare.TreatAsSolidFloor()) throw new AssertionError("Original floor absent");
+            groundFloorCount = totalFloors;
+            activated = true;
+            stage("session-ready");
+        }
 
         private static void awaitStreamerExit() {
             try {

@@ -63,7 +63,7 @@ Use the same $portArgs but omit interactive mode:
 node browser-jvm/run.mjs --profile play @portArgs
 ~~~
 
-This bounded run sends actual browser keyboard events, observes original input, verifies displacement across ten held-input frames, then requires four consecutive original zero-input frames after release. It also checks genuine floor visibility and a separate body-pixel contribution, source-file hashes and owned cleanup. Failures return a nonzero exit status.
+This bounded run sends actual browser keyboard events, observes original input, verifies displacement across ten held-input frames, then requires four consecutive original zero-input frames after release. It also checks the genuine nine-chunk neighborhood, loaded script/loot definitions, floor visibility and a separate body-pixel contribution, source-file hashes and owned cleanup. Chunk-activation exceptions and missing Lua callback lookups fail qualification. Failures return a nonzero exit status.
 
 The latest clean public run passed. A separate 100-frame browser run crossed the former single-chunk boundary inside the loaded neighborhood and verified key release and cleanup. Earlier longer runs passed 94 frames of directional/diagonal movement and blur release, and 95 idle frames. Interior loaded-wall and door collision remain unqualified.
 
@@ -95,7 +95,7 @@ These are bounded qualifications, not independent claims that the complete game 
 
 ## Current limits
 
-The complete survival game, zombie population simulation, full Bullet dynamics, clothing composition, audio, menus, native saves and broad streaming are not qualified. The bounded bootstrap still logs missing loot/container and vehicle-definition initialization errors. Unsupported host operations fail explicitly.
+The complete survival game, zombie population simulation, full Bullet dynamics, clothing composition, audio, menus, native saves and broad streaming are not qualified. The connected bootstrap loads all 1,004 vanilla script files, genuine clothing XML and the bounded loot/container Lua dependencies. This preserves original definition loading; complete game Lua, additional model/texture readiness and original object rendering remain separate work. Unsupported host operations fail explicitly.
 
 The original region worker belongs to the dedicated browser-JVM context lifetime because its original reset busy-waits without yielding. Closing the owned browser releases that runtime; same-JVM engine reset/reuse is not supported. Installed native saves are never mounted.
 

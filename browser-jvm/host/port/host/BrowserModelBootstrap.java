@@ -3,7 +3,6 @@ package port.host;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.EnumSet;
 import java.util.function.Consumer;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -18,7 +17,6 @@ import zombie.core.skinnedmodel.model.Model;
 import zombie.core.skinnedmodel.model.ModelAssetManager;
 import zombie.core.skinnedmodel.model.ModelMesh;
 import zombie.scripting.ScriptManager;
-import zombie.scripting.ScriptType;
 
 /** Original client model lifecycle shared by authored browser sessions; global engine assets remain owned by the session. */
 public final class BrowserModelBootstrap {
@@ -28,14 +26,14 @@ public final class BrowserModelBootstrap {
         mount();
         zombie.debug.DebugLog.getInstance().setStdOut(System.out);
         zombie.debug.DebugLog.getInstance().setStdErr(System.out);
-        zombie.core.random.RandStandard.INSTANCE.init();
-        zombie.core.random.RandLua.INSTANCE.init();
-        zombie.ZomboidFileSystem.instance.init();
+        BrowserContentBootstrap.mountAssets();
+        progress.accept("original-lua-before-scripts");
+        BrowserWorldBootstrap.initializeLua();
         progress.accept("original-script-lifecycle");
-        ScriptBootstrap.load(EnumSet.of(ScriptType.AnimationMesh, ScriptType.Model),
-                "media/scripts/generated/animations_meshes.txt", "media/scripts/generated/models_characters.txt");
-        if (ScriptManager.instance.getAllAnimationsMeshes().size() != 23)
-            throw new AssertionError("Installed animation-mesh definitions differ");
+        BrowserContentBootstrap.loadDefinitions();
+        int animationMeshes = ScriptManager.instance.getAllAnimationsMeshes().size();
+        if (animationMeshes != 75 || ScriptManager.instance.getAnimationsMesh("Human") == null)
+            throw new AssertionError("Installed full animation-mesh definitions differ: " + animationMeshes);
         progress.accept("original-asset-managers");
         AssetManagers managers = GameWindow.assetManagers;
         MeshAssetManager.instance.create(ModelMesh.ASSET_TYPE, managers);

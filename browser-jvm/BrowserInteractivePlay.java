@@ -3,16 +3,15 @@ import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.EnumSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import port.host.BrowserModelBootstrap;
 import port.host.BrowserGeometry;
 import port.host.BrowserPlaySession;
 import port.host.BrowserWorldBootstrap;
+import port.host.BrowserContentBootstrap;
 import port.host.CharacterRenderer;
 import port.host.SpriteGraphics;
-import port.host.ScriptBootstrap;
 import port.host.FloorMapRenderer;
 import zombie.GameWindow;
 
@@ -48,10 +47,10 @@ public final class BrowserInteractivePlay {
         try {
             // The original -nosound option is already the qualified browser bootstrap's audio mode.
             zombie.core.Core.soundDisabled = true;
+            zombie.SoundManager.instance = new zombie.DummySoundManager();
+            zombie.AmbientStreamManager.instance = new zombie.DummyAmbientStreamManager();
+            zombie.audio.BaseSoundBank.instance = new zombie.audio.DummySoundBank();
             BrowserGeometry.mountAssets();
-            String weaponScript = "media/scripts/generated/items/weapon.txt";
-            mountFile(weaponScript);
-            mountFile("media/clothing/clothing.xml");
             mountFile("media/texturepacks/WeatherFx.pack");
             mountFile("media/textures/weather/fogcircle_tex.png");
             mountFile("media/textures/weather/fogwhite_tex.png");
@@ -61,14 +60,15 @@ public final class BrowserInteractivePlay {
             installRuntimeLogTransport();
             stage = "original-spawn-in-loaded-cell";
             try (BrowserWorldBootstrap world = BrowserWorldBootstrap.openAt(153, 158, 0, cell -> {
-                stage = "original-weapon-script-lifecycle";
+                stage = "original-item-factory";
                 progress(stage);
-                zombie.world.WorldDictionary.StartScriptLoading();
-                ScriptBootstrap.load(EnumSet.of(zombie.scripting.ScriptType.Item), weaponScript);
-                zombie.world.WorldDictionary.ScriptsLoaded();
                 var bareHands = zombie.inventory.InventoryItemFactory.CreateItem("Base.BareHands");
                 if (!(bareHands instanceof zombie.inventory.types.HandWeapon weapon) || !weapon.isBareHands())
                     throw new AssertionError("Original Base.BareHands factory did not produce bare hands");
+                stage = "original-loot-distributions";
+                progress(stage);
+                BrowserContentBootstrap.loadDistributions();
+                zombie.vehicles.VehicleType.init();
                 stage = "original-clock-init";
                 progress(stage);
                 zombie.GameTime.getInstance().init();
@@ -91,8 +91,6 @@ public final class BrowserInteractivePlay {
                 stage = "original-same-cell-geometry";
                 progress(stage);
                 geometry[0] = BrowserGeometry.loadChallenge1(cell);
-                if (geometry[0].getChunks().size() != 9 || geometry[0].getGroundFloorCount() != 576)
-                    throw new AssertionError("Original loaded neighborhood is incomplete");
                 stage = "original-weather-texture-assets";
                 progress(stage);
                 GameWindow.fileSystem.mountTexturePack("WeatherFx", GameWindow.texturePackTextures, 0);
@@ -103,7 +101,6 @@ public final class BrowserInteractivePlay {
                 for (int i = 1; i <= 3; i++) port.host.BrowserTileTextures.load("snow_" + i);
                 port.host.BrowserTileTextures.load("fogwhite");
                 zombie.iso.weather.fx.WeatherFxMask.init();
-                zombie.iso.areas.isoregion.IsoRegions.init();
                 zombie.iso.objects.ObjectRenderEffects.init();
                 stage = "original-climate-lifecycle";
                 progress(stage);
@@ -122,10 +119,6 @@ public final class BrowserInteractivePlay {
                 report("{\"progress\":\"original-nosound-readiness\",\"ambientWasNull\":"
                         + (zombie.AmbientStreamManager.instance == null) + ",\"spawnAlarmed\":"
                         + (building != null && building.def != null && building.def.isAlarmed()) + "}");
-                // Exact original GameWindow.mainThreadInit -nosound implementations and ownership slots.
-                zombie.SoundManager.instance = new zombie.DummySoundManager();
-                zombie.AmbientStreamManager.instance = new zombie.DummyAmbientStreamManager();
-                zombie.audio.BaseSoundBank.instance = new zombie.audio.DummySoundBank();
                 progress(stage);
             })) {
                 var player = world.getPlayer();
@@ -143,6 +136,11 @@ public final class BrowserInteractivePlay {
                     stage = "owned-reusable-renderer";
                     try (BrowserPlaySession session = new BrowserPlaySession(world, value -> { stage = value; progress(value); });
                          CharacterRenderer renderer = draw ? CharacterRenderer.open(material) : null) {
+                        stage = "original-post-player-chunk-activation";
+                        progress(stage);
+                        geometry[0].activate();
+                        if (geometry[0].getChunks().size() != 9 || geometry[0].getGroundFloorCount() != 576)
+                            throw new AssertionError("Original loaded neighborhood is incomplete");
                         int shaderId = draw ? renderer.getShaderId() : 0, textureId = draw ? renderer.getMaterialId() : 0;
                         int frames = 0, drawnFrames = 0;
                         float initialX = player.getX(), initialY = player.getY();
@@ -195,6 +193,9 @@ public final class BrowserInteractivePlay {
                                 + ",\"initialX\":" + initialX + ",\"initialY\":" + initialY
                                 + ",\"loadedChunks\":" + geometry[0].getChunks().size()
                                 + ",\"groundFloors\":" + geometry[0].getGroundFloorCount()
+                                + ",\"vanillaContent\":{\"items\":" + zombie.scripting.ScriptManager.instance.getAllItems().size()
+                                + ",\"vehicleScripts\":" + zombie.scripting.ScriptManager.instance.getAllVehicleScripts().size()
+                                + ",\"lootRooms\":" + zombie.inventory.ItemPickerJava.rooms.size() + "}"
                                 + ",\"final\":" + session.snapshot() + ",\"composition\":" + composition + ",\"frame\":" + capture + "}";
                     }
                 } finally { player.releaseAnimationPlayer(); }

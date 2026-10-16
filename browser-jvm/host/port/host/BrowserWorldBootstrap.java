@@ -37,8 +37,9 @@ public final class BrowserWorldBootstrap implements AutoCloseable {
         return openInternal(x, y, z, Objects.requireNonNull(loader, "loader"));
     }
 
-    private static BrowserWorldBootstrap openInternal(int x, int y, int z, WorldLoader loader) throws Exception {
-
+    /** Original Lua environment is shared by script loading and the ensuing world session. */
+    public static void initializeLua() throws Exception {
+        if (LuaManager.env != null) throw new IllegalStateException("Original Lua environment already initialized");
         zombie.core.random.RandStandard.INSTANCE.init();
         zombie.core.random.RandLua.INSTANCE.init();
         Path work = Path.of("/files/work");
@@ -56,6 +57,13 @@ public final class BrowserWorldBootstrap implements AutoCloseable {
         }
         zombie.ZomboidFileSystem.instance.init();
         LuaManager.init();
+    }
+
+    private static BrowserWorldBootstrap openInternal(int x, int y, int z, WorldLoader loader) throws Exception {
+        if (LuaManager.env == null) initializeLua();
+        if (LuaManager.thread == null || LuaManager.exposer == null)
+            throw new IllegalStateException("Original Lua environment is incomplete");
+        Path work = Path.of("/files/work");
         try (Reader reader = new FileReader(work.resolve("media/lua/shared/NPCs/MainCreationMethods.lua").toFile())) {
             checkLua(LuaManager.thread.pcall(LuaCompiler.loadis(reader, "MainCreationMethods.lua", LuaManager.env), new Object[0]));
         }

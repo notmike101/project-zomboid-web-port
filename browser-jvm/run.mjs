@@ -335,7 +335,7 @@ try {
         command(executable('java'), ['-cp', tools, 'PreparePath', path.join(output, 'atomic-view.jar'), path.join(output, 'path-view.jar'), path.join(output, 'path-adaptation.json')]);
         command(executable('java'), ['-cp', tools, 'PrepareVendor', gameJar, path.join(output, 'animation-view.jar')]);
         command(executable('java'), ['-cp', tools, 'PrepareAnimationSdk', path.join(output, 'atomic-view.jar'), path.join(output, 'animation-sdk-view.jar'), path.join(output, 'animation-sdk-adaptation.json')]);
-        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes')].join(path.delimiter), '-d', animationClasses, ...['animation/BrowserClientAnimation.java', 'animation/AiSceneSnapshot.java', 'animation/PreparedSceneLoader.java', 'animation/PathCompat.java', 'host/port/host/ReferenceExchange.java', 'host/port/host/ListFirstSupport.java', 'host/port/host/StackFirstSupport.java', 'host/port/host/CharacterFrame.java', 'host/port/host/ScriptBootstrap.java'].map((name) => path.join(source, name))]);
+        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes')].join(path.delimiter), '-d', animationClasses, ...['animation/BrowserClientAnimation.java', 'animation/AiSceneSnapshot.java', 'animation/PreparedSceneLoader.java', 'animation/PathCompat.java', 'host/port/host/ReferenceExchange.java', 'host/port/host/ListFirstSupport.java', 'host/port/host/StackFirstSupport.java', 'host/port/host/ArrayListFirstSupport.java', 'host/port/host/CharacterFrame.java', 'host/port/host/ScriptBootstrap.java'].map((name) => path.join(source, name))]);
         command(executable('jar'), ['--create', '--file', path.join(output, 'animation-entry.jar'), '-C', animationClasses, '.']);
         const manifest = JSON.parse(await readFile(path.join(output, 'animation-assets-manifest.json'), 'utf8'));
 
@@ -359,18 +359,21 @@ try {
         const playClasses = path.join(output, 'play-classes');
         const geometry = path.join(output, 'geometry-data');
         const tiles = path.join(output, 'tile-data');
+        const content = path.join(output, 'content-data');
 
         await mkdir(playClasses, { recursive: true });
         await mkdir(geometry, { recursive: true });
-        command(executable('javac'), ['-d', tools, path.join(source, 'PrepareGeometryAssets.java'), path.join(source, 'PrepareTilePack.java')]);
+        await mkdir(content, { recursive: true });
+        command(executable('javac'), ['-d', tools, path.join(source, 'PrepareGeometryAssets.java'), path.join(source, 'PrepareTilePack.java'), path.join(source, 'PrepareContentAssets.java')]);
         await boundedReadOnly(['Tiles1x.pack', 'Tiles1x.floor.pack'], async (name) => {
             const file = path.join(options['media-root'], 'texturepacks', name);
 
             assetHashes.push({ name: `media/texturepacks/${name}`, file, sha256Before: await hash(file) });
         });
         command(executable('java'), ['-cp', tools, 'PrepareGeometryAssets', path.dirname(gameJar), geometry]);
+        command(executable('java'), ['-cp', tools, 'PrepareContentAssets', path.dirname(gameJar), content]);
         command(executable('java'), ['-cp', tools, 'PrepareTilePack', path.join(options['media-root'], 'texturepacks/Tiles1x.pack'), path.join(options['media-root'], 'texturepacks/Tiles1x.floor.pack'), path.join(geometry, 'sprite-names.txt'), tiles]);
-        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', playClasses, ...['BrowserInteractivePlay.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserPlaySession.java', 'host/port/host/BrowserGeometry.java', 'host/port/host/BrowserTileTextures.java', 'host/port/host/CharacterRenderer.java', 'host/port/host/FloorMapRenderer.java'].map((name) => path.join(source, name))]);
+        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', playClasses, ...['BrowserInteractivePlay.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserPlaySession.java', 'host/port/host/BrowserGeometry.java', 'host/port/host/BrowserTileTextures.java', 'host/port/host/CharacterRenderer.java', 'host/port/host/FloorMapRenderer.java', 'host/org/lwjgl/stb/STBImage.java'].map((name) => path.join(source, name))]);
         command(executable('jar'), ['--create', '--file', path.join(output, 'play-entry.jar'), '-C', playClasses, '.']);
         const geometryRows = (await readFile(path.join(geometry, 'geometry-assets.tsv'), 'utf8')).trim().split(/\r?\n/u);
 
@@ -385,6 +388,19 @@ try {
             assetHashes.push({ name, file, sha256Before: sha256 });
         });
         evidence.geometryAssets = { files: geometryRows.length, archiveSha256: await hash(path.join(geometry, 'geometry-assets.jar')) };
+        const contentRows = (await readFile(path.join(content, 'content-assets.tsv'), 'utf8')).trim().split(/\r?\n/u);
+
+        await boundedReadOnly(contentRows, async (row) => {
+            const [name, size, sha256] = row.split('\t');
+            const file = path.resolve(path.dirname(gameJar), name);
+
+            if (!contained(path.dirname(gameJar), file) || !/^media\//u.test(name) || !/^\d+$/u.test(size) || !/^[a-f0-9]{64}$/u.test(sha256) || await hash(file) !== sha256) {
+                throw new Error(`Invalid or changed content manifest input: ${name}`);
+            }
+
+            assetHashes.push({ name, file, sha256Before: sha256 });
+        });
+        evidence.contentAssets = { files: contentRows.length, archiveSha256: await hash(path.join(content, 'content-assets.jar')) };
         evidence.tilePreparation = JSON.parse(await readFile(path.join(tiles, 'manifest.json'), 'utf8'));
         await writeFile(path.join(output, 'play.html'), (await readFile(path.join(source, 'play.html'), 'utf8')).replace('const interactive = false;', `const interactive = ${interactive};`));
         evidence.interactive = interactive;
@@ -478,16 +494,16 @@ try {
 
     if (profile === 'play') {
         routes.set('/browser-physics.js', { file: path.join(source, 'browser-physics.js'), type: 'text/javascript' });
+        routes.set('/ragdoll-definitions.js', { file: path.join(source, 'ragdoll-definitions.js'), type: 'text/javascript' });
         routes.set('/play-entry.jar', { file: path.join(output, 'play-entry.jar'), type: 'application/java-archive' });
         routes.set('/geometry-assets.jar', { file: path.join(output, 'geometry-data/geometry-assets.jar'), type: 'application/java-archive' });
+        routes.set('/content-assets.jar', { file: path.join(output, 'content-data/content-assets.jar'), type: 'application/java-archive' });
 
         for (const name of ['Challenge1Tiles.pack', 'Tiles1x.floor.pack']) {
             routes.set(`/media/texturepacks/${name}`, { file: path.join(output, 'tile-data', name), type: 'application/octet-stream' });
         }
 
         const playAssets = [
-            'scripts/generated/items/weapon.txt',
-            'clothing/clothing.xml',
             'texturepacks/WeatherFx.pack',
             'textures/weather/fogcircle_tex.png',
             'textures/weather/fogwhite_tex.png',
@@ -692,13 +708,22 @@ try {
     if (profile === 'play') {
         evidence.frameCompleted = Number.isInteger(evidence.result.frames) && evidence.result.frames > 0;
         evidence.neighborhoodLoaded = evidence.result.loadedChunks === 9 && evidence.result.groundFloors === 576;
+        evidence.contentLoaded = evidence.result.vanillaContent?.items === 5_092
+            && evidence.result.vanillaContent.vehicleScripts === 241 && evidence.result.vanillaContent.lootRooms === 423
+            && evidence.result.physics?.vehicleDefinitions?.length === 241 && evidence.result.physics.ragdollDefinitions?.length === 4;
+        evidence.initializationErrors = logs.filter((line) => line.includes('IsoChunk.loadGridSquareIfNeeded> Exception thrown')
+            || line.includes('RandomizedBuildingBase.ChunkLoaded> Exception thrown')
+            || (line.includes('LuaManager.getFunctionObject') && line.includes('no such function'))
+            || (line.includes('LuaManager.getTableObject') && line.includes('no such table'))
+            || (line.includes('FileNotFoundException') && line.includes('media/clothing/')));
         evidence.inputPressed = evidence.pressedInput?.inputX === 0 && evidence.pressedInput?.inputY < 0;
         evidence.normalMovement = evidence.heldInput?.frames >= evidence.pressedInput?.frames + 10
             && Number.isFinite(evidence.heldInput?.x) && Number.isFinite(evidence.heldInput?.y)
             && (evidence.heldInput.x !== evidence.pressedInput.x || evidence.heldInput.y !== evidence.pressedInput.y);
         evidence.inputReleased = evidence.releasedInput?.inputX === 0 && evidence.releasedInput?.inputY === 0
             && evidence.releasedInput.frames >= evidence.heldInput?.frames + 4 && evidence.zeroInputFrames >= 4;
-        evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded
+        evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded && evidence.contentLoaded
+            && evidence.initializationErrors.length === 0
             && (interactive || (evidence.inputPressed && evidence.normalMovement && evidence.inputReleased));
         evidence.fullGamePlayable = false;
     }
