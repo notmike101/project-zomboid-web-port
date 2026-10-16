@@ -22,7 +22,23 @@ public final class BrowserWorldBootstrap implements AutoCloseable {
         this.player = player;
     }
 
+    /** Loads a real world into the one cell before the original player constructor runs. */
+    @FunctionalInterface
+    public interface WorldLoader {
+        void load(IsoCell cell) throws Exception;
+    }
+
     public static BrowserWorldBootstrap open() throws Exception {
+        return openInternal(0, 0, 0, null);
+    }
+
+    /** Uses original initial placement; subsequent movement belongs exclusively to the game update loop. */
+    public static BrowserWorldBootstrap openAt(int x, int y, int z, WorldLoader loader) throws Exception {
+        return openInternal(x, y, z, Objects.requireNonNull(loader, "loader"));
+    }
+
+    private static BrowserWorldBootstrap openInternal(int x, int y, int z, WorldLoader loader) throws Exception {
+
         zombie.core.random.RandStandard.INSTANCE.init();
         zombie.core.random.RandLua.INSTANCE.init();
         Path work = Path.of("/files/work");
@@ -56,9 +72,10 @@ public final class BrowserWorldBootstrap implements AutoCloseable {
         if (((List<?>) states.get(group)).size() != 92) throw new AssertionError("Expected all 92 installed player states");
         IsoCell cell = new IsoCell(10, 10);
         try {
+            if (loader != null) loader.load(cell);
             // The original -nosound bootstrap option selects the game's real dummy emitter path.
             Core.soundDisabled = true;
-            IsoPlayer player = new IsoPlayer(cell);
+            IsoPlayer player = loader == null ? new IsoPlayer(cell) : new IsoPlayer(cell, null, x, y, z);
             if (player.getActionContext().getGroup() != group || !"idle".equals(player.getActionContext().getCurrentStateName()))
                 throw new AssertionError("Original player action context incomplete");
             return new BrowserWorldBootstrap(cell, player);
