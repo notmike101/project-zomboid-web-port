@@ -14,7 +14,17 @@ public final class STBImageQualification {
   STBImage.stbi_set_flip_vertically_on_load(false);IntBuffer ix=IntBuffer.allocate(2);ix.position(1);ByteBuffer image=STBImage.stbi_load(ByteBuffer.wrap(encoded),ix,(IntBuffer)null,(IntBuffer)null,4);if(ix.position()!=1||ix.get(1)!=2)throw new AssertionError("IntBufferposition");STBImage.stbi_image_free(image);checks++;
   if(STBImage.stbi_load(ByteBuffer.wrap(new byte[]{1,2,3}),x,y,c,4)!=null||STBImage.stbi_failure_reason()==null)throw new AssertionError("invalidPNGfailure");checks++;
   STBImage.stbi_image_free((ByteBuffer)null);report("{\"pass\":true,\"checks\":"+checks+"}");
- }catch(Throwable e){e.printStackTrace();report("{\"pass\":false,\"error\":\""+e.toString().replace("\"","'")+"\"}");}}
+ }catch(Throwable e){e.printStackTrace();report("{\"pass\":false,\"error\":"+quote(e.toString())+"}");}}
+ private static String quote(String value) {
+  StringBuilder result = new StringBuilder("\"");
+  for (int i = 0; i < value.length(); i++) {
+   char ch = value.charAt(i);
+   if (ch == '"' || ch == '\\') result.append('\\').append(ch);
+   else if (ch < 32) result.append(String.format("\\u%04x", (int) ch));
+   else result.append(ch);
+  }
+  return result.append('"').toString();
+ }
  static byte[] png()throws Exception{var bytes=new ByteArrayOutputStream();var out=new DataOutputStream(bytes);out.writeLong(0x89504e470d0a1a0aL);var h=new ByteArrayOutputStream();var hd=new DataOutputStream(h);hd.writeInt(2);hd.writeInt(2);hd.write(new byte[]{8,6,0,0,0});chunk(out,"IHDR",h.toByteArray());var compressed=new ByteArrayOutputStream();try(var z=new DeflaterOutputStream(compressed)){for(int row=0;row<2;row++){z.write(0);for(int i=row*8;i<row*8+8;i++)z.write(pixels[i]);}}chunk(out,"IDAT",compressed.toByteArray());chunk(out,"IEND",new byte[0]);return bytes.toByteArray();}
  static void chunk(DataOutputStream o,String type,byte[] b)throws Exception{byte[] name=type.getBytes("US-ASCII");o.writeInt(b.length);o.write(name);o.write(b);CRC32 crc=new CRC32();crc.update(name);crc.update(b);o.writeInt((int)crc.getValue());}
 }
