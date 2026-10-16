@@ -30,7 +30,7 @@ const directions = [[0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1], [1, 0],
 const cases = [
     ...['closed', 'open', 'hole', 'down', 'stairs', 'many', 'geometry', 'world', 'null'].map((name) => [name, 33, 32]),
     ['up', 32, 32], ['open', 32, 34], ['stairs-hole', 33, 34], ['stairs-blocked', 33, 34],
-    ['origin', 32, 32],
+    ['origin', 32, 32], ['asymmetric', 32, 32], ['asymmetric-vertex', 32, 32],
 ];
 const execute = promisify(execFile);
 
@@ -97,6 +97,14 @@ function edge(width, first, second) {
  * @returns {object|null} Authored square input, or explicit absence.
  */
 function makeSquare(kind, width, x, y, z) {
+    if (kind.startsWith('asymmetric')) {
+        const source = kind === 'asymmetric-vertex';
+        const edgeBit = source ? 64 : 4;
+        const mask = x === (source ? 2 : 3) && y === 2 && z === 32 ? edgeBit : 0;
+
+        return { mask, vision: 0, up: false, down: false, stairs: false };
+    }
+
     if (kind === 'null' && x === 3 && y === 3 && z === 33) {
         return null;
     }
@@ -177,6 +185,10 @@ function makeScene(kind, lightZ, playerZ) {
             id: 1, x: 8, y: 18, z: lightZ, radius: 9,
             color: [1, Math.fround(0.784_313_738_346_099_9), Math.fround(0.627_451_002_597_808_8)],
         };
+    }
+
+    if (kind.startsWith('asymmetric')) {
+        lights[0] = { id: 1, x: 2, y: 2, z: 32, radius: kind === 'asymmetric-vertex' ? 1 : 6, color: [1, 0.5, 0] };
     }
 
     if (kind === 'many') {
@@ -268,7 +280,7 @@ try {
         }
     }
 
-    assert.equal(cells, 5_759);
+    assert.equal(cells, 6_143);
     evidence.kernel = { cells, integers: cells * 49 };
     evidence.native = { deterministic: true, lines: expected };
     const classpath = ['/app/qualification.jar', ...sdkNames.map((name) => `/app/${name}`)].join(':');

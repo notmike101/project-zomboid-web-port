@@ -221,6 +221,30 @@ function allowed(scene, index, direction) {
 }
 
 /**
+ * Tests the native combined edge, including either endpoint's cardinal bit.
+ * Native0x5d80/0x5d60 builds this union for propagation and vertex neighbors.
+ * Diagonal edges and darkness averaging retain the original directed mask.
+ *
+ * @param {object} scene - Validated scene.
+ * @param {number} index - Source square index.
+ * @param {number} direction - Original direction ordinal.
+ * @returns {boolean} Whether the native combined adjacency admits this edge.
+ */
+function propagationAllowed(scene, index, direction) {
+    if (allowed(scene, index, direction)) {
+        return true;
+    }
+
+    if (direction >= 8 || direction % 2 !== 0) {
+        return false;
+    }
+
+    const adjacent = neighbor(scene, index, direction);
+
+    return adjacent >= 0 && allowed(scene, adjacent, (direction + 4) % 8);
+}
+
+/**
  * Builds the native chunk and local-X/local-Y traversal order.
  *
  * @param {object} scene - Validated scene.
@@ -382,7 +406,7 @@ function propagate(scene, order) {
             const index = queue[cursor];
 
             for (const direction of propagationOrder) {
-                if (!allowed(scene, index, direction)) {
+                if (!propagationAllowed(scene, index, direction)) {
                     continue;
                 }
 
@@ -622,7 +646,7 @@ function sharedCorner(scene, work, index, corner) {
     let color = work[index][corner];
 
     for (const [direction, adjacentCorner] of cornerNeighbors[corner % 4]) {
-        if (allowed(scene, index, direction)) {
+        if (propagationAllowed(scene, index, direction)) {
             color = maximumColor(color, work[neighbor(scene, index, direction)][adjacentCorner + Math.floor(corner / 4) * 4]);
         }
     }
@@ -665,7 +689,7 @@ export function calculateLighting(scene) {
             let color = seeds[index];
 
             for (const [direction] of cornerNeighbors[corner % 4]) {
-                if (allowed(scene, index, direction)) {
+                if (propagationAllowed(scene, index, direction)) {
                     color = maximumColor(color, seeds[neighbor(scene, index, direction)]);
                 }
             }

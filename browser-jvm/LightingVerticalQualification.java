@@ -52,6 +52,14 @@ public final class LightingVerticalQualification {
             if (blocked) vision |= 1 << (dx + 1 + (dy + 1) * 3 + (dz + 1) * 9);
         }
         LightingJNI.squareBeginUpdate(x % 8, y % 8, z);
+        if (kind.startsWith("asymmetric")) {
+            boolean source = kind.equals("asymmetric-vertex");
+            int edgeBit = source ? 64 : 4;
+            mask = x == (source ? 2 : 3) && y == 2 && z == 32 ? edgeBit : 0;
+            up = false;
+            down = false;
+            vision = 0;
+        }
         LightingJNI.squareSet(mask, up, down, stairs, vision, -1, -1, 0, false);
         LightingJNI.squareSetLightTransmission(
                 1, 1, 1, 0, 0, 1, 1, 1, 0, 0,
@@ -87,7 +95,10 @@ public final class LightingVerticalQualification {
                 LightingJNI.stateEndFrame(1, 1, 1, .1f, 1, 20, 20, true, 100, 0);
                 if (frame == 0) {
                     geometry(kind);
-                    if (origin != 0) {
+                    if (kind.startsWith("asymmetric")) {
+                        LightingJNI.addLight(1, 2, 2, 32, kind.equals("asymmetric-vertex") ? 1 : 6,
+                                1, .5f, 0, -1, true);
+                    } else if (origin != 0) {
                         LightingJNI.addLight(1, 152, 162, lightZ, 9, 1, .7843137383460999f, .6274510025978088f, -1, true);
                     } else {
                         LightingJNI.addLight(1, width == 24 ? 19 : 4, width == 24 ? 12 : 4,
@@ -163,6 +174,8 @@ public final class LightingVerticalQualification {
             scenario("stairs-hole", 33, 34);
             scenario("stairs-blocked", 33, 34);
             scenario("origin", 32, 32);
+            scenario("asymmetric", 32, 32);
+            scenario("asymmetric-vertex", 32, 32);
         } finally {
             LightingJNI.stop();
         }
