@@ -56,6 +56,9 @@ export function createBrowserPhysics() {
     const collision = new Map();
     const populationChunks = new Set();
     const clippers = [];
+    const vehicles = new Map();
+    const dynamicObjects = new Map();
+    let simulation = null;
     let clipperAllocations = 0;
     let clipperClears = 0;
     let world = null;
@@ -128,6 +131,9 @@ export function createBrowserPhysics() {
         }
 
         world = { minX, minY, maxX, maxY, offsetX, offsetY };
+        vehicles.clear();
+        dynamicObjects.clear();
+        simulation = { calls: 0, requestedSeconds: 0, simulatedSeconds: 0, remainder: 0, substeps: 0, droppedSeconds: 0 };
         chunks.clear();
         maps.clear();
         collision.clear();
@@ -251,6 +257,8 @@ export function createBrowserPhysics() {
     function snapshot() {
         return {
             world: world && { ...world }, revision,
+            simulation: simulation && { ...simulation },
+            dynamicBodies: { vehicles: vehicles.size, objects: dynamicObjects.size },
             collision: [...collision].map(([square, flags]) => ({ square, flags })),
             populationChunks: [...populationChunks],
             clipperContainers: { allocations: clipperAllocations, clears: clipperClears },
@@ -262,6 +270,71 @@ export function createBrowserPhysics() {
                 })),
             })),
         };
+    }
+
+    /**
+     * Requires an initialized static-only solver state.
+     * No body-registration native is installed, so a dynamic request fails at its actual boundary.
+     */
+    function requireStaticWorld() {
+        if (!world || !simulation) {
+            throw new Error('Physics world has not been initialized');
+        }
+
+        if (vehicles.size !== 0 || dynamicObjects.size !== 0) {
+            throw new Error('Dynamic physics is outside this static-only backend');
+        }
+    }
+
+    /**
+     * Advances owned static-world time with variable or bounded fixed substeps.
+     * Static shapes are invariant under integration; no dynamic solver behavior is claimed.
+     *
+     * @param {number} timeStep - Requested elapsed seconds.
+     * @param {number} maxSubSteps - Zero for variable steps, otherwise the fixed-step execution cap.
+     * @param {number} fixedTimeStep - Positive interval when fixed stepping is selected.
+     */
+    function stepSimulation(timeStep, maxSubSteps, fixedTimeStep) {
+        requireStaticWorld();
+        integer(maxSubSteps, 'maximum substeps');
+
+        if (!Number.isFinite(timeStep) || timeStep < 0 || maxSubSteps < 0
+            || !Number.isFinite(fixedTimeStep) || fixedTimeStep < 0
+            || (maxSubSteps > 0 && fixedTimeStep === 0)) {
+            throw new RangeError('Invalid simulation step parameters');
+        }
+
+        let remainder = 0;
+        let count = timeStep > 0 ? 1 : 0;
+        let executed = timeStep;
+        let dropped = 0;
+
+        if (maxSubSteps > 0) {
+            const accumulated = simulation.remainder + timeStep;
+            const requested = Math.floor(accumulated / fixedTimeStep);
+
+            if (!Number.isSafeInteger(requested)) {
+                throw new RangeError('Simulation substep count exceeds exact host range');
+            }
+
+            count = Math.min(requested, maxSubSteps);
+            remainder = accumulated - requested * fixedTimeStep;
+            executed = count * fixedTimeStep;
+            dropped = (requested - count) * fixedTimeStep;
+        }
+
+        const requestedSeconds = simulation.requestedSeconds + timeStep;
+        const simulatedSeconds = simulation.simulatedSeconds + executed;
+        const droppedSeconds = simulation.droppedSeconds + dropped;
+        const substeps = simulation.substeps + count;
+
+        if (![requestedSeconds, simulatedSeconds, droppedSeconds].every(Number.isFinite)
+            || !Number.isSafeInteger(substeps) || !Number.isSafeInteger(simulation.calls + 1)) {
+            throw new RangeError('Simulation clock exceeds host range');
+        }
+
+        simulation = { calls: simulation.calls + 1, requestedSeconds, simulatedSeconds, remainder, substeps, droppedSeconds };
+        revision++;
     }
 
     /**
@@ -346,7 +419,7 @@ export function createBrowserPhysics() {
     }
 
     return {
-        initialize, setLevels, submit, snapshot, setCollisionChunk, setCollisionSquares, collisionAt,
+        initialize, setLevels, submit, snapshot, setCollisionChunk, setCollisionSquares, collisionAt, stepSimulation,
         natives: {
             /**
              * Creates the world from the original WorldSimulation call.
@@ -377,8 +450,54 @@ export function createBrowserPhysics() {
                 maps.clear();
                 collision.clear();
                 populationChunks.clear();
+                vehicles.clear();
+                dynamicObjects.clear();
+                simulation = null;
                 world = null;
                 revision++;
+            },
+            /**
+             * Advances the initialized world without fabricating dynamic bodies.
+             *
+             * @param {unknown} lib - Reserved CheerpJ library context.
+             * @param {number} timeStep - Actual original elapsed seconds.
+             * @param {number} maxSubSteps - Original substep cap.
+             * @param {number} fixedTimeStep - Original fixed-step interval.
+             */
+            Java_zombie_core_physics_Bullet_stepSimulation(lib, timeStep, maxSubSteps, fixedTimeStep) {
+                stepSimulation(timeStep, maxSubSteps, fixedTimeStep);
+            },
+            /**
+             * Reports the real owned vehicle registry size.
+             * Vehicle registration and dynamics remain unsupported native boundaries.
+             *
+             * @returns {number} Actual registered vehicle count.
+             */
+            Java_zombie_core_physics_Bullet_getVehicleCount() {
+                requireStaticWorld();
+
+                return vehicles.size;
+            },
+            /**
+             * Reads the empty dynamic-object result set into the actual caller array.
+             * With zero registered objects no floats are written and all capacity is preserved.
+             *
+             * @param {unknown} lib - Reserved CheerpJ library context.
+             * @param {Float32Array} values - Original Java float-array output storage.
+             * @returns {number} Actual registered dynamic-object count.
+             */
+            Java_zombie_core_physics_Bullet_getObjectPhysics(lib, values) {
+                requireStaticWorld();
+
+                if (!(values instanceof Float32Array)) {
+                    throw new TypeError('Object physics output must be actual Java float-array storage');
+                }
+
+                if (values.length < dynamicObjects.size * 4) {
+                    throw new RangeError('Object physics result exceeds output capacity');
+                }
+
+                return dynamicObjects.size;
             },
             /**
              * Registers an active original player chunk map.
