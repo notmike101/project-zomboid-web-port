@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Original keyboard input in a browser worker</title>
+<h1>Original keyboard input</h1>
+<p>Focus the canvas and press W, A, S, D, arrows, Shift or Space. The displayed values come from the shipped Keyboard and KeyCodes implementations.</p>
+<p id="status" role="status">RUNNING</p>
+<canvas id="keyboard-canvas" width="320" height="120" tabindex="0" aria-label="Keyboard input target" style="border:2px solid #777"></canvas>
+<button id="leave-input" type="button">Leave input focus</button>
+<pre id="keys"></pre>
+<pre id="details"></pre>
+<script>
+globalThis.probeErrors = [];
+const worker = new Worker('/keyboard-worker.js');
+const requests = new Map();
+let sequence = 0;
+let ready = false;
+const gameInput = new URLSearchParams(location.search).has('game-input');
+/**
+ * Reports a runtime failure and stops the owned operation.
+ *
+ * @param {unknown} error - Failure reported by the runtime.
+ */
+const fail = (error) => {
+    globalThis.probeErrors.push(String(error.stack || error));
+
+    for (const request of requests.values()) {
+        request.reject(error);
+    }
+
+    requests.clear();
+    globalThis.probeResult = { pass: false, errors: globalThis.probeErrors };
+    document.getElementById('status').textContent = 'FAIL';
+    document.getElementById('details').textContent = JSON.stringify(globalThis.probeResult, null, 2);
+    worker.terminate();
+};
+
+/**
+ * Sends a correlated request to the owned worker.
+ *
+ * @param {Record<string, unknown>} data - Payload sent to the owned worker.
+ * @returns {Promise<unknown>} The correlated worker result.
+ */
+function request(data) {
+    return new Promise((resolve, reject) => {
+        if (!ready) {
+            reject(new Error('Keyboard is not ready'));
+
+            return;
+        }
+
+        const id = ++sequence;
+
+        requests.set(id, { resolve, reject });
+        worker.postMessage({ id, ...data });
+    });
+}
+
+/**
+ * Queries the original key mapping for a physical key code.
+ *
+ * @param {number} key - Original physical key code.
+ * @returns {Promise<unknown>} The original key mapping result.
+ */
+globalThis.queryOriginalKey = (key) => request({ type: 'query', key });
+/**
+ * Queries the original transition state for a physical key code.
+ *
+ * @param {number} key - Original physical key code.
+ * @returns {Promise<unknown>} The original input transition state.
+ */
+globalThis.queryOriginalState = (key) => request({ type: 'query', key, state: true });
+/**
+ * Advances the original input state by the requested frame count.
+ *
+ * @param {number} count - Number of original input frames to advance.
+ * @returns {Promise<unknown>} The original input frame result.
+ */
+globalThis.advanceOriginalInput = (count) => request({ type: 'frames', count });
+
+/**
+ * Queries and displays the original keyboard state.
+ */
+async function showKeys() {
+    try {
+        const entries = [['W', 17], ['A', 30], ['S', 31], ['D', 32], ['Up', 200], ['Left', 203], ['Shift', 42], ['Space', 57]];
+        const state = {};
+
+        for (const [name, key] of entries) {
+            // eslint-disable-next-line no-await-in-loop -- Query original input state in request order within the current frame.
+            state[name] = await globalThis.queryOriginalKey(key);
+        }
+
+        document.getElementById('keys').textContent = JSON.stringify(state, null, 2);
+    } catch (error) {
+        fail(error);
+    }
+}
+
+for (const type of ['keydown', 'keyup']) {
+    addEventListener(type, (event) => {
+        if (!ready || document.activeElement !== document.getElementById('keyboard-canvas')) {
+            return;
+        }
+
+        event.preventDefault();
+        worker.postMessage({ type: 'key', code: event.code, down: type === 'keydown' });
+
+        if (gameInput) {
+            worker.postMessage({ type: 'frames', count: 2 });
+        }
+
+        showKeys();
+    });
+}
+
+/**
+ * Releases browser input when the canvas loses focus.
+ */
+function releaseKeys() {
+    if (ready) {
+        worker.postMessage({ type: 'blur' });
+
+        if (gameInput) {
+            worker.postMessage({ type: 'frames', count: 2 });
+        }
+
+        showKeys();
+    }
+}
+
+addEventListener('blur', releaseKeys);
+document.getElementById('keyboard-canvas').addEventListener('blur', releaseKeys);
+addEventListener('pagehide', () => worker.terminate(), { once: true });
+/**
+ * Reports an error raised by the owned worker.
+ *
+ * @param {ErrorEvent} event - Message or error delivered by the owned worker.
+ * @returns {void} No return value.
+ */
+worker.addEventListener('error', (event) => fail(new Error(event.message)));
+/**
+ * Handles the next message from the owned runtime.
+ *
+ * @param {MessageEvent} event - Message or error delivered by the owned worker.
+ */
+worker.addEventListener('message', (event) => {
+    const message = event.data;
+
+    if (message.error) {
+        fail(new Error(`${message.error}\n${JSON.stringify(message)}`));
+
+        return;
+    }
+
+    if (message.ready) {
+        clearTimeout(timer);
+        ready = true;
+        const result = message.result;
+
+        if (!result.pass || !(message.windowHandle > 0)) {
+            fail(new Error('Keyboard initialization failed'));
+
+            return;
+        }
+
+        const comparisons = result.cases.reduce((count, item) => count + Object.keys(item.outputs).length, 0);
+
+        globalThis.probeResult = {
+            pass: true, cases: result.cases.length, comparisons, matched: comparisons,
+            actual: result, worker: true, windowHandle: message.windowHandle, errors: [],
+        };
+        document.getElementById('status').textContent = 'PASS: original keyboard ready';
+        document.getElementById('details').textContent = JSON.stringify(globalThis.probeResult, null, 2);
+        document.getElementById('keyboard-canvas').focus();
+        showKeys();
+    } else {
+        const request = requests.get(message.id);
+
+        if (!request) {
+            fail(new Error('Unexpected keyboard response'));
+
+            return;
+        }
+
+        requests.delete(message.id);
+        request.resolve(message.value);
+    }
+});
+
+const timer = setTimeout(() => fail(new Error('Keyboard runtime timed out')), 20_000);
+const canvas = document.getElementById('keyboard-canvas').transferControlToOffscreen();
+
+worker.postMessage({ type: 'start', canvas }, [canvas]);
+</script>
+</html>

@@ -1,89 +1,168 @@
-# Project Zomboid Web Port
+# Original-bytecode browser port investigation
 
-Personal-use standalone browser reimplementation project. **0.1.0-preview.1 / M1 architecture proof — not a completed port, not yet a playable recreation.** No streaming or native simulation service. The complete destination and acceptance gaps remain in [ROADMAP](docs/ROADMAP.md) and [COMPATIBILITY](docs/COMPATIBILITY.md).
+An incremental Project Zomboid browser-port investigation using the installed game's original Java class files.
+TeaVM 0.16.0 compiles selected dependency closures to WebAssembly GC.
+The same original implementation runs on the bundled JVM and in actual Chromium for comparison.
 
-## Windows prerequisites
+This is a compatibility and host-integration workbench. It is not a playable game yet.
+The repository contains authored adapters, build configuration, browser host code, and comparison tooling.
+It contains no original game classes, assets, downloaded toolchains, or generated WASM.
 
-Install [Node 26.10.0](https://nodejs.org/download/release/v26.10.0/) (npm 11.19.1), [Git for Windows](https://git-scm.com/download/win), and [rustup](https://rustup.rs/) with the MSVC toolchain prerequisites (Visual Studio Build Tools C++ workload/Windows SDK). These are development-only tools; receiving devices do not need them. `scripts/Windows.ps1 Setup` installs pinned Rust 1.96.0, rustfmt, clippy, wasm32-unknown-unknown and locked npm packages. The Windows resolver accepts `npm.cmd` or `npm.exe`. Local ESLint packages are installed from `vendor/`, not a guessed registry name.
+## Verified components
+
+| Probe | Behavior |
+|---|---|
+| `angles` | Original angle wrapping and interpolation |
+| `weather` | Stateful weather-value transitions and 2D/3D/4D simplex noise |
+| `airfront` | Original climate-front state and in-memory save/load |
+| `erosion` | Seeded layer construction, sampling, reset, and reconstruction |
+| `colors` | Connected original climate-color interpolation, aliasing, copying, scaling, and serialization |
+| `browser-save` | Original climate state restored from browser OPFS across eight page/module loads |
+| `lazy-value` | Original field-handle memoization, null results, retry, identity, and reentrant witness |
+
+The seven original-game probes compare 72 cases and 440 raw output bit patterns with the JVM.
+These counts are behavioral checks, not a percentage of game coverage.
+The browser-save probe adds real browser filesystem persistence without replacing gameplay calculations or the original record format.
+
+The runtime compatibility extension uses TeaVM's supported plugin interface and class-library substitutions.
+Runtime probes compare standard Java API behavior against Java 25, including paths, streams, queues, fused arithmetic, field handles, classpath resources and manifest metadata, futures, executors, locks, time conversions, SHA-1, regular expressions, and integer rectangles.
+These checks are separate from original-game coverage. Path operations use the browser's virtual path provider; they do not provide OPFS-backed Java files.
+The queue supports TeaVM's cooperative single-agent execution, without cross-worker object sharing.
+The `graphics-worker` entry runs the same original shader integration inside a dedicated worker with a transferred OffscreenCanvas. The separate `exit` entry verifies terminating an owned worker runtime, including a real Wasm trap and absence of subsequent Java execution.
+The browser-only `core-boot` entry executes the original Core initializer. `lua-runtime` runs the shipped Lua compiler/interpreter, including closures and coroutines. `asset-lua` executes two unchanged installed Lua files through a verified read-only media mount, and `filesystem-runtime` builds the original selected-file index over that mount. These are connected engine milestones; no player/world loop runs yet.
+
+See [COMPATIBILITY.md](COMPATIBILITY.md) for measured results and [PORTING.md](PORTING.md) for the route toward a playable slice.
+
+## Prerequisites
+
+- Windows and Node.js 22.13 or newer in the 22.x line, or Node.js 24 or newer.
+- An installed Project Zomboid JAR and its bundled Java 25 runtime.
+- A local JDK 25, Apache Maven 3.9.16, and a Chromium executable with WasmGC support.
+- Locked Node dependencies installed with `npm ci --ignore-scripts --no-audit --no-fund`.
+
+Set these environment variables to your own absolute paths:
+
+| Variable | Path |
+|---|---|
+| `PZ_GAME_JAR` | Installed `projectzomboid.jar` |
+| `PZ_JAVA` | Installed bundled `jre64/bin/java.exe` |
+| `PZ_JDK` | JDK directory containing `bin/java.exe` and `bin/javac.exe` |
+| `PZ_MAVEN_HOME` | Maven directory containing `boot/` and `bin/m2.conf` |
+| `PZ_BROWSER` | Chromium `chrome.exe` |
+
+Run all verified components from the repository root:
 
 ```powershell
-# From a clean checkout:
-.\scripts\Windows.ps1 Setup
-.\scripts\Windows.ps1 Build
-.\scripts\Windows.ps1 ProvisionContent -Source 'C:\Games\steam\steamapps\common\ProjectZomboid'
-.\scripts\Windows.ps1 Check
-.\scripts\Windows.ps1 Run
-# Open http://127.0.0.1:4173 in a WebGPU-capable Chromium browser.
+& {
+    $probeArgs = @(
+        '--game-jar', $env:PZ_GAME_JAR,
+        '--java', $env:PZ_JAVA,
+        '--jdk', $env:PZ_JDK,
+        '--maven-home', $env:PZ_MAVEN_HOME,
+        '--browser', $env:PZ_BROWSER
+    )
+    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream', 'deque', 'fma', 'field-handles', 'resources', 'future', 'executors', 'time-units', 'digest', 'locks', 'regex', 'rectangles', 'channels', 'libraries', 'watch', 'format-exception', 'package-name', 'module-token', 'anonymous-class', 'generics', 'thread-groups', 'inflater', 'output-channel', 'lazy-value', 'joml') {
+        node compare.mjs --probe $probe @probeArgs
+        if ($LASTEXITCODE -ne 0) { throw "Probe failed: $probe" }
+    }
+}
 ```
 
-Equivalent commands: `npm ci --ignore-scripts`; `rustup target add wasm32-unknown-unknown`; `npm run build`; `node scripts/provision-content.mjs --source "C:/Games/steam/steamapps/common/ProjectZomboid"`; `npm run check`; `npm start`. Tests instantiate built WASM, so build first. The preview serves static application files from `dist/` and approved content from a separate directory at `/content/`; all simulation runs in the browser. Use a WebGPU-capable secure-context browser. No WebGL fallback.
+Each command rebuilds its module, runs the isolated JVM baseline, serves loopback, launches its own browser, and compares original output bits.
+It returns nonzero for mismatches, initialization errors, browser errors, changed input hashes, or unexpected game-class loading.
+Owned browser and server resources close before the command returns.
+Evidence and generated code remain ignored under `target/<probe>/`.
 
-## Private content directory — automatic startup
-
-There is **no asset picker or gameplay-file import in the web UI**. Before opening the application, provision your own installation's media into a separate directory once:
+After building `browser-save`, verify storage failures and input validation:
 
 ```powershell
-.\scripts\Windows.ps1 ProvisionContent -Source 'C:\Games\steam\steamapps\common\ProjectZomboid'
-# Optional small startup copy instead of all approved media:
-.\scripts\Windows.ps1 ProvisionContent -Source 'C:\Games\steam\steamapps\common\ProjectZomboid' -StartupOnly
-# An already copied content/media tree, optionally content/mods:
-.\scripts\Windows.ps1 ProvisionContent -IndexOnly -Output 'D:\PrivatePZContent'
-.\scripts\Windows.ps1 Run -ContentRoot 'D:\PrivatePZContent'
+node verify-host.mjs --browser $env:PZ_BROWSER
 ```
 
-CLI equivalents: `node scripts/provision-content.mjs --source INSTALL --output content`; use `--startup-only`, `--index-only`, `--mods-source USER_MODS`, `--hash` and `--source-build OBSERVED_VERSION` as needed. The default source is `C:/Games/steam/steamapps/common/ProjectZomboid`; source/output are configurable. `--index-only` cannot be combined with copying options. Default output is the ignored `content/` directory, never `dist/` or a release. `CONTENT_ROOT` selects the preview's approved content root (default `content/`). This is static provisioning, not a required native converter, companion process or game execution.
+This runs the real OPFS bridge across reloads, then injects a result mismatch, corrupted reads, a truncated file, and a quota failure.
+It also checks malformed snapshots, invalid step indexes, and preservation of data after a rejected write.
 
-Copying includes only recognized data/source formats under `media/`, optionally a plain-text root `stdlib.lua`, plus explicitly selected user mods under `mods/`. Executables, JARs, DLLs, Lua bytecode, original saves and arbitrary installation-root files are excluded. Links/junctions and overlapping source/output trees are rejected. The original installation and saves remain read-only. Provisioning never overwrites existing asset bytes or deletes unrelated files; restarting the same command copies missing files and rewrites only this tool's `manifest.json`. Existing unrelated manifests are refused. An interrupted run can leave partial copies but no newly published manifest; rerun to complete. To update changed assets, provision into a **new empty directory** and switch the host/root once complete; rerunning is not an in-place asset update.
+## Current larger boundaries
 
-`manifest.json` uses `pz-web-content-directory` version 1 with relative file paths, sizes, modification times, optional streamed SHA-256 hashes, explicit startup assets and discovered mods. Stat-only indexing is the default: texture banks are never loaded wholesale to generate metadata. Source build is `unknown` unless you supply an observed version label; the helper does not invent or execute build discovery. Original spaces, commas and filename case remain intact.
+`season` and `core` are compile-only diagnostics. Their initialization closures are not qualified for execution.
+They currently fail TeaVM compilation on missing library APIs and reachable native integration paths.
+They require `--compile-only`, which prevents the runner from starting a JVM baseline or browser for them.
 
-Startup roles are matched case-insensitively against the inventory, but the manifest and copied files retain the actual original spelling (for example `Bob_Idle.X`). This makes the directory portable to case-sensitive static hosts. Multiple files that differ only by case for one startup role are rejected as ambiguous, never silently selected or renamed.
+```powershell
+node compare.mjs --probe core --compile-only --game-jar $env:PZ_GAME_JAR --jdk $env:PZ_JDK --maven-home $env:PZ_MAVEN_HOME
+```
 
-Automatic startup is bounded to the four Tutorial cells (0_0, 0_1, 1_0, 1_1), five floor/overlay/tree texture packs, tile definitions, MaleBody mesh, Bob idle/walk animations, MaleBody02a texture and three loose sound cues. `--startup-only` also includes the original `media/scripts/generated/items/clothing.txt` and `container.txt` definitions needed to seed footwear, hands and bags, plus optional `stdlib.lua`; the default may retain all approved media for future gameplay. Restart provisioning to add missing required files without overwriting existing assets. Startup position (190.5,190.5) is a browser approximation, not an original spawn-parity claim. Missing required startup files fail with their names. This startup subset does **not** establish complete gameplay, world, animation, FMOD event playback or native engine parity.
+Use `--probe season` to diagnose the seasonal constructor instead.
+A compile-only result is never reported as a browser pass.
 
-## Input and mods
+JavaScript host services are part of the investigation. The current OPFS adapter is one working example.
+It does not yet implement Java filesystem APIs, full game saves, graphics, audio, physics, or networking.
+Those integrations need their own behavior and runtime checks.
+The `libraries` probe verifies honest failure for unavailable desktop native libraries. Mapping a library name to a `.wasm` filename does not load a library or port its native functionality.
 
-The game fills the browser viewport; there is no header, sidebar, footer or visible debug panel. The ready canvas receives keyboard focus automatically. WASD/arrows provide manual movement; click/tap a destination to travel without holding a key. Space stops movement. Escape cancels movement and opens the hidden in-game pause menu; Resume returns focus to the world. Movement assistance in that menu provides direction toggles and fractional X/Y destinations, automatically resuming play when selected. Save/load, backup transfer and mod controls stay in the menu. Hidden tabs/blur cancel movement; resume never catches up elapsed offline time.
+All work on this checkout belongs to the isolated orphan branch `work/original-bytecode-browser-port`.
 
-In the pause menu, open **Keyboard bindings** to edit primary/alternate keys and Shift/Ctrl/Alt requirements for supported source actions, including Interact and ToggleInventory, plus other already-configured source actions. **Apply live** replaces the session's binding map without reloading; **Clear** leaves an action unbound. Use the menu's **Save** to persist the preferences with that game. Interact starts unbound until you configure it; no new physical defaults are supplied. Actual Chromium/NVIDIA checks exercised configured Interact on an ordinary unlocked original door, shifted alternate-key routing, live inventory remapping and exact Save/reload persistence. Browser-reserved keys may be unavailable. This editor does not remap WASD/arrows or touch movement; broader controls, physical-device and screen-reader acceptance remain open.
 
-The bundled **Accessible walking** JavaScript mod uses the browser mod API. Separately copied trusted mods can be provisioned with `--mods-source USER_MODS` (PowerShell: `-ModsSource PATH`), or placed under `content/mods/` before `--index-only`. The manifest discovers `mod.json` browser JavaScript packages and `mod.info` native Lua packages, grouping Build 42 `common/` and numeric version roots. Discovery does not prove that a native mod's full engine APIs are implemented. Reload after changing provisioned content; the web UI does not select/import asset or mod folders. **Safe mode** (`?safe-mods=1`) is the recovery route for incompatible mods. [Mod author guide and delivered API](docs/modding/README.md). Executable mods are trusted code, not a security sandbox.
+## Browser graphics integration
 
-Provisioned JavaScript package activation state survives menu Save/Load, reboot and New session initialization. Mod namespace schema migration from 1 to 2 is browser-proven only with the same exact package version (`1.0.0`); a package-version mismatch intentionally blocks automatic restoration. This is not general cross-version mod compatibility or unmodified Workshop gameplay acceptance.
+The opt-in `graphics` probe runs original `Color` bytecode through real WebGL2 calls behind selected LWJGL APIs.
+It verifies four shader-rendered cases driven by original ShaderParameter objects, exact clear/uniform float bits, framebuffer readback, and consumed error state.
+The runner also changes real browser sliders and verifies their rendered output.
+This is an interactive graphics integration, not a playable Project Zomboid world.
 
-Native Lua packages now use that same manager: discovered disabled, enabled only with explicit consent, executed without JavaScript rewrites, and skipped in safe mode. Supply an **observed numeric game version** with `-SourceBuild` / `--source-build` before enabling native code; for the recorded installation this is `42.21.0`, not a version label with a Steam suffix. Unknown builds block native execution without preventing ordinary directory startup. The interpreter provides bounded source `require`, mapped movement/state/events and persistent namespaces—not the complete original engine.
+```powershell
+node compare.mjs --probe graphics --game-jar $env:PZ_GAME_JAR --jdk $env:PZ_JDK --maven-home $env:PZ_MAVEN_HOME --browser $env:PZ_BROWSER
+```
 
-Owned Lua browser checks exercise real WASM movement, save/reboot, failed-load rollback preserving committed closure state, and exclusion of consent changes during activation. They do **not** establish that an existing Workshop mod's gameplay or UI works; original inventory, health and UI APIs remain prerequisites.
+This entry never starts a desktop JVM baseline. Original arithmetic already has separate JVM comparisons.
+The compiler activates the third-party graphics plugin only for this probe and `core-webgl`.
+`core-webgl --compile-only` diagnoses the larger engine with that backend enabled. The separate `core-boot` entry now executes its audited initializer in an owned browser worker.
+Unsupported graphics APIs retain their original implementations; they have not been supplied with successful stubs.
 
-## Release and hosting
+The `memory` entry uses the same browser-only command with `--probe memory` to verify real direct allocations, raw Wasm addresses, and release ownership.
+`joml` separately compares the shipped NIO matrix provider with the JVM, without adding to game coverage.
+The `resources` host exposes only entries in the configured local archive through loopback HTTP. It never extracts or executes an archived class or DLL.
+All executor workers cooperate within one browser agent; they do not supply parallel Java threads.
 
-After committing verified source: `./scripts/Windows.ps1 Release`. Creates an allowlisted asset-free application directory with version, source revision and SHA-256 file manifest under `release/`. No original assets, native binaries or saves are part of source/application releases. Keep private content in ignored `content/` or outside the checkout; never copy it into `dist/`, application release artifacts or Git. Application CI uses synthetic tests only and does not claim GPU proof.
+## Original engine and installed assets
 
-Release requires a clean tracked and untracked source tree and creates a new version/revision directory; an existing destination is rejected, never merged or overwritten. Keep private inputs outside the checkout. `Check` runs `eslint . --max-warnings 0`, Rust formatting, clippy with warnings denied, native/WASM integration contracts and documentation links. Vendored lint rules are not disabled.
+Use the browser-only invocation shown for `graphics`, substituting `core-boot`, `lua-runtime`, or `keyboard` as the probe name. The keyboard fixture tests real DOM press/release, simultaneous keys and canvas focus loss through the shipped Keyboard/KeyCodes path. It does not implement desktop window creation.
 
-The release audit accepts only the exact `applicationFiles` targets from `scripts/build.mjs` plus `build.json`, including `licenses/wasmoon.txt`, `licenses/lua.txt` and `licenses/rust.txt`. An otherwise familiar extension does not authorize an extra file: unknown `.txt`, `.json`, `.js` or `.wasm` content is rejected. Keep all three dependency license notices with the application.
+The two asset entries additionally require the explicit installed media directory:
 
-Deploy release application files to an HTTPS static host, then separately copy/transfer your privately provisioned directory into a `content/` folder beside the hosted application (`/content/manifest.json`, `/content/media/...`, `/content/mods/...`). The receiving device needs only the browser, not Node, Rust, a running native game or a companion service. Application files alone supply neither game content nor saves. Keep game files on authorized private hosting; do not publish them in public Git, application releases or public asset servers.
+```powershell
+node compare.mjs --probe asset-lua --game-jar $env:PZ_GAME_JAR --media-root $env:PZ_MEDIA_ROOT --jdk $env:PZ_JDK --maven-home $env:PZ_MAVEN_HOME --browser $env:PZ_BROWSER
+```
 
-The static host must support single HTTP byte ranges: `206` with `Content-Range`/`Content-Length`, `416` with `Content-Range: bytes */SIZE`, and `HEAD`. Large banks are fetched in bounded slices, not whole-bank buffers. The local preview streams these responses and restricts content to the separate approved root; it does not expose original installation executables or arbitrary disk paths. Content MIME examples: PNG `image/png`, packs/maps `application/octet-stream`, manifest `application/json`. WASM MIME: `application/wasm`; JavaScript: `text/javascript`. Use HTTPS (localhost is a secure-context exception); plain remote HTTP will not enable WebGPU. No COOP/COEP headers are required (no shared memory). Keep complete versioned applications together; do not mix old JavaScript with new WASM. Content transfer is independent of browser save export/import; original native saves are not migrated.
+Use `--probe filesystem-runtime` for the original selected-file index. The allowlist currently contains only `lua/shared/ISBaseObject.lua` and `lua/shared/Util/LuaTableUtil.lua`; the host does not serve the installation as a directory tree. Original bytes stay local and untracked. Both entries use a read-only mount while ordinary runtime files remain ephemeral.
 
-## Troubleshooting
+`season-runtime` remains a diagnostic without bootstrap. The `season-bootstrap` entry mounts unchanged `stdlib.lua`, `defines.lua` and the Apocalypse preset, initializes the original filesystem and a deliberately partial Lua environment, then runs original SandboxOptions and ErosionSeason. Its five cases and 26 outputs pass in the browser, including independent file-byte checks. It does not qualify full LuaManager.init or a running world.
 
-- `WebGPU unavailable`/adapter failure: use HTTPS or localhost and an eligible GPU/browser; backend never silently falls back. Browser implementation support does not certify a device; see matrix.
-- Device loss: simulation stops and an accessible reload instruction appears. This fatal message takes precedence over delayed save/load or content-request failures; reload to fetch provisioned startup content again. Recovery does not restore an unsaved session.
-- `cargo`/linker missing: install rustup and MSVC prerequisites, then run Setup. The Rust target/toolchain is pinned in `rust-toolchain.toml`.
-- `npm ci` errors: use exact Node/npm versions and vendored archives. ESLint 9.39.4 is pinned to vendor peer baseline; npm reports it deprecated. Upgrade as a coherent lint/toolchain change, not an unrecorded install.
-- Remote repository operation blocked: app-scoped credentials must have access to the private target repository. Local commits retain verified bot attribution; no personal fallback.
-- Content missing/404: provision before opening the app; check `content/manifest.json` or `CONTENT_ROOT`, and verify the host maps `/content/` to that separate directory. A range request returning `200` rather than `206` means the host must be configured for byte ranges. Do not resolve missing content by pointing a public server at your installation.
-- Saved-world geometry missing: every saved navigation cell requires its original lotheader and lotpack, including cells away from the player. Startup stops with the missing paths and preserves retained saves; provision those files or explicitly choose New session.
-- Required streamed tile content unavailable: movement pauses with a visible functional error naming the failing content and instructing you to provision it and reload. This uses the game's error surface, not a separate debug overlay; known unresolved vegetation names remain a fidelity gap.
+The `game-keyboard` entry uses the same browser-only invocation as `keyboard` and verifies the original game input cache and transition lifecycle. It remains an input integration rather than a running player simulation.
 
-## Project record
+The `standard-environment` entry additionally mounts the exact installation-root `stdlib.lua` and lets original J2SEPlatform.newEnvironment load it. Use the same `--media-root` argument; its parent directory supplies only that explicitly allowlisted file. `reflection-exposure` uses the same invocation to expose original GameVersion through the original Java-to-Lua bridge, with actual reflective constructor/method calls and numeric conversion. `lua-manager-init --compile-only` remains a diagnostic for the much larger full game Lua environment.
 
-- [STATUS: verified capabilities, evidence, blockers and next command](docs/STATUS.md)
-- [ROADMAP: destination and ordered acceptance criteria](docs/ROADMAP.md)
-- [DECISIONS: responsibilities, versioned ABI and architecture rationale](docs/DECISIONS.md)
-- [COMPATIBILITY: build-specific fidelity, asset and platform gaps](docs/COMPATIBILITY.md)
-- [Modding guide/API](docs/modding/README.md)
+The `reflection-manifest` entry independently passes the same original GameVersion exposure using a generated, parse-only retention manifest instead of the old class-specific whitelist. Missing original members fail compilation; missing standard-library public APIs are listed explicitly. `game-lua-exposure --compile-only` expands that inventory to the full exposure hierarchy. Its first full compile exhausted the compiler's 8 GB heap after validating 29,027 methods and 23,892 fields; it has not executed. `game-lua-exposure-fast --compile-only` separately investigates TeaVM's supported conservative analysis mode. Neither diagnostic is a full Lua initialization success.
 
-Reproducibility: dependency/toolchain versions and lockfiles pinned; native toolchain, Windows runner image and GPU/browser implementation vary. No claim of byte-identical builds or mobile support without measured device evidence.
+`menu-png` now passes three cases/eight outputs for an actual installed character-menu PNG. It preserves original PNGDecoder, independently matches browser-decoded RGBA pixels, and checks a real texture upload/FBO readback byte for byte. A standard-library Inflater repair resolves the initial decoding failure. It is not a rendered game menu. Existing interactive graphics checks still pass. `game-boot --compile-only` separately inspects the original launcher entry without executing it or supplying full reflection retention.
+
+The separate fast-analysis full-exposure compile also exhausted the same 8 GB heap. Compiler-side separation of reflection discovery metadata from callable bodies is under investigation; removing private metadata would alter the original exposer's discovery and is not an acceptable workaround.
+
+
+`image-texture` now executes original ImageData and TextureID loading/upload with the same menu PNG profile. It verifies the original render-context callback and image disposal, and independently matches every 128-by-128 padded GPU pixel against browser decoding. This remains a texture integration, not a rendered game menu. The direct-memory check now includes owned byte allocation, range filling and real byte addresses (nine cases/59 assertions).
+
+`reflection-vectors` expands actual Lua reflection to original GameVersion, Vector2 and IsoDirections. Five browser cases/ten outputs pass, including vector normalization/scaling, copies, enum identity, rotation and direction conversion. All original declared members are retained; missing JDK Constable metadata is explicitly reported. This remains bounded exposure rather than full LuaManager.init.
+
+The original default shader now passes real browser compilation, linking, uniform and attribute checks (default-shader). The alternative [browser JVM workflow](browser-jvm/README.md) runs original bytecode using CheerpJ with an explicitly documented private compatibility copy. It now qualifies a bounded original-code walking slice with genuine map floors, animated body rendering, real keyboard-driven movement and release checks. This is separate from the selected-code TeaVM AOT/WASM experiments and is not a whole-game WASM build or complete survival game.
+
+
+The browser JVM --profile lua route now completes original LuaManager.init, including its full Java exposure list, and executes exposed vector/enum calls. It uses generated real static-field accessors and owned controller-state storage at documented third-party boundaries. The public `--profile play` route now runs original player/world updates in one genuine loaded chunk. Add `--interactive true` to its documented command to open the bounded walking session; see the [walking slice instructions](browser-jvm/README.md#original-walking-slice) for controls and limitations.
+
+
+Original SpriteRenderer now draws a shipped texture through its real batch/state handoff and indexed GPU submission: browser PASS 5 cases / 14 outputs, with all 128x128 RGBA pixels checked. GPU buffer mapping/upload/readback qualification passes separately. This frame is a renderer milestone; it is not yet a playable world.
+
+
+## JavaScript linting
+
+Install locked dependencies with `npm ci --ignore-scripts --no-audit --no-fund`, then run `npm run lint`. The script executes `eslint . --max-warnings 0` using `@notmike101/eslint-config-js` and `@notmike101/eslint-config-jsdoc` from the validated upstream package artifacts. `eslint-plugin-html` also checks inline browser scripts. Generated outputs, installed dependencies and private local experiments are excluded; authored browser and Node sources are included. `npm run lint:fix` applies available fixes with the same zero-warning threshold. Artifact provenance is recorded in [vendor/eslint-configs/README.md](vendor/eslint-configs/README.md).
+

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zomboid original walking slice</title>
+<style>
+body{margin:0;background:#171b1c;color:#e8ece8;font:16px system-ui,sans-serif;display:grid;justify-items:center;gap:12px;padding:24px}main{width:min(100%,720px)}h1{font-size:24px;margin:0 0 8px}p{line-height:1.5}canvas{display:block;width:100%;max-width:512px;aspect-ratio:1;background:#000;border:1px solid #525b57;outline-offset:4px}button{font:inherit;padding:8px 16px;cursor:pointer}#state{font-variant-numeric:tabular-nums}footer{font-size:13px;color:#b4bdb6}
+</style>
+<main>
+<h1>Zomboid original walking slice</h1>
+<p id="status" role="status" aria-live="polite">Loading the browser runtime…</p>
+<canvas id="graphics-canvas" width="512" height="512" tabindex="0" aria-label="Original player on a loaded Project Zomboid map chunk"></canvas>
+<p id="state">Waiting for the original world and player.</p>
+<p id="controls">Click the scene and use WASD to walk. This slice contains one loaded map chunk; the full world and survival systems are still being ported. Press Escape or Stop to end the session.</p>
+<button id="stop" type="button">Stop session</button>
+<footer>Private technical evaluation. Powered by CheerpJ / Leaning Technologies. Installed game assets remain local to this computer.</footer>
+</main>
+<script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script>
+<script type="module">
+import { createBrowserPhysics } from './browser-physics.js';
+import { keyboardNatives } from './keyboard.js';
+import { createSpriteNatives } from './sprite-webgl.js';
+
+const interactive = false;
+const canvas = document.getElementById('graphics-canvas');
+const status = document.getElementById('status');
+const state = document.getElementById('state');
+const stop = document.getElementById('stop');
+const keyboard = keyboardNatives(canvas);
+const physics = createBrowserPhysics();
+const graphics = createSpriteNatives(canvas, () => undefined);
+let stopped = false;
+
+globalThis.stageResults = [];
+globalThis.playIterations = 0;
+globalThis.playSnapshot = null;
+globalThis.zeroInputFrames = 0;
+/** Requests orderly cleanup on the owning Java loop. */
+const requestStop = () => {
+    stopped = true;
+    stop.disabled = true;
+    status.textContent = 'Stopping the original session…';
+};
+
+stop.addEventListener('click', requestStop);
+document.addEventListener('keydown', (event) => {
+    if (event.code === 'Escape') {
+        requestStop();
+    }
+});
+/**
+ * Displays read-only state from the original player.
+ *
+ * @param {object} player - Original player snapshot from the Java owner.
+ */
+const showPlayer = (player) => {
+    state.textContent = `Position ${Number(player.x).toFixed(2)}, ${Number(player.y).toFixed(2)}, ${Number(player.z).toFixed(0)} · ${player.state || 'initializing'} · ${player.frames} original frames`;
+};
+
+/**
+ * Receives results without running Java frame methods from a browser callback.
+ *
+ * @param {string} json - Serialized report from the owning Java loop.
+ */
+const report = (json) => {
+    const result = JSON.parse(String(json));
+
+    globalThis.stageResults.push(result);
+
+    if (globalThis.stageResults.length > 120) {
+        globalThis.stageResults.shift();
+    }
+
+    if (result.ready) {
+        globalThis.sessionReady = true;
+        globalThis.playSnapshot = result.initial;
+        status.textContent = 'Original world and player loaded. Click the scene and use WASD to walk.';
+        showPlayer(result.initial);
+        canvas.focus();
+    } else if (result.player) {
+        globalThis.playSnapshot = result.player;
+        globalThis.zeroInputFrames = result.player.inputX === 0 && result.player.inputY === 0 ? globalThis.zeroInputFrames + 1 : 0;
+        status.textContent = 'Original world running. WASD to walk; Escape to stop.';
+        showPlayer(result.player);
+    } else if (result.progress && !globalThis.sessionReady) {
+        status.textContent = `Loading: ${result.progress.replaceAll('-', ' ')}…`;
+    }
+
+    if ('pass' in result) {
+        globalThis.probeResult = { ...result, physics: physics.snapshot(), graphicsResources: graphics.resources(), graphicsDiagnostics: [...graphics.diagnostics] };
+        status.textContent = result.pass ? 'Session stopped.' : `Session stopped at ${result.stage || 'startup'}: ${result.error || 'unknown error'}`;
+
+        if (result.final) {
+            showPlayer(result.final);
+        }
+
+        stop.disabled = true;
+    }
+};
+
+try {
+    await cheerpjInit({
+        version: 17, status: 'none', javaProperties: ['user.dir=/files/work'], natives: {
+            ...graphics.natives, ...keyboard.natives, ...physics.natives,
+            /**
+             * Receives a report from the owning Java session.
+             *
+             * @param {unknown} lib - Reserved browser JVM context.
+             * @param {string} json - Serialized report.
+             */
+            Java_BrowserInteractivePlay_report(lib, json) {
+                report(json);
+            },
+            /**
+             * Queries host stop state once per Java loop iteration.
+             *
+             * @returns {boolean} Whether orderly shutdown was requested.
+             */
+            Java_BrowserInteractivePlay_stopRequested() {
+                globalThis.playIterations++;
+
+                return stopped;
+            },
+        },
+    });
+    globalThis.exitCode = await cheerpjRunMain('BrowserInteractivePlay', '/app/play-entry.jar:/app/animation-entry.jar:/app/animation-view.jar:/app/animation-sdk-view.jar:/app/path-view.jar:/app/float-bridge.jar:/app/memory-bridge.jar:/app/world-entry.jar:/app/atomic-view.jar', interactive ? '0' : '240', 'draw');
+
+    if (!globalThis.probeResult) {
+        throw new Error(`Original session exited without a result (${globalThis.exitCode})`);
+    }
+} catch (error) {
+    globalThis.probeResult = { pass: false, error: String(error.stack || error) };
+    status.textContent = `Evaluation could not continue: ${error.message || error}`;
+    stop.disabled = true;
+} finally {
+    keyboard.dispose();
+}
+</script>
+</html>

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser direct-memory integration</title>
+<h1>Browser direct-memory integration</h1>
+<p id="status" role="status">RUNNING</p>
+<pre id="details"></pre>
+<script src="/wasm/classes.wasm-runtime.js"></script>
+<script>
+globalThis.probeErrors = [];
+addEventListener('error', (event) => globalThis.probeErrors.push(event.message));
+addEventListener('unhandledrejection', (event) => globalThis.probeErrors.push(String(event.reason)));
+(async () => {
+    const lines = [];
+    let pending = '';
+    let linearMemory;
+
+    try {
+        const module = await globalThis.TeaVM.wasmGC.load('/wasm/probe.wasm', {
+            /**
+             * Installs the host functions used by the compiled WebAssembly runtime.
+             *
+             * @param {WebAssembly.Imports} imports - Imports populated for the compiled runtime.
+             */
+            installImports(imports) {
+                linearMemory = imports.env?.memory;
+                imports.teavmConsole = {
+                /**
+                 * Collects one character of the original runtime stdout.
+                 *
+                 * @param {number} c - Character code emitted by the runtime.
+                 */
+                    putcharStdout(c) {
+                        if (c === 10) {
+                            lines.push(pending);
+                            pending = '';
+                        } else {
+                            pending += String.fromCharCode(c);
+                        }
+                    },
+                    /**
+                     * Rejects unexpected output on the runtime stderr channel.
+                     *
+                     * @param {number} c - Character code emitted by the runtime.
+                     */
+                    putcharStderr(c) {
+                        throw new Error(`WASM stderr character: ${c}`);
+                    },
+                };
+            },
+        });
+
+        await module.exports.main([]);
+
+        if (lines.length !== 1 || pending) {
+            throw new Error('Expected one memory result');
+        }
+
+        const result = JSON.parse(lines[0]);
+
+        if (!result.pass || result.cases.length !== 9 || result.checks !== 59 || result.allocationsRemaining !== 0) {
+            throw new Error('Memory assertions failed');
+        }
+
+        const memory = linearMemory;
+
+        if (!memory || !memory.buffer.byteLength) {
+            throw new Error('Expected actual Wasm linear memory');
+        }
+
+        globalThis.probeResult = {
+            pass: true, cases: result.cases.length, comparisons: result.checks, matched: result.checks,
+            linearMemory: true, memoryBytes: memory.buffer.byteLength, allocationsRemaining: result.allocationsRemaining,
+            actual: result, errors: globalThis.probeErrors,
+        };
+        document.getElementById('status').textContent = 'PASS: 59 direct-memory assertions';
+    } catch (error) {
+        globalThis.probeResult = { pass: false, stdout: lines, pending, errors: [...globalThis.probeErrors, String(error.stack || error)] };
+        document.getElementById('status').textContent = 'FAIL';
+    }
+
+    document.getElementById('details').textContent = JSON.stringify(globalThis.probeResult, null, 2);
+})();
+</script>
+</html>

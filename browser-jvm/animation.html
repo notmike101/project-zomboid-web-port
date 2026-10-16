@@ -1,0 +1,56 @@
+<!doctype html><meta charset="utf-8"><title>Original client animation and character frame</title>
+<p>Private technical evaluation. Powered by CheerpJ / Leaning Technologies.</p>
+<canvas id="graphics-canvas" width="256" height="256" aria-label="Original animated Zomboid body mesh"></canvas><pre id="status">Loading browser JVM</pre>
+<script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script><script type="module">
+import { keyboardNatives } from './keyboard.js';
+import { createSpriteNatives } from './sprite-webgl.js';
+
+const keyboard = keyboardNatives(document.getElementById('graphics-canvas'));
+
+document.getElementById('graphics-canvas').focus();
+globalThis.stageResults = [];
+let backend;
+/**
+ * Records an original-code qualification result.
+ *
+ * @param {string} json - Serialized qualification result.
+ */
+const report = (json) => {
+    const result = JSON.parse(String(json));
+
+    globalThis.stageResults.push(result);
+    document.getElementById('status').textContent = JSON.stringify(result);
+
+    if ('pass' in result) {
+        globalThis.probeResult = { ...result, graphicsResources: backend.resources(), graphicsDiagnostics: [...backend.diagnostics] };
+    }
+};
+
+try {
+    backend = createSpriteNatives(document.getElementById('graphics-canvas'), report);
+    await cheerpjInit({
+        version: 17, status: 'none', javaProperties: ['user.dir=/files/work'], natives: {
+            ...backend.natives, ...keyboard.natives,
+            /**
+             * Records an original-code qualification result.
+             *
+             * @param {unknown} lib - Reserved library context supplied by CheerpJ.
+             * @param {string} json - Serialized qualification result.
+             */
+            Java_BrowserClientAnimation_report(lib, json) {
+                report(json);
+            },
+        },
+    });
+    globalThis.exitCode = await cheerpjRunMain('BrowserClientAnimation', '/app/animation-entry.jar:/app/animation-view.jar:/app/animation-sdk-view.jar:/app/path-view.jar:/app/float-bridge.jar:/app/memory-bridge.jar:/app/world-entry.jar:/app/atomic-view.jar');
+
+    if (!globalThis.probeResult) {
+        throw new Error(`Original client animation exited without result: ${globalThis.exitCode}`);
+    }
+} catch (error) {
+    globalThis.probeResult = { pass: false, error: String(error.stack || error), graphicsDiagnostics: backend ? [...backend.diagnostics] : [] };
+    document.getElementById('status').textContent = JSON.stringify(globalThis.probeResult);
+} finally {
+    keyboard.dispose();
+}
+</script>
