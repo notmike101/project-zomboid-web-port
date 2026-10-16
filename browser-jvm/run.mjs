@@ -10,16 +10,18 @@ import {chromium} from 'playwright-core';
 const source = fileURLToPath(new URL('./', import.meta.url));
 const repository = path.resolve(source, '..');
 const output = path.join(repository, 'target', 'browser-jvm');
-const names = new Set(['game-jar', 'media-root', 'jdk', 'browser']);
+const names = new Set(['game-jar', 'media-root', 'jdk', 'browser', 'profile']);
 const options = {};
 for (let i = 2; i < process.argv.length; i += 2) {
   const name = process.argv[i]?.replace(/^--/, '');
   if (!names.has(name) || !process.argv[i].startsWith('--') || !process.argv[i + 1] || options[name])
     throw new Error('Usage: node browser-jvm/run.mjs --game-jar PATH --media-root PATH --jdk JDK25_DIRECTORY --browser CHROMIUM_EXECUTABLE');
-  options[name] = path.resolve(process.argv[i + 1]);
+  options[name] = name === 'profile' ? process.argv[i + 1] : path.resolve(process.argv[i + 1]);
 }
-if (Object.keys(options).length !== names.size)
+if (!['game-jar','media-root','jdk','browser'].every(name => options[name]))
   throw new Error('Required: --game-jar PATH --media-root PATH --jdk JDK25_DIRECTORY --browser CHROMIUM_EXECUTABLE');
+const profile = options.profile || 'graphics';
+if (!['graphics','lua'].includes(profile)) throw new Error('Profile must be graphics or lua');
 
 const classes = path.join(output, 'classes');
 const tools = path.join(output, 'tools');
@@ -45,11 +47,11 @@ const actualOutput = await canonical(output);
 if (!contained(actualRepository, actualTarget) || actualTarget === actualRepository
     || !contained(actualTarget, actualOutput) || actualOutput === actualTarget)
   throw new Error('Generated output must remain inside the workspace target directory; escaping junctions are rejected');
-for (const prerequisite of [...Object.values(options), png, executable('java'), executable('javac')]) {
+for (const prerequisite of [...Object.entries(options).filter(([name]) => name !== 'profile').map(([,value]) => value), png, executable('java'), executable('javac')]) {
   if (contained(output, prerequisite) || contained(actualOutput, await canonical(prerequisite)))
     throw new Error('Prerequisite is inside generated output: ' + prerequisite);
 }
-for (const destination of [classes, tools, ...['view.jar', 'class-manifest.json', 'result.json', 'build.json'].map(name => path.join(output, name))])
+for (const destination of [classes, tools, ...['host-classes','bridge-classes','GeneratedFloatBridge.java','runtime-view.jar','full-entry.jar','float-bridge.jar','memory-bridge.jar','generated-float-members.tsv','float-bridge-summary.json','view.jar', 'class-manifest.json', 'result.json', 'build.json'].map(name => path.join(output, name))])
   if (!contained(actualOutput, await canonical(destination))) throw new Error('Generated destination escapes output: ' + destination);
 await mkdir(output, {recursive: true});
 await mkdir(classes, {recursive: true});
@@ -62,6 +64,7 @@ async function hash(file) {
 const requests = [], denied = [], logs = [], build = [];
 let browser, server;
 const evidence = {pass: false, runtime: 'CheerpJ 4.3 Java17', closed: false};
+const assetHashes = [];
 function command(binary, args) {
   const result = spawnSync(binary, args, {cwd: repository, encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024});
   build.push({binary, args, status: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.message});
@@ -72,9 +75,32 @@ try {
     if (!(await stat(file)).isFile()) throw new Error('Expected file: ' + file);
   evidence.originalJarSha256Before = await hash(gameJar);
   evidence.pngSha256Before = await hash(png);
+  if (profile === 'lua') for (const name of ['stdlib.lua','media/lua/shared/defines.lua','media/lua/shared/Sandbox/Apocalypse.lua']) {
+    const file=path.join(options['media-root'],'..',name);
+    assetHashes.push({name,file,sha256Before:await hash(file)});
+  }
   command(executable('javac'), ['--release', '17', '-classpath', gameJar, '-d', classes, path.join(source, 'CheerpJGL.java')]);
   command(executable('javac'), ['-d', tools, path.join(source, 'PrepareBrowserJvm.java')]);
   command(executable('java'), ['-cp', tools, 'PrepareBrowserJvm', gameJar, output, classes]);
+  if (profile === 'lua') {
+    const hostClasses = path.join(output, 'host-classes');
+    await mkdir(hostClasses, {recursive:true});
+    command(executable('javac'), ['--release','17','-d',hostClasses,
+      path.join(source,'host/org/lwjgl/glfw/GLFWGamepadState.java'),path.join(source,'host/port/host/BrowserBuffers.java')]);
+    // The bootstrap entry references generated getter declarations. Generate once for javac,
+    // then regenerate against the actual authored fixture fields, never loading game classes.
+    command(executable('javac'), ['-d',tools,path.join(source,'PrepareRuntime.java')]);
+    const bridgeSource = path.join(output,'GeneratedFloatBridge.java');
+    await writeFile(bridgeSource,'package port.host; public final class GeneratedFloatBridge { public static native Object get(java.lang.reflect.Field f,Object o)throws IllegalAccessException; }');
+    const bridgeClasses = path.join(output,'bridge-classes');
+    command(executable('javac'), ['--release','17','-d',bridgeClasses,bridgeSource]);
+    command(executable('javac'), ['--release','17','-cp',[hostClasses,bridgeClasses,gameJar].join(path.delimiter),'-d',classes,path.join(source,'CheerpJFull.java')]);
+    command(executable('java'), ['-cp',tools,'PrepareRuntime',output,classes]);
+    command(executable('javac'), ['--release','17','-cp',bridgeClasses,'-d',bridgeClasses,bridgeSource]);
+    command(executable('jar'), ['--create','--file',path.join(output,'full-entry.jar'),'-C',classes,'probe/CheerpJFull.class']);
+    command(executable('jar'), ['--create','--file',path.join(output,'float-bridge.jar'),'-C',bridgeClasses,'.']);
+    command(executable('jar'), ['--create','--file',path.join(output,'memory-bridge.jar'),'-C',hostClasses,'.']);
+  }
   evidence.viewJarSha256 = await hash(path.join(output, 'view.jar'));
   const manifest = JSON.parse(await readFile(path.join(output, 'class-manifest.json'), 'utf8'));
   evidence.classes = manifest.classes;
@@ -83,11 +109,20 @@ try {
   evidence.gameMethodBodiesUnchanged = manifest.gameMethodBodiesUnchanged;
 
   const routes = new Map([
-    ['/', {file: path.join(source, 'index.html'), type: 'text/html; charset=utf-8'}],
+    ['/', {file: path.join(source, profile === 'lua' ? 'lua.html' : 'index.html'), type: 'text/html; charset=utf-8'}],
     ['/index.html', {file: path.join(source, 'index.html'), type: 'text/html; charset=utf-8'}],
     ['/view.jar', {file: path.join(output, 'view.jar'), type: 'application/java-archive'}],
     ['/menu.png', {file: png, type: 'image/png'}],
   ]);
+  if (profile === 'lua') {
+    for (const name of ['full-entry.jar','float-bridge.jar','memory-bridge.jar','runtime-view.jar'])
+      routes.set('/'+name,{file:path.join(output,name),type:'application/java-archive'});
+    for (const name of ['stdlib.lua','media/lua/shared/defines.lua','media/lua/shared/Sandbox/Apocalypse.lua'])
+      routes.set('/'+name,{file:path.join(options['media-root'],'..',name),type:'text/plain'});
+    evidence.runtimeViewJarSha256=await hash(path.join(output,'runtime-view.jar'));
+  }
+  evidence.profile=profile;
+  if (profile === 'lua') evidence.runtimeAdaptations=JSON.parse(await readFile(path.join(output,'float-bridge-summary.json'),'utf8'));
   server = createServer(async (request, response) => {
     try {
       if (!['GET', 'HEAD'].includes(request.method)) {response.writeHead(405).end(); return;}
@@ -144,6 +179,7 @@ try {
   await page.goto(origin, {waitUntil: 'domcontentloaded', timeout: 60000});
   await page.waitForFunction(() => window.probeResult, undefined, {timeout: 180000});
   evidence.result = await page.evaluate(() => window.probeResult);
+  if (profile === 'lua') evidence.stages=await page.evaluate(() => window.stageResults);
   evidence.pass = evidence.result.pass === true && denied.length === 0;
 } catch (error) {
   evidence.error = String(error.stack || error);
@@ -163,8 +199,14 @@ try {
   evidence.denied = denied;
   evidence.logs = logs;
   evidence.externalNonReadRequests = requests.filter(r => !r.url.startsWith(evidence.origin || 'http://127.0.0.1/') && (!['GET', 'HEAD'].includes(r.method) || r.postDataBytes));
+  for (const asset of assetHashes) {
+    try {asset.sha256After=await hash(asset.file);if(asset.sha256After!==asset.sha256Before)evidence.pass=false;}
+    catch(error){asset.error=String(error);evidence.pass=false;}
+  }
+  if(assetHashes.length)evidence.assets=assetHashes;
   await writeFile(path.join(output, 'build.json'), JSON.stringify(build, null, 2) + '\n');
   await writeFile(path.join(output, 'result.json'), JSON.stringify(evidence, null, 2) + '\n');
+  await writeFile(path.join(output, 'result-'+profile+'.json'), JSON.stringify(evidence, null, 2) + '\n');
   console.log(JSON.stringify({...evidence, requests: requests.length, logs: logs.length, resultFile: path.join(output, 'result.json')}, null, 2));
   if (!evidence.pass) process.exitCode = 1;
 }

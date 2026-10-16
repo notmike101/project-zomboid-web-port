@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Private staged browser JVM evaluation</title>
+<p>Private technical evaluation. Powered by CheerpJ / Leaning Technologies.</p><pre id="status">Loading runtime</pre>
+<script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script>
+<script>
+window.stageResults=[];
+(async()=>{try{
+  await cheerpjInit({version:17,status:'none',javaProperties:['user.dir=/files/work'],natives:{
+  async Java_probe_CheerpJFull_report(lib,json){
+    let result;try{result=JSON.parse(json);}catch(error){result={pass:false,reportParseError:String(error),rawReport:json};}
+    window.stageResults.push(result);document.getElementById('status').textContent=JSON.stringify(result);
+    if('pass' in result)window.probeResult=result;
+  }}});
+  window.exitCode=await cheerpjRunMain('probe.CheerpJFull','/app/full-entry.jar:/app/float-bridge.jar:/app/memory-bridge.jar:/app/runtime-view.jar');
+  if(!window.probeResult)throw new Error('Java main exited without reporting: '+window.exitCode);
+}catch(error){window.probeResult={pass:false,error:String(error.stack||error)};document.getElementById('status').textContent=JSON.stringify(window.probeResult);}})();
+</script>

@@ -381,3 +381,6 @@ The `reflection-vectors` browser probe passes five cases/ten outputs. It retains
 
 Original default shader: browser PASS 3 cases / 10 outputs. Original SceneShaderStore/DefaultShader/ShaderProgram/ShaderUnit load the installed shader files and compile/link/validate a real WebGL2 program. Desktop OpenGL capability flags remain false; the original GLSL120 fallback is translated to GLSL ES300. Actual uniform defaults and attribute locations are checked. This does not yet draw an original sprite or initialize a world.
 
+
+CheerpJ Lua profile: full original LuaManager.init PASS, with original Core metadata 548 methods / 281 fields, 24 generated-field checks, 8 owned gamepad-memory checks, original filesystem and random initialization, shipped standard library and post-init exposed vector/enum calls. All game method bodies unchanged. Controller polling/native pointers remain unsupported. Evidence is separate from TeaVM compilation and does not establish playable world behavior.
+

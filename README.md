@@ -155,3 +155,6 @@ The separate fast-analysis full-exposure compile also exhausted the same 8 GB he
 
 The original default shader now passes real browser compilation, linking, uniform and attribute checks (default-shader). The alternative [browser JVM workflow](browser-jvm/README.md) qualifies original PNG decoding and real GPU output using CheerpJ with an explicitly documented private class-file copy view. Neither route is playable yet.
 
+
+The browser JVM --profile lua route now completes original LuaManager.init, including its full Java exposure list, and executes exposed vector/enum calls. It uses generated real static-field accessors and owned controller-state storage at documented third-party boundaries. Original world-cell construction also passed a private browser experiment; a player and playable loop are still in progress.
+
