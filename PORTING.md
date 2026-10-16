@@ -2,7 +2,7 @@
 
 ## Original native lighting service
 
-The production indoor lighting backend now has a reproducible original-DLL/browser gate: 896 cells and 43,904 exact packed integer comparisons, with separate incremental retained-chunk and publication/dirty-bit protocols. Keep its native float32 propagation, LOS, traversal order and original packed ABI. Unsupported world features reject explicitly before publication; see `browser-jvm/lighting-provenance.md`. This is a qualified native service, not a completed original `LightingJNI.update` or cell-rendering lifecycle. Integrate genuine Java17 library loading and normal original caller inputs next, expanding the native oracle whenever those inputs exceed the admitted indoor closure.
+The production indoor lighting backend now has a reproducible original-DLL/browser gate: 896 cells and 43,904 exact packed integer comparisons, with separate incremental retained-chunk and publication/dirty-bit protocols. Keep its native float32 propagation, LOS, traversal order and original packed ABI. Unsupported world features reject explicitly before publication; see `browser-jvm/lighting-provenance.md`. Original `LightingJNI.init()` now also passes through a real service module and narrow CheerpJ4.3 Java17 loader adapter, preserving original initialization and genuine missing-library failures. Continue with normal original world-update inputs, expanding the native oracle when those inputs exceed the admitted indoor closure. This is not yet a completed original `LightingJNI.update` or cell-rendering lifecycle.
 
 ## Full installed media discovery
 

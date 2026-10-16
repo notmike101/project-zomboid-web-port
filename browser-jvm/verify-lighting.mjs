@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { chromium } from 'playwright-core';
 import { calculateLighting } from './lighting-kernel.js';
 import { createLightingNatives } from './lighting-natives.js';
+import { installNativeLibraryLoader } from './native-library-loader.js';
 
 const { PZ_JDK: jdk, PZ_BROWSER: executablePath, PZ_GAME_DIR: installation } = process.env;
 
@@ -330,6 +331,32 @@ function stageValidationPlane(methods, geometry) {
  * Checks unsupported inputs and ensures failed input does not publish state.
  */
 function verifyValidation() {
+    const calls = [];
+    const runtime = {
+        /**
+         * Records the original native loader ABI without dereferencing test pointers.
+         *
+         * @param {...unknown} args - Delegated native arguments.
+         * @returns {number} Distinct reference handle.
+         */
+        cj3LoadLibrary(...args) {
+            calls.push(args);
+
+            return 17;
+        },
+    };
+    const continuation = {};
+
+    assert.equal(installNativeLibraryLoader(runtime), true);
+    assert.equal(runtime.JVM_LoadLibrary(123, true, continuation), 17);
+    assert.deepEqual(calls, [[123, -1, continuation]]);
+    const installed = runtime.JVM_LoadLibrary;
+
+    assert.equal(installNativeLibraryLoader(runtime), false);
+    assert.equal(runtime.JVM_LoadLibrary, installed);
+    assert.throws(() => installNativeLibraryLoader({}), /unavailable/u);
+    assert.throws(() => installNativeLibraryLoader({ ...runtime, JVM_LoadLibrary: 1 }), /Invalid/u);
+
     for (const mutate of [
         (scene) => {
             scene.width = Number.NaN;
@@ -417,6 +444,8 @@ const files = new Map([
     ['/qualification.jar', archive], ['/scenes.bin', fixture],
     ['/lighting-kernel.js', path.join(root, 'browser-jvm/lighting-kernel.js')],
     ['/lighting-natives.js', path.join(root, 'browser-jvm/lighting-natives.js')],
+    ['/Lighting64.js', path.join(root, 'browser-jvm/Lighting64.js')],
+    ['/native-library-loader.js', path.join(root, 'browser-jvm/native-library-loader.js')],
 ]);
 
 for (const name of sdkNames) {
@@ -467,15 +496,15 @@ try {
     const classpath = ['/app/qualification.jar', ...sdkNames.map((name) => `/app/${name}`)].join(':');
     const pages = new Map(modes.map((mode) => [`/${mode}.html`, `<script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script>
         <script type="module">
-            import {createLightingNatives} from '/lighting-natives.js';
-            const lighting=createLightingNatives();
+            import {installNativeLibraryLoader} from '/native-library-loader.js';
             try {
-                await cheerpjInit({version:17,status:'none',natives:{...lighting.natives,
+                await cheerpjInit({version:17,status:'none',javaProperties:['java.library.path=/app/'],natives:{
                     Java_LightingQualification_report(lib,json){globalThis.result=JSON.parse(String(json));}
                 }});
+                const installed=installNativeLibraryLoader(globalThis.cj3Module);
                 const code=await cheerpjRunMain('LightingQualification','${classpath}','browser','${mode}','/app/scenes.bin');
                 if(!globalThis.result)throw new Error('Missing JNI qualification report, exit '+code);
-                globalThis.result.snapshot=lighting.snapshot();
+                globalThis.result.loaderInstalled=installed;
             } catch(error) {globalThis.result={pass:false,error:String(error.stack||error)};}
             finally {globalThis.completed=true;}
         </script>`]));
@@ -503,6 +532,12 @@ try {
             const file = files.get(pathname);
 
             if (!file) {
+                if (pathname === '/PortMissingLightingService.js') {
+                    response.writeHead(404).end();
+
+                    return;
+                }
+
                 throw new Error('outside qualification allowlist');
             }
 
@@ -599,6 +634,7 @@ try {
 
         evidence.browser[mode] = { result, lines: actual, logs };
         assert.equal(result.pass, true, result.error);
+        assert.equal(result.originalInitialization, true);
         assert.deepEqual(actual, evidence.native[mode].lines, `browser/native ${mode}`);
         await context.close();
     }
