@@ -117,6 +117,7 @@ probes['season-bootstrap'] = {...probes['standard-environment'], mainClass: 'pro
 probes['menu-png'] = {...probes['standard-environment'], mainClass: 'probe.MenuPngProbe', category: 'browser-assets', assetProfile: 'menu-image', cases: 3, comparisons: 8};
 probes['menu-png'].inflater = true;
 probes['image-texture'] = {...probes['menu-png'], mainClass: 'probe.ImageTextureProbe', category: 'browser-core', cases: 2, comparisons: 8};
+probes['default-shader'] = {...probes['standard-environment'], mainClass: 'probe.DefaultShaderProbe', category: 'browser-core', assetProfile: 'default-shader', cases: 3, comparisons: 10};
 probes.inflater = {mainClass: 'probe.InflaterProbe', category: 'runtime-compatibility', inflater: true, cases: 8, comparisons: 16, classes: [], symbols: []};
 probes['output-channel'] = {mainClass: 'probe.FileOutputChannelProbe', category: 'runtime-compatibility', outputChannels: true, cases: 8, comparisons: 16, classes: [], symbols: []};
 probes['game-boot'] = {...probes['lua-manager-init'], mainClass: 'zombie.gameStates.MainScreenState', keyboard: true, symbols: ['MainScreenState::main']};

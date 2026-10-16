@@ -9,11 +9,14 @@ import org.teavm.jso.webgl.WebGLProgram;
 import org.teavm.jso.webgl.WebGLUniformLocation;
 import org.teavm.jso.webgl.WebGLTexture;
 import org.teavm.jso.webgl.WebGLFramebuffer;
+import org.teavm.jso.webgl.WebGLActiveInfo;
 import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
 import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.regex.Pattern;
 
 /** Real browser graphics backend for the explicitly supported OpenGL entry points. */
 public final class BrowserGraphics {
@@ -24,6 +27,12 @@ public final class BrowserGraphics {
     private static final ArrayList<WebGLUniformLocation> uniforms = new ArrayList<>();
     private static final HashMap<Integer, WebGLTexture> textures = new HashMap<>();
     private static final HashMap<Integer, WebGLFramebuffer> framebuffers = new HashMap<>();
+    private static final HashMap<Integer, Integer> shaderTypes = new HashMap<>();
+    private static final HashMap<Integer, ArrayList<UniformDefault>> shaderDefaults = new HashMap<>();
+    private static final HashMap<Integer, ArrayList<Integer>> programShaders = new HashMap<>();
+    private static final StringBuilder shaderDiagnostics = new StringBuilder();
+
+    public static String shaderDiagnostics() { return shaderDiagnostics.toString(); }
 
     public static int glGenTextures() {
         initialize();
@@ -187,11 +196,28 @@ public final class BrowserGraphics {
         if (shader == null) return 0;
         int id = nextObject++;
         shaders.put(id, shader);
+        shaderTypes.put(id, type);
+        shaderDiagnostics.append("create shader ").append(id).append(" type ").append(type).append('\n');
         return id;
     }
 
-    public static void glShaderSource(int id, CharSequence source) { context.shaderSource(shader(id), source.toString()); }
-    public static void glCompileShader(int id) { context.compileShader(shader(id)); }
+    public static void glShaderSource(int id, CharSequence source) {
+        try {
+            String translated = translateShader(id, source.toString());
+            shaderDiagnostics.append("shader source ").append(id).append(" originalHash ").append(source.toString().hashCode())
+                    .append(" translatedHash ").append(translated.hashCode()).append('\n');
+            context.shaderSource(shader(id), translated);
+        } catch (RuntimeException failure) {
+            shaderDiagnostics.append("shader translation failed ").append(id).append(' ').append(failure.toString()).append('\n');
+            throw failure;
+        }
+    }
+    public static void glCompileShader(int id) {
+        context.compileShader(shader(id));
+        shaderDiagnostics.append("compile ").append(id).append(" status ")
+                .append(context.getShaderParameterb(shader(id), 0x8B81)).append(" log ")
+                .append(context.getShaderInfoLog(shader(id))).append('\n');
+    }
     public static String glGetShaderInfoLog(int id) { return context.getShaderInfoLog(shader(id)); }
     public static String glGetShaderInfoLog(int id, int maxLength) { return limitLog(glGetShaderInfoLog(id), maxLength); }
     public static int glGetShaderi(int id, int parameter) {
@@ -206,13 +232,132 @@ public final class BrowserGraphics {
         if (program == null) return 0;
         int id = nextObject++;
         programs.put(id, program);
+        shaderDiagnostics.append("create program ").append(id).append('\n');
         return id;
     }
 
-    public static void glAttachShader(int program, int shader) { context.attachShader(program(program), shader(shader)); }
-    public static void glLinkProgram(int id) { context.linkProgram(program(id)); }
+    public static void glAttachShader(int program, int shader) {
+        context.attachShader(program(program), shader(shader));
+        programShaders.computeIfAbsent(program, ignored -> new ArrayList<>()).add(shader);
+    }
+    public static void glLinkProgram(int id) {
+        WebGLProgram program = program(id);
+        context.linkProgram(program);
+        shaderDiagnostics.append("link ").append(id).append(" status ")
+                .append(context.getProgramParameterb(program, 0x8B82)).append(" log ")
+                .append(context.getProgramInfoLog(program)).append('\n');
+        if (!context.getProgramParameterb(program, 0x8B82)) return;
+        WebGLProgram previous = (WebGLProgram) context.getParameter(0x8B8D);
+        context.useProgram(program);
+        try {
+            ArrayList<Integer> attached = programShaders.get(id);
+            if (attached != null) for (int shader : attached) {
+                ArrayList<UniformDefault> defaults = shaderDefaults.get(shader);
+                if (defaults != null) for (UniformDefault value : defaults) {
+                    WebGLUniformLocation location = context.getUniformLocation(program, value.name);
+                    if (location == null) continue;
+                    if (value.integer) context.uniform1i(location, (int) value.value);
+                    else context.uniform1f(location, (float) value.value);
+                }
+            }
+        } finally { context.useProgram(previous); }
+    }
+
+    /** Platform dialect adaptation only; shader expressions and original control flow remain intact. */
+    private static String translateShader(int id, String source) {
+        ArrayList<UniformDefault> defaults = new ArrayList<>();
+        shaderDefaults.put(id, defaults);
+        var version = Pattern.compile("(?m)^\\s*#version\\s+(330(?:\\s+core)?|120)\\s*$").matcher(source);
+        if (!version.find()) return source;
+        boolean legacy = version.group(1).equals("120");
+        source = source.substring(0, version.start()) + "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+                + source.substring(version.end());
+        var initializers = Pattern.compile("(?m)^(\\s*uniform\\s+(float|int)\\s+([A-Za-z_][A-Za-z_0-9]*)\\s*)=\\s*([^;]+);").matcher(source);
+        StringBuilder translated = new StringBuilder();
+        int start = 0;
+        while (initializers.find()) {
+            String literal = initializers.group(4).trim();
+            boolean integer = initializers.group(2).equals("int");
+            String numeric = integer ? "[+-]?[0-9]+" : "[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?";
+            if (!literal.matches(numeric)) throw new UnsupportedOperationException("Unsupported shader uniform initializer: " + literal);
+            double value;
+            try {
+                if (integer) value = Integer.parseInt(literal);
+                else value = Float.parseFloat(literal);
+            }
+            catch (NumberFormatException failure) { throw new UnsupportedOperationException("Out-of-range shader uniform initializer: " + literal, failure); }
+            if (!Double.isFinite(value)) throw new UnsupportedOperationException("Non-finite shader uniform initializer");
+            defaults.add(new UniformDefault(initializers.group(3), integer, value));
+            translated.append(source, start, initializers.start()).append(initializers.group(1)).append(';');
+            start = initializers.end();
+        }
+        translated.append(source, start, source.length());
+        source = translated.toString().replaceAll("\\btexture2D\\b", "texture");
+        if (legacy) {
+            if (shaderTypes.get(id) == 0x8B31) {
+                source = source.replaceAll("(?m)^(\\s*)attribute\\b", "$1in");
+                source = source.replaceAll("(?m)^(\\s*)varying\\b", "$1out");
+            } else if (shaderTypes.get(id) == 0x8B30) {
+                source = source.replaceAll("(?m)^(\\s*)varying\\b", "$1in");
+            } else throw new UnsupportedOperationException("Unsupported legacy GLSL shader stage");
+        }
+        if (source.matches("(?s).*\\bgl_FragColor\\b.*")) {
+            if (shaderTypes.get(id) != 0x8B30) throw new UnsupportedOperationException("Fragment output used outside fragment shader");
+            source = source.replaceAll("\\bgl_FragColor\\b", "portFragmentOutput");
+            int header = source.indexOf('\n');
+            source = source.substring(0, header + 1) + "layout(location=0) out highp vec4 portFragmentOutput;\n" + source.substring(header + 1);
+        }
+        return source;
+    }
+
+    private static final class UniformDefault {
+        final String name;
+        final boolean integer;
+        final double value;
+        UniformDefault(String name, boolean integer, double value) {
+            this.name = name; this.integer = integer; this.value = value;
+        }
+    }
     public static String glGetProgramInfoLog(int id) { return context.getProgramInfoLog(program(id)); }
     public static String glGetProgramInfoLog(int id, int maxLength) { return limitLog(glGetProgramInfoLog(id), maxLength); }
+    public static void glBindAttribLocation(int id, int index, CharSequence name) {
+        context.bindAttribLocation(program(id), index, name.toString());
+    }
+    public static int glGetAttribLocation(int id, CharSequence name) {
+        return context.getAttribLocation(program(id), name.toString());
+    }
+    public static void glDetachShader(int id, int shader) {
+        context.detachShader(program(id), shader(shader));
+        ArrayList<Integer> attached = programShaders.get(id);
+        if (attached != null) attached.remove(Integer.valueOf(shader));
+    }
+    public static void glValidateProgram(int id) {
+        context.validateProgram(program(id));
+        shaderDiagnostics.append("validate ").append(id).append(" status ")
+                .append(context.getProgramParameterb(program(id), 0x8B83)).append(" log ")
+                .append(context.getProgramInfoLog(program(id))).append('\n');
+    }
+    public static String glGetActiveUniform(int id, int index, int maxLength, IntBuffer size, IntBuffer type) {
+        if (maxLength < 0) throw new IllegalArgumentException("Negative uniform name length");
+        if (size != null && size.remaining() < 1 || type != null && type.remaining() < 1)
+            throw new IllegalArgumentException("Uniform metadata buffer is empty");
+        WebGLActiveInfo info = context.getActiveUniform(program(id), index);
+        if (info == null) return "";
+        if (size != null) size.put(size.position(), info.getSize());
+        if (type != null) type.put(type.position(), info.getType());
+        String name = info.getName();
+        return name.substring(0, Math.min(name.length(), Math.max(0, maxLength - 1)));
+    }
+
+    public static double uniformScalar(int id, String name) {
+        WebGLProgram program = program(id);
+        WebGLUniformLocation location = context.getUniformLocation(program, name);
+        if (location == null) throw new IllegalArgumentException("Uniform not active: " + name);
+        return scalarUniform(context, program, location);
+    }
+
+    @JSBody(params = {"gl", "program", "location"}, script = "const value=gl.getUniform(program,location); if(typeof value!=='number')throw new Error('Uniform is not scalar'); return value;")
+    private static native double scalarUniform(WebGL2RenderingContext gl, WebGLProgram program, WebGLUniformLocation location);
     public static int glGetProgrami(int id, int parameter) {
         if (parameter == 0x8B82 || parameter == 0x8B83 || parameter == 0x8B80) return context.getProgramParameterb(program(id), parameter) ? 1 : 0;
         if (parameter == 0x8B84) return glGetProgramInfoLog(id).length() + 1;

@@ -150,3 +150,8 @@ The separate fast-analysis full-exposure compile also exhausted the same 8 GB he
 
 
 `image-texture` now executes original ImageData and TextureID loading/upload with the same menu PNG profile. It verifies the original render-context callback and image disposal, and independently matches every 128-by-128 padded GPU pixel against browser decoding. This remains a texture integration, not a rendered game menu. The direct-memory check now includes owned byte allocation, range filling and real byte addresses (nine cases/59 assertions).
+
+`reflection-vectors` expands actual Lua reflection to original GameVersion, Vector2 and IsoDirections. Five browser cases/ten outputs pass, including vector normalization/scaling, copies, enum identity, rotation and direction conversion. All original declared members are retained; missing JDK Constable metadata is explicitly reported. This remains bounded exposure rather than full LuaManager.init.
+
+The original default shader now passes real browser compilation, linking, uniform and attribute checks (default-shader). The alternative [browser JVM workflow](browser-jvm/README.md) qualifies original PNG decoding and real GPU output using CheerpJ with an explicitly documented private class-file copy view. Neither route is playable yet.
+

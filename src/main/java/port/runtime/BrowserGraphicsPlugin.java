@@ -1,6 +1,7 @@
 package port.runtime;
 
 import org.teavm.model.ElementModifier;
+import org.teavm.model.AccessLevel;
 import org.teavm.model.MethodDescriptor;
 import org.teavm.model.MethodHolder;
 import org.teavm.model.MethodReference;
@@ -15,13 +16,48 @@ public final class BrowserGraphicsPlugin implements TeaVMPlugin {
     @Override public void install(TeaVMHost host) {
         if (!Boolean.getBoolean("port.webgl")) return;
         host.add((cls, context) -> {
-            if (cls.getName().equals("org.lwjgl.opengl.GL")) {
+            if (cls.getName().equals(BrowserCapabilities.class.getName())) {
+                MethodHolder method = required(cls.getMethod(new MethodDescriptor("createDescriptor",
+                        ValueType.object("org.lwjgl.opengl.GLCapabilities"))), "createDescriptor");
+                method.getModifiers().remove(ElementModifier.NATIVE);
+                ProgramEmitter body = ProgramEmitter.create(method, context.getHierarchy());
+                body.construct("org.lwjgl.opengl.GLCapabilities").returnValue();
+            } else if (cls.getName().equals("org.lwjgl.opengl.GLCapabilities")) {
+                // The browser never publishes desktop native function addresses or
+                // claims a complete desktop version. Missing selected APIs still fail.
+                MethodHolder constructor = new MethodHolder(new MethodDescriptor("<init>", ValueType.VOID));
+                if (cls.getMethod(constructor.getDescriptor()) != null) throw new IllegalStateException("Vendor capabilities constructor changed");
+                constructor.setLevel(AccessLevel.PUBLIC);
+                cls.addMethod(constructor);
+                ProgramEmitter body = ProgramEmitter.create(constructor, context.getHierarchy());
+                body.var(0, ValueType.object(cls.getName())).invokeSpecial(Object.class, "<init>");
+                body.exit();
+            } else if (cls.getName().equals("org.lwjglx.opengl.Display")) {
+                MethodHolder original = required(cls.getMethod(new MethodDescriptor("<clinit>", ValueType.VOID)), "Display.<clinit>");
+                cls.removeMethod(original);
+                MethodHolder defaults = new MethodHolder(new MethodDescriptor("portInitializeDefaults", ValueType.VOID));
+                defaults.getModifiers().add(ElementModifier.STATIC);
+                defaults.setLevel(AccessLevel.PRIVATE);
+                defaults.setProgram(original.getProgram());
+                cls.addMethod(defaults);
+                MethodHolder initializer = new MethodHolder(new MethodDescriptor("<clinit>", ValueType.VOID));
+                initializer.getModifiers().add(ElementModifier.STATIC);
+                cls.addMethod(initializer);
+                ProgramEmitter body = ProgramEmitter.create(initializer, context.getHierarchy());
+                body.invoke(new MethodReference(cls.getName(), defaults.getDescriptor()));
+                body.setField(cls.getName(), "capabilities", body.invoke(BrowserCapabilities.class, "get", org.lwjgl.opengl.GLCapabilities.class));
+                body.exit();
+            } else if (cls.getName().equals("org.lwjgl.opengl.GL")) {
                 for (String name : new String[]{"<clinit>", "initialize"}) {
                     MethodHolder method = required(cls.getMethod(new MethodDescriptor(name, ValueType.VOID)), name);
                     ProgramEmitter body = ProgramEmitter.create(method, context.getHierarchy());
-                    body.invoke(BrowserGraphics.class, "initialize");
+                    body.invoke(BrowserCapabilities.class, "get", org.lwjgl.opengl.GLCapabilities.class);
                     body.exit();
                 }
+                MethodHolder capabilities = required(cls.getMethod(new MethodDescriptor("getCapabilities",
+                        ValueType.object("org.lwjgl.opengl.GLCapabilities"))), "GL.getCapabilities");
+                ProgramEmitter body = ProgramEmitter.create(capabilities, context.getHierarchy());
+                body.invoke(BrowserCapabilities.class, "get", org.lwjgl.opengl.GLCapabilities.class).returnValue();
             } else if (cls.getName().equals("org.lwjgl.opengl.GL20C")) {
                 for (MethodDescriptor descriptor : new MethodDescriptor[]{
                     new MethodDescriptor("glCreateShader", ValueType.INTEGER, ValueType.INTEGER),
@@ -31,6 +67,12 @@ public final class BrowserGraphicsPlugin implements TeaVMPlugin {
                     new MethodDescriptor("glGetShaderInfoLog", ValueType.INTEGER, ValueType.INTEGER, ValueType.object("java.lang.String")),
                     new MethodDescriptor("glCreateProgram", ValueType.INTEGER),
                     new MethodDescriptor("glAttachShader", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glBindAttribLocation", ValueType.INTEGER, ValueType.INTEGER, ValueType.object("java.lang.CharSequence"), ValueType.VOID),
+                    new MethodDescriptor("glGetAttribLocation", ValueType.INTEGER, ValueType.object("java.lang.CharSequence"), ValueType.INTEGER),
+                    new MethodDescriptor("glDetachShader", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glValidateProgram", ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glGetActiveUniform", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER,
+                            ValueType.object("java.nio.IntBuffer"), ValueType.object("java.nio.IntBuffer"), ValueType.object("java.lang.String")),
                     new MethodDescriptor("glLinkProgram", ValueType.INTEGER, ValueType.VOID),
                     new MethodDescriptor("glGetProgrami", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER),
                     new MethodDescriptor("glGetProgramInfoLog", ValueType.INTEGER, ValueType.INTEGER, ValueType.object("java.lang.String")),
