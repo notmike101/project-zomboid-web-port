@@ -95,9 +95,9 @@ These are bounded qualifications, not independent claims that the complete game 
 
 ## Current limits
 
-The complete survival game, zombie population simulation, full Bullet dynamics, clothing composition, audio, menus, native saves and broad streaming are not qualified. The connected bootstrap loads all 1,004 vanilla script files, genuine clothing XML and the bounded loot/container Lua dependencies. This preserves original definition loading; complete game Lua, additional model/texture readiness and original object rendering remain separate work. Unsupported host operations fail explicitly.
+The complete survival game, zombie population simulation, full Bullet dynamics, clothing composition, audio, menus, native saves and broad streaming are not qualified. The connected bootstrap loads all 1,004 vanilla script files, genuine clothing XML and the bounded loot/container Lua dependencies. This preserves original definition loading; complete game Lua, additional model/texture readiness and complete original world rendering remain separate work. Unsupported host operations fail explicitly.
 
-A separate original-renderer qualification now creates all eight original scene shader programs and renders 35 genuine non-floor map objects, including walls and furniture, with an observed 44,177-pixel contribution. That bounded check mounts five genuine depth images; the full 219-image initialization still reaches JNI exhaustion. The public walking session continues to present floors and the body while full depth loading and continuous object presentation are integrated.
+A separate original-renderer qualification now loads all 219 genuine depth images, creates all eight original scene shader programs and renders 35 genuine non-floor map objects with an observed 33,932-pixel contribution. Immediate release of owned direct buffers resolves the former depth-loading JNI exhaustion; native buffer usage returns to its starting value. The public walking session continues to present floors and the body while continuous original scene presentation is integrated.
 
 The original region worker belongs to the dedicated browser-JVM context lifetime because its original reset busy-waits without yielding. Closing the owned browser releases that runtime; same-JVM engine reset/reuse is not supported. Installed native saves are never mounted.
 
@@ -110,9 +110,12 @@ Work continues on **main**. Use conventional commits, verify logical increments 
 ~~~powershell
 npm run lint
 node browser-jvm/verify-glsl-compat.mjs
+node browser-jvm/verify-native-memory.mjs
 ~~~
 
 The shader qualification uses the `PZ_BROWSER` executable set above. It checks actual WebGL2 compilation and exact pixels with Chromium's SwiftShader backend, including overload selection, integer arithmetic, legacy color varyings and uniform-dependent global initialization across composed shader units. It does not establish physical-GPU or complete GLSL conformance.
+
+The native-memory qualification also uses `PZ_JDK` and requires the prepared play profile's `sprite-view.jar`. It checks immediate native storage release for owned byte/float/integer buffers, rejects foreign and repeated frees, and verifies the prepared archive is unchanged. The graphics host explicitly relies on the qualified Java 17 runtime's `sun.misc.Unsafe.invokeCleaner` support; unavailable support fails initialization.
 
 Lint runs ESLint with **--max-warnings 0**, using the actual @notmike101/eslint-config-js and @notmike101/eslint-config-jsdoc configurations. Authored Node, browser and inline HTML scripts are included. Package provenance is recorded in [vendor/eslint-configs/README.md](vendor/eslint-configs/README.md).
 

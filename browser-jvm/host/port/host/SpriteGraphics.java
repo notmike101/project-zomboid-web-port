@@ -7,6 +7,17 @@ import org.lwjgl.opengl.GLCapabilities;
 /** Selected LWJGL facade for actual browser graphics. No native pointer ABI. */
 public final class SpriteGraphics {
     private static final IdentityHashMap<Buffer,ByteBuffer> allocations = new IdentityHashMap<>();
+    private static final sun.misc.Unsafe memory = memory();
+    // The qualified Java 17 runtime supports immediate direct-buffer release; fail initialization if unavailable.
+    private static sun.misc.Unsafe memory() {
+        try {
+            var field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            return (sun.misc.Unsafe) field.get(null);
+        } catch (ReflectiveOperationException failure) {
+            throw new ExceptionInInitializerError(failure);
+        }
+    }
     private static GLCapabilities capabilities;
     private static Thread contextOwner;
     private static boolean requestedVsync;
@@ -41,13 +52,46 @@ public final class SpriteGraphics {
     public static boolean requestedVsync(){return requestedVsync;}
     public static native void present(boolean vsync);
 
-    public static ByteBuffer memAlloc(int bytes){if(bytes<0)throw new IllegalArgumentException("Negative capacity");ByteBuffer owner=ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());allocations.put(owner,owner);return owner;}
-    public static FloatBuffer memAllocFloat(int count){ByteBuffer owner=memAlloc(Math.multiplyExact(count,4));allocations.remove(owner);FloatBuffer view=owner.asFloatBuffer();allocations.put(view,owner);return view;}
-    public static IntBuffer memAllocInt(int count){ByteBuffer owner=memAlloc(Math.multiplyExact(count,4));allocations.remove(owner);IntBuffer view=owner.asIntBuffer();allocations.put(view,owner);return view;}
+    public static ByteBuffer memAlloc(int bytes) {
+        if (bytes < 0) throw new IllegalArgumentException("Negative capacity");
+        ByteBuffer owner = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
+        synchronized (allocations) {
+            allocations.put(owner, owner);
+        }
+        return owner;
+    }
+
+    public static FloatBuffer memAllocFloat(int count) {
+        ByteBuffer owner = memAlloc(Math.multiplyExact(count, 4));
+        FloatBuffer view = owner.asFloatBuffer();
+        synchronized (allocations) {
+            allocations.remove(owner);
+            allocations.put(view, owner);
+        }
+        return view;
+    }
+
+    public static IntBuffer memAllocInt(int count) {
+        ByteBuffer owner = memAlloc(Math.multiplyExact(count, 4));
+        IntBuffer view = owner.asIntBuffer();
+        synchronized (allocations) {
+            allocations.remove(owner);
+            allocations.put(view, owner);
+        }
+        return view;
+    }
     public static void memFree(ByteBuffer value){free(value);}
     public static void memFree(FloatBuffer value){free(value);}
     public static void memFree(IntBuffer value){free(value);}
-    private static void free(Buffer value){if(value!=null&&allocations.remove(value)==null)throw new IllegalArgumentException("Foreign or released browser allocation");}
+    private static void free(Buffer value) {
+        if (value == null) return;
+        synchronized (allocations) {
+            ByteBuffer owner = allocations.get(value);
+            if (owner == null) throw new IllegalArgumentException("Foreign or released browser allocation");
+            memory.invokeCleaner(owner);
+            allocations.remove(value);
+        }
+    }
     public static void memSet(ByteBuffer value,int fill){if(!value.isDirect())throw new IllegalArgumentException("Direct buffer required");if(value.isReadOnly())throw new ReadOnlyBufferException();for(int i=value.position();i<value.limit();i++)value.put(i,(byte)fill);}
 
     public static native int bufferCreate();
