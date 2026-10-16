@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+import { createMediaHandler } from './media-files.mjs';
 
 const source = fileURLToPath(new URL('./', import.meta.url));
 const repository = path.resolve(source, '..');
@@ -204,6 +205,7 @@ let browser;
 let server;
 const evidence = { pass: false, runtime: 'CheerpJ 4.3 Java17', closed: false };
 const assetHashes = [];
+const activeMediaRequests = new Set();
 
 /**
  * Runs a compiler or preparation tool and records its result.
@@ -547,6 +549,15 @@ try {
         evidence.runtimeAdaptations = JSON.parse(await readFile(path.join(output, 'float-bridge-summary.json'), 'utf8'));
     }
 
+    const mediaHandler = await createMediaHandler(options['media-root'], async (file) => {
+        try {
+            assetHashes.push({ name: `media/${path.relative(options['media-root'], file).split(path.sep).join('/')}`, file, sha256Before: await hash(file) });
+        } catch (error) {
+            (evidence.mediaReadErrors ||= []).push(String(error));
+            throw error;
+        }
+    });
+
     server = createServer(async (request, response) => {
         try {
             if (!['GET', 'HEAD'].includes(request.method)) {
@@ -555,10 +566,22 @@ try {
                 return;
             }
 
-            // Match the raw path. Never resolve a request path against the filesystem.
+            // Prepared routes take precedence; the media fallback validates its canonical root.
             const route = routes.get(request.url);
 
             if (!route) {
+                const pending = mediaHandler(request, response);
+
+                activeMediaRequests.add(pending);
+
+                try {
+                    if (await pending) {
+                        return;
+                    }
+                } finally {
+                    activeMediaRequests.delete(pending);
+                }
+
                 response.writeHead(404).end();
 
                 return;
@@ -633,7 +656,7 @@ try {
         const item = { url: request.url(), method: request.method(), postDataBytes: request.postDataBuffer()?.length || 0 };
 
         requests.push(item);
-        const local = url.origin === origin && routes.has(url.pathname) && !url.search;
+        const local = url.origin === origin && !url.search && (routes.has(url.pathname) || url.pathname === '/media' || url.pathname.startsWith('/media/'));
         const runtime = url.origin === 'https://cjrtnc.leaningtech.com' && url.pathname.startsWith('/4.3/');
 
         if (!['GET', 'HEAD'].includes(request.method()) || item.postDataBytes || (!local && !runtime)) {
@@ -772,7 +795,12 @@ try {
         }
     }
 
+    await Promise.allSettled([...activeMediaRequests]);
     evidence.closed = cleanupErrors.length === 0;
+
+    if (evidence.mediaReadErrors?.length) {
+        evidence.pass = false;
+    }
 
     if (cleanupErrors.length) {
         evidence.cleanupErrors = cleanupErrors;

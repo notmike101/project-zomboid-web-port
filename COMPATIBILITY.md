@@ -1,15 +1,25 @@
 # Incremental original-bytecode compatibility
 
+## Complete media filesystem discovery in the browser
+
+The original `ZomboidFileSystem.instance.init()` now passes in a separate fresh CheerpJ 4.3 / Java 17 browser context with `user.dir=/app`. A lazy HTTP handler exposes the installed media tree through read-only `/app/media` access, including generated immediate-child `index.list` responses and actual byte ranges. It mapped 47,437 original active paths, including 1,004 script paths and 2,680 Lua paths. Original `getMediaFile("scripts/generated/items/weapon.txt")` resolved and read 622,382 bytes with SHA-256 matching the installed source. The 278-second qualification includes final source-hash verification.
+
+All 47,416 byte-served media files and the original JAR retained their before/after hashes; the browser made 97,839 allowed read-only requests, including 4,148 directory listings, and closed with no forbidden requests. Two nonexistent `media/anims` probes returned 404 and two probes for a genuine zero-byte XML file returned 416, without preventing original initialization. No original game/server entry point, Lua/world bootstrap or native save was accessed by this filesystem-only probe. The public walking bootstrap retains its separately qualified prepared closure.
+
+`verify-media-files.mjs` checks the production handler's lazy directory discovery, range/HEAD behavior, concurrent integrity checks, failed-check rejection, traversal and external-junction containment, reserved listing-name conflicts and unchanged source data. The runner mounts this fallback after its explicit prepared routes and includes dynamically read files in its existing before/after integrity evidence. This qualifies original media discovery and resource access, not all later consumers or whole-game playability.
+
 ## Current answer
 
-Useful isolated Java gameplay logic can run unchanged in browser WASM.
+The connected CheerpJ browser-JVM route runs original world/player updates and a bounded nine-chunk walking scene, with complete vanilla script definitions and separately qualified original object rendering. The full survival game remains incomplete. The sections below retain the incremental evidence for both runtime routes; later sections record the connected browser milestones.
+
+For the separate TeaVM AOT route, useful isolated Java gameplay logic can run unchanged in browser WASM.
 We have verified eight gameplay classes and two supporting nested types across seven JVM/browser probes.
 The current total is **72 cases and 440 exact output comparisons**, with zero mismatches or browser errors.
 Two larger compile-only diagnostics fail. They are not included in the passing totals.
 
 This is not a percentage of the game. Class counts do not measure playable coverage or integration cost.
 The JAR contains 23,829 class files, including 5,095 under `zombie/`. Most remain unexamined.
-No world or character simulation has run in the browser. The two installed Lua helpers described below now execute unchanged through the shipped compiler/interpreter.
+Those TeaVM modules do not include world or character simulation. The two installed Lua helpers described below execute unchanged through the shipped compiler/interpreter. Original world/player simulation in the connected browser JVM is qualified separately later in this document.
 
 ## Evidence levels
 

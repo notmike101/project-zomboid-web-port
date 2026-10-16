@@ -95,3 +95,9 @@ The subsequent complete-depth check supersedes that resource limit: all 219 genu
 Set `PZ_BROWSER` as in the root README and run `node browser-jvm/verify-glsl-compat.mjs` for eight exact-pixel WebGL2 cases, including composed library global initialization. The check uses Chromium SwiftShader and releases its browser/server. It requires no game assets; the proprietary original-source/rendering evidence stays local and untracked.
 
 After public play preparation, set `PZ_JDK` and `PZ_BROWSER` and run `node browser-jvm/verify-native-memory.mjs`. It compiles only the authored native ownership qualification, serves the prepared play graphics archive read-only, checks actual immediate allocation/free accounting and verifies the archive hash after browser cleanup.
+
+## Lazy installed-media access
+
+The runner serves explicit prepared routes first, then exposes additional installed media through a read-only, canonical-root HTTP handler. Requested file ranges are streamed from disk after their first integrity check; directory `index.list` metadata is generated in memory. The handler rejects traversal, external junction targets and conflicting listing names. Dynamically read files join the runner's before/after hash evidence. `node browser-jvm/verify-media-files.mjs` checks these contracts without game assets or a browser.
+
+A separate fresh CheerpJ filesystem qualification uses `user.dir=/app` and the unchanged original `ZomboidFileSystem.init()` to map 47,437 real installed paths. An original 622,382-byte script read matches its installed SHA-256, and all 47,416 byte-served files retain their hashes after closure. This does not change the public walking bootstrap's `/files/work` prepared-content lifecycle or qualify full Lua initialization.

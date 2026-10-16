@@ -103,12 +103,15 @@ The original region worker belongs to the dedicated browser-JVM context lifetime
 
 Prepared assets and generated archives are private local outputs. Keep snapshots and manifests from the same preparation generation together, and do not rebuild a profile's output while another browser is serving that same directory.
 
+The local server also provides a lazy, read-only view of the complete installed media directory. It streams requested file ranges and generates directory listings in memory; it never writes listing files into the installation. In a separate fresh-browser qualification, original `ZomboidFileSystem.init()` mapped 47,437 paths through this service, and an original script read matched its source hash. All 47,416 byte-served source files retained their hashes. The public walking bootstrap still uses its prepared asset closure; full-media discovery does not establish full Lua or world initialization.
+
 ## Development
 
 Work continues on **main**. Use conventional commits, verify logical increments and push them regularly. Follow [AGENTS.md](AGENTS.md) for contribution identity, source preservation and verification rules.
 
 ~~~powershell
 npm run lint
+node browser-jvm/verify-media-files.mjs
 node browser-jvm/verify-glsl-compat.mjs
 node browser-jvm/verify-native-memory.mjs
 ~~~

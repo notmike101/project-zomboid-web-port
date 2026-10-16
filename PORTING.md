@@ -1,5 +1,11 @@
 # Toward a playable original-bytecode port
 
+## Full installed media discovery
+
+The lazy media service removes the prepared-file whitelist as a filesystem discovery limit. In a separate fresh browser JVM with `user.dir=/app`, original `ZomboidFileSystem.init()` discovers 47,437 active paths through the real installed tree. Original script access returns matching bytes; 47,416 byte-served source files and the installed JAR retain their hashes after the run. Directory metadata is generated in server memory, and canonical-path containment prevents traversal or external-junction reads.
+
+The connected runner now offers this read-only fallback alongside prepared routes, but its walking bootstrap still uses the existing bounded content setup. Full Lua loading, `ScriptManager.LoadedAfterLua()` and whole-game startup remain unqualified. Integrate those original lifecycles incrementally with explicit failure evidence; do not infer readiness from the complete filesystem scan. Continue original cell rendering through actual polygon, lighting and GPU state services rather than growing the authored scene painter.
+
 ## Working direction
 
 Preserve the original game implementation where its behavior can be verified.
