@@ -1,12 +1,18 @@
 # Incremental original-bytecode compatibility
 
+## Original boot event before world creation
+
+Connected play now delivers original `OnGameBoot` after model initialization, before world/player creation, matching that part of original GameWindow entry order. Its genuine registered callbacks produce 20 hair colors, 11 trouser colors, 3,799 surnames, 1,320 female forenames and 993 male forenames. The same counts remain through the 131-frame public regression, which passes all existing input/navigation/render/queue/error/hash/cleanup gates. The host's earlier direct hair bootstrap runs only for selective qualification profiles whose original hair list is still empty; it no longer duplicates the complete boot event's data.
+
+This phase does not call `LoadedAfterLua`. Original GameLoadingState loads server Lua before that later method. The installation contains 294 server Lua files / 3,680,192 bytes; parser-only inspection compiles all of them, but complete server execution is not yet integrated. A separate private component check of `LoadedAfterLua` returns without load errors with 219 entities and 969 crafting recipes; it does not establish the complete game-loading phase.
+
 ## Complete original client Lua in connected play
 
 All 727 original client Lua sources now load through `LuaManager.LoadDirBase("client")` after the 374 shared sources and complete script definitions, before model/world/player creation. Genuine Languages, Translator and font initialization provide the original top-level prerequisites. Original tables, event registrations and RunLua caching are preserved. The separate client archive contains 2,314 unchanged inputs / 41,999,146 bytes: 727 Lua files, five client PNGs, 1,538 UI PNGs and 44 English translation inputs. Repeated preparation is deterministic and independently matches every private qualified name, size and source SHA.
 
 The connected browser regression passes 131 frames with zero shared/client Lua errors and zero swallowed initialization errors, ready fonts, actual keyboard movement/release and original navigation/animation. Both action queues are empty, the path clears and the player returns idle. All 8,905 monitored asset hashes and the game JAR match, denied requests are zero, and original session/resource cleanup completes. This qualifies the existing lifecycle with all client callbacks installed; it does not establish every registered callback, global tick event, menu or complete game startup.
 
-A separate private browser probe additionally executes original `ScriptManager.LoadedAfterLua()` without load errors and original `OnGameBoot` data callbacks. It records 219 entities, 969 crafting recipes, 20 hair colors, 11 trouser colors and the original surname/forename lists. No item filters are defined in this input set; the probe records zero rather than inventing a nonempty filter test. Menu/game-start events and the connected post-Lua/boot integration remain separate work.
+A separate private browser probe additionally executes original `ScriptManager.LoadedAfterLua()` without load errors. It records 219 entities and 969 crafting recipes. No item filters are defined in this input set; the probe records zero rather than inventing a nonempty filter test. Original boot-data callbacks now have connected evidence above; menu/game-start events and the complete post-server-Lua phase remain separate work.
 
 ## Original font lifecycle in connected play
 

@@ -64,10 +64,14 @@ public final class BrowserWorldBootstrap implements AutoCloseable {
         if (LuaManager.thread == null || LuaManager.exposer == null)
             throw new IllegalStateException("Original Lua environment is incomplete");
         Path work = Path.of("/files/work");
-        try (Reader reader = new FileReader(work.resolve("media/lua/shared/NPCs/MainCreationMethods.lua").toFile())) {
-            checkLua(LuaManager.thread.pcall(LuaCompiler.loadis(reader, "MainCreationMethods.lua", LuaManager.env), new Object[0]));
+        // Full client boot populates these through OnGameBoot. Selective qualification profiles
+        // still initialize only the original hair data needed by their actor constructor.
+        if (zombie.characters.SurvivorDesc.HairCommonColors.isEmpty()) {
+            try (Reader reader = new FileReader(work.resolve("media/lua/shared/NPCs/MainCreationMethods.lua").toFile())) {
+                checkLua(LuaManager.thread.pcall(LuaCompiler.loadis(reader, "MainCreationMethods.lua", LuaManager.env), new Object[0]));
+            }
+            checkLua(LuaManager.thread.pcall(LuaCompiler.loadstring("BaseGameCharacterDetails.DoHairColor()", "character-bootstrap", LuaManager.env), new Object[0]));
         }
-        checkLua(LuaManager.thread.pcall(LuaCompiler.loadstring("BaseGameCharacterDetails.DoHairColor()", "character-bootstrap", LuaManager.env), new Object[0]));
         if (zombie.characters.SurvivorDesc.HairCommonColors.isEmpty()) throw new AssertionError("Original hair colors absent");
         zombie.core.skinnedmodel.population.HairStyles.init();
         zombie.core.skinnedmodel.population.BeardStyles.init();

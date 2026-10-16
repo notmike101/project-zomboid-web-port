@@ -63,6 +63,9 @@ public final class BrowserInteractivePlay {
             if (verifyNavigation) PlayerNavigationQualification.mountAssets();
             BrowserModelBootstrap.open(value -> { stage = value; progress(value); });
             installRuntimeLogTransport();
+            stage = "original-game-boot-event";
+            progress(stage);
+            BrowserContentBootstrap.gameBoot();
             stage = "original-spawn-in-loaded-cell";
             try (BrowserWorldBootstrap world = BrowserWorldBootstrap.openAt(153, 158, 0, cell -> {
                 stage = "original-item-factory";
@@ -217,6 +220,7 @@ public final class BrowserInteractivePlay {
                                 + ",\"clientLuaFiles\":" + BrowserContentBootstrap.getClientLuaFiles()
                                 + ",\"clientLuaErrors\":" + BrowserContentBootstrap.getClientLuaErrors() + "}"
                                 + ",\"fonts\":" + BrowserFontBootstrap.snapshot()
+                                + ",\"boot\":" + BrowserContentBootstrap.bootSnapshot()
                                 + ",\"navigation\":" + navigation + ",\"final\":" + session.snapshot() + ",\"composition\":" + composition + ",\"frame\":" + capture + "}";
                     }
                 } finally { player.releaseAnimationPlayer(); }

@@ -111,6 +111,8 @@ The public verification command also queues the installed original Lua walk acti
 
 The connected bootstrap also loads the original English fonts through `TextManager.Init()` and the genuine `UI.pack`, preserving original font choices and asynchronous texture loading. All 34 font lookups have ready glyph pages and positive original measurements; four retain the game's Small-font fallback. The original SDF shader compiles. A separate original bitmap `DrawString` GPU check produces 573 glyph pixels; complete menus, alternate languages/scales and SDF pixel rendering remain unqualified. The local font archive contains 348 unchanged original inputs and is prepared automatically by the play command.
 
+Original `OnGameBoot` now runs after model initialization and before world/player creation. Its actual callbacks populate 20 hair colors, 11 trouser colors and the original name lists; the connected actor no longer relies on the earlier direct hair-only initialization. The later full server-Lua and post-Lua game-loading phase is still being integrated.
+
 The original region worker belongs to the dedicated browser-JVM context lifetime because its original reset busy-waits without yielding. Closing the owned browser releases that runtime; same-JVM engine reset/reuse is not supported. Installed native saves are never mounted.
 
 Prepared assets and generated archives are private local outputs. Keep snapshots and manifests from the same preparation generation together, and do not rebuild a profile's output while another browser is serving that same directory.

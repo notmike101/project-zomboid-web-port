@@ -796,6 +796,10 @@ try {
             && evidence.result.fonts.sdfShaderId > 0 && evidence.result.fonts.lookups?.length === 34
             && evidence.result.fonts.lookups.every((font) => Number.isInteger(font.height) && font.height > 0
                 && Number.isInteger(font.width) && font.width > 0);
+        evidence.originalBootCompleted = evidence.result.boot?.gameBootCompleted === true
+            && evidence.result.boot.hairColors === 20 && evidence.result.boot.trouserColors === 11
+            && evidence.result.boot.surnames === 3_799 && evidence.result.boot.femaleNames === 1_320
+            && evidence.result.boot.maleNames === 993;
         evidence.initializationErrors = logs.filter((line) => line.includes('IsoChunk.loadGridSquareIfNeeded> Exception thrown')
             || line.includes('RandomizedBuildingBase.ChunkLoaded> Exception thrown')
             || (line.includes('LuaManager.getFunctionObject') && line.includes('no such function'))
@@ -809,7 +813,7 @@ try {
             && (evidence.heldInput.x !== evidence.pressedInput.x || evidence.heldInput.y !== evidence.pressedInput.y);
         evidence.inputReleased = evidence.releasedInput?.inputX === 0 && evidence.releasedInput?.inputY === 0
             && evidence.releasedInput.frames >= evidence.heldInput?.frames + 4 && evidence.zeroInputFrames >= 4;
-        evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded && evidence.contentLoaded && evidence.fontsLoaded
+        evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded && evidence.contentLoaded && evidence.fontsLoaded && evidence.originalBootCompleted
             && evidence.initializationErrors.length === 0 && evidence.luaErrors.length === 0
             && (interactive || (evidence.inputPressed && evidence.normalMovement && evidence.inputReleased));
         evidence.playerNavigationQualified = evidence.result.navigation?.pass === true

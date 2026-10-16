@@ -50,6 +50,7 @@ public final class BrowserContentBootstrap {
     private static int clientLuaFiles;
     private static int clientLuaErrors;
     private static boolean clientMounted;
+    private static boolean gameBootCompleted;
 
     private BrowserContentBootstrap() { }
 
@@ -57,6 +58,29 @@ public final class BrowserContentBootstrap {
     public static int getSharedLuaErrors() { return sharedLuaErrors; }
     public static int getClientLuaFiles() { return clientLuaFiles; }
     public static int getClientLuaErrors() { return clientLuaErrors; }
+
+    /** Original GameWindow.enter delivers this event after ModelManager.create, before world creation. */
+    public static void gameBoot() {
+        if (gameBootCompleted || clientLuaFiles != 727 || !zombie.core.skinnedmodel.ModelManager.instance.isCreated())
+            throw new IllegalStateException("Unexpected original game-boot lifecycle");
+        LuaEventManager.triggerEvent("OnGameBoot");
+        if (zombie.characters.SurvivorDesc.HairCommonColors.size() != 20
+                || zombie.characters.SurvivorDesc.TrouserCommonColors.size() != 11
+                || zombie.characters.SurvivorFactory.Surnames.size() != 3799
+                || zombie.characters.SurvivorFactory.FemaleForenames.size() != 1320
+                || zombie.characters.SurvivorFactory.MaleForenames.size() != 993)
+            throw new AssertionError("Original game-boot character data differs from qualified scope");
+        gameBootCompleted = true;
+    }
+
+    public static String bootSnapshot() {
+        if (!gameBootCompleted) throw new IllegalStateException("Original game-boot phase is incomplete");
+        return "{\"gameBootCompleted\":true,\"hairColors\":" + zombie.characters.SurvivorDesc.HairCommonColors.size()
+                + ",\"trouserColors\":" + zombie.characters.SurvivorDesc.TrouserCommonColors.size()
+                + ",\"surnames\":" + zombie.characters.SurvivorFactory.Surnames.size()
+                + ",\"femaleNames\":" + zombie.characters.SurvivorFactory.FemaleForenames.size()
+                + ",\"maleNames\":" + zombie.characters.SurvivorFactory.MaleForenames.size() + "}";
+    }
 
     /** Mount real client/UI/translation inputs before the first ZFS scan. */
     public static void mountClientAssets() throws IOException {
