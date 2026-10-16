@@ -123,3 +123,16 @@ Set `PZ_LIGHTING_SDK` to a frozen copy of the prepared play SDK archives and run
 The shader normalizer also preserves original `texture2D` calls through a typed helper before original globals, allowing an original sampler named `texture`. `verify-glsl-compat.mjs` now includes exact texture pixels, preserved original uniform lookup, user overloads and composed library calls. Twelve original scene pairs separately compile/link, including circle-stencil and no-depth cutaway programs. Complete original cell rendering remains unqualified.
 
 The vendor display-mode query now reports one windowed mode using the actual WebGL drawing-buffer dimensions. It uses the unchanged vendor `DisplayMode(int,int)` constructor, retaining zero refresh-rate/color-depth metadata and `isFullscreenCapable()==false`; browser monitor-mode enumeration is unavailable. The production sprite gate exercises the vendor query and verifies the dimensions and metadata while retaining the original sprite queue/render path (9,216 visible pixels), all 15 preserved vendor constructor bodies, unchanged installed inputs, zero denied requests and browser cleanup. This admits enumeration only; fullscreen switching and the complete menu remain unqualified.
+
+The pinned CheerpJ4.3 Java17 runtime has a missing aligned two-byte store for byte arrays. `unsafe-short-repair.js` repairs that runtime boundary without changing original game serialization. It checks the exact `Unsafe.putShort` export source, preserves native byte order, delegates other receivers, and rejects a replaced installed wrapper. The full `cj3.js` SHA-256 (`5bcf00711009cbb12b858dcbea865cfe0e9d652cfc95f55ad20a600724462644`) records provenance; the enforced guard is the exact export source. A changed export requires requalification.
+
+After preparing the play profile, run the JVM/browser comparison with:
+
+```powershell
+$env:PZ_JDK = 'D:/zomboid-web-2/.tools/jdk-25.0.1+8'
+$env:PZ_BROWSER = 'C:/Users/me/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe'
+$env:PZ_GAME_JAR = 'C:/Games/steam/steamapps/common/ProjectZomboid/projectzomboid.jar'
+node browser-jvm/verify-unsafe-short.mjs
+```
+
+Use your local dependency paths. This gate compares 140 primitive rows and 26 original UTF/table rows exactly against the JVM: heap/direct buffers, alignment, byte order, negative values, character writes, slices, bounds/read-only/overflow behavior, actual Unsafe short-array/Java-field delegation, and null/empty/Unicode/astral/embedded-NUL strings. It also checks idempotence, wrapper replacement rejection and unchanged inputs. It runs authored data-only qualifiers; it does not start the installed game or server.
