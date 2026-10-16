@@ -373,11 +373,13 @@ try {
         const geometry = path.join(output, 'geometry-data');
         const tiles = path.join(output, 'tile-data');
         const content = path.join(output, 'content-data');
+        const fonts = path.join(output, 'font-data');
 
         await mkdir(playClasses, { recursive: true });
         await mkdir(geometry, { recursive: true });
         await mkdir(content, { recursive: true });
-        command(executable('javac'), ['-d', tools, path.join(source, 'PrepareGeometryAssets.java'), path.join(source, 'PrepareTilePack.java'), path.join(source, 'PrepareContentAssets.java')]);
+        await mkdir(fonts, { recursive: true });
+        command(executable('javac'), ['-d', tools, ...['PrepareGeometryAssets.java', 'PrepareTilePack.java', 'PrepareContentAssets.java', 'PrepareFontAssets.java'].map((name) => path.join(source, name))]);
         await boundedReadOnly(['Tiles1x.pack', 'Tiles1x.floor.pack'], async (name) => {
             const file = path.join(options['media-root'], 'texturepacks', name);
 
@@ -385,8 +387,9 @@ try {
         });
         command(executable('java'), ['-cp', tools, 'PrepareGeometryAssets', path.dirname(gameJar), geometry]);
         command(executable('java'), ['-cp', tools, 'PrepareContentAssets', path.dirname(gameJar), content]);
+        command(executable('java'), ['-cp', tools, 'PrepareFontAssets', path.dirname(gameJar), fonts]);
         command(executable('java'), ['-cp', tools, 'PrepareTilePack', path.join(options['media-root'], 'texturepacks/Tiles1x.pack'), path.join(options['media-root'], 'texturepacks/Tiles1x.floor.pack'), path.join(geometry, 'sprite-names.txt'), tiles]);
-        command(executable('javac'), ['--release', '17', '-cp', [gameJar, clipperJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', playClasses, ...['BrowserInteractivePlay.java', 'PlayerNavigationQualification.java', 'host/port/host/ClipperSupport.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserPlaySession.java', 'host/port/host/BrowserGeometry.java', 'host/port/host/BrowserTileTextures.java', 'host/port/host/CharacterRenderer.java', 'host/port/host/FloorMapRenderer.java', 'host/org/lwjgl/stb/STBImage.java'].map((name) => path.join(source, name))]);
+        command(executable('javac'), ['--release', '17', '-cp', [gameJar, clipperJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', playClasses, ...['BrowserInteractivePlay.java', 'PlayerNavigationQualification.java', 'host/port/host/ClipperSupport.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserFontBootstrap.java', 'host/port/host/BrowserPlaySession.java', 'host/port/host/BrowserGeometry.java', 'host/port/host/BrowserTileTextures.java', 'host/port/host/CharacterRenderer.java', 'host/port/host/FloorMapRenderer.java', 'host/org/lwjgl/stb/STBImage.java'].map((name) => path.join(source, name))]);
         command(executable('jar'), ['--create', '--file', path.join(output, 'play-entry.jar'), '-C', playClasses, '.']);
         const geometryRows = (await readFile(path.join(geometry, 'geometry-assets.tsv'), 'utf8')).trim().split(/\r?\n/u);
 
@@ -414,6 +417,19 @@ try {
             assetHashes.push({ name, file, sha256Before: sha256 });
         });
         evidence.contentAssets = { files: contentRows.length, archiveSha256: await hash(path.join(content, 'content-assets.jar')) };
+        const fontRows = (await readFile(path.join(fonts, 'font-assets.tsv'), 'utf8')).trim().split(/\r?\n/u);
+
+        await boundedReadOnly(fontRows, async (row) => {
+            const [name, size, sha256] = row.split('\t');
+            const file = path.resolve(path.dirname(gameJar), name);
+
+            if (!contained(path.dirname(gameJar), file) || !/^media\//u.test(name) || !/^\d+$/u.test(size) || !/^[a-f0-9]{64}$/u.test(sha256) || await hash(file) !== sha256) {
+                throw new Error(`Invalid or changed font manifest input: ${name}`);
+            }
+
+            assetHashes.push({ name, file, sha256Before: sha256 });
+        });
+        evidence.fontAssets = { files: fontRows.length, archiveSha256: await hash(path.join(fonts, 'font-assets.jar')) };
         evidence.tilePreparation = JSON.parse(await readFile(path.join(tiles, 'manifest.json'), 'utf8'));
         await writeFile(path.join(output, 'play.html'), (await readFile(path.join(source, 'play.html'), 'utf8')).replace('const interactive = false;', `const interactive = ${interactive};`));
         evidence.interactive = interactive;
@@ -520,6 +536,7 @@ try {
         routes.set('/play-entry.jar', { file: path.join(output, 'play-entry.jar'), type: 'application/java-archive' });
         routes.set('/geometry-assets.jar', { file: path.join(output, 'geometry-data/geometry-assets.jar'), type: 'application/java-archive' });
         routes.set('/content-assets.jar', { file: path.join(output, 'content-data/content-assets.jar'), type: 'application/java-archive' });
+        routes.set('/font-assets.jar', { file: path.join(output, 'font-data/font-assets.jar'), type: 'application/java-archive' });
 
         for (const name of ['Challenge1Tiles.pack', 'Tiles1x.floor.pack']) {
             routes.set(`/media/texturepacks/${name}`, { file: path.join(output, 'tile-data', name), type: 'application/octet-stream' });
@@ -757,6 +774,10 @@ try {
             && evidence.result.vanillaContent.vehicleScripts === 241 && evidence.result.vanillaContent.lootRooms === 423
             && evidence.result.vanillaContent.sharedLuaFiles === 374 && evidence.result.vanillaContent.sharedLuaErrors === 0
             && evidence.result.physics?.vehicleDefinitions?.length === 241 && evidence.result.physics.ragdollDefinitions?.length === 4;
+        evidence.fontsLoaded = evidence.result.fonts?.mapped === 30 && evidence.result.fonts.sdfCompiled === true
+            && evidence.result.fonts.sdfShaderId > 0 && evidence.result.fonts.lookups?.length === 34
+            && evidence.result.fonts.lookups.every((font) => Number.isInteger(font.height) && font.height > 0
+                && Number.isInteger(font.width) && font.width > 0);
         evidence.initializationErrors = logs.filter((line) => line.includes('IsoChunk.loadGridSquareIfNeeded> Exception thrown')
             || line.includes('RandomizedBuildingBase.ChunkLoaded> Exception thrown')
             || (line.includes('LuaManager.getFunctionObject') && line.includes('no such function'))
@@ -770,7 +791,7 @@ try {
             && (evidence.heldInput.x !== evidence.pressedInput.x || evidence.heldInput.y !== evidence.pressedInput.y);
         evidence.inputReleased = evidence.releasedInput?.inputX === 0 && evidence.releasedInput?.inputY === 0
             && evidence.releasedInput.frames >= evidence.heldInput?.frames + 4 && evidence.zeroInputFrames >= 4;
-        evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded && evidence.contentLoaded
+        evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded && evidence.contentLoaded && evidence.fontsLoaded
             && evidence.initializationErrors.length === 0 && evidence.luaErrors.length === 0
             && (interactive || (evidence.inputPressed && evidence.normalMovement && evidence.inputReleased));
         evidence.playerNavigationQualified = evidence.result.navigation?.pass === true

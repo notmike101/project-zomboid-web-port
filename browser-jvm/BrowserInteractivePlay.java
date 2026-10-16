@@ -10,6 +10,7 @@ import port.host.BrowserGeometry;
 import port.host.BrowserPlaySession;
 import port.host.BrowserWorldBootstrap;
 import port.host.BrowserContentBootstrap;
+import port.host.BrowserFontBootstrap;
 import port.host.CharacterRenderer;
 import port.host.SpriteGraphics;
 import port.host.FloorMapRenderer;
@@ -51,6 +52,7 @@ public final class BrowserInteractivePlay {
             zombie.SoundManager.instance = new zombie.DummySoundManager();
             zombie.AmbientStreamManager.instance = new zombie.DummyAmbientStreamManager();
             zombie.audio.BaseSoundBank.instance = new zombie.audio.DummySoundBank();
+            BrowserFontBootstrap.mountAssets();
             BrowserGeometry.mountAssets();
             mountFile("media/texturepacks/WeatherFx.pack");
             mountFile("media/textures/weather/fogcircle_tex.png");
@@ -107,6 +109,9 @@ public final class BrowserInteractivePlay {
                 stage = "original-climate-lifecycle";
                 progress(stage);
                 zombie.iso.weather.ClimateManager.getInstance().init(zombie.iso.IsoWorld.instance.getMetaGrid());
+                stage = "original-font-lifecycle";
+                progress(stage);
+                BrowserFontBootstrap.initialize();
                 stage = "original-early-ui-lifecycle";
                 progress(stage);
                 if (zombie.characters.IsoPlayer.getInstance() != null)
@@ -211,6 +216,7 @@ public final class BrowserInteractivePlay {
                                 + ",\"lootRooms\":" + zombie.inventory.ItemPickerJava.rooms.size()
                                 + ",\"sharedLuaFiles\":" + BrowserContentBootstrap.getSharedLuaFiles()
                                 + ",\"sharedLuaErrors\":" + BrowserContentBootstrap.getSharedLuaErrors() + "}"
+                                + ",\"fonts\":" + BrowserFontBootstrap.snapshot()
                                 + ",\"navigation\":" + navigation + ",\"final\":" + session.snapshot() + ",\"composition\":" + composition + ",\"frame\":" + capture + "}";
                     }
                 } finally { player.releaseAnimationPlayer(); }
@@ -227,6 +233,11 @@ public final class BrowserInteractivePlay {
             Throwable cleanupFailure = null;
             // The original daemon has no nonblocking request-exit API. Its owner is the sole browser JVM.
             try { if (geometry[0] != null) geometry[0].close(); }
+            catch (Throwable cleanup) {
+                if (cleanupFailure == null) cleanupFailure = cleanup;
+                else cleanupFailure.addSuppressed(cleanup);
+            }
+            try { BrowserFontBootstrap.close(); }
             catch (Throwable cleanup) {
                 if (cleanupFailure == null) cleanupFailure = cleanup;
                 else cleanupFailure.addSuppressed(cleanup);

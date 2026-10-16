@@ -1,10 +1,18 @@
 # Incremental original-bytecode compatibility
 
+## Original font lifecycle in connected play
+
+The public play bootstrap mounts 348 original font/configuration/shader/texture-pack inputs before ZFS initialization, then calls original `TextManager.Init()` before `UIManager.init`. The uncompressed font closure is 47,946,445 bytes. Its genuine `UI.pack` is necessary: main-menu font atlas names are packed subtextures and do not exist as loose files. Original filesystem texture-pack mounting uses flags2; no image aliases or replacement font metrics are supplied.
+
+All 34 public font lookups have positive original height/string width and a ready actual `P` glyph image. Thirty entries are directly mapped; original `MediumNew` and `AutoNormSmall/Medium/Large` fall back to Small (16px high, 106px wide for `Project Zomboid 123`). DebugConsole also retains its original Small alias. The original SDF shader compiles. Original bitmap `TextManager.DrawString` through AngelCodeFont and SpriteRenderer separately produces 573 nonblack GPU pixels with no GL error. This does not qualify SDF pixels, every glyph, alternate languages or font scales.
+
+The final integrated source-build/browser gate passes 132 frames, complete shared Lua, keyboard movement/release, original navigation, empty Java and Lua queues, zero initialization/Lua errors, 6,591 unchanged monitored asset hashes and owned cleanup. Unique original font objects and the SDF shader are destroyed after the game session; shared texture caches and ring buffers remain owned by the browser context until it closes. An initial missing-packed-page failure remains separately recorded. The installed Dialogue FNT has a stale page name, but its explicit original image fallback yields ready glyphs; that original warning is not suppressed.
+
 ## Complete original shared Lua
 
 The connected bootstrap now mounts all 374 unchanged original shared Lua files before the first filesystem scan, then runs original `LuaManager.LoadDirBase("shared")` after complete `ScriptManager.Load()`. Original directory order, tables, event handlers and RunLua caching remain in control. The content archive contains 3,250 files / 15,097,273 bytes, including all shared Lua and the existing audited server data dependencies; every prepared entry matches its installed bytes and manifest hash.
 
-The public browser gate requires 374 shared sources and zero shared-load errors, and now rejects caught Lua error logs as well as missing callback lookups. This closes a gap in the earlier navigation evidence: movement, path success and Java queue cleanup passed, but Lua completion logged a missing `ISLogSystem.logAction`; the gate had not verified its Lua queue. The complete shared closure supplies the real logger. The final integrated run has zero Lua errors and independently inspects the original Lua queue array and current-action field, requiring both to be empty without calling a getter or mutating them. Complete client Lua, fonts, menus and `LoadedAfterLua()` remain separate work.
+The public browser gate requires 374 shared sources and zero shared-load errors, and now rejects caught Lua error logs as well as missing callback lookups. This closes a gap in the earlier navigation evidence: movement, path success and Java queue cleanup passed, but Lua completion logged a missing `ISLogSystem.logAction`; the gate had not verified its Lua queue. The complete shared closure supplies the real logger. The final integrated run has zero Lua errors and independently inspects the original Lua queue array and current-action field, requiring both to be empty without calling a getter or mutating them. Complete client Lua integration, menus and `LoadedAfterLua()` remain separate work.
 
 ## Original player navigation in the connected session
 

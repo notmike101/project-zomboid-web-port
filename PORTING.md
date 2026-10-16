@@ -1,5 +1,11 @@
 # Toward a playable original-bytecode port
 
+## Original fonts before complete client Lua
+
+The connected play profile now mounts a separate bounded archive of 348 unchanged original font/shader/UI-pack inputs (47,946,445 bytes) before ZFS scans. Original `TextManager.Init` and actual asynchronous readiness provide all 34 font lookups and ready glyph pages before `UIManager.init`; original fallback choices and the SDF shader remain intact. The 132-frame public gate passes movement, animation, original navigation, both action queues and cleanup with 6,591 protected asset hashes unchanged. Original bitmap DrawString separately has actual GPU evidence; SDF pixels and alternate languages/scales are still unqualified.
+
+The private complete-client closure now loads all 727 original client Lua files after the 374 shared sources and 5,092 item definitions, with genuine Languages/Translator and font setup, zero Lua errors and clean original asset-executor shutdown. Its 2,314-file client/UI/EN bundle remains private; this does not yet integrate the registered callbacks into world creation/ticks. Continue that integration using original load/cache/event order. Inspect `LoadedAfterLua` and menu/game-start events before executing those broader closures; do not infer callback readiness from loading alone.
+
 ## Complete shared Lua and next UI lifecycle
 
 All 374 original shared Lua sources now load through the original directory loader in public play after complete script definitions. The prepared archive remains byte-for-byte source verified, with 3,250 files / 15,097,273 bytes. The actual navigation action now completes without the formerly swallowed missing-logger error, and the public gate requires both its Java action list and original Lua queue/current-action field empty. It also rejects Lua error logs. The final 132-frame run preserves 6,243 monitored asset hashes and clean owned shutdown.
