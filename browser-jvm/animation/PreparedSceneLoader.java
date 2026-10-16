@@ -9,6 +9,12 @@ public final class PreparedSceneLoader {
    String normalized=file.replace('\\','/').toLowerCase(Locale.ROOT);String name;
    if(normalized.endsWith("/models_x/skinned/malebody.x"))name="MaleBody.x";
    else if(normalized.endsWith("/anims_x/bob/bob_idle.x"))name="Bob_Idle.X";
+   else if(normalized.endsWith("/anims_x/bob/bob_idle_heavybreathing.x"))name="Bob_Idle_HeavyBreathing.X";
+   else if(normalized.endsWith("/anims_x/bob/bob_walkslow.x"))name="Bob_WalkSlow.x";
+   else if(normalized.endsWith("/anims_x/bob/bob_walklightlimpr.x"))name="Bob_WalkLightLimpR.x";
+   else if(normalized.endsWith("/anims_x/bob/bob_walklightlimpl.x"))name="Bob_WalkLightLimpL.x";
+   else if(normalized.endsWith("/anims_x/bob/bob_walkheavylimpr.x"))name="Bob_WalkHeavyLimpR.x";
+   else if(normalized.endsWith("/anims_x/bob/bob_walkheavylimpl.x"))name="Bob_WalkHeavyLimpL.x";
    else if(normalized.endsWith("/anims_x/bob/bob_walk.x"))name="Bob_Walk.x";else if(normalized.endsWith("/anims_x/bob/bob_run.x"))name="Bob_Run.X";else if(normalized.endsWith("/models_x/skinned/femalebody.x"))name="FemaleBody.x";else if(normalized.endsWith("/models_x/skinned/male_skeleton.x"))name="Male_Skeleton.X";else if(normalized.endsWith("/models_x/skinned/female_skeleton.x"))name="Female_Skeleton.X";
    else throw new java.io.IOException("No prepared original importer data for "+file);
    boolean animation=name.startsWith("Bob_");

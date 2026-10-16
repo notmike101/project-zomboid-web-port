@@ -36,7 +36,13 @@ const output = path.join(repository, 'target', 'browser-jvm', profile);
 const runtimeProfile = ['lua', 'sprite', 'world', 'character-shader', 'animation', 'food'].includes(profile);
 const graphicsProfile = ['sprite', 'character-shader', 'animation'].includes(profile);
 const worldSdkProfile = ['world', 'animation', 'food'].includes(profile);
-const animationInputs = ['models_X/skinned/MaleBody.x', 'models_X/skinned/FemaleBody.x', 'models_X/skinned/Male_Skeleton.X', 'models_X/skinned/Female_Skeleton.X', 'anims_X/Bob/Bob_Idle.X', 'anims_X/Bob/Bob_Walk.x', 'anims_X/Bob/Bob_Run.X'];
+const animationInputs = [
+    'models_X/skinned/MaleBody.x', 'models_X/skinned/FemaleBody.x', 'models_X/skinned/Male_Skeleton.X', 'models_X/skinned/Female_Skeleton.X',
+    'anims_X/Bob/Bob_Idle.X', 'anims_X/Bob/Bob_Idle_HeavyBreathing.X',
+    'anims_X/Bob/Bob_Walk.x', 'anims_X/Bob/Bob_WalkSlow.x',
+    'anims_X/Bob/Bob_WalkLightLimpR.x', 'anims_X/Bob/Bob_WalkLightLimpL.x',
+    'anims_X/Bob/Bob_WalkHeavyLimpR.x', 'anims_X/Bob/Bob_WalkHeavyLimpL.x', 'anims_X/Bob/Bob_Run.X',
+];
 
 const classes = path.join(output, 'classes');
 const tools = path.join(output, 'tools');
