@@ -1,5 +1,6 @@
 import java.lang.classfile.*;
 import java.lang.classfile.instruction.ReturnInstruction;
+import java.lang.classfile.instruction.InvokeInstruction;
 import java.lang.constant.*;
 import java.nio.file.*;
 import java.security.MessageDigest;
@@ -13,6 +14,22 @@ public final class PrepareSpriteGraphics {
     private static String hash(byte[] bytes)throws Exception{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));}
     private static String quote(String text){return "\""+text.replace("\\","\\\\").replace("\"","\\\"")+"\"";}
 
+    /** Parse-only proof that selected static APIs never rewrite vendor instance constructors. */
+    private static int verifyConstructors(ClassModel original, byte[] emittedBytes) {
+        ClassModel emitted=ClassFile.of().parse(emittedBytes);
+        int preserved=0;
+        for(var before:original.methods())if(before.methodName().equalsString("<init>")){
+            var after=emitted.methods().stream().filter(method->method.methodName().equalsString("<init>")&&method.methodType().equalsString(before.methodType().stringValue())).findFirst().orElseThrow(()->new AssertionError("Vendor constructor removed"));
+            var beforeCode=before.findAttribute(Attributes.code());var afterCode=after.findAttribute(Attributes.code());
+            if(beforeCode.isPresent()!=afterCode.isPresent()||beforeCode.isPresent()&&!Arrays.equals(beforeCode.get().codeArray(),afterCode.get().codeArray()))throw new AssertionError("Vendor constructor body changed: "+original.thisClass().asInternalName()+before.methodType());
+            preserved++;
+        }
+        for(var method:emitted.methods())if(method.methodName().equalsString("<init>"))for(var element:method.code().orElseThrow()){
+            if(element instanceof InvokeInstruction call&&call.opcode()==Opcode.INVOKESTATIC&&call.owner().asInternalName().equals("port/host/SpriteGraphics")&&call.name().equalsString("<init>"))throw new AssertionError("Invalid static host constructor invocation");
+        }
+        return preserved;
+    }
+
     public static void main(String[] args)throws Exception{
         if(args.length!=3)throw new IllegalArgumentException("runtimeViewJar outputDirectory authoredClasses");
         Path input=Path.of(args[0]).toRealPath(),output=Path.of(args[1]).toAbsolutePath().normalize(),authored=Path.of(args[2]).toRealPath();
@@ -21,8 +38,8 @@ public final class PrepareSpriteGraphics {
         Files.createDirectories(output);
         var cf=ClassFile.of();
         var host=cf.parse(Files.readAllBytes(authored.resolve("port/host/SpriteGraphics.class")));
-        var methods=new HashSet<String>();for(var method:host.methods())methods.add(method.methodName().stringValue()+method.methodType().stringValue());
-        var changed=new ArrayList<String>();int[]gameClasses={0};
+        var methods=new HashSet<String>();for(var method:host.methods())if((method.flags().flagsMask()&0x8)!=0&&!method.methodName().stringValue().startsWith("<"))methods.add(method.methodName().stringValue()+method.methodType().stringValue());
+        var changed=new ArrayList<String>();int[]gameClasses={0};int constructorChecks=0;
         try(var jar=new ZipFile(input.toFile());var result=new ZipOutputStream(Files.newOutputStream(output.resolve("sprite-view.jar")))){
             var entries=jar.entries();
             while(entries.hasMoreElements()){
@@ -53,9 +70,9 @@ public final class PrepareSpriteGraphics {
                                     code.return_();
                                 });return;
                             }
-                            boolean selected=(gl&&methods.contains(helper+descriptor))||(memory&&Set.of("memAlloc","memAllocFloat","memAllocInt","memFree","memSet").contains(helper)&&methods.contains(helper+descriptor))
+                            boolean selected=(method.flags().flagsMask()&0x8)!=0&&((gl&&methods.contains(helper+descriptor))||(memory&&Set.of("memAlloc","memAllocFloat","memAllocInt","memFree","memSet").contains(helper)&&methods.contains(helper+descriptor))
                                     ||(api&&Set.of("initialize","getCapabilities").contains(helper)&&methods.contains(helper+descriptor))
-                                    ||(display&&Set.of("isCreated","makeCurrent","releaseContext","setVSyncEnabled","processMessages","isActive","isVisible","isCloseRequested","wasResized","getWidth","getHeight","getX","getY").contains(helper)&&methods.contains(helper+descriptor));
+                                    ||(display&&Set.of("isCreated","makeCurrent","releaseContext","setVSyncEnabled","processMessages","isActive","isVisible","isCloseRequested","wasResized","getWidth","getHeight","getX","getY").contains(helper)&&methods.contains(helper+descriptor)));
                             if(!selected){builder.with(element);return;}
                             changes.add(methodName+descriptor+"->"+helper);
                             builder.withMethodBody(method.methodName(),method.methodType(),method.flags().flagsMask()&~0x100,code->{
@@ -79,6 +96,7 @@ public final class PrepareSpriteGraphics {
                             });changes.add("<init>(Z):bounded-ARB-buffer-descriptor");
                         }
                     }
+                    if(gl||memory||api||display||name.equals("org/lwjgl/opengl/GLCapabilities"))constructorChecks+=verifyConstructors(model,bytes);
                     if(name.startsWith("zombie/")){gameClasses[0]++;if(!Arrays.equals(original,bytes))throw new AssertionError("Original game class changed: "+name);}
                     if(!Arrays.equals(original,bytes))changed.add("{\"class\":"+quote(name)+",\"inputSha256\":"+quote(hash(original))+",\"outputSha256\":"+quote(hash(bytes))+",\"methods\":["+String.join(",",changes.stream().map(PrepareSpriteGraphics::quote).toList())+"]}");
                 }
@@ -97,7 +115,7 @@ public final class PrepareSpriteGraphics {
                 }
             }
         }
-        Files.writeString(output.resolve("sprite-graphics-manifest.json"),"{\"gameMethodBodiesUnchanged\":true,\"unchangedGameClasses\":"+gameClasses[0]+",\"nativePointerABI\":false,\"desktopGLVersionsAdvertised\":false,\"boundedArbBufferFacade\":true,\"adaptedVendorClasses\":["+String.join(",",changed)+"]}\n");
+        Files.writeString(output.resolve("sprite-graphics-manifest.json"),"{\"vendorConstructorBodiesPreserved\":"+constructorChecks+",\"forbiddenStaticConstructorCalls\":0,\"gameMethodBodiesUnchanged\":true,\"unchangedGameClasses\":"+gameClasses[0]+",\"nativePointerABI\":false,\"desktopGLVersionsAdvertised\":false,\"boundedArbBufferFacade\":true,\"adaptedVendorClasses\":["+String.join(",",changed)+"]}\n");
         System.out.println("Prepared original sprite graphics view with "+changed.size()+" vendor adapters and "+gameClasses[0]+" unchanged game classes");
     }
 }
