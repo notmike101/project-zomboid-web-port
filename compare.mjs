@@ -118,6 +118,8 @@ probes['menu-png'] = {...probes['standard-environment'], mainClass: 'probe.MenuP
 probes['menu-png'].inflater = true;
 probes['image-texture'] = {...probes['menu-png'], mainClass: 'probe.ImageTextureProbe', category: 'browser-core', cases: 2, comparisons: 8};
 probes['default-shader'] = {...probes['standard-environment'], mainClass: 'probe.DefaultShaderProbe', category: 'browser-core', assetProfile: 'default-shader', cases: 3, comparisons: 10};
+probes['sprite-renderer'] = {...probes['default-shader'], mainClass: 'probe.SpriteRendererProbe', assetProfile: 'sprite-renderer', inflater: true, webglVbo: true, cases: 5, comparisons: 14};
+probes['gpu-buffers'] = {...probes['native-capabilities'], mainClass: 'probe.BufferBackendProbe', category: 'browser-core', memory: true, cases: 2, comparisons: 8};
 probes.inflater = {mainClass: 'probe.InflaterProbe', category: 'runtime-compatibility', inflater: true, cases: 8, comparisons: 16, classes: [], symbols: []};
 probes['output-channel'] = {mainClass: 'probe.FileOutputChannelProbe', category: 'runtime-compatibility', outputChannels: true, cases: 8, comparisons: 16, classes: [], symbols: []};
 probes['game-boot'] = {...probes['lua-manager-init'], mainClass: 'zombie.gameStates.MainScreenState', keyboard: true, symbols: ['MainScreenState::main']};
@@ -242,7 +244,7 @@ try {
     }
     const boot = (await readdir(join(paths['maven-home'], 'boot'))).filter(name => /^plexus-classworlds-.*\.jar$/.test(name));
     if (boot.length !== 1) throw new Error('Expected one Maven classworlds boot JAR');
-    const mavenArgs = ['-Xss16m', '-Dport.threadGroups=' + !!probe.threadGroups, '-Dport.generics=' + !!probe.generics, '-Dport.reflectionExposure=' + !!probe.reflectionExposure, '-Dport.browserKeyboard=' + !!probe.keyboard, '-Dport.nativeCapabilities=' + !!probe.nativeCapabilities, '-Dport.watchService=' + !!probe.watchService, '-Dport.webgl=' + !!probe.webgl, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dport.regex=' + !!probe.regex, '-Dport.workerProcess=' + !!probe.workerProcess, '-Dport.nativeLibraries=' + !!probe.nativeLibraries, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
+    const mavenArgs = ['-Xss16m', '-Dport.threadGroups=' + !!probe.threadGroups, '-Dport.generics=' + !!probe.generics, '-Dport.reflectionExposure=' + !!probe.reflectionExposure, '-Dport.browserKeyboard=' + !!probe.keyboard, '-Dport.nativeCapabilities=' + !!probe.nativeCapabilities, '-Dport.watchService=' + !!probe.watchService, '-Dport.webgl=' + !!probe.webgl, '-Dport.webglVbo=' + !!probe.webglVbo, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dport.regex=' + !!probe.regex, '-Dport.workerProcess=' + !!probe.workerProcess, '-Dport.nativeLibraries=' + !!probe.nativeLibraries, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
         '-Dclassworlds.conf=' + join(paths['maven-home'], 'bin', 'm2.conf'),
         '-cp', join(paths['maven-home'], 'boot', boot[0]), 'org.codehaus.plexus.classworlds.launcher.Launcher',
         '-Dprobe.mainClass=' + probe.mainClass, '-Dprobe.output=' + output];
@@ -363,6 +365,8 @@ try {
         if (!route) { response.writeHead(404); response.end(); return; }
         try {
             let body = route[0] ? await readFile(route[0]) : Buffer.alloc(0);
+            if (probeName === 'sprite-renderer' && request.url === '/')
+                body = Buffer.from(body.toString('utf8').replace('width="96" height="96"', 'width="128" height="128"'));
             if (probe.generics && request.url === '/') body = Buffer.from(body.toString('utf8').replace('<script src="/wasm/', '<script src="/generic-host.js"></script>\n<script src="/wasm/'));
             if (probe.resources && request.url === '/') body = Buffer.from(body.toString('utf8').replace('<script src="/wasm/', '<script src="/resource-host.js"></script>\n<script src="/wasm/'));
             response.writeHead(200, {'Content-Type': route[1], 'Cache-Control': 'no-store'});
@@ -528,3 +532,6 @@ try {
         mismatches: evidence.browser?.mismatches || [], errors: evidence.errors,
         evidence: join(outputDir, 'comparison.json')}, null, 2));
 }
+
+
+

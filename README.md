@@ -158,3 +158,6 @@ The original default shader now passes real browser compilation, linking, unifor
 
 The browser JVM --profile lua route now completes original LuaManager.init, including its full Java exposure list, and executes exposed vector/enum calls. It uses generated real static-field accessors and owned controller-state storage at documented third-party boundaries. Original world-cell construction also passed a private browser experiment; a player and playable loop are still in progress.
 
+
+Original SpriteRenderer now draws a shipped texture through its real batch/state handoff and indexed GPU submission: browser PASS 5 cases / 14 outputs, with all 128x128 RGBA pixels checked. GPU buffer mapping/upload/readback qualification passes separately. This frame is a renderer milestone; it is not yet a playable world.
+

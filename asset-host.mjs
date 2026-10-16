@@ -6,16 +6,17 @@ import {dirname, isAbsolute, relative, resolve, sep} from 'node:path';
 const selection = ['lua/shared/ISBaseObject.lua', 'lua/shared/Util/LuaTableUtil.lua'];
 
 export async function loadAssets(mediaRoot, profile = false) {
-    if (![false, true, 'sandbox', 'menu-image', 'default-shader'].includes(profile)) throw new Error('Unknown asset selection');
+    if (![false, true, 'sandbox', 'menu-image', 'default-shader', 'sprite-renderer'].includes(profile)) throw new Error('Unknown asset selection');
     const root = await realpath(mediaRoot);
     const manifest = [];
     const files = new Map();
-    const selected = profile === 'default-shader'
+    const selected = (profile === 'default-shader' || profile === 'sprite-renderer')
         ? ['default.vert', 'default.frag'].map(name => ({name: 'shaders/' + name, root, virtual: '/media/shaders/' + name}))
         : profile === 'menu-image'
         ? [{name: 'ui/avatarBackgroundWhite.png', root, virtual: '/media/ui/avatarBackgroundWhite.png'}]
         : profile ? [{name: 'stdlib.lua', root: dirname(root), virtual: '/stdlib.lua'}]
         : selection.map(name => ({name, root, virtual: '/media/' + name}));
+    if (profile === 'sprite-renderer') selected.push({name: 'ui/avatarBackgroundWhite.png', root, virtual: '/media/ui/avatarBackgroundWhite.png'});
     if (profile === 'sandbox') {
         for (const name of ['lua/shared/defines.lua', 'lua/shared/Sandbox/Apocalypse.lua'])
             selected.push({name, root, virtual: '/media/' + name});
@@ -37,3 +38,4 @@ export async function loadAssets(mediaRoot, profile = false) {
     }
     return {manifest, files};
 }
+

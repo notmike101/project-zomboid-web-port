@@ -21,16 +21,17 @@ public final class BrowserGraphicsPlugin implements TeaVMPlugin {
                         ValueType.object("org.lwjgl.opengl.GLCapabilities"))), "createDescriptor");
                 method.getModifiers().remove(ElementModifier.NATIVE);
                 ProgramEmitter body = ProgramEmitter.create(method, context.getHierarchy());
-                body.construct("org.lwjgl.opengl.GLCapabilities").returnValue();
+                body.construct("org.lwjgl.opengl.GLCapabilities", body.constant(Boolean.getBoolean("port.webglVbo") ? 1 : 0).cast(ValueType.BOOLEAN)).returnValue();
             } else if (cls.getName().equals("org.lwjgl.opengl.GLCapabilities")) {
                 // The browser never publishes desktop native function addresses or
                 // claims a complete desktop version. Missing selected APIs still fail.
-                MethodHolder constructor = new MethodHolder(new MethodDescriptor("<init>", ValueType.VOID));
+                MethodHolder constructor = new MethodHolder(new MethodDescriptor("<init>", ValueType.BOOLEAN, ValueType.VOID));
                 if (cls.getMethod(constructor.getDescriptor()) != null) throw new IllegalStateException("Vendor capabilities constructor changed");
                 constructor.setLevel(AccessLevel.PUBLIC);
                 cls.addMethod(constructor);
                 ProgramEmitter body = ProgramEmitter.create(constructor, context.getHierarchy());
                 body.var(0, ValueType.object(cls.getName())).invokeSpecial(Object.class, "<init>");
+                body.var(0, ValueType.object(cls.getName())).setField("GL_ARB_vertex_buffer_object", body.var(1, boolean.class));
                 body.exit();
             } else if (cls.getName().equals("org.lwjglx.opengl.Display")) {
                 MethodHolder original = required(cls.getMethod(new MethodDescriptor("<clinit>", ValueType.VOID)), "Display.<clinit>");
@@ -69,6 +70,10 @@ public final class BrowserGraphicsPlugin implements TeaVMPlugin {
                     new MethodDescriptor("glAttachShader", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
                     new MethodDescriptor("glBindAttribLocation", ValueType.INTEGER, ValueType.INTEGER, ValueType.object("java.lang.CharSequence"), ValueType.VOID),
                     new MethodDescriptor("glGetAttribLocation", ValueType.INTEGER, ValueType.object("java.lang.CharSequence"), ValueType.INTEGER),
+                    new MethodDescriptor("glEnableVertexAttribArray", ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glDisableVertexAttribArray", ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glVertexAttribPointer", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER,
+                            ValueType.BOOLEAN, ValueType.INTEGER, ValueType.LONG, ValueType.VOID),
                     new MethodDescriptor("glDetachShader", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
                     new MethodDescriptor("glValidateProgram", ValueType.INTEGER, ValueType.VOID),
                     new MethodDescriptor("glGetActiveUniform", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER,
@@ -104,6 +109,8 @@ public final class BrowserGraphicsPlugin implements TeaVMPlugin {
                 }
             } else if (cls.getName().equals("org.lwjgl.opengl.GL30C")) {
                 for (MethodDescriptor descriptor : new MethodDescriptor[]{
+                    new MethodDescriptor("glMapBufferRange", ValueType.INTEGER, ValueType.LONG, ValueType.LONG,
+                            ValueType.INTEGER, ValueType.object("java.nio.ByteBuffer"), ValueType.object("java.nio.ByteBuffer")),
                     new MethodDescriptor("glGenFramebuffers", ValueType.INTEGER),
                     new MethodDescriptor("glBindFramebuffer", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
                     new MethodDescriptor("glDeleteFramebuffers", ValueType.INTEGER, ValueType.VOID),
@@ -111,8 +118,35 @@ public final class BrowserGraphicsPlugin implements TeaVMPlugin {
                     new MethodDescriptor("glFramebufferTexture2D", ValueType.INTEGER, ValueType.INTEGER,
                             ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID)
                 }) redirect(required(cls.getMethod(descriptor), descriptor.toString()), context.getHierarchy());
+            } else if (cls.getName().equals("org.lwjgl.opengl.GL15C") || cls.getName().equals("org.lwjgl.opengl.ARBVertexBufferObject")) {
+                boolean arb = cls.getName().endsWith("ARBVertexBufferObject");
+                for (MethodDescriptor descriptor : bufferMethods()) {
+                    String name = descriptor.getName() + (arb ? "ARB" : "");
+                    MethodDescriptor vendor = new MethodDescriptor(name, descriptor.getSignature());
+                    redirect(required(cls.getMethod(vendor), vendor.toString()), context.getHierarchy(), descriptor.getName());
+                }
+            } else if (cls.getName().equals("org.lwjgl.opengl.ARBMapBufferRange")) {
+                MethodDescriptor descriptor = new MethodDescriptor("glMapBufferRange", ValueType.INTEGER, ValueType.LONG, ValueType.LONG,
+                        ValueType.INTEGER, ValueType.object("java.nio.ByteBuffer"), ValueType.object("java.nio.ByteBuffer"));
+                redirect(required(cls.getMethod(descriptor), descriptor.toString()), context.getHierarchy());
+            } else if (cls.getName().equals("org.lwjgl.opengl.GL12C")) {
+                MethodDescriptor descriptor = new MethodDescriptor("glDrawRangeElements", ValueType.INTEGER, ValueType.INTEGER,
+                        ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.LONG, ValueType.VOID);
+                redirect(required(cls.getMethod(descriptor), descriptor.toString()), context.getHierarchy());
+            } else if (cls.getName().equals("org.lwjgl.opengl.GL13C")) {
+                MethodDescriptor descriptor = new MethodDescriptor("glActiveTexture", ValueType.INTEGER, ValueType.VOID);
+                redirect(required(cls.getMethod(descriptor), descriptor.toString()), context.getHierarchy());
+            } else if (cls.getName().equals("org.lwjgl.opengl.GL14C")) {
+                for (MethodDescriptor descriptor : new MethodDescriptor[]{
+                    new MethodDescriptor("glBlendFuncSeparate", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glBlendEquation", ValueType.INTEGER, ValueType.VOID)
+                }) redirect(required(cls.getMethod(descriptor), descriptor.toString()), context.getHierarchy());
             } else if (cls.getName().equals("org.lwjgl.opengl.GL11C")) {
                 for (MethodDescriptor descriptor : new MethodDescriptor[]{
+                    new MethodDescriptor("glIsEnabled", ValueType.INTEGER, ValueType.BOOLEAN),
+                    new MethodDescriptor("glBlendFunc", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glViewport", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glGetInteger", ValueType.INTEGER, ValueType.INTEGER),
                     new MethodDescriptor("glGenTextures", ValueType.INTEGER),
                     new MethodDescriptor("glBindTexture", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
                     new MethodDescriptor("glDeleteTextures", ValueType.INTEGER, ValueType.VOID),
@@ -151,14 +185,39 @@ public final class BrowserGraphicsPlugin implements TeaVMPlugin {
     }
 
     private static void redirect(MethodHolder method, org.teavm.model.ClassHierarchy hierarchy) {
+        redirect(method, hierarchy, method.getName());
+    }
+
+    private static void redirect(MethodHolder method, org.teavm.model.ClassHierarchy hierarchy, String helperName) {
         MethodDescriptor descriptor = method.getDescriptor();
         method.getModifiers().remove(ElementModifier.NATIVE);
         ProgramEmitter body = ProgramEmitter.create(method, hierarchy);
         ValueEmitter[] arguments = new ValueEmitter[descriptor.parameterCount()];
         for (int i = 0; i < arguments.length; i++) arguments[i] = body.var(i + 1, descriptor.parameterType(i));
-        ValueEmitter result = body.invoke(new MethodReference(BrowserGraphics.class.getName(), descriptor), arguments);
+        ValueEmitter result = body.invoke(new MethodReference(BrowserGraphics.class.getName(),
+                new MethodDescriptor(helperName, descriptor.getSignature())), arguments);
         if (descriptor.getResultType() == ValueType.VOID) body.exit();
         else result.returnValue();
+    }
+
+    private static MethodDescriptor[] bufferMethods() {
+        ValueType bytes = ValueType.object("java.nio.ByteBuffer");
+        return new MethodDescriptor[]{
+            new MethodDescriptor("glGenBuffers", ValueType.INTEGER),
+            new MethodDescriptor("glBindBuffer", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
+            new MethodDescriptor("glDeleteBuffers", ValueType.INTEGER, ValueType.VOID),
+            new MethodDescriptor("glIsBuffer", ValueType.INTEGER, ValueType.BOOLEAN),
+            new MethodDescriptor("glBufferData", ValueType.INTEGER, ValueType.LONG, ValueType.INTEGER, ValueType.VOID),
+            new MethodDescriptor("glBufferData", ValueType.INTEGER, bytes, ValueType.INTEGER, ValueType.VOID),
+            new MethodDescriptor("glBufferSubData", ValueType.INTEGER, ValueType.LONG, bytes, ValueType.VOID),
+            new MethodDescriptor("glGetBufferSubData", ValueType.INTEGER, ValueType.LONG, bytes, ValueType.VOID),
+            new MethodDescriptor("glMapBuffer", ValueType.INTEGER, ValueType.INTEGER, bytes),
+            new MethodDescriptor("glMapBuffer", ValueType.INTEGER, ValueType.INTEGER, bytes, bytes),
+            new MethodDescriptor("glMapBuffer", ValueType.INTEGER, ValueType.INTEGER, ValueType.LONG, bytes, bytes),
+            new MethodDescriptor("glUnmapBuffer", ValueType.INTEGER, ValueType.BOOLEAN),
+            new MethodDescriptor("glGetBufferParameteriv", ValueType.INTEGER, ValueType.INTEGER, ValueType.object("java.nio.IntBuffer"), ValueType.VOID),
+            new MethodDescriptor("glGetBufferParameteri", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER)
+        };
     }
 
     private static MethodHolder required(MethodHolder method, String name) {

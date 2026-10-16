@@ -31,6 +31,8 @@ public final class BrowserGraphics {
     private static final HashMap<Integer, ArrayList<UniformDefault>> shaderDefaults = new HashMap<>();
     private static final HashMap<Integer, ArrayList<Integer>> programShaders = new HashMap<>();
     private static final StringBuilder shaderDiagnostics = new StringBuilder();
+    private static int activeTexture = 0x84C0;
+    private static final HashMap<Integer, Boolean> legacyTextureEnabled = new HashMap<>();
 
     public static String shaderDiagnostics() { return shaderDiagnostics.toString(); }
 
@@ -154,17 +156,96 @@ public final class BrowserGraphics {
 
     public static int getError() {
         initialize();
+        int buffered = BrowserBuffers.error();
+        if (buffered != 0) return buffered;
         return context.getError();
     }
 
+    public static int glGenBuffers() { initialize(); return BrowserBuffers.generate(context); }
+    public static void glBindBuffer(int target, int id) { initialize(); BrowserBuffers.bind(context, target, id); }
+    public static void glDeleteBuffers(int id) { initialize(); BrowserBuffers.delete(context, id); }
+    public static boolean glIsBuffer(int id) { initialize(); return BrowserBuffers.isBuffer(context, id); }
+    public static void glBufferData(int target, long size, int usage) { initialize(); BrowserBuffers.data(context, target, size, usage); }
+    public static void glBufferData(int target, ByteBuffer data, int usage) { initialize(); BrowserBuffers.data(context, target, data, usage); }
+    public static void glBufferSubData(int target, long offset, ByteBuffer data) { initialize(); BrowserBuffers.subData(context, target, offset, data); }
+    public static void glGetBufferSubData(int target, long offset, ByteBuffer data) { initialize(); BrowserBuffers.getData(context, target, offset, data); }
+    public static ByteBuffer glMapBuffer(int target, int access, long length, ByteBuffer old) {
+        initialize(); return BrowserBuffers.map(context, target, access, length, old);
+    }
+    public static ByteBuffer glMapBuffer(int target, int access, ByteBuffer old) {
+        return glMapBuffer(target, access, glGetBufferParameteri(target, 0x8764), old);
+    }
+    public static ByteBuffer glMapBuffer(int target, int access) { return glMapBuffer(target, access, null); }
+    public static ByteBuffer glMapBufferRange(int target, long offset, long length, int flags, ByteBuffer old) {
+        initialize(); return BrowserBuffers.mapRange(context, target, offset, length, flags, old);
+    }
+    public static boolean glUnmapBuffer(int target) { initialize(); return BrowserBuffers.unmap(context, target); }
+    public static void glGetBufferParameteriv(int target, int name, IntBuffer data) {
+        initialize(); BrowserBuffers.getParameter(context, target, name, data);
+    }
+    public static int glGetBufferParameteri(int target, int name) { initialize(); return BrowserBuffers.getParameter(context, target, name); }
+    public static void glEnableVertexAttribArray(int index) { initialize(); context.enableVertexAttribArray(index); }
+    public static void glDisableVertexAttribArray(int index) { initialize(); context.disableVertexAttribArray(index); }
+    public static void glVertexAttribPointer(int index, int size, int type, boolean normalized, int stride, long offset) {
+        initialize(); context.vertexAttribPointer(index, size, type, normalized, stride, bufferOffset(offset));
+    }
+    public static void glDrawRangeElements(int mode, int start, int end, int count, int type, long offset) {
+        initialize(); context.drawRangeElements(mode, start, end, count, type, bufferOffset(offset));
+    }
+    public static void glActiveTexture(int texture) {
+        initialize();
+        int limit = integerParameter(context, 0x8B4D);
+        if (texture < 0x84C0 || texture >= 0x84C0 + limit) { context.activeTexture(texture); return; }
+        context.activeTexture(texture); activeTexture = texture;
+    }
+    public static void glBlendFunc(int source, int destination) { initialize(); context.blendFunc(source, destination); }
+    public static void glBlendFuncSeparate(int srcRgb, int dstRgb, int srcAlpha, int dstAlpha) {
+        initialize(); context.blendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+    }
+    public static void glBlendEquation(int mode) { initialize(); context.blendEquation(mode); }
+    public static void glViewport(int x, int y, int width, int height) { initialize(); context.viewport(x, y, width, height); }
+    public static int glGetInteger(int name) {
+        initialize();
+        if (name == 0x8894) return BrowserBuffers.binding(0x8892);
+        if (name == 0x8895) return BrowserBuffers.binding(0x8893);
+        if (name == 0x8B8D) {
+            WebGLProgram current = (WebGLProgram) context.getParameter(name);
+            for (int id : programs.keySet()) if (sameProgram(program(id), current)) return id;
+            return 0;
+        }
+        return integerParameter(context, name);
+    }
+
+    private static int bufferOffset(long offset) {
+        if (offset < 0 || offset > Integer.MAX_VALUE) throw new UnsupportedOperationException("Buffer offset outside browser adapter range");
+        return (int) offset;
+    }
+
+    @JSBody(params = {"gl", "name"}, script = "const value=gl.getParameter(name);if(typeof value==='number')return value;if(typeof value==='boolean')return value?1:0;throw new Error('Unsupported scalar GL state query');")
+    private static native int integerParameter(WebGL2RenderingContext gl, int name);
+
+    @JSBody(params = {"left", "right"}, script = "return left===right;")
+    private static native boolean sameProgram(WebGLProgram left, WebGLProgram right);
+
     public static void enable(int capability) {
         initialize();
+        // Compatibility-profile texture enable is per-unit fixed-function state.
+        // Original programmable DefaultShader manages useTexture itself; this
+        // legacy flag must not overwrite a custom shader's uniform values.
+        if (capability == 0x0DE1) { legacyTextureEnabled.put(activeTexture, true); return; }
         context.enable(capability);
     }
 
     public static void disable(int capability) {
         initialize();
+        if (capability == 0x0DE1) { legacyTextureEnabled.put(activeTexture, false); return; }
         context.disable(capability);
+    }
+
+    public static boolean glIsEnabled(int capability) {
+        initialize();
+        if (capability == 0x0DE1) return Boolean.TRUE.equals(legacyTextureEnabled.get(activeTexture));
+        return context.isEnabled(capability);
     }
 
     public static void clearColor(float red, float green, float blue, float alpha) {
@@ -182,6 +263,11 @@ public final class BrowserGraphics {
         Uint8Array pixel = new Uint8Array(4);
         context.readPixels(0, 0, 1, 1, 0x1908, 0x1401, pixel);
         return new int[]{pixel.get(0), pixel.get(1), pixel.get(2), pixel.get(3)};
+    }
+
+    public static int[] drawingBufferSize() {
+        initialize();
+        return new int[]{context.getDrawingBufferWidth(), context.getDrawingBufferHeight()};
     }
 
     public static float[] clearState() {

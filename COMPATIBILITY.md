@@ -384,3 +384,6 @@ Original default shader: browser PASS 3 cases / 10 outputs. Original SceneShader
 
 CheerpJ Lua profile: full original LuaManager.init PASS, with original Core metadata 548 methods / 281 fields, 24 generated-field checks, 8 owned gamepad-memory checks, original filesystem and random initialization, shipped standard library and post-init exposed vector/enum calls. All game method bodies unchanged. Controller polling/native pointers remain unsupported. Evidence is separate from TeaVM compilation and does not establish playable world behavior.
 
+
+Bounded ARB VBO backend PASS 2 cases / 8 outputs using actual GPU storage/readback, owned CPU mappings, full/range uploads and error/cleanup checks. Explicit port.webglVbo gate selects original ARB renderer factory only after qualification; desktop GL version flags remain false. Unsupported typed/array/native-address overloads and persistent/explicit-flush mappings are not claimed. Original SpriteRenderer PASS 5 cases / 14 outputs, including state handoff and all 128x128 framebuffer pixels. Fixture deletes its owned GL texture directly; original TextureID.destroy and static ring lifetime are not qualified. Engine stdout accepts exactly one result JSON plus bounded original log lines.
+

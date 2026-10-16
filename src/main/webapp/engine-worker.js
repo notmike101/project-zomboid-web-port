@@ -41,6 +41,7 @@ self.onmessage = async event => {
                 putcharStdout(c) {
                     if (c === 10) { lines.push(pending); pending = ''; }
                     else pending += String.fromCharCode(c);
+                    if (pending.length > 65536 || lines.length > 1024) throw new Error('Engine stdout exceeds limit');
                 },
                 putcharStderr(c) { throw new Error('WASM stderr character: ' + c); }
             };
@@ -49,7 +50,11 @@ self.onmessage = async event => {
         await module.exports.main([]);
         const deadline = performance.now() + 15000;
         while (!lines.length && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
-        if (lines.length !== 1 || pending) throw new Error('Expected one complete engine result');
-        self.postMessage({result: JSON.parse(lines[0]), wasmInstance: true});
+        if (pending) throw new Error('Incomplete engine stdout');
+        const results = lines.filter(line => line.trimStart().startsWith('{')).map(line => JSON.parse(line));
+        if (results.length !== 1 || !Array.isArray(results[0].cases) || typeof results[0].pass !== 'boolean')
+            throw new Error('Expected one complete engine result');
+        self.postMessage({result: results[0], stdout: lines, wasmInstance: true});
     } catch (error) { fail(error); }
 };
+

@@ -3,7 +3,9 @@ package port.runtime;
 import org.lwjgl.opengl.GLCapabilities;
 
 /** Metadata for the selected browser wrappers, not a claim of a desktop GL version.
- * Every desktop version/extension flag is false and native entry addresses are zero.
+ * Every desktop version and unsupported extension is false; native addresses are zero.
+ * The separately qualified port.webglVbo option enables the bounded ARB buffer adapter,
+ * whose ByteBuffer operations are backed by actual WebGL storage and CPU mappings.
  */
 public final class BrowserCapabilities {
     private static GLCapabilities descriptor;
