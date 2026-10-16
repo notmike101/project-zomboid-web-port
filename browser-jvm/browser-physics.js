@@ -747,6 +747,49 @@ export function createBrowserPhysics() {
                 await (await clipperSupport(lib)).addPath(receiver, count, buffer, isClip, closed);
             },
             /**
+             * Forwards native-qualified polygon coordinates without changing winding.
+             *
+             * @param {object} lib - Actual browser JVM library.
+             * @param {object} receiver - Original owned Clipper instance.
+             * @param {number} left - Original coordinate.
+             * @param {number} top - Original coordinate.
+             * @param {number} right - Original coordinate.
+             * @param {number} bottom - Original coordinate.
+             */
+            async Java_zombie_vehicles_Clipper_addAABB(lib, receiver, left, top, right, bottom) {
+                await (await clipperSupport(lib)).addAABB(receiver, left, top, right, bottom);
+            },
+            /**
+             * Forwards native-qualified polygon coordinates without changing winding.
+             *
+             * @param {object} lib - Actual browser JVM library.
+             * @param {object} receiver - Original owned Clipper instance.
+             * @param {number} x1 - Original coordinate.
+             * @param {number} y1 - Original coordinate.
+             * @param {number} x2 - Original coordinate.
+             * @param {number} y2 - Original coordinate.
+             * @param {number} x3 - Original coordinate.
+             * @param {number} y3 - Original coordinate.
+             * @param {number} x4 - Original coordinate.
+             * @param {number} y4 - Original coordinate.
+             */
+            async Java_zombie_vehicles_Clipper_addPolygon(lib, receiver, x1, y1, x2, y2, x3, y3, x4, y4) {
+                await (await clipperSupport(lib)).addPolygon(receiver, x1, y1, x2, y2, x3, y3, x4, y4);
+            },
+            /**
+             * Forwards native-qualified polygon coordinates without changing winding.
+             *
+             * @param {object} lib - Actual browser JVM library.
+             * @param {object} receiver - Original owned Clipper instance.
+             * @param {number} left - Original coordinate.
+             * @param {number} top - Original coordinate.
+             * @param {number} right - Original coordinate.
+             * @param {number} bottom - Original coordinate.
+             */
+            async Java_zombie_vehicles_Clipper_clipAABB(lib, receiver, left, top, right, bottom) {
+                await (await clipperSupport(lib)).clipAABB(receiver, left, top, right, bottom);
+            },
+            /**
              * Executes the real Clipper2 engine for native-qualified operations.
              *
              * @param {object} lib - Actual browser JVM library.

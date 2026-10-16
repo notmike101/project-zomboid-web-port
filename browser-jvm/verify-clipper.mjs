@@ -112,9 +112,9 @@ try {
 
     await writeFile(path.join(output, 'native.jsonl'), stdout);
     evidence.nativeRows = stdout.split(/\r?\n/).filter((line) => line.startsWith('{"name":')).map(JSON.parse);
-    assert.equal(evidence.nativeRows.length, 92, 'Missing native reference cases');
-    assert.equal(evidence.nativeRows.filter((row) => row.operation === 1).length, 46, 'Missing intersection cases');
-    assert.equal(evidence.nativeRows.filter((row) => row.operation === 3).length, 46, 'Missing difference cases');
+    assert.equal(evidence.nativeRows.length, 134, 'Missing native reference cases');
+    assert.equal(evidence.nativeRows.filter((row) => row.operation === 1).length, 67, 'Missing intersection cases');
+    assert.equal(evidence.nativeRows.filter((row) => row.operation === 3).length, 67, 'Missing difference cases');
     assert(stdout.includes('CLIPPER_ADAPTER_CHECKS_PASS'), 'Native adapter boundary assertions did not complete');
     const html = `<link rel="icon" href="data:,"><script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script><script type="module">
         import { createBrowserPhysics } from '/browser-physics.js';
@@ -211,10 +211,10 @@ try {
     await page.waitForFunction(() => globalThis.completed, undefined, { timeout: 90_000 });
     evidence.result = await page.evaluate(() => globalThis.result);
     assert.equal(evidence.result.pass, true, evidence.result.error);
-    assert.equal(evidence.browserRows.length, 92, 'Missing browser cases');
+    assert.equal(evidence.browserRows.length, 134, 'Missing browser cases');
     assert(evidence.logs.some((line) => line.includes('CLIPPER_ADAPTER_CHECKS_PASS')), 'Browser adapter boundary assertions did not complete');
     assert.deepEqual(canonical(evidence.browserRows), canonical(evidence.nativeRows));
-    assert.deepEqual(evidence.result.containers, { allocations: 1, clears: 92 });
+    assert.deepEqual(evidence.result.containers, { allocations: 1, clears: 134 });
     assert.equal(evidence.denied.length, 0, 'Requests escaped the qualification allowlist');
     evidence.pass = true;
 } catch (error) {

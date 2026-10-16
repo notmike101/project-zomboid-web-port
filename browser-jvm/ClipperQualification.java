@@ -9,6 +9,7 @@ import zombie.vehicles.Clipper;
 public final class ClipperQualification {
     static Clipper clipper;
     static int operation;
+    static String primitive = "path";
     static ByteOrder inputTagOverride;
     static ByteOrder outputTagOverride;
 
@@ -62,8 +63,25 @@ public final class ClipperQualification {
         }
         int subjectPosition = subject.position();
         int clipPosition = clip.position();
-        clipper.addPath(first.length / 2, subject, false, true);
-        clipper.addPath(second.length / 2, clip, true, true);
+        switch (primitive) {
+            case "aabb" -> clipper.addAABB(first[0], first[1], first[4], first[5]);
+            case "polygon" -> clipper.addPolygon(first[0], first[1], first[2], first[3],
+                    first[4], first[5], first[6], first[7]);
+            case "bevel" -> clipper.addAABBBevel(0, 0, 4, 4, .25f);
+            case "repeat" -> {
+                clipper.addAABB(-2, -2, 6, 6);
+                clipper.addAABB(0, 0, 8, 8);
+            }
+            default -> clipper.addPath(first.length / 2, subject, false, true);
+        }
+        if (primitive.equals("clip")) {
+            clipper.clipAABB(second[0], second[1], second[4], second[5]);
+        } else if (primitive.equals("repeat")) {
+            clipper.clipAABB(1, 1, 3, 3);
+            clipper.clipAABB(2, 2, 5, 5);
+        } else {
+            clipper.addPath(second.length / 2, clip, true, true);
+        }
         int count = clipper.generatePolygons(operation, 0, Clipper.jtSquare);
         StringJoiner polygons = new StringJoiner(",", "[", "]");
         for (int index = 0; index < count; index++) {
@@ -134,7 +152,34 @@ public final class ClipperQualification {
         for (int type : new int[] { Clipper.ctIntersection, Clipper.ctDifference }) {
             operation = type;
             runCases();
+            runPrimitiveCases();
         }
+    }
+
+    private static void runPrimitiveCases() {
+        inputTagOverride = null;
+        outputTagOverride = null;
+        float[][] bounds = {
+            {0, 0, 4, 4}, {4, 0, 0, 4}, {0, 4, 4, 0}, {4, 4, 0, 0},
+            {.0005f, -.0005f, 3.123456f, 4.005f}, {0, 0, 0, 4},
+        };
+        for (String mode : new String[] {"aabb", "polygon", "clip"}) {
+            primitive = mode;
+            for (int index = 0; index < bounds.length; index++) {
+                float[] b = bounds[index];
+                float[] rectangle = new float[] {b[0], b[1], b[2], b[1], b[2], b[3], b[0], b[3]};
+                test(mode + "-bounds-" + index, mode.equals("clip") ? rect(-1, -1, 6, 6) : rectangle,
+                        mode.equals("clip") ? rectangle : rect(1, 1, 1, 1), ByteOrder.BIG_ENDIAN, 7, 11);
+            }
+        }
+        primitive = "polygon";
+        test("polygon-irregular", new float[] {-.0005f, .0005f, 4.12345f, 1, 3, 4, -1, 2},
+                rect(0, 0, 3, 3), ByteOrder.BIG_ENDIAN, 7, 11);
+        primitive = "bevel";
+        test("original-java-bevel", rect(0, 0, 4, 4), rect(1, 1, 2, 2), ByteOrder.BIG_ENDIAN, 7, 11);
+        primitive = "repeat";
+        test("repeated-subject-and-clip", rect(-2, -2, 8, 8), rect(1, 1, 2, 2), ByteOrder.BIG_ENDIAN, 7, 11);
+        primitive = "path";
     }
 
     private static void runCases() {
@@ -188,6 +233,26 @@ final class AdapterChecks {
             if (ClipperSupport.generate(owner, 1, 0, 0) != 1) {
                 throw new AssertionError("Real engine intersection failed");
             }
+            // Reject every primitive atomically: previously generated geometry must remain available.
+            for (int primitive = 0; primitive < 3; primitive++) {
+                try {
+                    switch (primitive) {
+                        case 0 -> ClipperSupport.addAABB(owner, 0, 0, 4, Float.NaN);
+                        case 1 -> ClipperSupport.addPolygon(owner, 0, 0, 4, 0, 4, 4, 0, Float.POSITIVE_INFINITY);
+                        default -> ClipperSupport.clipAABB(owner, 0, 0, 4, Float.MAX_VALUE);
+                    }
+                    throw new AssertionError("Invalid primitive coordinate accepted");
+                } catch (IllegalArgumentException expected) { }
+                ByteBuffer retained = ByteBuffer.allocateDirect(128);
+                ClipperSupport.getPolygon(owner, 0, retained);
+                if (retained.getShort(0) != 4 || ClipperSupport.generate(owner, 1, 0, 0) != 1) {
+                    throw new AssertionError("Rejected primitive changed geometry");
+                }
+            }
+            try {
+                ClipperSupport.addAABB(new Object(), 0, 0, 1, 1);
+                throw new AssertionError("Unknown primitive owner accepted");
+            } catch (IllegalArgumentException expected) { }
             ByteBuffer small = ByteBuffer.allocateDirect(8);
             for (int index = 0; index < 8; index++) {
                 small.put((byte) 0x5a);

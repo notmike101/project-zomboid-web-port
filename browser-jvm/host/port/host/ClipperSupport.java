@@ -84,6 +84,34 @@ public final class ClipperSupport {
         state.polygons.clear();
     }
 
+    private static void addCoordinates(Object owner, boolean isClip, float... coordinates) {
+        State state = state(owner);
+        Path64 path = new Path64();
+        for (int index = 0; index < coordinates.length; index += 2) {
+            path.add(new Point64(coordinate(coordinates[index]), coordinate(coordinates[index + 1])));
+        }
+        if (isClip) {
+            state.engine.addClip(path);
+        } else {
+            state.engine.addSubject(path);
+        }
+        state.polygons.clear();
+    }
+
+    public static void addAABB(Object owner, float left, float top, float right, float bottom) {
+        // Native calls preserve the supplied winding, including reversed bounds.
+        addCoordinates(owner, false, left, top, right, top, right, bottom, left, bottom);
+    }
+
+    public static void addPolygon(Object owner, float x1, float y1, float x2, float y2,
+            float x3, float y3, float x4, float y4) {
+        addCoordinates(owner, false, x1, y1, x2, y2, x3, y3, x4, y4);
+    }
+
+    public static void clipAABB(Object owner, float left, float top, float right, float bottom) {
+        addCoordinates(owner, true, left, top, right, top, right, bottom, left, bottom);
+    }
+
     private static void collect(PolyPath64 node, ArrayList<Polygon> polygons) {
         if (node.getPolygon() != null && !node.getIsHole()) {
             ArrayList<Path64> holes = new ArrayList<>();
