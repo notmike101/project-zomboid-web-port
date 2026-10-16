@@ -3,7 +3,8 @@ export function createSpriteNatives(canvas, report) {
   const gl=canvas.getContext('webgl2',{alpha:true,antialias:false,premultipliedAlpha:false,preserveDrawingBuffer:true});
   if(!gl)throw Error('WebGL2 unavailable');
   let next=1,activeUnit=gl.TEXTURE0;
-  const shaders=new Map(),programs=new Map(),textures=new Map(),buffers=new Map(),framebuffers=new Map(),locations=new Map();
+  const shaders=new Map(),programs=new Map(),textures=new Map(),buffers=new Map(),framebuffers=new Map(),renderbuffers=new Map(),locations=new Map();
+  const shaderSources=new Map(),linkedStages=new Map();
   const shaderTypes=new Map(),sourceDefaults=new Map(),attached=new Map(),locationOwners=new Map(),legacyTexture=new Map();
   const diagnostics=[];
   const note=text=>{diagnostics.push(text);if(diagnostics.length>64)diagnostics.shift();};
@@ -19,14 +20,26 @@ export function createSpriteNatives(canvas, report) {
     if(!version)return source;
     const legacy=version[1]==='120';
     source=source.slice(0,version.index)+'#version 300 es\nprecision highp float;\nprecision highp int;\n'+source.slice(version.index+version[0].length);
-    source=source.replace(/^(\s*uniform\s+(float|int)\s+([A-Za-z_]\w*)\s*)=\s*([^;]+);/gm,(all,declaration,type,name,text)=>{
+    source=source.replace(/^(\s*uniform\s+(float|int|vec[234])\s+([A-Za-z_]\w*)\s*)=\s*([^;]+);/gm,(all,declaration,type,name,text)=>{
       const literal=text.trim(),integer=type==='int';
+      if(type.startsWith('vec')){
+        const count=Number(type.slice(3)),match=new RegExp('^'+type+'\\s*\\(([^()]*)\\)$').exec(literal);
+        if(!match)throw Error('Unsupported vector uniform initializer '+literal);
+        const parts=match[1].split(',').map(part=>part.trim());
+        if(parts.length!==1&&parts.length!==count)throw Error('Invalid vector initializer arity');
+        const values=parts.map(part=>{if(!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(part))throw Error('Unsupported vector initializer component');const value=Math.fround(Number(part));if(!Number.isFinite(value))throw Error('Non-finite vector initializer');return value;});
+        defaults.push({name,vector:parts.length===1?Array(count).fill(values[0]):values});return declaration+';';
+      }
       const pattern=integer?/^[+-]?\d+$/:/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
       if(!pattern.test(literal))throw Error('Unsupported GLSL uniform initializer '+literal);
       let value=Number(literal);if(integer){if(!Number.isInteger(value)||value< -2147483648||value>2147483647)throw Error('Integer uniform initializer out of range');}else value=Math.fround(value);
       if(!Number.isFinite(value))throw Error('Non-finite uniform initializer');
       defaults.push({name,integer,value});return declaration+';';
     });
+    // Desktop GLSL accepts these implicit scalar conversions; ES requires explicit float literals.
+    source=source.replace(/\(clip\s*\*\s*2\)\s*-\s*1\b/g,'(clip*2.0)-1.0');
+    // ES reserves builtin names even when desktop GLSL supplies custom overloads.
+    for(const name of ['max','min','clamp'])if(new RegExp('\\b(?:float|vec[234])\\s+'+name+'\\s*\\(').test(source))source=source.replace(new RegExp('\\b'+name+'\\s*\\(','g'),'portDesktop_'+name+'(');
     source=source.replace(/\btexture2D\b/g,'texture');
     if(legacy){
       if(shaderTypes.get(id)===gl.VERTEX_SHADER)source=source.replace(/^(\s*)attribute\b/gm,'$1in').replace(/^(\s*)varying\b/gm,'$1out');
@@ -40,7 +53,22 @@ export function createSpriteNatives(canvas, report) {
     }
     return source;
   }
+  let fboQualified;
+  function framebufferSupported(){
+    if(fboQualified!==undefined)return fboQualified;
+    ensure();
+    const savedTexture=gl.getParameter(gl.TEXTURE_BINDING_2D),savedRead=gl.getParameter(gl.READ_FRAMEBUFFER_BINDING),savedDraw=gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+    const color=gl.createTexture(),depth=gl.createTexture(),fbo=gl.createFramebuffer();
+    try{
+      gl.bindTexture(gl.TEXTURE_2D,color);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+      gl.bindTexture(gl.TEXTURE_2D,depth);gl.texImage2D(gl.TEXTURE_2D,0,gl.DEPTH_COMPONENT16,1,1,0,gl.DEPTH_COMPONENT,gl.UNSIGNED_SHORT,null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,color,0);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.TEXTURE_2D,depth,0);
+      fboQualified=gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE;
+      note('color-depth framebuffer qualification '+fboQualified);return fboQualified;
+    }finally{gl.bindTexture(gl.TEXTURE_2D,savedTexture);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,savedRead);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,savedDraw);gl.deleteFramebuffer(fbo);gl.deleteTexture(color);gl.deleteTexture(depth);}
+  }
   const api={
+    framebufferSupported,
     initialize:ensure,contextCreated:()=>!gl.isContextLost(),resize:(w,h)=>{canvas.width=w;canvas.height=h;},surfaceWidth:()=>gl.drawingBufferWidth,surfaceHeight:()=>gl.drawingBufferHeight,
     present:async vsync=>{ensure();gl.flush();if(vsync)await new Promise(requestAnimationFrame);},report,
     bufferCreate:()=>add(buffers,gl.createBuffer()),bufferBind:(target,id)=>gl.bindBuffer(target,object(buffers,id)),
@@ -51,6 +79,7 @@ export function createSpriteNatives(canvas, report) {
     rawError:()=>gl.getError(),integerState:name=>{const value=gl.getParameter(name);if(typeof value==='number')return value;if(typeof value==='boolean')return Number(value);if(value===null)return 0;for(const map of[programs,textures,buffers,framebuffers])for(const[id,item]of map)if(item===value)return id;throw Error('Unsupported scalar graphics query '+name);},
     vertexPointer:(index,size,type,normalized,stride,offset)=>gl.vertexAttribPointer(index,size,type,normalized,stride,offset),
     drawRange:(mode,first,last,count,type,offset)=>gl.drawRangeElements(mode,first,last,count,type,offset),
+    drawElements:(mode,count,type,offset)=>gl.drawElements(mode,count,type,offset),
     glEnableVertexAttribArray:index=>gl.enableVertexAttribArray(index),glDisableVertexAttribArray:index=>gl.disableVertexAttribArray(index),
     glActiveTexture:unit=>{gl.activeTexture(unit);if(unit>=gl.TEXTURE0&&unit<gl.TEXTURE0+gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS))activeUnit=unit;},
     glEnable:cap=>{if(cap===gl.TEXTURE_2D)legacyTexture.set(activeUnit,true);else gl.enable(cap);},
@@ -59,27 +88,41 @@ export function createSpriteNatives(canvas, report) {
     glBlendFunc:(s,d)=>gl.blendFunc(s,d),glBlendFuncSeparate:(a,b,c,d)=>gl.blendFuncSeparate(a,b,c,d),glBlendEquation:mode=>gl.blendEquation(mode),
     glViewport:(x,y,w,h)=>gl.viewport(x,y,w,h),glClearColor:(r,g,b,a)=>gl.clearColor(r,g,b,a),glClear:mask=>gl.clear(mask),glDrawArrays:(mode,first,count)=>gl.drawArrays(mode,first,count),
     glCreateShader:type=>{const id=add(shaders,gl.createShader(type));shaderTypes.set(id,type);return id;},
-    shaderText:(id,text)=>gl.shaderSource(object(shaders,id),translate(id,String(text))),
+    shaderText:(id,text)=>{const source=translate(id,String(text));shaderSources.set(id,source);gl.shaderSource(object(shaders,id),source);},
     glCompileShader:id=>{gl.compileShader(object(shaders,id));note('compile '+id+' '+gl.getShaderParameter(object(shaders,id),gl.COMPILE_STATUS)+' '+gl.getShaderInfoLog(object(shaders,id)));},
     glGetShaderi:(id,name)=>name===0x8B84?(gl.getShaderInfoLog(object(shaders,id))||'').length+1:Number(gl.getShaderParameter(object(shaders,id),name)),
     glGetShaderInfoLog:(id,length)=>(gl.getShaderInfoLog(object(shaders,id))||'').slice(0,Math.max(0,length-1)),
     glDeleteShader:id=>{gl.deleteShader(object(shaders,id));},
-    glCreateProgram:()=>add(programs,gl.createProgram()),glAttachShader:(program,shader)=>{gl.attachShader(object(programs,program),object(shaders,shader));if(!attached.has(program))attached.set(program,[]);attached.get(program).push(shader);},
-    glDetachShader:(program,shader)=>{gl.detachShader(object(programs,program),object(shaders,shader));attached.set(program,(attached.get(program)||[]).filter(id=>id!==shader));},
+    glCreateProgram:()=>add(programs,gl.createProgram()),glAttachShader:(program,shader)=>{object(programs,program);object(shaders,shader);if(!attached.has(program))attached.set(program,[]);if(attached.get(program).includes(shader))throw Error('Duplicate shader attachment');attached.get(program).push(shader);},
+    glDetachShader:(program,shader)=>{object(programs,program);object(shaders,shader);const list=attached.get(program)||[];if(!list.includes(shader))throw Error('Shader not attached');attached.set(program,list.filter(id=>id!==shader));},
     bindAttribute:(program,index,name)=>gl.bindAttribLocation(object(programs,program),index,String(name)),attributeLocation:(program,name)=>gl.getAttribLocation(object(programs,program),String(name)),
-    glLinkProgram:id=>{const program=object(programs,id);gl.linkProgram(program);note('link '+id+' '+gl.getProgramParameter(program,gl.LINK_STATUS)+' '+gl.getProgramInfoLog(program));if(!gl.getProgramParameter(program,gl.LINK_STATUS))return;const previous=gl.getParameter(gl.CURRENT_PROGRAM);gl.useProgram(program);try{for(const shader of attached.get(id)||[])for(const init of sourceDefaults.get(shader)||[]){const where=gl.getUniformLocation(program,init.name);if(where!==null){if(init.integer)gl.uniform1i(where,init.value);else gl.uniform1f(where,init.value);}}}finally{gl.useProgram(previous);}},
+    glLinkProgram:id=>{const program=object(programs,id);
+      for(const shader of linkedStages.get(id)||[]){gl.detachShader(program,shader);gl.deleteShader(shader);}const stages=[];linkedStages.set(id,stages);
+      const groups=new Map();for(const shader of attached.get(id)||[]){const type=shaderTypes.get(shader);if(!groups.has(type))groups.set(type,[]);groups.get(type).push(shaderSources.get(shader));}
+      for(const[type,sources]of groups){
+        let source=sources.join('\n');
+        if(sources.length>1){source='#version 300 es\nprecision highp float;\nprecision highp int;\n'+source.replace(/^\s*#version[^\n]*$/gm,'').replace(/^\s*precision\s+highp\s+(float|int)\s*;/gm,'');
+          for(const name of ['max','min','clamp'])if(source.includes('portDesktop_'+name+'('))source=source.replace(new RegExp('\\b'+name+'\\s*\\(','g'),'portDesktop_'+name+'(');
+        }
+        if(source.includes('portDesktop_min('))source=source.replace(/(precision highp int;)/,'$1\nfloat portDesktop_min(float a,float b);');
+        const shader=gl.createShader(type);gl.shaderSource(shader,source);gl.compileShader(shader);note('composed compile '+type+' '+gl.getShaderParameter(shader,gl.COMPILE_STATUS)+' '+gl.getShaderInfoLog(shader));gl.attachShader(program,shader);stages.push(shader);
+      }
+      gl.linkProgram(program);note('link '+id+' '+gl.getProgramParameter(program,gl.LINK_STATUS)+' '+gl.getProgramInfoLog(program));if(!gl.getProgramParameter(program,gl.LINK_STATUS))return;const previous=gl.getParameter(gl.CURRENT_PROGRAM);gl.useProgram(program);try{for(const shader of attached.get(id)||[])for(const init of sourceDefaults.get(shader)||[]){const where=gl.getUniformLocation(program,init.name);if(where!==null){if(init.vector)gl['uniform'+init.vector.length+'fv'](where,new Float32Array(init.vector));else if(init.integer)gl.uniform1i(where,init.value);else gl.uniform1f(where,init.value);}}}finally{gl.useProgram(previous);}},
     glValidateProgram:id=>{gl.validateProgram(object(programs,id));note('validate '+id+' '+gl.getProgramParameter(object(programs,id),gl.VALIDATE_STATUS)+' '+gl.getProgramInfoLog(object(programs,id)));},
     glGetProgrami:(id,name)=>name===0x8B84?(gl.getProgramInfoLog(object(programs,id))||'').length+1:Number(gl.getProgramParameter(object(programs,id),name)),
     glGetProgramInfoLog:(id,length)=>(gl.getProgramInfoLog(object(programs,id))||'').slice(0,Math.max(0,length-1)),glUseProgram:id=>gl.useProgram(object(programs,id)),
-    glDeleteProgram:id=>{gl.deleteProgram(object(programs,id));programs.delete(id);attached.delete(id);for(const[location,owner]of locationOwners)if(owner===id){locationOwners.delete(location);locations.delete(location);}},
+    glDeleteProgram:id=>{for(const shader of linkedStages.get(id)||[])gl.deleteShader(shader);linkedStages.delete(id);gl.deleteProgram(object(programs,id));programs.delete(id);attached.delete(id);for(const[location,owner]of locationOwners)if(owner===id){locationOwners.delete(location);locations.delete(location);}},
     uniformLocation:(program,name)=>{const value=gl.getUniformLocation(object(programs,program),String(name));if(value===null)return -1;const id=add(locations,value);locationOwners.set(id,program);return id;},
+    uniformComponent:(program,id,index)=>{const value=gl.getUniform(object(programs,program),location(id));if(typeof value==='number'){if(index!==0)throw Error('Scalar uniform index');return value;}if(!value||index<0||index>=value.length)throw Error('Uniform component index');return value[index];},
     activeUniformName:(program,index)=>{const value=gl.getActiveUniform(object(programs,program),index);if(!value)throw Error('Invalid uniform index');return value.name;},
     activeUniformProperty:(program,index,type)=>{const value=gl.getActiveUniform(object(programs,program),index);if(!value)throw Error('Invalid uniform index');return type?value.type:value.size;},
     glUniform1i:(id,x)=>gl.uniform1i(location(id),x),glUniform1f:(id,x)=>gl.uniform1f(location(id),x),glUniform2f:(id,x,y)=>gl.uniform2f(location(id),x,y),glUniform3f:(id,x,y,z)=>gl.uniform3f(location(id),x,y,z),glUniform4f:(id,x,y,z,w)=>gl.uniform4f(location(id),x,y,z,w),
     matrix4:(id,data)=>gl.uniformMatrix4fv(location(id),false,floats(data)),matrix3:(id,data)=>gl.uniformMatrix3fv(location(id),false,floats(data)),
     glGenTextures:()=>add(textures,gl.createTexture()),glBindTexture:(target,id)=>gl.bindTexture(target,object(textures,id)),glDeleteTextures:id=>{gl.deleteTexture(object(textures,id));textures.delete(id);},glTexParameteri:(target,name,value)=>gl.texParameteri(target,name,value),
-    textureBytes:(target,level,internal,w,h,border,format,type,data)=>{if(format!==gl.RGBA||type!==gl.UNSIGNED_BYTE||![gl.RGBA,gl.RGBA8].includes(internal))throw Error('Unsupported texture format');gl.texImage2D(target,level,internal,w,h,border,format,type,bytes(data));},
+    textureBytes:(target,level,internal,w,h,border,format,type,data)=>{const color=format===gl.RGBA&&type===gl.UNSIGNED_BYTE&&[gl.RGBA,gl.RGBA8].includes(internal);const depth=data===null&&format===gl.DEPTH_COMPONENT&&type===gl.UNSIGNED_SHORT&&internal===gl.DEPTH_COMPONENT16;if(!color&&!depth)throw Error('Unsupported texture format');gl.texImage2D(target,level,internal,w,h,border,format,type,bytes(data));},
     readPixels:(x,y,w,h,format,type,data)=>gl.readPixels(x,y,w,h,format,type,bytes(data)),
+    glGenRenderbuffers:()=>add(renderbuffers,gl.createRenderbuffer()),glBindRenderbuffer:(target,id)=>gl.bindRenderbuffer(target,object(renderbuffers,id)),glDeleteRenderbuffers:id=>{gl.deleteRenderbuffer(object(renderbuffers,id));renderbuffers.delete(id);},
+    glRenderbufferStorage:(target,format,w,h)=>gl.renderbufferStorage(target,format,w,h),glRenderbufferStorageMultisample:(target,samples,format,w,h)=>gl.renderbufferStorageMultisample(target,samples,format,w,h),glFramebufferRenderbuffer:(target,attachment,renderTarget,id)=>gl.framebufferRenderbuffer(target,attachment,renderTarget,object(renderbuffers,id)),glBlitFramebuffer:(...args)=>gl.blitFramebuffer(...args),
     glGenFramebuffers:()=>add(framebuffers,gl.createFramebuffer()),glBindFramebuffer:(target,id)=>gl.bindFramebuffer(target,object(framebuffers,id)),glDeleteFramebuffers:id=>{gl.deleteFramebuffer(object(framebuffers,id));framebuffers.delete(id);},glCheckFramebufferStatus:target=>gl.checkFramebufferStatus(target),glFramebufferTexture2D:(target,attachment,textureTarget,id,level)=>gl.framebufferTexture2D(target,attachment,textureTarget,object(textures,id),level),
   };
   const natives={};for(const[name,callback]of Object.entries(api))natives['Java_port_host_SpriteGraphics_'+name]=async(lib,...args)=>callback(...args);

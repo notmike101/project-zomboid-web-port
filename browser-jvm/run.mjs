@@ -21,7 +21,7 @@ for (let i = 2; i < process.argv.length; i += 2) {
 if (!['game-jar','media-root','jdk','browser'].every(name => options[name]))
   throw new Error('Required: --game-jar PATH --media-root PATH --jdk JDK25_DIRECTORY --browser CHROMIUM_EXECUTABLE');
 const profile = options.profile || 'graphics';
-if (!['graphics','lua','input','sprite','world'].includes(profile)) throw new Error('Profile must be graphics, lua, input, sprite or world');
+if (!['graphics','lua','input','sprite','world','character-shader'].includes(profile)) throw new Error('Profile must be graphics, lua, input, sprite, world or character-shader');
 
 const classes = path.join(output, 'classes');
 const tools = path.join(output, 'tools');
@@ -85,15 +85,15 @@ try {
     if (!(await stat(file)).isFile()) throw new Error('Expected file: ' + file);
   evidence.originalJarSha256Before = await hash(gameJar);
   evidence.pngSha256Before = await hash(png);
-  if (['lua','sprite','world'].includes(profile)) for (const name of ['stdlib.lua','media/lua/shared/defines.lua','media/lua/shared/Sandbox/Apocalypse.lua']) {
+  if (['lua','sprite','world','character-shader'].includes(profile)) for (const name of ['stdlib.lua','media/lua/shared/defines.lua','media/lua/shared/Sandbox/Apocalypse.lua']) {
     const file=path.join(options['media-root'],'..',name);
     assetHashes.push({name,file,sha256Before:await hash(file)});
   }
-  if (profile === 'sprite') for(const name of ['shaders/default.vert','shaders/default.frag']) {const file=path.join(options['media-root'],name);assetHashes.push({name,file,sha256Before:await hash(file)});}
+  if (profile === 'sprite' || profile === 'character-shader') for(const name of (profile==='character-shader'?['basicEffect.vert','basicEffect.frag','util/math.h','util/math.glsl','util/hueShift.h','util/hueShift.glsl'].map(name=>'shaders/'+name):['shaders/default.vert','shaders/default.frag'])) {const file=path.join(options['media-root'],name);assetHashes.push({name,file,sha256Before:await hash(file)});}
   command(executable('javac'), ['--release', '17', '-classpath', gameJar, '-d', classes, path.join(source, 'CheerpJGL.java')]);
   command(executable('javac'), ['-d', tools, path.join(source, 'PrepareBrowserJvm.java')]);
   command(executable('java'), ['-cp', tools, 'PrepareBrowserJvm', gameJar, output, classes]);
-  if (['lua','sprite','world'].includes(profile)) {
+  if (['lua','sprite','world','character-shader'].includes(profile)) {
     const hostClasses = path.join(output, 'host-classes');
     await mkdir(hostClasses, {recursive:true});
     command(executable('javac'), ['--release','17','-d',hostClasses,
@@ -118,11 +118,12 @@ try {
     command(executable('java'), ['-cp',tools,'PrepareInput',path.join(output,'view.jar'),path.join(output,'input-view.jar')]);
     command(executable('jar'), ['--create','--file',path.join(output,'input-entry.jar'),'-C',classes,'probe/CheerpJInput.class','-C',classes,'port/host/BrowserKeyboard.class']);
   }
-  if (profile === 'sprite') {
+  if (profile === 'sprite' || profile === 'character-shader') {
     const spriteClasses=path.join(output,'sprite-classes'); await mkdir(spriteClasses,{recursive:true});
-    command(executable('javac'),['--release','17','-cp',[gameJar,classes].join(path.delimiter),'-d',spriteClasses,...['CheerpJSprite.java','host/port/host/SpriteGraphics.java','host/port/host/SpriteBuffers.java'].map(name=>path.join(source,name))]);
+    command(executable('javac'),['--release','17','-cp',[gameJar,classes].join(path.delimiter),'-d',spriteClasses,...['CheerpJSprite.java','CheerpJCharacterShader.java','host/port/host/SpriteGraphics.java','host/port/host/SpriteBuffers.java'].map(name=>path.join(source,name))]);
     command(executable('javac'),['-d',tools,path.join(source,'PrepareSpriteGraphics.java')]);
     command(executable('java'),['-cp',tools,'PrepareSpriteGraphics',path.join(output,'runtime-view.jar'),output,spriteClasses]);
+    if(profile==='character-shader')await writeFile(path.join(output,'character-shader.html'),(await readFile(path.join(source,'sprite.html'),'utf8')).replace('probe.CheerpJSprite','probe.CheerpJCharacterShader'));
   }
   if (profile === 'world') {
     const worldClasses=path.join(output,'world-classes');await mkdir(worldClasses,{recursive:true});
@@ -144,12 +145,12 @@ try {
   evidence.gameMethodBodiesUnchanged = manifest.gameMethodBodiesUnchanged;
 
   const routes = new Map([
-    ['/', {file: path.join(source, profile === 'lua' ? 'lua.html' : profile === 'world' ? 'world.html' : profile === 'sprite' ? 'sprite.html' : profile === 'input' ? 'input.html' : 'index.html'), type: 'text/html; charset=utf-8'}],
+    ['/', {file: profile==='character-shader'?path.join(output,'character-shader.html'):path.join(source, profile === 'lua' ? 'lua.html' : profile === 'world' ? 'world.html' : profile === 'sprite' ? 'sprite.html' : profile === 'input' ? 'input.html' : 'index.html'), type: 'text/html; charset=utf-8'}],
     ['/index.html', {file: path.join(source, 'index.html'), type: 'text/html; charset=utf-8'}],
     ['/view.jar', {file: path.join(output, 'view.jar'), type: 'application/java-archive'}],
     ['/menu.png', {file: png, type: 'image/png'}],
   ]);
-  if (['lua','sprite','world'].includes(profile)) {
+  if (['lua','sprite','world','character-shader'].includes(profile)) {
     for (const name of ['full-entry.jar','float-bridge.jar','memory-bridge.jar','runtime-view.jar'])
       routes.set('/'+name,{file:path.join(output,name),type:'application/java-archive'});
     for (const name of ['stdlib.lua','media/lua/shared/defines.lua','media/lua/shared/Sandbox/Apocalypse.lua'])
@@ -160,10 +161,10 @@ try {
     routes.set('/keyboard.js',{file:path.join(source,'keyboard.js'),type:'text/javascript'});
     for(const name of ['input-view.jar','input-entry.jar']) routes.set('/'+name,{file:path.join(output,name),type:'application/java-archive'});
   }
-  if (profile === 'sprite') {
+  if (profile === 'sprite' || profile === 'character-shader') {
     routes.set('/sprite-webgl.js',{file:path.join(source,'sprite-webgl.js'),type:'text/javascript'});
     routes.set('/sprite-view.jar',{file:path.join(output,'sprite-view.jar'),type:'application/java-archive'});
-    for(const name of ['ui/avatarBackgroundWhite.png','shaders/default.vert','shaders/default.frag']) routes.set('/media/'+name,{file:path.join(options['media-root'],name),type:name.endsWith('.png')?'image/png':'text/plain'});
+    for(const name of (profile==='character-shader'?['basicEffect.vert','basicEffect.frag','util/math.h','util/math.glsl','util/hueShift.h','util/hueShift.glsl'].map(name=>'shaders/'+name):['ui/avatarBackgroundWhite.png','shaders/default.vert','shaders/default.frag'])) routes.set('/media/'+name,{file:path.join(options['media-root'],name),type:name.endsWith('.png')?'image/png':'text/plain'});
     evidence.spriteAdaptations=JSON.parse(await readFile(path.join(output,'sprite-graphics-manifest.json'),'utf8'));
   }
   if(profile==='world'){
@@ -172,7 +173,7 @@ try {
     evidence.sdkAdaptations=JSON.parse(await readFile(path.join(output,'world-sdk-manifest.json'),'utf8'));evidence.gameMethodBodiesUnchanged=false;evidence.originalGameAlgorithmsPreserved=true;
   }
   evidence.profile=profile;
-  if (['lua','sprite','world'].includes(profile)) evidence.runtimeAdaptations=JSON.parse(await readFile(path.join(output,'float-bridge-summary.json'),'utf8'));
+  if (['lua','sprite','world','character-shader'].includes(profile)) evidence.runtimeAdaptations=JSON.parse(await readFile(path.join(output,'float-bridge-summary.json'),'utf8'));
   server = createServer(async (request, response) => {
     try {
       if (!['GET', 'HEAD'].includes(request.method)) {response.writeHead(405).end(); return;}
@@ -236,7 +237,7 @@ try {
   if(profile==='world'){for(const [phase,action] of [['press',()=>page.keyboard.down('w')],['release',()=>page.keyboard.up('w')]]){await page.waitForFunction(expected=>window.inputPhase===expected,phase,{timeout:60000});await action();}}
   await page.waitForFunction(() => window.probeResult, undefined, {timeout: 180000});
   evidence.result = await page.evaluate(() => window.probeResult);
-  if (['lua','sprite','world'].includes(profile)) evidence.stages=await page.evaluate(() => window.stageResults);
+  if (['lua','sprite','world','character-shader'].includes(profile)) evidence.stages=await page.evaluate(() => window.stageResults);
   evidence.pass = evidence.result.pass === true && denied.length === 0;
 } catch (error) {
   evidence.error = String(error.stack || error);
@@ -267,6 +268,7 @@ try {
   console.log(JSON.stringify({...evidence, requests: requests.length, logs: logs.length, resultFile: path.join(output, 'result.json')}, null, 2));
   if (!evidence.pass) process.exitCode = 1;
 }
+
 
 
 

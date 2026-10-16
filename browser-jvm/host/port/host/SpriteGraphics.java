@@ -13,6 +13,7 @@ public final class SpriteGraphics {
     private SpriteGraphics() { }
     public static native void initialize();
     public static native boolean contextCreated();
+    public static native boolean framebufferSupported();
     public static native void report(String json);
     public static native void resize(int width,int height);
     public static native int surfaceWidth();
@@ -73,6 +74,8 @@ public final class SpriteGraphics {
     private static native void vertexPointer(int index,int size,int type,boolean normalized,int stride,int offset);
     public static void glDrawRangeElements(int mode,int first,int last,int count,int type,long address){drawRange(mode,first,last,count,type,offset(address));}
     private static native void drawRange(int mode,int first,int last,int count,int type,int offset);
+    public static void glDrawElements(int mode,int count,int type,long address){drawElements(mode,count,type,offset(address));}
+    private static native void drawElements(int mode,int count,int type,int offset);
     public static native void glEnableVertexAttribArray(int index);
     public static native void glDisableVertexAttribArray(int index);
     public static native void glActiveTexture(int texture);
@@ -109,6 +112,7 @@ public final class SpriteGraphics {
     public static native void glDeleteProgram(int id);
     public static int glGetUniformLocation(int id,CharSequence name){return uniformLocation(id,name.toString());}
     private static native int uniformLocation(int id,String name);
+    public static native float uniformComponent(int program,int location,int component);
     private static native String activeUniformName(int id,int index);
     private static native int activeUniformProperty(int id,int index,boolean type);
     public static String glGetActiveUniform(int id,int index,int length,IntBuffer size,IntBuffer type){if(length<0)throw new IllegalArgumentException("Negative name length");String name=activeUniformName(id,index);if(size!=null)size.put(size.position(),activeUniformProperty(id,index,false));if(type!=null)type.put(type.position(),activeUniformProperty(id,index,true));return name.substring(0,Math.min(name.length(),Math.max(0,length-1)));}
@@ -127,11 +131,20 @@ public final class SpriteGraphics {
     public static native void glBindTexture(int target,int id);
     public static native void glDeleteTextures(int id);
     public static native void glTexParameteri(int target,int name,int value);
-    public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,ByteBuffer data){int count=pixelCount(width,height,format,type);byte[] bytes=null;if(data!=null){if(data.remaining()<count)throw new IllegalArgumentException("Texture buffer too short");bytes=new byte[count];for(int i=0;i<count;i++)bytes[i]=data.get(data.position()+i);}textureBytes(target,level,internal,width,height,border,format,type,bytes);}
+    public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,ByteBuffer data){int count=data==null?0:pixelCount(width,height,format,type);byte[] bytes=null;if(data!=null){if(data.remaining()<count)throw new IllegalArgumentException("Texture buffer too short");bytes=new byte[count];for(int i=0;i<count;i++)bytes[i]=data.get(data.position()+i);}textureBytes(target,level,internal,width,height,border,format,type,bytes);}
+    /** The original FBO allocation uses this typed-null overload; client IntBuffer pixels remain unsupported. */
+    public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,IntBuffer data){if(data!=null)throw new UnsupportedOperationException("IntBuffer texture uploads are outside the bounded browser backend");textureBytes(target,level,internal,width,height,border,format,type,null);}
     private static native void textureBytes(int target,int level,int internal,int width,int height,int border,int format,int type,byte[] data);
     public static void glReadPixels(int x,int y,int width,int height,int format,int type,ByteBuffer data){int count=pixelCount(width,height,format,type);if(data.isReadOnly())throw new ReadOnlyBufferException();if(data.remaining()<count)throw new IllegalArgumentException("Readback buffer too short");byte[] bytes=new byte[count];for(int i=0;i<count;i++)bytes[i]=data.get(data.position()+i);readPixels(x,y,width,height,format,type,bytes);for(int i=0;i<count;i++)data.put(data.position()+i,bytes[i]);}
     private static native void readPixels(int x,int y,int width,int height,int format,int type,byte[] data);
     private static int pixelCount(int width,int height,int format,int type){if(format!=6408||type!=5121)throw new UnsupportedOperationException("Only RGBA UNSIGNED_BYTE qualified");if(width<0||height<0)throw new IllegalArgumentException("Negative image dimensions");return Math.multiplyExact(Math.multiplyExact(width,height),4);}
+    public static native int glGenRenderbuffers();
+    public static native void glBindRenderbuffer(int target,int id);
+    public static native void glDeleteRenderbuffers(int id);
+    public static native void glRenderbufferStorage(int target,int format,int width,int height);
+    public static native void glRenderbufferStorageMultisample(int target,int samples,int format,int width,int height);
+    public static native void glFramebufferRenderbuffer(int target,int attachment,int renderTarget,int id);
+    public static native void glBlitFramebuffer(int sx0,int sy0,int sx1,int sy1,int dx0,int dy0,int dx1,int dy1,int mask,int filter);
     public static native int glGenFramebuffers();
     public static native void glBindFramebuffer(int target,int id);
     public static native void glDeleteFramebuffers(int id);

@@ -53,3 +53,6 @@ Use --profile sprite for a combined run of full original Lua initialization and 
 
 Use --profile world for actual original IsoCell/IsoPlayer construction, 92 loaded action states with initial idle, and real DOM W press/release interpreted by the original player input component. It packages 953 installed bootstrap files locally and checks their hashes after the run. A SHA-qualified copied Pool.alloc method retargets one Java21 List.removeLast call to equivalent support for its actual ArrayList receiver; this profile therefore records copied game method bytes changed, with original algorithms preserved. The original archive is unchanged. It stops the actual world worker before success. Player movement, map geometry and rendering are still separate prerequisites.
 
+
+Use --profile character-shader to load the original basicEffect skinning shader, verify UVScale and actual matrix-palette upload (two matrices including off-diagonal transpose checks). The runtime qualifies real color/depth FBO completeness before exposing its bounded ARB framebuffer facade. Desktop shader units are composed into one actual WebGL stage at link; individual library-unit compile failures remain visible, while the complete composed stages, link and validation must succeed. The installed shader files are unchanged. Actual skinned mesh drawing is not yet qualified.
+

@@ -393,3 +393,6 @@ Combined CheerpJ full-Lua + original SpriteRenderer PASS in one JVM: original fu
 
 CheerpJ world profile PASS: real IsoCell/IsoPlayer, 953 installed files / 806347 bytes, 92 action states / idle, original position (.5,.5,0), DOM W through original GameKeyboard and player ECS input vector (0,-1.95), release (0,0), actual worker stop before result. One precisely recorded Pool.alloc Java21 SDK call is retargeted in the private copy; game method bytes are explicitly marked changed, algorithms preserved. All selected installed input hashes verified after run. No walking or playable world claim.
 
+
+Original character shader browser PASS: actual basicEffect composed stages compile/link/validate, UVScale(1,1), two matrix-palette GPU elements including non-diagonal transpose and NIO state. Real color/depth FBO completeness gates the bounded ARB capability. Separate library-unit compile failures are preserved; same-stage source composition is an explicit desktop-to-WebGL linker adaptation. Original shader operations are preserved; no actual character drawing claim. Full Lua + sprite regression remains5/14 and identical framebuffer hash.
+
