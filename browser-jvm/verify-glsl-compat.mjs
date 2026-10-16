@@ -82,8 +82,8 @@ try {
                 // Root first deliberately puts the library's initialized global after main.
                 for (const [stage, source] of [
                     [35633, vertex],
-                    [35632, prefix+'float helper();void main(){color=vec4(helper(),0,0,1);}'],
-                    [35632, prefix.replace('out vec4 color;', '')+'uniform float u;float g=u;float helper(){return g;}'],
+                    [35632, prefix+'uniform sampler2D rootTexture;vec4 sampleRoot(){return texture2D(rootTexture,vec2(0));}float helper();void main(){color=vec4(helper(),0,0,1);}'],
+                    [35632, prefix.replace('out vec4 color;', '')+'uniform sampler2D libraryTexture;vec4 sampleLibrary(){return texture2D(libraryTexture,vec2(0));}uniform float u;float g=u;float helper(){return g;}'],
                 ]) {
                     const shader = await call('glCreateShader', stage); handles.push(shader);
                     await call('shaderText', shader, source);
@@ -112,6 +112,53 @@ try {
                 context.getExtension('WEBGL_lose_context')?.loseContext();
             }
         }
+        async function legacyTexture() {
+            const { createSpriteNatives } = await import('/browser-jvm/sprite-webgl.js');
+            const canvas = document.createElement('canvas');
+            const facade = createSpriteNatives(canvas, () => {});
+            const context = canvas.getContext('webgl2');
+            const call = (name, ...args) => facade.natives['Java_port_host_SpriteGraphics_' + name](null, ...args);
+            const handles = [];
+            const program = await call('glCreateProgram');
+            const texture = context.createTexture();
+            try {
+                for (const [stage, source] of [
+                    [35633, vertex],
+                    [35632, '#version 330\\n' + 'uniform sampler2D texture;float portLegacyTexture2D=0.0;vec4 texture2D(float value){return vec4(value);}void main(){gl_FragColor=(texture2D(texture,vec2(.5))+texture2D(texture,vec2(.5),0))*.5+texture2D(0.0);}'],
+                ]) {
+                    const shader = await call('glCreateShader', stage); handles.push(shader);
+                    await call('shaderText', shader, source);
+                    await call('glCompileShader', shader);
+                    if (!(await call('glGetShaderi', shader, 35713))) throw new Error(await call('glGetShaderInfoLog', shader, 10000));
+                    await call('glAttachShader', program, shader);
+                }
+                await call('glLinkProgram', program);
+                if (!(await call('glGetProgrami', program, 35714))) throw new Error(await call('glGetProgramInfoLog', program, 10000));
+                await call('glUseProgram', program);
+                const location = await call('uniformLocation', program, 'texture');
+                if (location === -1) throw new Error('Original texture uniform is hidden');
+                await call('glUniform1i', location, 0);
+                context.bindTexture(context.TEXTURE_2D, texture);
+                context.texParameteri(context.TEXTURE_2D, context.TEXTURE_MIN_FILTER, context.NEAREST);
+                context.texParameteri(context.TEXTURE_2D, context.TEXTURE_MAG_FILTER, context.NEAREST);
+                const pixels = [];
+                for (const rgba of [[32,96,160,224], [240,128,64,192]]) {
+                    context.texImage2D(context.TEXTURE_2D,0,context.RGBA8,1,1,0,context.RGBA,context.UNSIGNED_BYTE,new Uint8Array(rgba));
+                    context.viewport(0,0,1,1);
+                    await call('glDrawArrays', 4, 0, 3);
+                    const data = new Uint8Array(4);
+                    context.readPixels(0,0,1,1,context.RGBA,context.UNSIGNED_BYTE,data);
+                    if (context.getError() !== context.NO_ERROR) throw new Error('Legacy texture draw failed');
+                    pixels.push([...data]);
+                }
+                return pixels;
+            } finally {
+                context.deleteTexture(texture);
+                await call('glDeleteProgram', program);
+                for (const shader of handles) await call('glDeleteShader', shader);
+                context.getExtension('WEBGL_lose_context')?.loseContext();
+            }
+        }
         try {
             const baseline = [
                 'void main(){float d=0.5;color=vec4(d>0?1.0:0.0);}',
@@ -129,7 +176,7 @@ try {
             const globals = program('uniform float u;float g=u;float h=g*2;void main(){color=vec4(g,h,0,1);}');
             const scopes = program('void main(){float f=0.5;float a=0;{int f=1;int values[2]=int[2](0,1);if(f/2==0 && values[1]==1 && (1<<2)==4)a=1;}color=vec4(f>0?a:0,0,0,1);}');
             const numeric = program('float helper(vec2 p,float n){return n/4;}float max(float a,float b){return a>b?a:b;}float result(){return 1-max(0.0,0.0);}void main(){float n=20;color=vec4(helper(vec2(0),3),result(),(1-0.5)*n/20,1);}');
-            return { baseline, overload:pixel(overload), integerOverload:pixel(integerOverload), vectorClamp:pixel(vectorClamp), legacyColor:pixel(legacyColor), globalsFirst:pixel(globals,0.25), globalsSecond:pixel(globals,0.5), scopes:pixel(scopes), numeric:pixel(numeric), composedGlobals:await composedGlobals() };
+            return { baseline, overload:pixel(overload), integerOverload:pixel(integerOverload), vectorClamp:pixel(vectorClamp), legacyColor:pixel(legacyColor), globalsFirst:pixel(globals,0.25), globalsSecond:pixel(globals,0.5), scopes:pixel(scopes), numeric:pixel(numeric), composedGlobals:await composedGlobals(), legacyTexture:await legacyTexture() };
         } finally {
             for (const program of programs) gl.deleteProgram(program);
             for (const shader of shaders) gl.deleteShader(shader);
@@ -137,8 +184,8 @@ try {
         }
     })()`);
 
-    assert.deepEqual(results, { baseline: [false, false, false], overload: [255, 255, 64, 255], integerOverload: [255, 64, 0, 255], vectorClamp: [255, 64, 128, 255], legacyColor: [64, 128, 191, 255], globalsFirst: [64, 128, 0, 255], globalsSecond: [128, 255, 0, 255], scopes: [255, 0, 0, 255], numeric: [191, 255, 128, 255], composedGlobals: { status: [true, false, false], pixels: [[64, 0, 0, 255], [191, 0, 0, 255]] } });
-    console.info('GLSL compatibility: eight WebGL2 semantic cases passed, including composed library globals.', JSON.stringify(results));
+    assert.deepEqual(results, { baseline: [false, false, false], overload: [255, 255, 64, 255], integerOverload: [255, 64, 0, 255], vectorClamp: [255, 64, 128, 255], legacyColor: [64, 128, 191, 255], globalsFirst: [64, 128, 0, 255], globalsSecond: [128, 255, 0, 255], scopes: [255, 0, 0, 255], numeric: [191, 255, 128, 255], composedGlobals: { status: [true, false, false], pixels: [[64, 0, 0, 255], [191, 0, 0, 255]] }, legacyTexture: [[32, 96, 160, 224], [240, 128, 64, 192]] });
+    console.info('GLSL compatibility: nine WebGL2 semantic cases passed, including composed globals and legacy texture sampling.', JSON.stringify(results));
 } finally {
     await browser?.close();
     await new Promise((done, reject) => {

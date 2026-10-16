@@ -121,6 +121,9 @@ export function normalizeDesktopShader(source, stage) {
     const types = new WeakMap();
     const functions = new Map();
     const definitions = [];
+    const identifiers = new Set();
+    const legacyTextureArities = new Set();
+    let legacyTextureName = 'portLegacyTexture2D';
     const legacyColor = stage === 'vertex' ? 'gl_FrontColor' : 'gl_Color';
     let needsLegacyColor = false;
 
@@ -133,6 +136,8 @@ export function normalizeDesktopShader(source, stage) {
              * @param {object} root0.node - Identifier AST node.
              */
             enter: ({ node }) => {
+                identifiers.add(node.identifier);
+
                 if (node.identifier === legacyColor) {
                     node.identifier = 'portLegacyFrontColor';
                     types.set(node, 'vec4');
@@ -194,6 +199,10 @@ export function normalizeDesktopShader(source, stage) {
             },
         },
     });
+
+    while (identifiers.has(legacyTextureName)) {
+        legacyTextureName += '_';
+    }
 
     for (const scope of ast.scopes) {
         for (const binding of Object.values(scope.bindings)) {
@@ -352,7 +361,20 @@ export function normalizeDesktopShader(source, stage) {
                     }
 
                     result = selected.result;
-                } else if (/^(?:texture|texture2D|textureLod|textureProj)$/.test(name)) {
+                } else if (name === 'texture2D') {
+                    if (argumentTypes[0] !== 'sampler2D' || argumentTypes[1] !== 'vec2'
+                        || (args.length !== 2 && !(stage === 'fragment' && args.length === 3 && Number.isFinite(conversion(argumentTypes[2], 'float'))))) {
+                        throw new Error(`Unqualified legacy texture2D(${argumentTypes.join(', ')}) in ${stage} shader`);
+                    }
+
+                    if (args.length === 3 && conversion(argumentTypes[2], 'float') === 1) {
+                        node.args[4] = cast(node.args[4], 'float');
+                    }
+
+                    node.identifier.identifier = legacyTextureName;
+                    legacyTextureArities.add(args.length);
+                    result = 'vec4';
+                } else if (/^(?:texture|textureLod|textureProj)$/.test(name)) {
                     result = 'vec4';
                 } else if (['dot', 'length', 'distance', 'determinant'].includes(name)) {
                     result = 'float';
@@ -512,5 +534,113 @@ export function normalizeDesktopShader(source, stage) {
         ast.program.splice(firstFunction, 0, ...parse(prototypes.join(''), { quiet: true }).program);
     }
 
+    if (legacyTextureArities.size) {
+        const helpers = [...legacyTextureArities].map((arity) => `highp vec4 ${legacyTextureName}(highp sampler2D image, highp vec2 uv${arity === 3 ? ', highp float bias' : ''}) { return texture(image, uv${arity === 3 ? ', bias' : ''}); }\n`);
+        const firstGlobal = ast.program.findIndex((node) => node.type !== 'preprocessor' && node.declaration?.type !== 'precision');
+
+        /* Resolve the builtin before an original global named texture enters scope.
+         * Insert once after stage composition, retaining every original uniform name.
+         */
+        ast.program.splice(firstGlobal === -1 ? ast.program.length : firstGlobal, 0, ...parse(`precision highp float;\nprecision highp int;\n${helpers.join('')}`, { quiet: true }).program);
+    }
+
     return generate(ast);
+}
+
+export const alphaNames = ['portAlphaOriginalMain', 'portAlphaFunction', 'portAlphaReference', 'portAlphaValue', 'portAlphaPassed'];
+
+/**
+ * Checks every shader stage before introducing shared program uniform names.
+ *
+ * @param {string} source - One original translated shader unit.
+ * @returns {boolean} Whether original identifiers conflict with the alpha adapter.
+ */
+export function hasAlphaIdentifiers(source) {
+    const ast = parse(source, { quiet: true });
+    let collision = false;
+
+    visit(ast, {
+        identifier: {
+            /**
+             * Conservatively reserves adapter names across all shader scopes.
+             *
+             * @param {object} context - AST visitor context.
+             * @param {object} context.node - Original identifier node.
+             */
+            enter: ({ node }) => {
+                if (alphaNames.includes(node.identifier)) {
+                    collision = true;
+                }
+            },
+        },
+    });
+
+    return collision;
+}
+
+/**
+ * Tests final location-zero alpha after original main returns, including early returns.
+ *
+ * @param {string} source - Complete normalized fragment stage.
+ * @returns {object} Preserved or instrumented source and its qualification boundary.
+ */
+export function instrumentAlphaTest(source) {
+    if (hasAlphaIdentifiers(source)) {
+        return { source, supported: false, reason: 'Alpha adapter identifier collision' };
+    }
+
+    const ast = parse(source, { stage: 'fragment', quiet: true });
+    const main = ast.program.find((node) => node.type === 'function' && node.prototype.header.name.identifier === 'main');
+
+    if (!main) {
+        return { source, supported: false, reason: 'Fragment stage has no main' };
+    }
+
+    const outputs = [];
+
+    for (const statement of ast.program) {
+        const declaration = statement.declaration;
+
+        if (declaration?.type !== 'declarator_list' || !declaration.specified_type.qualifiers?.some((qualifier) => qualifier.token === 'out')) {
+            continue;
+        }
+
+        const location = declaration.specified_type.qualifiers.filter((qualifier) => qualifier.type === 'layout_qualifier')
+            .flatMap((qualifier) => qualifier.qualifiers).find((qualifier) => qualifier.identifier.identifier === 'location');
+
+        for (const variable of declaration.declarations) {
+            outputs.push({
+                name: variable.identifier.identifier,
+                type: declaration.specified_type.specifier.specifier.token,
+                array: variable.quantifier || declaration.specified_type.specifier.quantifier,
+                location: location ? generate(location.expression).trim() : undefined,
+            });
+        }
+    }
+
+    const output = outputs.length === 1 && outputs[0].location === undefined ? outputs[0] : outputs.find((candidate) => candidate.location === '0');
+
+    if (!output || output.type !== 'vec4' || output.array) {
+        return { source, supported: false, reason: 'No unambiguous vec4 output at location zero' };
+    }
+
+    main.prototype.header.name.identifier = alphaNames[0];
+    ast.program.push(...parse(`
+uniform int portAlphaFunction;
+uniform highp float portAlphaReference;
+void main() {
+    portAlphaOriginalMain();
+    highp float portAlphaValue = clamp(${output.name}.a, 0.0, 1.0);
+    bool portAlphaPassed = portAlphaFunction == 519
+        || (portAlphaFunction == 513 && portAlphaValue < portAlphaReference)
+        || (portAlphaFunction == 514 && portAlphaValue == portAlphaReference)
+        || (portAlphaFunction == 515 && portAlphaValue <= portAlphaReference)
+        || (portAlphaFunction == 516 && portAlphaValue > portAlphaReference)
+        || (portAlphaFunction == 517 && portAlphaValue != portAlphaReference)
+        || (portAlphaFunction == 518 && portAlphaValue >= portAlphaReference);
+    if (!portAlphaPassed) discard;
+}
+`, { stage: 'fragment', quiet: true }).program);
+
+    return { source: generate(ast), supported: true };
 }

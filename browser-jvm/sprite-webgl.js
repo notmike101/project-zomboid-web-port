@@ -1,4 +1,4 @@
-import { normalizeDesktopShader } from './glsl-compat.js';
+import { normalizeDesktopShader, instrumentAlphaTest, hasAlphaIdentifiers, alphaNames } from './glsl-compat.js';
 
 /**
  * Resolves an owned graphics handle and rejects foreign handles.
@@ -71,6 +71,57 @@ export function createSpriteNatives(canvas, report) {
     const attached = new Map();
     const locationOwners = new Map();
     const legacyTexture = new Map();
+    let alphaEnabled = false;
+    let alphaFunction = 519;
+    let alphaReference = 0;
+    let compatibilityError = 0;
+    const alphaPrograms = new WeakMap();
+    /**
+     * Excludes injected uniforms while retaining every original uniform on unsupported programs.
+     *
+     * @param {WebGLProgram} program - Actual linked program.
+     * @returns {WebGLActiveInfo[]} Original active uniforms in driver order.
+     */
+    const visibleUniforms = (program) => {
+        const info = alphaPrograms.get(program);
+        const result = [];
+
+        for (let index = 0; index < gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS); index++) {
+            const uniform = gl.getActiveUniform(program, index);
+
+            if (!info?.supported || !alphaNames.slice(1).includes(uniform.name)) {
+                result.push(uniform);
+            }
+        }
+
+        return result;
+    };
+
+    /**
+     * Applies current desktop alpha state before each actual draw without faking fixed-function rendering.
+     */
+    const applyAlpha = () => {
+        const program = gl.getParameter(gl.CURRENT_PROGRAM);
+        const info = program && alphaPrograms.get(program);
+
+        if (alphaEnabled && !info?.supported) {
+            throw new Error(`Unsupported alpha-test draw: ${info?.reason || 'no instrumented fragment program'}`);
+        }
+
+        if (alphaEnabled && gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)) {
+            const type = gl.getFramebufferAttachmentParameter(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE);
+
+            if (type !== gl.NONE && gl.getFramebufferAttachmentParameter(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE) === gl.FLOAT) {
+                throw new Error('Unsupported alpha-test draw: floating-point color attachment');
+            }
+        }
+
+        if (info?.supported) {
+            gl.uniform1i(info.functionLocation, alphaEnabled ? alphaFunction : 519);
+            gl.uniform1f(info.referenceLocation, alphaReference);
+        }
+    };
+
     const diagnostics = [];
     /**
      * Records bounded compiler and graphics diagnostics.
@@ -201,7 +252,6 @@ export function createSpriteNatives(canvas, report) {
 
             return `${declaration};`;
         });
-        source = source.replaceAll(/\btexture2D\b/g, 'texture');
 
         if (legacy) {
             if (shaderTypes.get(id) === gl.VERTEX_SHADER) {
@@ -450,7 +500,13 @@ export function createSpriteNatives(canvas, report) {
          *
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        rawError: () => gl.getError(),
+        rawError: () => {
+            const result = compatibilityError;
+
+            compatibilityError = 0;
+
+            return result || gl.getError();
+        },
         /**
          * Performs the integer state operation for the owned browser runtime.
          *
@@ -458,6 +514,10 @@ export function createSpriteNatives(canvas, report) {
          * @returns {number} Actual scalar state or the corresponding owned object handle.
          */
         integerState: (name) => {
+            if (name === 0x0B_C1) {
+                return alphaFunction;
+            }
+
             const value = gl.getParameter(name);
 
             if (typeof value === 'number') {
@@ -505,7 +565,11 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} offset - Numeric offset argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        drawRange: (mode, first, last, count, type, offset) => gl.drawRangeElements(mode, first, last, count, type, offset),
+        drawRange: (mode, first, last, count, type, offset) => {
+            applyAlpha();
+
+            return gl.drawRangeElements(mode, first, last, count, type, offset);
+        },
         /**
          * Performs the draw elements operation for the owned browser runtime.
          *
@@ -515,7 +579,11 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} offset - Numeric offset argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        drawElements: (mode, count, type, offset) => gl.drawElements(mode, count, type, offset),
+        drawElements: (mode, count, type, offset) => {
+            applyAlpha();
+
+            return gl.drawElements(mode, count, type, offset);
+        },
         /**
          * Executes the selected glEnableVertexAttribArray operation against the actual WebGL context.
          *
@@ -548,6 +616,12 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} cap - Numeric cap argument for the declared operation.
          */
         glEnable: (cap) => {
+            if (cap === 3_008) {
+                alphaEnabled = true;
+
+                return;
+            }
+
             if (cap === gl.TEXTURE_2D) {
                 legacyTexture.set(activeUnit, true);
             } else {
@@ -560,6 +634,12 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} cap - Numeric cap argument for the declared operation.
          */
         glDisable: (cap) => {
+            if (cap === 3_008) {
+                alphaEnabled = false;
+
+                return;
+            }
+
             if (cap === gl.TEXTURE_2D) {
                 legacyTexture.set(activeUnit, false);
             } else {
@@ -572,7 +652,29 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} cap - Numeric cap argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        glIsEnabled: (cap) => cap === gl.TEXTURE_2D ? legacyTexture.get(activeUnit) === true : gl.isEnabled(cap),
+        glIsEnabled: (cap) => {
+            if (cap === 3_008) {
+                return alphaEnabled;
+            }
+
+            return cap === gl.TEXTURE_2D ? legacyTexture.get(activeUnit) === true : gl.isEnabled(cap);
+        },
+        /**
+         * Retains the desktop comparison and normalized-buffer reference; invalid enums preserve state.
+         *
+         * @param {number} comparison - One of the eight original alpha comparison enums.
+         * @param {number} reference - Reference value from the original float ABI.
+         */
+        glAlphaFunc: (comparison, reference) => {
+            if (!Number.isInteger(comparison) || comparison < 512 || comparison > 519) {
+                compatibilityError ||= gl.INVALID_ENUM;
+
+                return;
+            }
+
+            alphaFunction = comparison;
+            alphaReference = Math.fround(Math.min(1, Math.max(0, reference)));
+        },
         /**
          * Executes the selected glBlendFunc operation against the actual WebGL context.
          *
@@ -699,7 +801,11 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} count - Numeric count argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        glDrawArrays: (mode, first, count) => gl.drawArrays(mode, first, count),
+        glDrawArrays: (mode, first, count) => {
+            applyAlpha();
+
+            return gl.drawArrays(mode, first, count);
+        },
         /**
          * Executes the selected glCreateShader operation against the actual WebGL context.
          *
@@ -831,6 +937,7 @@ export function createSpriteNatives(canvas, report) {
                 gl.deleteShader(shader);
             }
 
+            let alphaInfo = { supported: false, reason: 'No fragment stage' };
             const stages = [];
 
             linkedStages.set(id, stages);
@@ -846,6 +953,8 @@ export function createSpriteNatives(canvas, report) {
                 groups.get(type).push(shaderSources.get(shader));
             }
 
+            const alphaCollision = [...groups.values()].flat().some(hasAlphaIdentifiers);
+
             for (const [type, sources] of groups) {
                 let source = sources.join('\n');
 
@@ -854,6 +963,11 @@ export function createSpriteNatives(canvas, report) {
                 }
 
                 source = normalizeDesktopShader(source, type === gl.VERTEX_SHADER ? 'vertex' : 'fragment');
+
+                if (type === gl.FRAGMENT_SHADER) {
+                    alphaInfo = alphaCollision ? { source, supported: false, reason: 'Program identifier collides with alpha adapter' } : instrumentAlphaTest(source);
+                    source = alphaInfo.source;
+                }
 
                 const shader = gl.createShader(type);
 
@@ -871,6 +985,11 @@ export function createSpriteNatives(canvas, report) {
                 return;
             }
 
+            alphaPrograms.set(program, {
+                ...alphaInfo,
+                functionLocation: gl.getUniformLocation(program, alphaNames[1]),
+                referenceLocation: gl.getUniformLocation(program, alphaNames[2]),
+            });
             const previous = gl.getParameter(gl.CURRENT_PROGRAM);
 
             gl.useProgram(program);
@@ -913,7 +1032,17 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} name - Numeric name argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        glGetProgrami: (id, name) => name === 0x8B_84 ? (gl.getProgramInfoLog(object(programs, id)) || '').length + 1 : Number(gl.getProgramParameter(object(programs, id), name)),
+        glGetProgrami: (id, name) => {
+            if (name === gl.ACTIVE_UNIFORMS) {
+                return visibleUniforms(object(programs, id)).length;
+            }
+
+            if (name === gl.ACTIVE_UNIFORM_MAX_LENGTH) {
+                return Math.max(0, ...visibleUniforms(object(programs, id)).map((info) => info.name.length + 1));
+            }
+
+            return name === 0x8B_84 ? (gl.getProgramInfoLog(object(programs, id)) || '').length + 1 : Number(gl.getProgramParameter(object(programs, id), name));
+        },
         /**
          * Executes the selected glGetProgramInfoLog operation against the actual WebGL context.
          *
@@ -959,6 +1088,10 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         uniformLocation: (program, name) => {
+            if (alphaPrograms.get(object(programs, program))?.supported && alphaNames.slice(1).includes(String(name))) {
+                return -1;
+            }
+
             const value = gl.getUniformLocation(object(programs, program), String(name));
 
             if (value === null) {
@@ -1004,7 +1137,7 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         activeUniformName: (program, index) => {
-            const value = gl.getActiveUniform(object(programs, program), index);
+            const value = visibleUniforms(object(programs, program))[index];
 
             if (!value) {
                 throw new Error('Invalid uniform index');
@@ -1021,7 +1154,7 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         activeUniformProperty: (program, index, type) => {
-            const value = gl.getActiveUniform(object(programs, program), index);
+            const value = visibleUniforms(object(programs, program))[index];
 
             if (!value) {
                 throw new Error('Invalid uniform index');

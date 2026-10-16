@@ -121,13 +121,16 @@ Work continues on **main**. Use conventional commits, verify logical increments 
 npm run lint
 node browser-jvm/verify-media-files.mjs
 node browser-jvm/verify-stencil.mjs
+node browser-jvm/verify-alpha.mjs
 node browser-jvm/verify-glsl-compat.mjs
 node browser-jvm/verify-native-memory.mjs
 node browser-jvm/verify-clipper-callbacks.mjs
 node browser-jvm/verify-clipper.mjs
 ~~~
 
-The shader qualification uses the `PZ_BROWSER` executable set above. It checks actual WebGL2 compilation and exact pixels with Chromium's SwiftShader backend, including overload selection, integer arithmetic, legacy color varyings and uniform-dependent global initialization across composed shader units. It does not establish physical-GPU or complete GLSL conformance.
+The shader qualification uses the `PZ_BROWSER` executable set above. Nine cases check actual WebGL2 compilation and exact pixels with Chromium's SwiftShader backend, including overload selection, integer arithmetic, legacy color varyings, uniform-dependent globals across composed units and legacy texture sampling with an original sampler named `texture`. A separate source check now compiles and links twelve original scene shader pairs, including both cutaway shaders. These checks do not establish physical-GPU or complete GLSL conformance.
+
+The alpha qualification checks 113 actual GPU outcomes, including all eight comparisons, reference clamping, early returns, original discard behavior, program changes, uniform collisions and rejected fragments leaving depth/stencil untouched. The host routes the original `GL11.glAlphaFunc` entry point to this real shader implementation. Enabled alpha testing currently requires a supported fragment program and normalized color attachments; floating-point attachments and fixed-function program zero fail explicitly. The public walking build passes with this implementation, while the complete original cell-rendering lifecycle remains separate work.
 
 The native-memory qualification also uses `PZ_JDK` and requires the prepared play profile's `sprite-view.jar`. It checks immediate native storage release for owned byte/float/integer buffers, rejects foreign and repeated frees, and verifies the prepared archive is unchanged. The graphics host explicitly relies on the qualified Java 17 runtime's `sun.misc.Unsafe.invokeCleaner` support; unavailable support fails initialization.
 
