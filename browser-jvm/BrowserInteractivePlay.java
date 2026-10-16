@@ -80,9 +80,19 @@ public final class BrowserInteractivePlay {
                 zombie.core.skinnedmodel.population.OutfitManager.init();
                 if (zombie.core.skinnedmodel.population.OutfitManager.instance == null)
                     throw new AssertionError("Original OutfitManager did not initialize from installed clothing.xml");
+                stage = "original-stash-lifecycle";
+                progress(stage);
+                zombie.Lua.LuaManager.LoadDirBase("shared", true);
+                for (String name : STASH_FILES)
+                    zombie.Lua.LuaManager.RunLua("/files/work/media/lua/shared/StashDescriptions/" + name + ".lua");
+                zombie.core.stash.StashSystem.init();
+                if (zombie.core.stash.StashSystem.getAllStashes().isEmpty())
+                    throw new AssertionError("Installed stash definitions were not loaded");
                 stage = "original-same-cell-geometry";
                 progress(stage);
                 geometry[0] = BrowserGeometry.loadChallenge1(cell);
+                if (geometry[0].getChunks().size() != 9 || geometry[0].getGroundFloorCount() != 576)
+                    throw new AssertionError("Original loaded neighborhood is incomplete");
                 stage = "original-weather-texture-assets";
                 progress(stage);
                 GameWindow.fileSystem.mountTexturePack("WeatherFx", GameWindow.texturePackTextures, 0);
@@ -95,14 +105,6 @@ public final class BrowserInteractivePlay {
                 zombie.iso.weather.fx.WeatherFxMask.init();
                 zombie.iso.areas.isoregion.IsoRegions.init();
                 zombie.iso.objects.ObjectRenderEffects.init();
-                stage = "original-stash-lifecycle";
-                progress(stage);
-                zombie.Lua.LuaManager.LoadDirBase("shared", true);
-                for (String name : STASH_FILES)
-                    zombie.Lua.LuaManager.RunLua("/files/work/media/lua/shared/StashDescriptions/" + name + ".lua");
-                zombie.core.stash.StashSystem.init();
-                if (zombie.core.stash.StashSystem.getAllStashes().isEmpty())
-                    throw new AssertionError("Installed stash definitions were not loaded");
                 stage = "original-climate-lifecycle";
                 progress(stage);
                 zombie.iso.weather.ClimateManager.getInstance().init(zombie.iso.IsoWorld.instance.getMetaGrid());
@@ -191,6 +193,8 @@ public final class BrowserInteractivePlay {
                         String capture = frames == 0 || !draw ? "null" : renderer.capture();
                         result = "{\"pass\":true,\"qualification\":\"original-frame-lifecycle\",\"stopped\":true,\"cleanupComplete\":true,\"regionWorkerLifetime\":\"browser-context\",\"frames\":" + frames
                                 + ",\"initialX\":" + initialX + ",\"initialY\":" + initialY
+                                + ",\"loadedChunks\":" + geometry[0].getChunks().size()
+                                + ",\"groundFloors\":" + geometry[0].getGroundFloorCount()
                                 + ",\"final\":" + session.snapshot() + ",\"composition\":" + composition + ",\"frame\":" + capture + "}";
                     }
                 } finally { player.releaseAnimationPlayer(); }

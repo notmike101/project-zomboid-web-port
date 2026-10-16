@@ -1,6 +1,6 @@
 # Project Zomboid browser port
 
-An in-development browser port built around the installed game's original Java code and data. The goal is whole-game compatibility. **The full game is not ported yet:** the current verified milestone is an original-code walking scene in one genuine loaded map chunk.
+An in-development browser port built around the installed game's original Java code and data. The goal is whole-game compatibility. **The full game is not ported yet:** the current verified milestone is an original-code walking scene in a genuine nine-chunk neighborhood.
 
 This repository contains authored platform adapters, preparation tools and verification code. It does not distribute the game's JAR, assets, native libraries, downloaded toolchains or generated runtime files. Supply your own local installation.
 
@@ -53,7 +53,7 @@ node browser-jvm/run.mjs --profile play --interactive true @portArgs
 
 The command prepares local inputs, starts a loopback asset server and opens an owned browser window. Allow time for preparation and browser-JVM startup. **Click the scene and use WASD to walk. Escape or Stop ends the session.** Keep the terminal running while playing.
 
-The current scene contains one loaded 8-by-8 chunk and renders its genuine floors plus the original animated body. Neighboring-world streaming, original object presentation and interactions are active development areas.
+The current scene contains a fixed 3-by-3 neighborhood of 8-by-8 chunks, with 576 genuine ground floors, and renders those floors plus the original animated body. Original player movement can cross the internal chunk boundaries. Continuous world streaming beyond this neighborhood, original object presentation and interactions are active development areas.
 
 ## Run the automated browser qualification
 
@@ -65,7 +65,7 @@ node browser-jvm/run.mjs --profile play @portArgs
 
 This bounded run sends actual browser keyboard events, observes original input, verifies displacement across ten held-input frames, then requires four consecutive original zero-input frames after release. It also checks genuine floor visibility and a separate body-pixel contribution, source-file hashes and owned cleanup. Failures return a nonzero exit status.
 
-The latest clean public run passed. Separate longer browser runs passed 94 frames of directional/diagonal movement and blur release, 95 idle frames, and a 130-frame approach that stopped at the loaded chunk boundary. Interior loaded-wall and door collision remain unqualified.
+The latest clean public run passed. A separate 100-frame browser run crossed the former single-chunk boundary inside the loaded neighborhood and verified key release and cleanup. Earlier longer runs passed 94 frames of directional/diagonal movement and blur release, and 95 idle frames. Interior loaded-wall and door collision remain unqualified.
 
 Generated evidence stays local under target/browser-jvm/play/:
 

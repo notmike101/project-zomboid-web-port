@@ -8,6 +8,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.TreeSet;
@@ -34,7 +36,7 @@ import zombie.pathfind.PolygonalMap2;
 import zombie.pathfind.nativeCode.PathfindNative;
 import zombie.util.BufferedRandomAccessFile;
 
-/** Owns the original bounded Challenge1 chunk lifecycle in the browser JVM. */
+/** Owns the original bounded Challenge1 chunk neighborhood lifecycle in the browser JVM. */
 public final class BrowserGeometry {
     private static final String MEDIA = "/files/work/media/";
     private static final String[] TILE_FILES = {
@@ -100,23 +102,43 @@ public final class BrowserGeometry {
             IsoChunkMap map = cell.getChunkMap(0);
             map.setInitialPos(19, 19);
             int middle = IsoChunkMap.chunkGridWidth / 2;
+            if (middle < 1 || middle + 1 >= IsoChunkMap.chunkGridWidth)
+                throw new IllegalStateException("Original chunk map cannot contain the requested neighborhood");
             // Exact original Bullet.init transport allocation; no desktop library-load success stub.
             Bullet.cmdBuf = ByteBuffer.allocateDirect(4096).order(ByteOrder.LITTLE_ENDIAN);
             WorldSimulation.instance.create();
             session.physics = true;
             WorldStreamer.instance.create();
             session.streamer = true;
-            IsoChunk chunk = map.LoadChunkForLater(19, 19, middle, middle);
-            if (chunk == null) throw new AssertionError("Original chunk request rejected");
-            long end = System.currentTimeMillis() + 20000;
-            while (!chunk.loaded && System.currentTimeMillis() < end) {
+            requestChunk(session, map, 19, 19, middle, middle);
+            for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                if (dx != 0 || dy != 0) requestChunk(session, map, 19 + dx, 19 + dy, middle + dx, middle + dy);
+            }
+            long end = System.currentTimeMillis() + 60000;
+            while (!allLoaded(session.chunks) && System.currentTimeMillis() < end) {
                 map.processAllLoadGridSquare();
                 Thread.sleep(10);
             }
-            if (!chunk.loaded) throw new AssertionError("Original chunk never completed");
-            stage("chunk-loaded");
+            if (!allLoaded(session.chunks)) throw new AssertionError("Original chunk neighborhood never completed");
+            stage("nine-chunks-loaded");
             stage("physics-upload-before");
-            chunk.updatePhysicsForLevel(0);
+            for (IsoChunk loaded : session.chunks) {
+                int mapX = middle + loaded.wx - 19, mapY = middle + loaded.wy - 19;
+                if (map.getChunk(mapX, mapY) != loaded)
+                    throw new AssertionError("Original loaded chunk is not bound to its chunk map");
+                loaded.updatePhysicsForLevel(0);
+                int floors = 0;
+                for (int y = 0; y < IsoChunkMap.CHUNK_SIZE_IN_SQUARES; y++)
+                    for (int x = 0; x < IsoChunkMap.CHUNK_SIZE_IN_SQUARES; x++) {
+                        IsoGridSquare ground = cell.getGridSquare(loaded.wx * IsoChunkMap.CHUNK_SIZE_IN_SQUARES + x,
+                                loaded.wy * IsoChunkMap.CHUNK_SIZE_IN_SQUARES + y, 0);
+                        if (ground == null || ground.getChunk() != loaded)
+                            throw new AssertionError("Original ground square is absent or bound to another chunk");
+                        if (ground.getFloor() != null && ground.TreatAsSolidFloor()) floors++;
+                    }
+                session.groundFloorCount += floors;
+                stage("chunk-" + loaded.wx + "-" + loaded.wy + "-ground-floors-" + floors);
+            }
             stage("physics-upload-after");
             IsoGridSquare square = cell.getGridSquare(153, 158, 0);
             if (square == null) throw new AssertionError("Original square not registered");
@@ -125,7 +147,7 @@ public final class BrowserGeometry {
             square.RecalcAllWithNeighbours(true);
             stage("floor-recalc-after");
             if (!square.TreatAsSolidFloor()) throw new AssertionError("Original floor absent");
-            session.chunk = chunk;
+            session.chunk = session.chunks.get(0);
             session.spawnSquare = square;
             stage("session-ready");
             return session;
@@ -137,6 +159,17 @@ public final class BrowserGeometry {
             }
             throw failure;
         }
+    }
+
+    private static void requestChunk(Session session, IsoChunkMap map, int worldX, int worldY, int mapX, int mapY) {
+        IsoChunk chunk = map.LoadChunkForLater(worldX, worldY, mapX, mapY);
+        if (chunk == null) throw new AssertionError("Original chunk request rejected: " + worldX + "," + worldY);
+        session.chunks.add(chunk);
+    }
+
+    private static boolean allLoaded(List<IsoChunk> chunks) {
+        for (IsoChunk chunk : chunks) if (!chunk.loaded) return false;
+        return true;
     }
 
     private static void loadTextures() throws Exception {
@@ -209,9 +242,13 @@ public final class BrowserGeometry {
         private boolean physics;
         private boolean closed;
         private IsoChunk chunk;
+        private final List<IsoChunk> chunks = new ArrayList<>();
+        private int groundFloorCount;
         private IsoGridSquare spawnSquare;
 
         public IsoChunk getChunk() { return chunk; }
+        public List<IsoChunk> getChunks() { return List.copyOf(chunks); }
+        public int getGroundFloorCount() { return groundFloorCount; }
         public IsoGridSquare getSpawnSquare() { return spawnSquare; }
 
         private static void awaitStreamerExit() {

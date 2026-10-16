@@ -691,13 +691,15 @@ try {
 
     if (profile === 'play') {
         evidence.frameCompleted = Number.isInteger(evidence.result.frames) && evidence.result.frames > 0;
+        evidence.neighborhoodLoaded = evidence.result.loadedChunks === 9 && evidence.result.groundFloors === 576;
         evidence.inputPressed = evidence.pressedInput?.inputX === 0 && evidence.pressedInput?.inputY < 0;
         evidence.normalMovement = evidence.heldInput?.frames >= evidence.pressedInput?.frames + 10
             && Number.isFinite(evidence.heldInput?.x) && Number.isFinite(evidence.heldInput?.y)
             && (evidence.heldInput.x !== evidence.pressedInput.x || evidence.heldInput.y !== evidence.pressedInput.y);
         evidence.inputReleased = evidence.releasedInput?.inputX === 0 && evidence.releasedInput?.inputY === 0
             && evidence.releasedInput.frames >= evidence.heldInput?.frames + 4 && evidence.zeroInputFrames >= 4;
-        evidence.pass = evidence.pass && evidence.frameCompleted && (interactive || (evidence.inputPressed && evidence.normalMovement && evidence.inputReleased));
+        evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded
+            && (interactive || (evidence.inputPressed && evidence.normalMovement && evidence.inputReleased));
         evidence.fullGamePlayable = false;
     }
 
