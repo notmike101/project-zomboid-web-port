@@ -50,49 +50,45 @@ function validateColor(color) {
 }
 
 /**
- * Compares every packed word in one chunk of two completed worker buffers.
+ * Finds genuine center/vertex changes and newly submitted square geometry.
  *
- * @param {number} width - Region width in chunks.
- * @param {number[][]} previous - Previous worker output.
+ * @param {object} state - Retained region coordinates.
+ * @param {number[][]|null} previous - Previous worker output.
  * @param {number[][]} next - New worker output.
- * @param {number} chunkX - Local chunk X.
- * @param {number} chunkY - Local chunk Y.
- * @returns {boolean} Whether a packed word changed.
+ * @param {Set<string>} submitted - Actually submitted world chunk keys.
+ * @returns {Set<number>} Square indices marked by this calculation.
  */
-function chunkChanged(width, previous, next, chunkX, chunkY) {
-    for (let y = chunkY * 8; y < chunkY * 8 + 8; y++) {
-        for (let x = chunkX * 8; x < chunkX * 8 + 8; x++) {
-            const index = y * width * 8 + x;
+function changedSquares(state, previous, next, submitted) {
+    const dirty = new Set();
 
-            if (next[index].some((value, word) => value !== previous[index][word])) {
-                return true;
-            }
+    for (const [index, element] of next.entries()) {
+        const x = Math.floor(index % (state.width * 8) / 8) + state.x;
+        const y = Math.floor(index / (state.width * 64)) + state.y;
+
+        if (previous === null || submitted.has(`${x},${y}`)
+            || element.slice(0, 14).some((value, word) => value !== previous[index][word])) {
+            dirty.add(index);
         }
     }
 
-    return false;
+    return dirty;
 }
 
 /**
  * Identifies changed native chunk payloads for the worker's next publication.
  *
  * @param {object} state - Retained player region.
- * @param {number[][]|null} previous - Previous worker result.
- * @param {number[][]} next - New worker result.
- * @param {boolean} cleared - Original LOS invalidation flag.
+ * @param {Set<number>} squares - Squares newly marked by the calculation.
  * @returns {Set<string>} World chunk keys whose result changed.
  */
-function changedChunks(state, previous, next, cleared) {
+function changedChunks(state, squares) {
     const dirty = new Set();
 
-    for (let chunkY = 0; chunkY < state.height; chunkY++) {
-        for (let chunkX = 0; chunkX < state.width; chunkX++) {
-            const changed = cleared || previous === null || chunkChanged(state.width, previous, next, chunkX, chunkY);
+    for (const index of squares) {
+        const x = Math.floor(index % (state.width * 8) / 8) + state.x;
+        const y = Math.floor(index / (state.width * 64)) + state.y;
 
-            if (changed) {
-                dirty.add(`${chunkX + state.x},${chunkY + state.y}`);
-            }
-        }
+        dirty.add(`${x},${y}`);
     }
 
     return dirty;
@@ -128,7 +124,7 @@ export function createLightingNatives() {
     let level = null;
     const states = new Map();
     const lights = new Map();
-    const diagnostics = [];
+    let lastUpdate = null;
 
     /**
      * Requires the original native update transaction.
@@ -228,8 +224,8 @@ export function createLightingNatives() {
             if (!state) {
                 state = {
                     x, y, width, height, counter: 0, cells: null, published: null, computed: null,
-                    pending: null, workerReady: false, lightsRegistered: false, previousPlayer: null,
-                    squareDirty: new Set(), chunkDirty: new Set(), computedChunkDirty: new Set(),
+                    pending: null, deferred: null, workerReady: false, lightsRegistered: false, previousPlayer: null,
+                    squareDirty: new Set(), computedSquareDirty: new Set(), chunkDirty: new Set(), computedChunkDirty: new Set(),
                 };
             }
 
@@ -239,7 +235,13 @@ export function createLightingNatives() {
                 cells = [...state.cells];
             }
 
-            active = { state, player, cells, chunks: new Set() };
+            if (state.deferred) {
+                cells = [...state.deferred.cells];
+            }
+
+            active = {
+                state, player, cells, chunks: new Set(state.deferred?.chunks), cleared: state.deferred?.cleared,
+            };
         },
         /**
          * Accepts the original player input inside the qualified near-detection region.
@@ -300,7 +302,7 @@ export function createLightingNatives() {
                 unsupported('ambient, sunlight or frame settings');
             }
 
-            update.cleared = cleared;
+            update.cleared = Boolean(update.cleared || cleared);
         },
         /**
          * Opens one changed original chunk without discarding retained neighbors.
@@ -502,15 +504,15 @@ export function createLightingNatives() {
                 unsupported('incomplete region update');
             }
 
-            if (state.pending && !state.workerReady) {
-                throw new Error('Lighting worker has not completed');
-            }
-
             for (const light of lights.values()) {
                 if (light.x < state.x * 8 || light.y < state.y * 8
                     || light.x >= (state.x + state.width) * 8 || light.y >= (state.y + state.height) * 8) {
                     unsupported('static light outside qualified region');
                 }
+            }
+
+            if (!cleared && state.cells && cells.some((cell, index) => cell.vision !== state.cells[index].vision)) {
+                unsupported('changed vision geometry without LOS invalidation');
             }
 
             let sceneLights = [];
@@ -524,7 +526,7 @@ export function createLightingNatives() {
             const pending = {
                 width: state.width * 8, height: state.height * 8, cells,
                 player: playerPosition, seen: state.computed?.map((payload) => Boolean(payload[0] & 1)),
-                lights: sceneLights, cleared,
+                lights: sceneLights, cleared, submitted: new Set(chunks),
             };
 
             // Validate and calculate before committing any retained geometry or publication.
@@ -532,10 +534,18 @@ export function createLightingNatives() {
 
             restoreCoordinates(state, calculated);
 
+            // The native write queue accumulates while its separate worker buffer is pending.
+            if (state.pending && !state.workerReady) {
+                state.deferred = { cells: [...cells], chunks: new Set(chunks), cleared };
+                active = null;
+
+                return;
+            }
+
             if (state.workerReady) {
                 state.published = state.computed;
                 state.counter++;
-                state.squareDirty = new Set(cells.map((cell, index) => index));
+                state.squareDirty = new Set(state.computedSquareDirty);
                 state.chunkDirty = new Set(state.computedChunkDirty);
             } else {
                 state.chunkDirty = new Set(chunks);
@@ -545,6 +555,7 @@ export function createLightingNatives() {
             state.previousPlayer = worldPlayer;
             state.pending = pending;
             state.pendingResult = calculated;
+            state.deferred = null;
             state.lightsRegistered = true;
             state.workerReady = false;
             states.set(player, state);
@@ -557,10 +568,6 @@ export function createLightingNatives() {
          * @param {boolean} dirty - Original global-light invalidation flag.
          */
         DoLightingUpdateNew(time, dirty) {
-            if (active) {
-                throw new Error('LightingJNI: missing stateEndUpdate');
-            }
-
             if (typeof time !== 'bigint' || time < 0n || dirty !== false) {
                 unsupported('worker timestamp or global-light invalidation');
             }
@@ -570,9 +577,13 @@ export function createLightingNatives() {
                     const previous = state.computed;
 
                     state.computed = state.pendingResult;
-                    state.computedChunkDirty = changedChunks(state, previous, state.computed, state.pending.cleared);
+                    const changed = changedSquares(state, previous, state.computed, state.pending.submitted);
+
+                    // Native ready chunks inherit readback dirty bytes at worker time, before marking changes.
+                    state.computedSquareDirty = new Set([...state.squareDirty, ...changed]);
+                    state.computedChunkDirty = changedChunks(state, changed);
                     state.workerReady = true;
-                    diagnostics.push({ counter: state.counter, cells: state.computed.length });
+                    lastUpdate = { counter: state.counter, cells: state.computed.length };
                 }
             }
         },
@@ -676,6 +687,7 @@ export function createLightingNatives() {
             chunk = null;
             square = null;
             level = null;
+            lastUpdate = null;
         },
     };
 
@@ -709,7 +721,13 @@ export function createLightingNatives() {
          * @returns {object} Configuration status and completed worker updates.
          */
         snapshot() {
-            return { configured, updates: diagnostics.map((entry) => ({ ...entry })) };
+            let updates = [];
+
+            if (lastUpdate) {
+                updates = [{ ...lastUpdate }];
+            }
+
+            return { configured, updates };
         },
     };
 }

@@ -181,6 +181,56 @@ public final class LightingQualification {
         }
     }
 
+    private static void pendingSnapshot(String stage) {
+        if (!stage.equals("activeworker")) {
+            LightingJNI.getChunkDirty(0, 0, 0, 32);
+            LightingJNI.getChunkDirty(0, 1, 0, 32);
+        }
+        for (int x : new int[]{2, 6}) {
+            boolean dirty = LightingJNI.getSquareDirty(0, x, 3, 32);
+            int[] packed = readSquare(x, 3);
+            System.out.println("PENDING " + stage + " x=" + x
+                    + " counter=" + LightingJNI.stateUpdateCounter(0)
+                    + " waiting=" + LightingJNI.WaitingForMain()
+                    + " dirty=" + dirty + " ok=true " + Arrays.toString(packed));
+        }
+    }
+
+    private static void pending(boolean overlap) {
+        LightingJNI.configure(0.005f);
+        try {
+            begin(16, 8, 2.5f, 3.5f, true);
+            int[][] initial = geometry(16, false);
+            chunk(0, 0, 16, initial[0], initial[1]);
+            chunk(1, 0, 16, initial[0], initial[1]);
+            LightingJNI.addLight(1, 6, 4, 32, 10, 0.2f, 1, 0.5f, -1, true);
+            LightingJNI.stateEndUpdate();
+            pendingSnapshot("first");
+
+            begin(16, 8, 2.5f, 3.5f, true);
+            int[][] changed = geometry(16, true);
+            chunk(0, 0, 16, changed[0], changed[1]);
+            if (overlap) {
+                LightingJNI.DoLightingUpdateNew(1_000_000_000L, false);
+                pendingSnapshot("activeworker");
+            }
+            LightingJNI.stateEndUpdate();
+            pendingSnapshot("second");
+            LightingJNI.DoLightingUpdateNew(1_100_000_000L, false);
+            pendingSnapshot("worker");
+
+            for (int frame = 2; frame < 5; frame++) {
+                begin(16, 8, 2.5f, 3.5f, true);
+                LightingJNI.stateEndUpdate();
+                pendingSnapshot("end" + frame);
+                LightingJNI.DoLightingUpdateNew(1_000_000_000L + frame * 100_000_000L, false);
+                pendingSnapshot("worker" + frame);
+            }
+        } finally {
+            LightingJNI.destroy();
+        }
+    }
+
     private static void snapshot(int frame, String stage) {
         boolean dirty = LightingJNI.getSquareDirty(0, 2, 3, 32);
         int[] packed = readSquare(2, 3);
@@ -246,6 +296,8 @@ public final class LightingQualification {
             incremental();
         } else if (args[1].equals("publication")) {
             publication();
+        } else if (args[1].equals("pending") || args[1].equals("overlap")) {
+            pending(args[1].equals("overlap"));
         } else {
             throw new IllegalArgumentException("unknown qualification mode");
         }

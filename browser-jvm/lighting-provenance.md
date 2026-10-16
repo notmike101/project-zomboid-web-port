@@ -29,9 +29,13 @@ Addresses are virtual addresses in the qualified native DLL:
 
 The payload is the original49-int format: visibility bits; packed center RGB; darkness and target darkness scaled100000; ambient level; eight packed vertex colors; result-light count; then up to five6-int records. Unused words in a caller's Java array remain unchanged. Result-light Z retains the original native32 offset.
 
+The main write queue and worker buffer remain separate when a second update arrives before the worker finishes. Deferred geometry accumulates, and the worker can complete while another main-thread draft is open. Native ready chunks inherit readback dirty bytes at worker time before marking changed payloads or submitted geometry. Consequently, consuming a dirty bit before versus after the worker can change the next publication's dirty state even when lighting values match. The service preserves that ordering. Diagnostics retain only the last completed update and clear it on destroy.
+
 ## Qualified scope and explicit rejection
 
 The native service accepts one player, a fixed rectangular region of complete8x8 chunks, flat level32, indoor squares, opaque directional geometry, no rooms/buildings, and at most five static point lights inside the region. It retains unchanged chunks when original Java stops submitting geometry and accepts selective changed-chunk updates. Previously seen squares remain seen after an opaque geometry change.
+
+Changed vision geometry requires the original LOS-cache invalidation signal. Native cached LOS for changed geometry without that signal is not ported; such an update rejects before publication rather than recomputing a different visibility result.
 
 The bounded region is at most24x16 squares, with nonnegative chunk coordinates through65535. All squares must be within the qualified near-detection radius20 of the fixed player. Inputs are checked for finite values, integer bounds, complete geometry, duplicate lights, and valid transmission tuples before a staged region update can replace retained or published state.
 
@@ -59,6 +63,7 @@ The regression gates compare:
 -976 general JNI payload/counter/readiness/dirty lines.
 -1040 incremental lines:1024 full cell payloads over8frames, with two initial chunks, no geometry resubmission on stable frames, and only one changed chunk later.
 -18 publication lines covering initial zero output, worker/readback separation, a changed light color, and consuming chunk/square dirty state.
+-38 pending/interleaving lines covering a second main update before worker completion, worker completion inside an active draft, deferred geometry and readback dirty-bit timing.
 -Malformed and unsupported input rejection before publication.
 
 The browser gates also run unchanged original `LightingJNI.init()`: its actual `System.loadLibrary("Lighting64")` imports `Lighting64.js`, registers the real service, calls its configure method and sets the original initializer's counters to four minus-one values. A deliberately missing native module must still throw `UnsatisfiedLinkError`. These gates establish original initialization, the qualified algorithm and JNI transport. They do not establish original `LightingJNI.update`, `FBORenderCell`, or whole-game rendering.

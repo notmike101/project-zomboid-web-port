@@ -28,8 +28,8 @@ const sdkNames = [
     'animation-entry.jar', 'animation-view.jar', 'animation-sdk-view.jar', 'path-view.jar',
     'float-bridge.jar', 'memory-bridge.jar', 'world-entry.jar', 'atomic-view.jar',
 ];
-const modes = ['general', 'incremental', 'publication'];
-const expectedLines = { general: 976, incremental: 1_040, publication: 18 };
+const modes = ['general', 'incremental', 'publication', 'pending', 'overlap'];
+const expectedLines = { general: 976, incremental: 1_040, publication: 18, pending: 18, overlap: 20 };
 const directions = [[0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1], [1, 0], [1, -1]];
 const run = promisify(execFile);
 
@@ -291,7 +291,7 @@ function encodeScenes() {
  * @returns {string[]} Complete payload, counter and dirty-bit lines.
  */
 function referenceLines(text) {
-    return text.split(/\r?\n/).filter((line) => /^(GRID|FRAME|DONE|CELL|PUB) /u.test(line));
+    return text.split(/\r?\n/).filter((line) => /^(GRID|FRAME|DONE|CELL|PUB|PENDING) /u.test(line));
 }
 
 /**
@@ -299,13 +299,14 @@ function referenceLines(text) {
  *
  * @param {object} methods - Actual production JNI protocol methods.
  * @param {boolean} geometry - Whether to submit the initial complete chunk.
+ * @param {boolean} [cleared] - Whether the original LOS cache was invalidated.
  */
-function stageValidationPlane(methods, geometry) {
+function stageValidationPlane(methods, geometry, cleared = true) {
     const scene = scenes[0];
 
     methods.stateBeginUpdate(0, 0, 0, 1, 1);
     methods.playerSet(1.5, 1.5, 32, 1, 0, false, false, false, false, 0, 20, Math.fround(-0.2));
-    methods.stateEndFrame(1, 1, 1, Math.fround(0.1), 1, 20, 20, true, 100, 0);
+    methods.stateEndFrame(1, 1, 1, Math.fround(0.1), 1, 20, 20, cleared, 100, 0);
 
     if (geometry) {
         methods.chunkBeginUpdate(0, 0, 32, 32);
@@ -417,6 +418,7 @@ function verifyValidation() {
     stageValidationPlane(backend.methods, false);
     backend.methods.stateEndUpdate();
     backend.methods.DoLightingUpdateNew(1_100_000_000n, false);
+    assert.equal(backend.snapshot().updates.length, 1);
     const published = new Int32Array(49);
 
     backend.methods.getSquareLighting(0, 1, 1, 32, published);
@@ -432,6 +434,26 @@ function verifyValidation() {
     assert.deepEqual(afterFailure, published);
     assert.equal(backend.methods.stateUpdateCounter(0), counter);
     assert.deepEqual(backend.snapshot(), retained);
+    backend.methods.destroy();
+    assert.deepEqual(backend.snapshot().updates, []);
+    stageValidationPlane(backend.methods, true);
+    backend.methods.stateEndUpdate();
+    backend.methods.DoLightingUpdateNew(1_000_000_000n, false);
+    const unchanged = backend.snapshot();
+
+    stageValidationPlane(backend.methods, false, false);
+    backend.methods.chunkBeginUpdate(0, 0, 32, 32);
+    backend.methods.chunkLevelBeginUpdate(32);
+    backend.methods.squareBeginUpdate(0, 0, 32);
+    backend.methods.squareSet(scenes[0].cells[0].mask, false, false, false,
+        scenes[0].cells[0].vision ^ 512, -1n, -1n, 0, false);
+    backend.methods.squareSetLightTransmission(1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0);
+    backend.methods.squareEndUpdate();
+    backend.methods.chunkLevelEndUpdate();
+    backend.methods.chunkEndUpdate();
+    assert.throws(() => backend.methods.stateEndUpdate(), /without LOS invalidation/u);
+    assert.equal(backend.methods.stateUpdateCounter(0), 0);
+    assert.deepEqual(backend.snapshot(), unchanged);
     backend.methods.destroy();
 }
 
@@ -642,6 +664,8 @@ try {
     await qualifyBrowser('general');
     await qualifyBrowser('incremental');
     await qualifyBrowser('publication');
+    await qualifyBrowser('pending');
+    await qualifyBrowser('overlap');
 
     assert.equal(evidence.denied.length, 0);
     assert.equal(evidence.errors.length, 0);
