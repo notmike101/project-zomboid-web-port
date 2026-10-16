@@ -604,6 +604,7 @@ export function createLightingNatives() {
                 width: state.width * 8, height: state.height * 8, minimum: 0, maximum: 63, cells,
                 player: playerPosition, seen: state.computed?.map((payload) => Boolean(payload?.[0] & 1)),
                 lights: sceneLights, cleared, submitted: new Set(chunks),
+                origin: [state.x * 8, state.y * 8, 0],
             };
 
             // Validate and calculate before committing any retained geometry or publication.

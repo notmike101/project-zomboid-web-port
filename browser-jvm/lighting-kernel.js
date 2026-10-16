@@ -79,6 +79,20 @@ function validate(scene) {
 
     integer(player[2], minimum, maximum, 'player native level');
 
+    if (scene.origin !== undefined) {
+        if (!Array.isArray(scene.origin) || scene.origin.length !== 3 || scene.origin[2] !== 0) {
+            unsupported('world origin');
+        }
+
+        for (const coordinate of scene.origin.slice(0, 2)) {
+            integer(coordinate, 0, 65_535 * 8, 'world origin');
+
+            if (coordinate % 8 !== 0) {
+                unsupported('world chunk origin');
+            }
+        }
+    }
+
     for (const x of [0.5, width - 0.5]) {
         for (const y of [0.5, height - 0.5]) {
             if (Math.hypot(x - player[0], y - player[1]) >= 20) {
@@ -481,7 +495,8 @@ function visible(scene, cache, target) {
     }
 
     const sign = Math.sign(delta[axis]);
-    const fraction = current.map((value) => Math.fround(value + 0.5));
+    // Native0xde50 accumulates float32 ray fractions in world coordinates.
+    const fraction = current.map((value, dimension) => Math.fround(value + 0.5 + (scene.origin?.[dimension] ?? 0)));
     const slope = delta.map((value) => Math.fround(Math.fround(value / delta[axis]) * sign));
     let previous = [...current];
     let unblocked = true;
@@ -492,7 +507,7 @@ function visible(scene, cache, target) {
                 current[dimension] += sign;
             } else {
                 fraction[dimension] = Math.fround(fraction[dimension] + slope[dimension]);
-                current[dimension] = Math.floor(fraction[dimension]);
+                current[dimension] = Math.floor(fraction[dimension]) - (scene.origin?.[dimension] ?? 0);
             }
         }
 

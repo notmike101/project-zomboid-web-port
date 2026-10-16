@@ -7,6 +7,7 @@ public final class LightingVerticalQualification {
     public static native void report(String json);
     private static int width;
     private static int height;
+    private static int origin;
 
     private static boolean edge(int x, int y, int z, int nx, int ny, int nz) {
         if (nx < 0 || nx >= width || ny < 0 || ny >= height || nz < 32 || nz > 34) return false;
@@ -39,6 +40,10 @@ public final class LightingVerticalQualification {
             up = edge(x, y, z, x, y, z + 1);
             down = edge(x, y, z, x, y, z - 1);
         }
+        if (kind.equals("origin")) {
+            up = z < 34 && (x + y + 288) % 7 != 0;
+            down = z > 32 && (x + y + 288) % 7 != 0;
+        }
         boolean stairs = kind.startsWith("stairs") && x == 4 && y == 4;
         for (int dz = -1; dz <= 1; dz++) for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
             boolean blocked = x + dx < 0 || x + dx >= width || y + dy < 0 || y + dy >= height
@@ -56,7 +61,7 @@ public final class LightingVerticalQualification {
 
     private static void geometry(String kind) {
         for (int cy = 0; cy < height / 8; cy++) for (int cx = 0; cx < width / 8; cx++) {
-            LightingJNI.chunkBeginUpdate(cx, cy, 32, 34);
+            LightingJNI.chunkBeginUpdate(cx + origin, cy + origin, 32, 34);
             for (int z = 32; z <= 34; z++) {
                 LightingJNI.chunkLevelBeginUpdate(z);
                 for (int y = cy * 8; y < cy * 8 + 8; y++) for (int x = cx * 8; x < cx * 8 + 8; x++) {
@@ -69,19 +74,25 @@ public final class LightingVerticalQualification {
     }
 
     private static void scenario(String kind, int lightZ, int playerZ) {
-        width = kind.equals("world") ? 24 : 8;
+        width = kind.equals("world") || kind.equals("origin") ? 24 : 8;
         height = width;
+        origin = kind.equals("origin") ? 18 : 0;
         LightingJNI.configure(.005f);
         try {
             for (int frame = 0; frame < 3; frame++) {
-                LightingJNI.stateBeginUpdate(0, 0, 0, width / 8, height / 8);
-                LightingJNI.playerSet(width == 24 ? 12.5f : 2.5f, width == 24 ? 11.5f : 3.5f,
+                LightingJNI.stateBeginUpdate(0, origin, origin, width / 8, height / 8);
+                LightingJNI.playerSet(origin * 8 + (origin != 0 ? 9.5f : width == 24 ? 12.5f : 2.5f),
+                        origin * 8 + (origin != 0 ? 14.5f : width == 24 ? 11.5f : 3.5f),
                         playerZ, 1, 0, false, false, false, false, 0, 20, -.2f);
                 LightingJNI.stateEndFrame(1, 1, 1, .1f, 1, 20, 20, true, 100, 0);
                 if (frame == 0) {
                     geometry(kind);
-                    LightingJNI.addLight(1, width == 24 ? 19 : 4, width == 24 ? 12 : 4,
-                            lightZ, width == 24 ? 14 : 10, .2f, 1, .5f, -1, true);
+                    if (origin != 0) {
+                        LightingJNI.addLight(1, 152, 162, lightZ, 9, 1, .7843137383460999f, .6274510025978088f, -1, true);
+                    } else {
+                        LightingJNI.addLight(1, width == 24 ? 19 : 4, width == 24 ? 12 : 4,
+                                lightZ, width == 24 ? 14 : 10, .2f, 1, .5f, -1, true);
+                    }
                     if (kind.equals("many")) {
                         int[][] positions = {{0, 0, 32}, {7, 7, 34}, {0, 7, 33}, {7, 0, 32}, {3, 3, 34}, {2, 5, 33}};
                         for (int i = 0; i < positions.length; i++) {
@@ -95,8 +106,8 @@ public final class LightingVerticalQualification {
                 LightingJNI.DoLightingUpdateNew(1_000_000_000L + frame * 100_000_000L, false);
             }
             for (int cy = 0; cy < height / 8; cy++) for (int cx = 0; cx < width / 8; cx++) for (int z = 32; z <= 34; z++) {
-                boolean dirty = LightingJNI.getChunkDirty(0, cx, cy, z);
-                boolean repeated = LightingJNI.getChunkDirty(0, cx, cy, z);
+                boolean dirty = LightingJNI.getChunkDirty(0, cx + origin, cy + origin, z);
+                boolean repeated = LightingJNI.getChunkDirty(0, cx + origin, cy + origin, z);
                 System.out.println("VRANGE " + kind + " " + lightZ + " " + playerZ + " " + cx + " " + cy + " " + z
                         + " " + LightingJNI.stateUpdateCounter(0) + " " + LightingJNI.WaitingForMain() + " " + dirty + " " + repeated);
             }
@@ -104,8 +115,8 @@ public final class LightingVerticalQualification {
                 // Native absent-square readback storage is unspecified; only real grid squares are consumed by Java.
                 if (kind.equals("null") && x == 3 && y == 3 && z == 33) continue;
                 int[] words = new int[49];
-                boolean dirty = LightingJNI.getSquareDirty(0, x, y, z);
-                boolean ok = LightingJNI.getSquareLighting(0, x, y, z, words);
+                boolean dirty = LightingJNI.getSquareDirty(0, x + origin * 8, y + origin * 8, z);
+                boolean ok = LightingJNI.getSquareLighting(0, x + origin * 8, y + origin * 8, z, words);
                 System.out.println("VERTICAL " + kind + " " + lightZ + " " + playerZ + " " + x + " " + y + " " + z
                         + " " + dirty + " " + ok + " " + Arrays.toString(words));
             }
@@ -151,6 +162,7 @@ public final class LightingVerticalQualification {
             scenario("open", 32, 34);
             scenario("stairs-hole", 33, 34);
             scenario("stairs-blocked", 33, 34);
+            scenario("origin", 32, 32);
         } finally {
             LightingJNI.stop();
         }

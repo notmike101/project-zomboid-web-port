@@ -30,6 +30,7 @@ const directions = [[0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1], [1, 0],
 const cases = [
     ...['closed', 'open', 'hole', 'down', 'stairs', 'many', 'geometry', 'world', 'null'].map((name) => [name, 33, 32]),
     ['up', 32, 32], ['open', 32, 34], ['stairs-hole', 33, 34], ['stairs-blocked', 33, 34],
+    ['origin', 32, 32],
 ];
 const execute = promisify(execFile);
 
@@ -111,6 +112,11 @@ function makeSquare(kind, width, x, y, z) {
         down = edge(width, [x, y, z], [x, y, z - 1]);
     }
 
+    if (kind === 'origin') {
+        up = z < 34 && (x + y + 288) % 7 !== 0;
+        down = z > 32 && (x + y + 288) % 7 !== 0;
+    }
+
     let mask = 0;
     let vision = 0;
 
@@ -150,7 +156,7 @@ function makeSquare(kind, width, x, y, z) {
  * @returns {object} Kernel scene.
  */
 function makeScene(kind, lightZ, playerZ) {
-    const width = kind === 'world' ? 24 : 8;
+    const width = kind === 'world' || kind === 'origin' ? 24 : 8;
     const cells = [];
 
     for (let z = 32; z <= 34; z++) {
@@ -166,6 +172,13 @@ function makeScene(kind, lightZ, playerZ) {
         radius: width === 24 ? 14 : 10, color: [Math.fround(0.2), 1, Math.fround(0.5)],
     }];
 
+    if (kind === 'origin') {
+        lights[0] = {
+            id: 1, x: 8, y: 18, z: lightZ, radius: 9,
+            color: [1, Math.fround(0.784_313_738_346_099_9), Math.fround(0.627_451_002_597_808_8)],
+        };
+    }
+
     if (kind === 'many') {
         for (const [index, [x, y, z]] of [[0, 0, 32], [7, 7, 34], [0, 7, 33], [7, 0, 32], [3, 3, 34], [2, 5, 33]].entries()) {
             lights.push({
@@ -178,6 +191,7 @@ function makeScene(kind, lightZ, playerZ) {
     return {
         width, height: width, minimum: 32, maximum: 34, cells, lights,
         player: [width === 24 ? 12.5 : 2.5, width === 24 ? 11.5 : 3.5, playerZ],
+        ...(kind === 'origin' ? { origin: [144, 144, 0], player: [9.5, 14.5, playerZ] } : {}),
     };
 }
 
@@ -225,8 +239,18 @@ try {
     const expected = referenceLines(first);
     const scenes = new Map(cases.map(([name, lightZ, playerZ]) => {
         const scene = makeScene(name, lightZ, playerZ);
+        const calculated = calculateLighting(scene);
 
-        return [`${name}:${lightZ}:${playerZ}`, { scene, output: calculateLighting(scene) }];
+        if (scene.origin) {
+            for (const payload of calculated) {
+                for (let record = 0; record < payload[13]; record++) {
+                    payload[15 + record * 6] += scene.origin[0];
+                    payload[16 + record * 6] += scene.origin[1];
+                }
+            }
+        }
+
+        return [`${name}:${lightZ}:${playerZ}`, { scene, output: calculated }];
     }));
     let cells = 0;
 
@@ -244,7 +268,7 @@ try {
         }
     }
 
-    assert.equal(cells, 4_031);
+    assert.equal(cells, 5_759);
     evidence.kernel = { cells, integers: cells * 49 };
     evidence.native = { deterministic: true, lines: expected };
     const classpath = ['/app/qualification.jar', ...sdkNames.map((name) => `/app/${name}`)].join(':');
