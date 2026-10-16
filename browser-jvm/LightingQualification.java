@@ -44,6 +44,9 @@ public final class LightingQualification {
     }
 
     private static int[] readSquare(int x, int y) {
+        if (LightingJNI.stateUpdateCounter(0) < 1) {
+            throw new AssertionError("square storage has not been published by the worker");
+        }
         int[] packed = new int[49];
         if (!LightingJNI.getSquareLighting(0, x, y, 32, packed)) {
             throw new AssertionError("native result missing");
@@ -52,6 +55,11 @@ public final class LightingQualification {
             throw new AssertionError("square dirty bit not consumed");
         }
         return packed;
+    }
+
+    private static String publishedSquare(int x, int y) {
+        // Native allocated storage is uninitialized until the first worker publication.
+        return LightingJNI.stateUpdateCounter(0) < 1 ? "unpublished" : Arrays.toString(readSquare(x, y));
     }
 
     private static void general(String path) throws Exception {
@@ -170,9 +178,9 @@ public final class LightingQualification {
                 for (int y = 0; y < 8; y++) {
                     for (int x = 0; x < 16; x++) {
                         boolean dirty = LightingJNI.getSquareDirty(0, x, y, 32);
-                        int[] packed = readSquare(x, y);
+                        String packed = publishedSquare(x, y);
                         System.out.println("CELL " + frame + " " + x + " " + y
-                            + " " + dirty + " true " + Arrays.toString(packed));
+                            + " " + dirty + " " + packed);
                     }
                 }
             }
@@ -188,11 +196,11 @@ public final class LightingQualification {
         }
         for (int x : new int[]{2, 6}) {
             boolean dirty = LightingJNI.getSquareDirty(0, x, 3, 32);
-            int[] packed = readSquare(x, 3);
+            String packed = publishedSquare(x, 3);
             System.out.println("PENDING " + stage + " x=" + x
                     + " counter=" + LightingJNI.stateUpdateCounter(0)
                     + " waiting=" + LightingJNI.WaitingForMain()
-                    + " dirty=" + dirty + " ok=true " + Arrays.toString(packed));
+                    + " dirty=" + dirty + " " + packed);
         }
     }
 
@@ -233,13 +241,13 @@ public final class LightingQualification {
 
     private static void snapshot(int frame, String stage) {
         boolean dirty = LightingJNI.getSquareDirty(0, 2, 3, 32);
-        int[] packed = readSquare(2, 3);
+        String packed = publishedSquare(2, 3);
         boolean chunkDirty = LightingJNI.getChunkDirty(0, 0, 0, 32);
         boolean again = LightingJNI.getChunkDirty(0, 0, 0, 32);
         System.out.println("PUB " + frame + " " + stage
             + " counter=" + LightingJNI.stateUpdateCounter(0) + " waiting=" + LightingJNI.WaitingForMain()
             + " dirty=" + dirty + " chunk=" + chunkDirty + " again=" + again
-            + " ok=true " + Arrays.toString(packed));
+            + " " + packed);
     }
 
     private static void publication() {

@@ -76,11 +76,16 @@ function changedSquares(state, previous, next, submitted) {
     const dirty = new Set();
 
     for (const [index, element] of next.entries()) {
+        if (element === null) {
+            continue;
+        }
+
+        const planeIndex = index % (state.width * state.height * 64);
         const x = Math.floor(index % (state.width * 8) / 8) + state.x;
-        const y = Math.floor(index / (state.width * 64)) + state.y;
+        const y = Math.floor(planeIndex / (state.width * 64)) + state.y;
 
         if (previous === null || submitted.has(`${x},${y}`)
-            || element.slice(0, 14).some((value, word) => value !== previous[index][word])) {
+            || previous[index] === null || element.slice(0, 14).some((value, word) => value !== previous[index][word])) {
             dirty.add(index);
         }
     }
@@ -99,10 +104,12 @@ function changedChunks(state, squares) {
     const dirty = new Set();
 
     for (const index of squares) {
+        const plane = state.width * state.height * 64;
         const x = Math.floor(index % (state.width * 8) / 8) + state.x;
-        const y = Math.floor(index / (state.width * 64)) + state.y;
+        const y = Math.floor(index % plane / (state.width * 64)) + state.y;
+        const z = Math.floor(index / plane);
 
-        dirty.add(`${x},${y}`);
+        dirty.add(`${x},${y},${z}`);
     }
 
     return dirty;
@@ -116,6 +123,10 @@ function changedChunks(state, squares) {
  */
 function restoreCoordinates(state, output) {
     for (const payload of output) {
+        if (payload === null) {
+            continue;
+        }
+
         for (let record = 0; record < payload[13]; record++) {
             payload[15 + record * 6] += state.x * 8;
             payload[16 + record * 6] += state.y * 8;
@@ -124,7 +135,7 @@ function restoreCoordinates(state, output) {
 }
 
 /**
- * Creates a native lighting service for the qualified flat indoor opaque closure.
+ * Creates a native lighting service for the qualified indoor opaque closure.
  * Registration does not load a library or change original LightingJNI.init fields.
  * See lighting-provenance.md for evidence and unsupported engine boundaries.
  *
@@ -183,12 +194,24 @@ export function createLightingNatives() {
         integer(y, -2_147_483_648, 2_147_483_647, 'square Y');
         integer(z, 0, 63, 'square level');
 
-        if (!state || z !== 32 || x < state.x * 8 || y < state.y * 8
+        if (!state || x < state.x * 8 || y < state.y * 8
             || x >= (state.x + state.width) * 8 || y >= (state.y + state.height) * 8) {
             return null;
         }
 
-        return { state, index: (y - state.y * 8) * state.width * 8 + x - state.x * 8 };
+        const index = z * state.width * state.height * 64 + (y - state.y * 8) * state.width * 8 + x - state.x * 8;
+
+        if (state.cells[index] === null) {
+            const range = state.ranges.get(`${Math.floor(x / 8)},${Math.floor(y / 8)}`);
+
+            if (range && z >= range[0] && z <= range[1]) {
+                unsupported('absent-square readback');
+            }
+
+            return null;
+        }
+
+        return { state, index };
     }
 
     const methods = {
@@ -227,7 +250,7 @@ export function createLightingNatives() {
             integer(x, 0, 65_535, 'region X');
             integer(y, 0, 65_535, 'region Y');
             integer(width, 1, 3, 'region width');
-            integer(height, 1, 2, 'region height');
+            integer(height, 1, 3, 'region height');
 
             let state = playerState(player);
 
@@ -238,12 +261,13 @@ export function createLightingNatives() {
             if (!state) {
                 state = {
                     x, y, width, height, counter: 0, cells: null, published: null, computed: null,
-                    pending: null, deferred: null, workerReady: false, lightsRegistered: false, previousPlayer: null,
+                    pending: null, deferred: null, workerReady: false, lightsRegistered: false, previousPlayer: null, ranges: new Map(),
                     squareDirty: new Set(), computedSquareDirty: new Set(), chunkDirty: new Set(), computedChunkDirty: new Set(),
+                    recycledChunkDirty: new Set(),
                 };
             }
 
-            let cells = Array.from({ length: width * height * 64 });
+            let cells = Array.from({ length: width * height * 64 * 64 }, () => null);
 
             if (state.cells) {
                 cells = [...state.cells];
@@ -255,6 +279,7 @@ export function createLightingNatives() {
 
             active = {
                 state, player, cells, chunks: new Set(state.deferred?.chunks), cleared: state.deferred?.cleared,
+                ranges: new Map(state.deferred?.ranges ?? state.ranges),
             };
         },
         /**
@@ -279,17 +304,19 @@ export function createLightingNatives() {
 
             finite([x, y, z, directionX, directionY, fatigue, range, cone], 'player input');
 
-            if (z !== 32 || flagA !== false || flagB !== false || flagC !== false || flagD !== false
+            integer(z, 0, 63, 'player native level');
+
+            if (flagA !== false || flagB !== false || flagC !== false || flagD !== false
                 || fatigue !== 0 || range !== 20 || Math.fround(cone) !== Math.fround(-0.2)) {
-                unsupported('player flags, vertical level or perception');
+                unsupported('player flags or perception');
             }
 
-            if (state.previousPlayer && (state.previousPlayer[0] !== x || state.previousPlayer[1] !== y)) {
+            if (state.previousPlayer && (state.previousPlayer[0] !== x || state.previousPlayer[1] !== y || state.previousPlayer[2] !== z)) {
                 unsupported('moving-player history');
             }
 
-            update.playerPosition = [x - state.x * 8, y - state.y * 8];
-            update.worldPlayer = [x, y];
+            update.playerPosition = [x - state.x * 8, y - state.y * 8, z];
+            update.worldPlayer = [x, y, z];
         },
         /**
          * Stages original frame settings and LOS invalidation.
@@ -328,17 +355,27 @@ export function createLightingNatives() {
          */
         chunkBeginUpdate(x, y, minimum, maximum) {
             const update = requireUpdate();
-            const { state, chunks } = update;
+            const { state, chunks, ranges } = update;
 
             integer(x, state.x, state.x + state.width - 1, 'chunk X');
             integer(y, state.y, state.y + state.height - 1, 'chunk Y');
 
-            if (chunk || square || minimum !== 32 || maximum !== 32) {
-                unsupported('chunk lifecycle or multiple levels');
+            integer(minimum, 0, 63, 'chunk minimum level');
+            integer(maximum, minimum, 63, 'chunk maximum level');
+
+            if (chunk || square) {
+                unsupported('chunk lifecycle');
             }
 
-            chunk = { x, y };
+            const previous = ranges.get(`${x},${y}`);
+
+            if (previous && (previous[0] !== minimum || previous[1] !== maximum)) {
+                unsupported('changed chunk level extent');
+            }
+
+            chunk = { x, y, minimum, maximum };
             chunks.add(`${x},${y}`);
+            ranges.set(`${x},${y}`, [minimum, maximum]);
         },
         /**
          * Opens the one qualified native chunk level.
@@ -346,7 +383,7 @@ export function createLightingNatives() {
          * @param {number} z - Native level32.
          */
         chunkLevelBeginUpdate(z) {
-            if (!chunk || level !== null || z !== 32) {
+            if (!chunk || level !== null || !Number.isInteger(z) || z < chunk.minimum || z > chunk.maximum) {
                 unsupported('chunk-level lifecycle');
             }
 
@@ -363,11 +400,11 @@ export function createLightingNatives() {
             integer(x, 0, 7, 'local square X');
             integer(y, 0, 7, 'local square Y');
 
-            if (!chunk || square || level !== 32 || z !== 32) {
+            if (!chunk || square || level === null || z !== level) {
                 unsupported('square lifecycle');
             }
 
-            square = { x: chunk.x * 8 + x, y: chunk.y * 8 + y };
+            square = { x: chunk.x * 8 + x, y: chunk.y * 8 + y, z };
         },
         /**
          * Stages genuine adjacency and vision data; unsupported world features reject.
@@ -388,14 +425,14 @@ export function createLightingNatives() {
             }
 
             integer(mask, 0, 255, 'flat adjacency');
-            integer(vision, 0, 0x3_FE_00, 'vision matrix');
+            integer(vision, 0, 0x7_FF_FF_FF, 'vision matrix');
 
-            if ((vision & ~0x3_FE_00) !== 0 || up !== false || down !== false || stairs !== false
+            if (typeof up !== 'boolean' || typeof down !== 'boolean' || typeof stairs !== 'boolean'
                 || building !== -1n || room !== -1n || lightLevel !== 0 || openAir !== false) {
-                unsupported('vertical geometry, rooms, buildings, ambient or outdoors');
+                unsupported('vertical flags, rooms, buildings, ambient or outdoors');
             }
 
-            Object.assign(square, { mask, vision });
+            Object.assign(square, { mask, vision, up, down, stairs });
         },
         /**
          * Admits only the original no-object opaque-edge transmission tuples.
@@ -419,10 +456,34 @@ export function createLightingNatives() {
 
             const update = requireUpdate();
             const { state, cells } = update;
-            const index = (square.y - state.y * 8) * state.width * 8 + square.x - state.x * 8;
+            const index = square.z * state.width * state.height * 64
+                + (square.y - state.y * 8) * state.width * 8 + square.x - state.x * 8;
 
-            cells[index] = { mask: square.mask, vision: square.vision };
+            cells[index] = { mask: square.mask, vision: square.vision, up: square.up, down: square.down, stairs: square.stairs };
             square = null;
+        },
+        /**
+         * Stages the original explicitly absent square without creating geometry.
+         *
+         * @param {number} x - Chunk-local square X.
+         * @param {number} y - Chunk-local square Y.
+         * @param {number} z - Native level in the current chunk.
+         */
+        squareSetNull(x, y, z) {
+            const update = requireUpdate();
+
+            integer(x, 0, 7, 'null local square X');
+            integer(y, 0, 7, 'null local square Y');
+
+            if (!chunk || square || z !== level) {
+                unsupported('null square lifecycle');
+            }
+
+            const { state, cells } = update;
+            const index = z * state.width * state.height * 64
+                + ((chunk.y - state.y) * 8 + y) * state.width * 8 + (chunk.x - state.x) * 8 + x;
+
+            cells[index] = null;
         },
         /**
          * Closes an original chunk-level update.
@@ -481,11 +542,13 @@ export function createLightingNatives() {
             integer(radius, 1, 255, 'light radius');
             validateColor([red, green, blue]);
 
-            if (z !== 32 || building !== -1 || on !== true || lights.has(id) || lights.size >= 5) {
+            integer(z, 0, 63, 'light native level');
+
+            if (building !== -1 || on !== true || lights.has(id) || lights.size >= 7) {
                 unsupported('static-light type, extent or registration');
             }
 
-            lights.set(id, { id, x, y, radius, color: [red, green, blue] });
+            lights.set(id, { id, x, y, z, radius, color: [red, green, blue] });
         },
         /**
          * Updates the actual registered static-light color.
@@ -511,10 +574,10 @@ export function createLightingNatives() {
          */
         stateEndUpdate() {
             const update = requireUpdate();
-            const { state, cells, playerPosition, cleared, chunks, worldPlayer, player } = update;
+            const { state, cells, playerPosition, cleared, chunks, worldPlayer, player, ranges } = update;
 
             if (chunk || square || level !== null || cells.includes(undefined)
-                || !playerPosition || cleared === undefined) {
+                || !playerPosition || cleared === undefined || ranges.size !== state.width * state.height) {
                 unsupported('incomplete region update');
             }
 
@@ -525,7 +588,7 @@ export function createLightingNatives() {
                 }
             }
 
-            if (!cleared && state.cells && cells.some((cell, index) => cell.vision !== state.cells[index].vision)) {
+            if (!cleared && state.cells && cells.some((cell, index) => cell?.vision !== state.cells[index]?.vision)) {
                 unsupported('changed vision geometry without LOS invalidation');
             }
 
@@ -538,8 +601,8 @@ export function createLightingNatives() {
             }
 
             const pending = {
-                width: state.width * 8, height: state.height * 8, cells,
-                player: playerPosition, seen: state.computed?.map((payload) => Boolean(payload[0] & 1)),
+                width: state.width * 8, height: state.height * 8, minimum: 0, maximum: 63, cells,
+                player: playerPosition, seen: state.computed?.map((payload) => Boolean(payload?.[0] & 1)),
                 lights: sceneLights, cleared, submitted: new Set(chunks),
             };
 
@@ -550,22 +613,25 @@ export function createLightingNatives() {
 
             // The native write queue accumulates while its separate worker buffer is pending.
             if (state.pending && !state.workerReady) {
-                state.deferred = { cells: [...cells], chunks: new Set(chunks), cleared };
+                state.deferred = { cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared };
                 active = null;
 
                 return;
             }
 
             if (state.workerReady) {
+                // Native0xea50 swaps dirty-map buffers; unread old readback flags become the next worker buffer.
+                state.recycledChunkDirty = new Set(state.chunkDirty);
                 state.published = state.computed;
                 state.counter++;
                 state.squareDirty = new Set(state.computedSquareDirty);
                 state.chunkDirty = new Set(state.computedChunkDirty);
             } else {
-                state.chunkDirty = new Set(chunks);
+                state.chunkDirty = changedChunks(state, changedSquares(state, null, calculated, chunks));
             }
 
             state.cells = [...cells];
+            state.ranges = new Map(ranges);
             state.previousPlayer = worldPlayer;
             state.pending = pending;
             state.pendingResult = calculated;
@@ -595,7 +661,7 @@ export function createLightingNatives() {
 
                     // Native ready chunks inherit readback dirty bytes at worker time, before marking changes.
                     state.computedSquareDirty = new Set([...state.squareDirty, ...changed]);
-                    state.computedChunkDirty = changedChunks(state, changed);
+                    state.computedChunkDirty = new Set([...state.recycledChunkDirty, ...changedChunks(state, changed)]);
                     state.workerReady = true;
                     lastUpdate = { counter: state.counter, cells: state.computed.length };
                 }
@@ -638,11 +704,11 @@ export function createLightingNatives() {
             integer(y, -2_147_483_648, 2_147_483_647, 'chunk Y');
             integer(z, 0, 63, 'chunk level');
 
-            if (!state || z !== 32) {
+            if (!state) {
                 return false;
             }
 
-            const key = `${x},${y}`;
+            const key = `${x},${y},${z}`;
             const dirty = state.chunkDirty.has(key);
 
             state.chunkDirty.delete(key);
@@ -680,11 +746,19 @@ export function createLightingNatives() {
                 return false;
             }
 
+            if (!resolved.state.published) {
+                unsupported('unpublished lighting readback');
+            }
+
             if (!(output instanceof Int32Array) || output.length < 49) {
                 unsupported('49-int Java output storage');
             }
 
-            const payload = resolved.state.published?.[resolved.index] ?? new Int32Array(49);
+            const payload = resolved.state.published[resolved.index];
+
+            if (payload === null) {
+                unsupported('unpublished square geometry');
+            }
 
             output.set(payload.slice(0, 14 + payload[13] * 6));
             resolved.state.squareDirty.delete(resolved.index);
@@ -706,7 +780,7 @@ export function createLightingNatives() {
     };
 
     for (const name of [
-        'scrollLeft', 'scrollRight', 'scrollUp', 'scrollDown', 'teleport', 'squareSetNull',
+        'scrollLeft', 'scrollRight', 'scrollUp', 'scrollDown', 'teleport',
         'squareAddCurtain', 'squareAddDoor', 'squareAddThumpable', 'squareAddWindow',
         'addTempLight', 'removeLight', 'setLightActive', 'addRoomLight', 'removeRoomLight',
         'setRoomLightActive', 'updateTorch', 'removeTorch', 'getVisibleRoomCount', 'getVisibleRooms',

@@ -366,7 +366,7 @@ function verifyValidation() {
             scene.cells[0].mask = -1;
         },
         (scene) => {
-            scene.cells[0].vision = 1;
+            scene.cells[0].vision = 2 ** 27;
         },
         (scene) => {
             delete scene.cells[0];
@@ -414,6 +414,7 @@ function verifyValidation() {
     backend.methods.destroy();
     stageValidationPlane(backend.methods, true);
     backend.methods.stateEndUpdate();
+    assert.throws(() => backend.methods.getSquareLighting(0, 1, 1, 32, new Int32Array(49)), /unpublished lighting readback/u);
     backend.methods.DoLightingUpdateNew(1_000_000_000n, false);
     stageValidationPlane(backend.methods, false);
     backend.methods.stateEndUpdate();
