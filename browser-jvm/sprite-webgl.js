@@ -771,7 +771,8 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} mask - Numeric mask argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        glClear: (mask) => gl.clear(mask),
+        // Desktop clears of an absent accumulation buffer have no effect; WebGL has none.
+        glClear: (mask) => gl.clear(mask & ~0x02_00),
         /**
          * Sets both faces' actual stencil write masks.
          *

@@ -55,6 +55,7 @@ public final class SpriteGraphics {
     public static void setVSyncEnabled(boolean enabled){initialize();requestedVsync=enabled;}
     public static boolean requestedVsync(){return requestedVsync;}
     public static native void present(boolean vsync);
+    public static void swapBuffers(){present(requestedVsync);}
 
     public static ByteBuffer memAlloc(int bytes) {
         if (bytes < 0) throw new IllegalArgumentException("Negative capacity");

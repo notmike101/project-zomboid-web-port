@@ -49,6 +49,18 @@ public final class ViewportQualification {
         check(GL11.glGetInteger(GL11.GL_ATTRIB_STACK_DEPTH) == 0, "Underflow retains empty stack");
         state(2, 0, 2, 2);
         check(GL11.glGetError() == GL11.GL_NO_ERROR, "All errors consumed");
+        GL11.glClear(GL11.GL_ACCUM_BUFFER_BIT);
+        check(GL11.glGetError() == GL11.GL_NO_ERROR, "Absent accumulation buffer clear is harmless");
+        GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_ACCUM_BUFFER_BIT);
+        check(GL11.glGetError() == GL11.GL_NO_ERROR, "Combined original clear mask is valid");
+        GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_ACCUM_BUFFER_BIT | 0x800);
+        check(GL11.glGetError() == GL11.GL_INVALID_VALUE, "Undefined clear bits retain actual GL error");
+        org.lwjglx.opengl.Display.setVSyncEnabled(false);
+        org.lwjglx.opengl.Display.update(false);
+        check(GL11.glGetError() == GL11.GL_NO_ERROR, "Original Display.update presents without GLFW");
+        org.lwjglx.opengl.Display.setVSyncEnabled(true);
+        org.lwjglx.opengl.Display.update(true);
+        check(GL11.glGetError() == GL11.GL_NO_ERROR, "Original update retains actual DOM event pump");
         report(checks);
     }
 }

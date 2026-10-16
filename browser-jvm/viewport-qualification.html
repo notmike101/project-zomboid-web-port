@@ -11,6 +11,22 @@ const canvas = document.querySelector('canvas');
 const backend = createSpriteNatives(canvas, () => undefined);
 const gl = canvas.getContext('webgl2');
 const checks = [];
+const presented = [];
+const present = backend.natives.Java_port_host_SpriteGraphics_present;
+
+/**
+ * Observes actual presentation without replacing the backend operation.
+ *
+ * @param {object} lib - Actual Java callback library.
+ * @param {boolean} vsync - Requested presentation pacing.
+ * @returns {Promise<unknown>} Real backend completion.
+ */
+backend.natives.Java_port_host_SpriteGraphics_present = async (lib, vsync) => {
+    presented.push(vsync);
+
+    return await present(lib, vsync);
+};
+
 /**
  * Checks one actual GPU result.
  *
@@ -109,6 +125,43 @@ try {
     gl.linkProgram(program);
     require(gl.getProgramParameter(program, gl.LINK_STATUS), 'Actual pixel program links');
     gl.useProgram(program);
+    gl.viewport(0, 0, 4, 2);
+    gl.depthRange(0, 0.5);
+    gl.clearColor(0, 1, 0, 1);
+    gl.clearDepth(0.125);
+    gl.clearStencil(5);
+    await call('glClear', 0x47_00);
+    const clearPixels = new Uint8Array(32);
+
+    gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.UNSIGNED_BYTE, clearPixels);
+    require([...clearPixels].every((value, i) => value === [0, 255, 0, 255][i % 4]), 'Original color/depth/stencil/absent-accumulation clear changes all color pixels');
+    require(await call('rawError') === gl.NO_ERROR, 'Original complete clear mask has no error');
+    await call('glClear', 0x02_00);
+    const unchanged = new Uint8Array(32);
+
+    gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.UNSIGNED_BYTE, unchanged);
+    require(unchanged.every((value, i) => value === clearPixels[i]), 'Absent accumulation clear preserves color');
+    require(await call('rawError') === gl.NO_ERROR, 'Absent accumulation clear has no error');
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilFunc(gl.EQUAL, 5, 0xFF);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.UNSIGNED_BYTE, clearPixels);
+    require([...clearPixels].every((value, i) => value === [0, 255, 0, 255][i % 4]), 'Actual cleared depth rejects a farther fragment');
+    gl.clearDepth(0.75);
+    await call('glClear', 0x47_00);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.UNSIGNED_BYTE, clearPixels);
+    require([...clearPixels].every((value, i) => value === [64, 0, 0, 255][i % 4]), 'Real depth and stencil clear values admit the expected fragment');
+    gl.clearColor(0, 0, 1, 1);
+    await call('glClear', 0x4F_00);
+    require(await call('rawError') === gl.INVALID_VALUE, 'Undefined clear mask bit retains WebGL error');
+    gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.UNSIGNED_BYTE, unchanged);
+    require(unchanged.every((value, i) => value === clearPixels[i]), 'Invalid clear preserves actual pixels');
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.STENCIL_TEST);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.viewport(0, 0, 2, 2);
@@ -152,8 +205,9 @@ try {
     });
     const exit = await cheerpjRunMain('ViewportQualification', '/app/qualification.jar:/app/sprite-view.jar');
 
-    require(exit === 0 && globalThis.javaChecks === 13, 'Actual original GL11 Java ABI passes');
-    globalThis.result = { pass: true, checks, javaChecks: globalThis.javaChecks, pixels: [...pixels], initial, stackDepth: await call('integerState', 2_992) };
+    require(exit === 0 && globalThis.javaChecks === 18, 'Actual original GL11 Java ABI passes');
+    require(presented.join(',') === 'false,true', 'Original Display updates use the real requested presentation modes');
+    globalThis.result = { pass: true, checks, javaChecks: globalThis.javaChecks, presented, clearPixels: [...clearPixels], pixels: [...pixels], initial, stackDepth: await call('integerState', 2_992) };
 } catch (error) {
     globalThis.result = { pass: false, error: String(error.stack || error), checks };
 } finally {
