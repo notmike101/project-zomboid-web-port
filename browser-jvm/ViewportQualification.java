@@ -61,6 +61,23 @@ public final class ViewportQualification {
         org.lwjglx.opengl.Display.setVSyncEnabled(true);
         org.lwjglx.opengl.Display.update(true);
         check(GL11.glGetError() == GL11.GL_NO_ERROR, "Original update retains actual DOM event pump");
+        for(int face:new int[]{GL11.GL_FRONT,GL11.GL_BACK,GL11.GL_FRONT_AND_BACK}){
+            GL11.glPolygonMode(face,GL11.GL_FILL);
+            check(GL11.glGetError()==GL11.GL_NO_ERROR,"Filled face keeps real WebGL rasterization");
+        }
+        GL11.glPolygonMode(0,GL11.GL_FILL);
+        check(GL11.glGetError()==GL11.GL_INVALID_ENUM,"Invalid polygon face reports original GL error");
+        GL11.glPolygonMode(GL11.GL_FRONT_AND_BACK,0);
+        check(GL11.glGetError()==GL11.GL_INVALID_ENUM,"Invalid polygon mode reports original GL error");
+        for(int mode:new int[]{GL11.GL_LINE,GL11.GL_POINT}){
+            boolean unsupported=false,cleanup=false;
+            try { GL11.glPolygonMode(GL11.GL_FRONT_AND_BACK,mode); }
+            catch(UnsupportedOperationException exception){unsupported=exception.getMessage().contains("rasterization mode");}
+            finally { cleanup=true; }
+            check(unsupported&&cleanup,"Unimplemented rasterization rejects through actual Java finally");
+        }
+        GL11.glPolygonMode(GL11.GL_FRONT_AND_BACK,GL11.GL_FILL);
+        check(GL11.glGetError()==GL11.GL_NO_ERROR,"Rejected modes preserve fill and GL state");
         report(checks);
     }
 }

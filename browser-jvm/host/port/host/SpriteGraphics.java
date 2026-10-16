@@ -144,6 +144,14 @@ public final class SpriteGraphics {
     public static native void glBlendFuncSeparate(int srcRgb,int dstRgb,int srcAlpha,int dstAlpha);
     public static native void glBlendEquation(int mode);
     public static native void glViewport(int x,int y,int width,int height);
+    /** WebGL fills polygon interiors; boundary-only rasterization needs a separate implementation. */
+    public static void glPolygonMode(int face,int mode) {
+        if ((face==1028||face==1029||face==1032) && (mode==6912||mode==6913)) {
+            throw new UnsupportedOperationException("Unqualified polygon rasterization mode: "+mode);
+        }
+        polygonMode(face,mode);
+    }
+    private static native void polygonMode(int face,int mode);
     /** Only the qualified viewport group is implemented; undefined group bits are ignored by GL. */
     public static void glPushAttrib(int mask) {
         int groups = mask & 0x200fffff;

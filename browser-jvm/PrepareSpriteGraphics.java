@@ -71,7 +71,7 @@ public final class PrepareSpriteGraphics {
                                     code.return_();
                                 });return;
                             }
-                            boolean selected=(method.flags().flagsMask()&0x8)!=0&&((gl&&methods.contains(helper+descriptor))||(legacyAttributes&&Set.of("glAlphaFunc(IF)V","glPushAttrib(I)V","glPopAttrib()V").contains(methodName+descriptor)&&methods.contains(helper+descriptor))||(memory&&Set.of("memAlloc","memAllocFloat","memAllocInt","memFree","memSet").contains(helper)&&methods.contains(helper+descriptor))
+                            boolean selected=(method.flags().flagsMask()&0x8)!=0&&((gl&&methods.contains(helper+descriptor))||(legacyAttributes&&Set.of("glAlphaFunc(IF)V","glPushAttrib(I)V","glPopAttrib()V","glPolygonMode(II)V").contains(methodName+descriptor)&&methods.contains(helper+descriptor))||(memory&&Set.of("memAlloc","memAllocFloat","memAllocInt","memFree","memSet").contains(helper)&&methods.contains(helper+descriptor))
                                     ||(api&&Set.of("initialize","getCapabilities").contains(helper)&&methods.contains(helper+descriptor))
                                     ||(display&&Set.of("swapBuffers","isCreated","makeCurrent","releaseContext","setVSyncEnabled","processMessages","isActive","isVisible","isCloseRequested","wasResized","getWidth","getHeight","getX","getY","getAvailableDisplayModes").contains(helper)&&methods.contains(helper+descriptor)));
                             if(!selected){builder.with(element);return;}

@@ -79,7 +79,7 @@ try {
     evidence.manifest = JSON.parse(await readFile(path.join(output, 'sprite-graphics-manifest.json'), 'utf8'));
     const legacy = evidence.manifest.adaptedVendorClasses.find((entry) => entry.class === 'org/lwjgl/opengl/GL11');
 
-    assert.deepEqual(legacy.methods.slice().sort(), ['glAlphaFunc(IF)V->glAlphaFunc', 'glPopAttrib()V->glPopAttrib', 'glPushAttrib(I)V->glPushAttrib'].sort());
+    assert.deepEqual(legacy.methods.slice().sort(), ['glAlphaFunc(IF)V->glAlphaFunc', 'glPopAttrib()V->glPopAttrib', 'glPolygonMode(II)V->glPolygonMode', 'glPushAttrib(I)V->glPushAttrib'].sort());
     assert.equal(evidence.manifest.gameMethodBodiesUnchanged, true);
     const routes = new Map([
         ['/qualification.jar', path.join(output, 'qualification.jar')],

@@ -59,6 +59,7 @@ const shaders = [];
 let program;
 
 try {
+    await call('polygonMode', 1_032, 6_914);
     const initial = state();
 
     require(await call('integerState', 2_992) === 0, 'Initial compatibility stack depth');
@@ -205,7 +206,7 @@ try {
     });
     const exit = await cheerpjRunMain('ViewportQualification', '/app/qualification.jar:/app/sprite-view.jar');
 
-    require(exit === 0 && globalThis.javaChecks === 18, 'Actual original GL11 Java ABI passes');
+    require(exit === 0 && globalThis.javaChecks === 26, 'Actual original GL11 Java ABI passes');
     require(presented.join(',') === 'false,true', 'Original Display updates use the real requested presentation modes');
     globalThis.result = { pass: true, checks, javaChecks: globalThis.javaChecks, presented, clearPixels: [...clearPixels], pixels: [...pixels], initial, stackDepth: await call('integerState', 2_992) };
 } catch (error) {

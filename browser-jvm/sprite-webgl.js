@@ -670,6 +670,17 @@ export function createSpriteNatives(canvas, report) {
             return cap === gl.TEXTURE_2D ? legacyTexture.get(activeUnit) === true : gl.isEnabled(cap);
         },
         /**
+         * Preserves filled rasterization without sending unavailable desktop enums to WebGL.
+         *
+         * @param {number} face - Original front, back or both enum.
+         * @param {number} mode - Validated fill mode, or an invalid enum to report.
+         */
+        polygonMode: (face, mode) => {
+            if (![1_028, 1_029, 1_032].includes(face) || mode !== 6_914) {
+                compatibilityError ||= gl.INVALID_ENUM;
+            }
+        },
+        /**
          * Retains the desktop comparison and normalized-buffer reference; invalid enums preserve state.
          *
          * @param {number} comparison - One of the eight original alpha comparison enums.
