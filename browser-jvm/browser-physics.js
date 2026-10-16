@@ -504,6 +504,14 @@ export function createBrowserPhysics() {
         natives: {
             ...ragdolls.natives,
             /**
+             * Identifies the implemented host backend in the original version labels.
+             *
+             * @returns {string} Browser static-geometry implementation and version.
+             */
+            Java_zombie_core_physics_Bullet_getPZBulletVersion() {
+                return 'browser-static-geometry/1';
+            },
+            /**
              * Registers genuine original script metadata independently of dynamic bodies.
              *
              * @param {unknown} lib - Reserved CheerpJ library context.
