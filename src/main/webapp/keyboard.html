@@ -17,6 +17,7 @@ const requests = new Map();
 let sequence = 0;
 let ready = false;
 let timer;
+const gameInput = new URLSearchParams(location.search).has('game-input');
 const fail = error => {
     window.probeErrors.push(String(error.stack || error));
     for (const request of requests.values()) request.reject(error);
@@ -26,12 +27,15 @@ const fail = error => {
     document.getElementById('details').textContent = JSON.stringify(window.probeResult, null, 2);
     worker.terminate();
 };
-window.queryOriginalKey = key => new Promise((resolve, reject) => {
+function request(data) { return new Promise((resolve, reject) => {
     if (!ready) { reject(new Error('Keyboard is not ready')); return; }
     const id = ++sequence;
     requests.set(id, {resolve, reject});
-    worker.postMessage({type: 'query', id, key});
-});
+    worker.postMessage({id, ...data});
+}); }
+window.queryOriginalKey = key => request({type: 'query', key});
+window.queryOriginalState = key => request({type: 'query', key, state: true});
+window.advanceOriginalInput = count => request({type: 'frames', count});
 async function showKeys() {
     try {
         const entries = [['W',17],['A',30],['S',31],['D',32],['Up',200],['Left',203],['Shift',42],['Space',57]];
@@ -44,10 +48,15 @@ for (const type of ['keydown', 'keyup']) addEventListener(type, event => {
     if (!ready || document.activeElement !== document.getElementById('keyboard-canvas')) return;
     event.preventDefault();
     worker.postMessage({type: 'key', code: event.code, down: type === 'keydown'});
+    if (gameInput) worker.postMessage({type: 'frames', count: 2});
     showKeys();
 });
 function releaseKeys() {
-    if (ready) { worker.postMessage({type: 'blur'}); showKeys(); }
+    if (ready) {
+        worker.postMessage({type: 'blur'});
+        if (gameInput) worker.postMessage({type: 'frames', count: 2});
+        showKeys();
+    }
 }
 addEventListener('blur', releaseKeys);
 document.getElementById('keyboard-canvas').addEventListener('blur', releaseKeys);

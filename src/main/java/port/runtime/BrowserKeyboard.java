@@ -7,6 +7,7 @@ public final class BrowserKeyboard {
     private static int handle;
     public static void initialize() { if (handle == 0) handle = registerCanvas(); }
     public static long windowHandle() { initialize(); return handle; }
+    public static boolean isCreated() { initialize(); return canvasRegistered(handle); }
     public static int getKey(long window, int key) {
         initialize();
         if (window != handle) throw new IllegalArgumentException("Unknown browser canvas window: " + window);
@@ -34,6 +35,15 @@ public final class BrowserKeyboard {
             """)
     private static native int registerCanvas();
 
+    @JSBody(params = {"handle"}, script = """
+            const registry = globalThis.__portKeyboardWindows;
+            const canvas = globalThis.portGraphicsCanvas;
+            return !!(registry && registry.byId.get(handle) === canvas
+                && globalThis.portKeyboardCodes instanceof Set
+                && (typeof HTMLCanvasElement === 'undefined' || !(canvas instanceof HTMLCanvasElement) || canvas.isConnected));
+            """)
+    private static native boolean canvasRegistered(int handle);
+
     @JSBody(params = {"handle", "key"}, script = """
             const registry = globalThis.__portKeyboardWindows;
             if (!registry || registry.byId.get(handle) !== globalThis.portGraphicsCanvas)
@@ -54,7 +64,15 @@ public final class BrowserKeyboard {
                 335:'NumpadEnter',336:'NumpadEqual',340:'ShiftLeft',341:'ControlLeft',342:'AltLeft',343:'MetaLeft',
                 344:'ShiftRight',345:'ControlRight',346:'AltRight',347:'MetaRight',348:'ContextMenu'})[key];
             if (code === undefined) {
-                if (key === 161 || key === 162) return -1; // GLFW WORLD keys lack an exact browser mapping.
+                // shortcut: WORLD keys have no portable DOM mapping. A complete
+                // US-keyboard scan can report them released only while no ambiguous
+                // physical key is held; international input fails explicitly.
+                if (key === 161 || key === 162) {
+                    for (const pressed of codes) {
+                        if (!pressed || pressed === 'Unidentified' || pressed.startsWith('Intl')) return -1;
+                    }
+                    return 0;
+                }
                 return 0; // Undefined entries in GLFW's key interval have no physical key.
             }
             return codes.has(code) ? 1 : 0;

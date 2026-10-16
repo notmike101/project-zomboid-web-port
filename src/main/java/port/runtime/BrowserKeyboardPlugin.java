@@ -22,6 +22,11 @@ public final class BrowserKeyboardPlugin implements TeaVMPlugin {
                 ProgramEmitter body = ProgramEmitter.create(method, context.getHierarchy());
                 body.setField(cls.getName(), "handle", body.invoke(BrowserKeyboard.class, "windowHandle", long.class));
                 body.exit();
+            } else if (cls.getName().equals("org.lwjglx.opengl.Display")) {
+                MethodHolder method = cls.getMethod(new MethodDescriptor("isCreated", boolean.class));
+                if (method == null) throw new IllegalStateException("Display.isCreated changed");
+                ProgramEmitter body = ProgramEmitter.create(method, context.getHierarchy());
+                body.invoke(BrowserKeyboard.class, "isCreated", boolean.class).returnValue();
             } else if (cls.getName().equals("org.lwjgl.glfw.GLFW")) {
                 MethodHolder initializer = cls.getMethod(new MethodDescriptor("<clinit>", ValueType.VOID));
                 MethodHolder query = cls.getMethod(new MethodDescriptor("glfwGetKey", long.class, int.class, int.class));

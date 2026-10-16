@@ -137,3 +137,5 @@ node compare.mjs --probe asset-lua --game-jar $env:PZ_GAME_JAR --media-root $env
 Use `--probe filesystem-runtime` for the original selected-file index. The allowlist currently contains only `lua/shared/ISBaseObject.lua` and `lua/shared/Util/LuaTableUtil.lua`; the host does not serve the installation as a directory tree. Original bytes stay local and untracked. Both entries use a read-only mount while ordinary runtime files remain ephemeral.
 
 `season-runtime` remains a failing diagnostic: its original SandboxOptions path requires additional installed media and game Lua environment initialization.
+
+The `game-keyboard` entry uses the same browser-only invocation as `keyboard` and verifies the original game input cache and transition lifecycle. It remains an input integration rather than a running player simulation.

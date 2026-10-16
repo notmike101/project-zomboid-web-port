@@ -86,6 +86,7 @@ const probes = {
     exit: {mainClass: 'probe.WorkerExitProbe', category: 'browser-process', browserOnly: true, workerProcess: true,
         cases: 1, comparisons: 2, symbols: []},
     'native-capabilities': {mainClass: 'probe.NativeCapabilitiesProbe', category: 'browser-native-capabilities', fixture: 'engine', browserOnly: true, webgl: true, resources: true, nativeCapabilities: true, cases: 1, comparisons: 2, symbols: []},
+    'game-keyboard': {mainClass: 'probe.GameKeyboardProbe', category: 'browser-game-keyboard', fixture: 'keyboard', browserOnly: true, keyboard: true, gameInput: true, nativeCapabilities: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 8, comparisons: 16, symbols: ['GameKeyboard::update']},
     keyboard: {mainClass: 'probe.KeyboardProbe', category: 'browser-keyboard', browserOnly: true, keyboard: true, cases: 8, comparisons: 16, symbols: []},
     'filesystem-runtime': {assets: true, nativeCapabilities: true, mainClass: 'probe.FilesystemRuntimeProbe', category: 'browser-core', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 2, comparisons: 6, symbols: ['ZomboidFileSystem::init']},
     'asset-lua': {assets: true, nativeCapabilities: true, mainClass: 'probe.AssetLuaProbe', category: 'browser-assets', fixture: 'engine', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 4, comparisons: 8, symbols: []},
@@ -286,7 +287,7 @@ try {
     page.on('pageerror', error => browserErrors.push(String(error)));
     page.on('console', message => { if (message.type() === 'error') browserErrors.push(message.text()); });
     page.on('requestfailed', request => browserErrors.push(request.url() + ': ' + request.failure()?.errorText));
-    await page.goto('http://127.0.0.1:' + server.address().port + '/' + (probe.worker ? '?worker' : ''), {waitUntil: 'load', timeout: 30000});
+    await page.goto('http://127.0.0.1:' + server.address().port + '/' + (probe.worker ? '?worker' : probe.gameInput ? '?game-input' : ''), {waitUntil: 'load', timeout: 30000});
     await page.waitForFunction(() => window.probeResult !== undefined, null, {timeout: 30000});
     if (probe.category === 'browser-graphics' && await page.evaluate(() => window.probeResult.pass)) {
         await page.locator('#red').fill('127');
@@ -304,13 +305,25 @@ try {
     evidence.visibleStatus = await page.locator('#status').innerText();
     evidence.browserErrors = browserErrors;
     evidence.browserPageLoads = pageLoads;
-    if (probeName === 'keyboard') {
+    if (probeName === 'keyboard' || probe.gameInput) {
         const states = [];
         for (const [physical, original] of [['KeyW',17],['KeyA',30],['KeyS',31],['KeyD',32],['ArrowUp',200],['ArrowLeft',203],['ShiftLeft',42],['Space',57]]) {
             await page.keyboard.down(physical);
             const pressed = await page.evaluate(key => window.queryOriginalKey(key), original);
+            if (probe.gameInput) {
+                const edge = await page.evaluate(key => window.queryOriginalState(key), original);
+                await page.evaluate(() => window.advanceOriginalInput(1));
+                const held = await page.evaluate(key => window.queryOriginalState(key), original);
+                if (edge !== 3 || held !== 1) throw new Error('Original press/held transition differs: ' + physical);
+            }
             await page.keyboard.up(physical);
             const released = await page.evaluate(key => window.queryOriginalKey(key), original);
+            if (probe.gameInput) {
+                const edge = await page.evaluate(key => window.queryOriginalState(key), original);
+                await page.evaluate(() => window.advanceOriginalInput(1));
+                const idle = await page.evaluate(key => window.queryOriginalState(key), original);
+                if (edge !== 4 || idle !== 0) throw new Error('Original release/idle transition differs: ' + physical);
+            }
             if (pressed !== 1 || released !== 0) throw new Error('Original keyboard did not follow DOM input: ' + physical);
             states.push({physical, original, pressed, released});
         }
