@@ -14,7 +14,7 @@ import java.util.TreeMap;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-/** Copies vanilla scripts, clothing XML and audited original Lua dependencies. */
+/** Copies vanilla scripts, clothing XML, complete shared Lua and audited server Lua dependencies. */
 public final class PrepareContentAssets {
     private PrepareContentAssets() { }
 
@@ -61,9 +61,11 @@ public final class PrepareContentAssets {
         add(files, installation, "media/lua/server/Vehicles/VehicleDistributions.lua");
         add(files, installation, "media/lua/shared/VehicleZoneDefinition.lua");
         add(files, installation, "media/lua/server/Items/AcceptItemFunction.lua");
-        for (String source : List.of("ISBaseObject.lua", "TimedActions/ISBaseTimedAction.lua",
-                "TimedActions/ISClothingExtraAction.lua", "Fishing/FishingZones.lua")) {
-            add(files, installation, "media/lua/shared/" + source);
+        try (var paths = Files.walk(installation.resolve("media/lua/shared"))) {
+            for (Path path : paths.filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(".lua")).toList()) {
+                files.put(installation.relativize(path).toString().replace('\\', '/'), path);
+            }
         }
         List<Path> inputs = new ArrayList<>();
         Map<String, byte[]> contents = new TreeMap<>();

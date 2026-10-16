@@ -755,12 +755,15 @@ try {
         evidence.neighborhoodLoaded = evidence.result.loadedChunks === 9 && evidence.result.groundFloors === 576;
         evidence.contentLoaded = evidence.result.vanillaContent?.items === 5_092
             && evidence.result.vanillaContent.vehicleScripts === 241 && evidence.result.vanillaContent.lootRooms === 423
+            && evidence.result.vanillaContent.sharedLuaFiles === 374 && evidence.result.vanillaContent.sharedLuaErrors === 0
             && evidence.result.physics?.vehicleDefinitions?.length === 241 && evidence.result.physics.ragdollDefinitions?.length === 4;
         evidence.initializationErrors = logs.filter((line) => line.includes('IsoChunk.loadGridSquareIfNeeded> Exception thrown')
             || line.includes('RandomizedBuildingBase.ChunkLoaded> Exception thrown')
             || (line.includes('LuaManager.getFunctionObject') && line.includes('no such function'))
             || (line.includes('LuaManager.getTableObject') && line.includes('no such table'))
             || (line.includes('FileNotFoundException') && line.includes('media/clothing/')));
+        evidence.luaErrors = logs.filter((line) => line.includes('SEVERE') || line.includes('Error found in')
+            || line.includes('KahluaThread.flushErrorMessage'));
         evidence.inputPressed = evidence.pressedInput?.inputX === 0 && evidence.pressedInput?.inputY < 0;
         evidence.normalMovement = evidence.heldInput?.frames >= evidence.pressedInput?.frames + 10
             && Number.isFinite(evidence.heldInput?.x) && Number.isFinite(evidence.heldInput?.y)
@@ -768,12 +771,12 @@ try {
         evidence.inputReleased = evidence.releasedInput?.inputX === 0 && evidence.releasedInput?.inputY === 0
             && evidence.releasedInput.frames >= evidence.heldInput?.frames + 4 && evidence.zeroInputFrames >= 4;
         evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded && evidence.contentLoaded
-            && evidence.initializationErrors.length === 0
+            && evidence.initializationErrors.length === 0 && evidence.luaErrors.length === 0
             && (interactive || (evidence.inputPressed && evidence.normalMovement && evidence.inputReleased));
         evidence.playerNavigationQualified = evidence.result.navigation?.pass === true
             && evidence.result.navigation.moved === true && evidence.result.navigation.animated === true
             && evidence.result.navigation.actionSucceeded === true && evidence.result.navigation.actionQueueEmpty === true
-            && evidence.result.navigation.pathCleared === true && evidence.result.navigation.final?.state === 'idle'
+            && evidence.result.navigation.luaActionQueueEmpty === true && evidence.result.navigation.pathCleared === true && evidence.result.navigation.final?.state === 'idle'
             && evidence.result.navigation.final.inputX === 0 && evidence.result.navigation.final.inputY === 0;
         evidence.pass = evidence.pass && (interactive || evidence.playerNavigationQualified);
         evidence.fullGamePlayable = false;

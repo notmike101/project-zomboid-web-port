@@ -89,11 +89,18 @@ public final class PlayerNavigationQualification {
                 || !player.getActionContext().getCurrentStateName().equals("idle")) {
             throw new AssertionError("Original completed walk action did not clear its queue/path and return idle");
         }
+        if (!(LuaManager.env.rawget("ISTimedActionQueue") instanceof KahluaTable service)
+                || !(service.rawget("queues") instanceof KahluaTable queues)
+                || !(queues.rawget(player) instanceof KahluaTable queue)
+                || !(queue.rawget("queue") instanceof KahluaTable actions)
+                || !actions.isEmpty() || queue.rawget("current") != null) {
+            throw new AssertionError("Original completed walk action left its Lua queue/current action populated");
+        }
         String json = "{\"pass\":true,\"navigationFrames\":" + frames + ",\"cleanupFrames\":3"
                 + ",\"initialX\":" + initialX + ",\"initialY\":" + initialY
                 + ",\"targetX\":" + targetX + ",\"targetY\":" + targetY
                 + ",\"moved\":" + moved + ",\"animated\":" + animated
-                + ",\"actionSucceeded\":true,\"actionQueueEmpty\":true,\"pathCleared\":true,\"final\":" + session.snapshot() + "}";
+                + ",\"actionSucceeded\":true,\"actionQueueEmpty\":true,\"luaActionQueueEmpty\":true,\"pathCleared\":true,\"final\":" + session.snapshot() + "}";
         return new Result(frames + 3, json);
     }
 }

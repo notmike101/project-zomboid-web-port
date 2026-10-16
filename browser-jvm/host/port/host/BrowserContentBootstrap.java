@@ -45,7 +45,13 @@ public final class BrowserContentBootstrap {
         "shared/VehicleZoneDefinition.lua"
     };
 
+    private static int sharedLuaFiles;
+    private static int sharedLuaErrors;
+
     private BrowserContentBootstrap() { }
+
+    public static int getSharedLuaFiles() { return sharedLuaFiles; }
+    public static int getSharedLuaErrors() { return sharedLuaErrors; }
 
     /** Mount before ZFS scans; the archive contains definitions, never installed saves. */
     public static void mountAssets() throws IOException {
@@ -61,13 +67,17 @@ public final class BrowserContentBootstrap {
                 if (!names.add(name)) throw new IOException("Duplicate content archive entry: " + name);
                 if (!(name.startsWith("media/scripts/") && name.endsWith(".txt"))
                         && !(name.startsWith("media/clothing/") && name.endsWith(".xml"))
-                        && !isDistributionSource(name)) {
+                        && !isDistributionSource(name) && !isSharedSource(name)) {
                     throw new IOException("Unexpected content archive entry: " + name);
                 }
                 if (++entries > 4000) throw new IOException("Too many content archive entries");
                 Path target = work.resolve(name).normalize();
+                if (!target.startsWith(work) || !work.relativize(target).toString().replace('\\', '/').equals(name)) {
+                    throw new IOException("Noncanonical content archive entry: " + name);
+                }
                 if (!target.startsWith(work.resolve("media/scripts"))
-                        && !target.startsWith(work.resolve("media/clothing")) && !isDistributionSource(name))
+                        && !target.startsWith(work.resolve("media/clothing")) && !isDistributionSource(name)
+                        && !(isSharedSource(name) && target.startsWith(work.resolve("media/lua/shared"))))
                     throw new IOException("Content escapes its allowed browser directory");
                 byte[] bytes = zip.readNBytes(32 * 1024 * 1024 + 1);
                 total += bytes.length;
@@ -96,6 +106,44 @@ public final class BrowserContentBootstrap {
         if (ScriptManager.instance.getAllItems().isEmpty()
                 || ScriptManager.instance.getAllVehicleScripts().isEmpty()) {
             throw new AssertionError("Original vanilla item/vehicle definitions missing");
+        }
+        if (ScriptManager.instance.hasLoadErrors()) {
+            throw new IllegalStateException("Original script definitions have load errors");
+        }
+        loadSharedLua();
+    }
+
+    /** Preserves the original directory order and RunLua cache after all script definitions exist. */
+    private static void loadSharedLua() throws Exception {
+        List<String> errors = new ArrayList<>();
+        Handler failures = new Handler() {
+            @Override public void publish(LogRecord record) {
+                if (record.getLevel().intValue() >= Level.SEVERE.intValue()) {
+                    String message = record.getMessage();
+                    if (record.getParameters() != null) {
+                        message += " " + java.util.Arrays.toString(record.getParameters());
+                    }
+                    errors.add(message);
+                }
+            }
+            @Override public void flush() { /* Observation only; owns no stream. */ }
+            @Override public void close() { /* Observation only; owns no stream. */ }
+        };
+        Logger compiler = Logger.getLogger(LuaManager.class.getName());
+        compiler.addHandler(failures);
+        try {
+            LuaManager.LoadDirBase("shared");
+        } finally {
+            compiler.removeHandler(failures);
+            sharedLuaErrors = errors.size();
+            sharedLuaFiles = (int) LuaManager.loaded.stream()
+                    .filter(name -> name.replace('\\', '/').contains("/media/lua/shared/")).distinct().count();
+        }
+        if (!errors.isEmpty()) {
+            throw new IllegalStateException("Original shared Lua failed: " + errors);
+        }
+        if (sharedLuaFiles != 374) {
+            throw new IllegalStateException("Expected 374 original shared Lua sources, loaded " + sharedLuaFiles);
         }
     }
 
@@ -148,6 +196,10 @@ public final class BrowserContentBootstrap {
                 || ItemPickerJava.VehicleDistributions.isEmpty()) {
             throw new AssertionError("Original parsed loot distribution maps missing");
         }
+    }
+
+    private static boolean isSharedSource(String name) {
+        return name.startsWith("media/lua/shared/") && name.endsWith(".lua");
     }
 
     private static boolean isDistributionSource(String name) {

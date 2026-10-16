@@ -208,7 +208,9 @@ public final class BrowserInteractivePlay {
                                 + ",\"groundFloors\":" + geometry[0].getGroundFloorCount()
                                 + ",\"vanillaContent\":{\"items\":" + zombie.scripting.ScriptManager.instance.getAllItems().size()
                                 + ",\"vehicleScripts\":" + zombie.scripting.ScriptManager.instance.getAllVehicleScripts().size()
-                                + ",\"lootRooms\":" + zombie.inventory.ItemPickerJava.rooms.size() + "}"
+                                + ",\"lootRooms\":" + zombie.inventory.ItemPickerJava.rooms.size()
+                                + ",\"sharedLuaFiles\":" + BrowserContentBootstrap.getSharedLuaFiles()
+                                + ",\"sharedLuaErrors\":" + BrowserContentBootstrap.getSharedLuaErrors() + "}"
                                 + ",\"navigation\":" + navigation + ",\"final\":" + session.snapshot() + ",\"composition\":" + composition + ",\"frame\":" + capture + "}";
                     }
                 } finally { player.releaseAnimationPlayer(); }
