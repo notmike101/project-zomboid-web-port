@@ -9,7 +9,7 @@ Two larger compile-only diagnostics fail. They are not included in the passing t
 
 This is not a percentage of the game. Class counts do not measure playable coverage or integration cost.
 The JAR contains 23,829 class files, including 5,095 under `zombie/`. Most remain unexamined.
-No world, character simulation, game script, or native subsystem has run in the browser.
+No world or character simulation has run in the browser. The two installed Lua helpers described below now execute unchanged through the shipped compiler/interpreter.
 
 ## Evidence levels
 
@@ -281,7 +281,7 @@ Fixed pixel cases avoid ambiguous midpoints; arbitrary interactive values enforc
 This distinction does not change any original-game JVM raw-bit comparison rule.
 Context loss marks the interaction failed and disables the controls.
 
-The preceding `core-webgl` checkpoint failed with 38 missing references across 12 declarations. Implementing those boundaries exposed package implementation metadata and class-relative resource lookup, which now have browser comparisons. The expanded Core initializer now compiles 2,439 classes and 34,210 methods after explicit native capability boundaries. Chromium rejects the resulting module before initialization because TeaVM emits an invalid br_on_cast type in Translator.reportMissingArgumentsFormatString. This compiler failure is under investigation; Core has not executed successfully. The preceding native frontier contained 215 entries, which remain unsupported operations unless a real browser backend exists.
+The preceding `core-webgl` checkpoint failed with 38 missing references across 12 declarations. Implementing those boundaries exposed package implementation metadata and class-relative resource lookup, which now have browser comparisons. The browser-only `core-boot` entry now passes one case and four assertions inside an owned worker: original singleton identity and initial width, height, sound volume, zoom, fullscreen and debug state. It has no desktop JVM baseline. A missing standard MissingFormatArgumentException initially produced invalid Wasm catch types; supplying its correct IllegalFormatException inheritance fixes validation. Its separate JVM/browser probe passes 8 cases and 16 outputs. The preceding native frontier contained 215 entries, which remain unsupported operations unless a real browser backend exists.
 Fixing the first graphics-loader path does not eliminate other image, memory, UI, concurrency, and native dependencies.
 No original world, player, collision, animation, or gameplay loop is running.
 
@@ -325,3 +325,21 @@ This explicit native capability boundary reduces build reachability without clai
 Shader matrix uploads honor position/limit and implement actual three/four-dimensional transposition. The vector-four original parameter path and direct matrix-four tests ran; the other dispatch branches only compile.
 
 The standard runtime table also includes the watch probe: 8 cases and 16 exact JVM/browser outputs for actual file changes, filtering, key lifecycle, interruption and close wakeup. It polls the ephemeral default VFS every 25 ms using the verified locks/conditions. Short-lived files or same-size changes within timestamp resolution can be missed. Alternate providers and cross-worker sharing are unsupported.
+
+## Connected engine milestones
+
+These browser-only probes use assertions against inspected original behavior, without a desktop JVM baseline. They do not add to the 72/440 JVM comparison count.
+
+| Probe | Cases | Outputs | Verified behavior |
+|---|---:|---:|---|
+| `core-boot` | 1 | 4 | Original Core constructor, singleton and initial configuration |
+| `lua-runtime` | 2 | 4 | Shipped compiler/interpreter, closures, tables, standard libraries, coroutines and retained state |
+| `asset-lua` | 4 | 8 | Mounted original Lua bytes, original object/event and table helper behavior |
+| `filesystem-runtime` | 2 | 6 | Original filesystem initialization, canonical folders, case-insensitive selected index and reads |
+
+The media host exposes only ISBaseObject.lua and LuaTableUtil.lua beneath the explicitly configured media root. It resolves real paths, rejects escapes, snapshots bounded files, and verifies SHA-256 before Java starts. Java file reads independently match the host bytes. Three unknown paths and a write request are rejected, and post-run checks confirm installed inputs remain unchanged.
+The immutable `/media` mount delegates other paths to ephemeral memory storage. It does not expose native saves or implement a complete media tree. File indexing is deliberately a two-file selection. The Lua environment binds `pairs` to the shipped table iterator as the installed standard library does; full game Lua environment initialization is still separate.
+The `season-runtime` entry currently fails at original SandboxOptions initialization because its media and Lua environment prerequisites are not yet mounted and initialized. It is a diagnostic, not a passing seasonal simulation.
+
+The real DOM keyboard fixture now passes eight initial-state cases and sixteen outputs, plus live press/release checks for eight physical keys, a simultaneous-key chord, and actual canvas focus loss. Original Keyboard.isKeyDown, KeyCodes.toGlfwKey and Display.getWindow remain on the query path. The bounded GLFW backend registers the actual transferred canvas and reads forwarded DOM state. Other window operations and ambiguous WORLD key mappings remain unsupported.
+Twenty-one standard runtime probes currently pass 373 cases and 810 exact JVM/browser outputs. These counts remain separate from original game and browser-only engine evidence.

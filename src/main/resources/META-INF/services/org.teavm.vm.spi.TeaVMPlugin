@@ -10,3 +10,4 @@ port.runtime.BrowserLibraryPlugin
 port.runtime.WatchServicePlugin
 port.runtime.SteamWorkshopImportPlugin
 port.runtime.NativeCapabilitiesPlugin
+port.runtime.BrowserKeyboardPlugin

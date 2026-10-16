@@ -7,7 +7,7 @@ import org.teavm.vm.spi.TeaVMHost;
 import org.teavm.vm.spi.TeaVMPlugin;
 
 /** Explicit failure boundary for third-party native capabilities without a browser backend. */
-@After({BrowserGraphicsPlugin.class, BrowserMemoryPlugin.class})
+@After({BrowserGraphicsPlugin.class, BrowserMemoryPlugin.class, BrowserKeyboardPlugin.class})
 public final class NativeCapabilitiesPlugin implements TeaVMPlugin {
     @Override public void install(TeaVMHost host) {
         if (!Boolean.getBoolean("port.nativeCapabilities")) return;

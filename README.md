@@ -29,6 +29,7 @@ Runtime probes compare standard Java API behavior against Java 25, including pat
 These checks are separate from original-game coverage. Path operations use the browser's virtual path provider; they do not provide OPFS-backed Java files.
 The queue supports TeaVM's cooperative single-agent execution, without cross-worker object sharing.
 The `graphics-worker` entry runs the same original shader integration inside a dedicated worker with a transferred OffscreenCanvas. The separate `exit` entry verifies terminating an owned worker runtime, including a real Wasm trap and absence of subsequent Java execution.
+The browser-only `core-boot` entry executes the original Core initializer. `lua-runtime` runs the shipped Lua compiler/interpreter, including closures and coroutines. `asset-lua` executes two unchanged installed Lua files through a verified read-only media mount, and `filesystem-runtime` builds the original selected-file index over that mount. These are connected engine milestones; no player/world loop runs yet.
 
 See [COMPATIBILITY.md](COMPATIBILITY.md) for measured results and [PORTING.md](PORTING.md) for the route toward a playable slice.
 
@@ -115,10 +116,24 @@ node compare.mjs --probe graphics --game-jar $env:PZ_GAME_JAR --jdk $env:PZ_JDK 
 
 This entry never starts a desktop JVM baseline. Original arithmetic already has separate JVM comparisons.
 The compiler activates the third-party graphics plugin only for this probe and `core-webgl`.
-`core-webgl --compile-only` diagnoses the larger engine with that backend enabled and currently still fails.
+`core-webgl --compile-only` diagnoses the larger engine with that backend enabled. The separate `core-boot` entry now executes its audited initializer in an owned browser worker.
 Unsupported graphics APIs retain their original implementations; they have not been supplied with successful stubs.
 
 The `memory` entry uses the same browser-only command with `--probe memory` to verify real direct allocations, raw Wasm addresses, and release ownership.
 `joml` separately compares the shipped NIO matrix provider with the JVM, without adding to game coverage.
 The `resources` host exposes only entries in the configured local archive through loopback HTTP. It never extracts or executes an archived class or DLL.
 All executor workers cooperate within one browser agent; they do not supply parallel Java threads.
+
+## Original engine and installed assets
+
+Use the browser-only invocation shown for `graphics`, substituting `core-boot`, `lua-runtime`, or `keyboard` as the probe name. The keyboard fixture tests real DOM press/release, simultaneous keys and canvas focus loss through the shipped Keyboard/KeyCodes path. It does not implement desktop window creation.
+
+The two asset entries additionally require the explicit installed media directory:
+
+```powershell
+node compare.mjs --probe asset-lua --game-jar $env:PZ_GAME_JAR --media-root $env:PZ_MEDIA_ROOT --jdk $env:PZ_JDK --maven-home $env:PZ_MAVEN_HOME --browser $env:PZ_BROWSER
+```
+
+Use `--probe filesystem-runtime` for the original selected-file index. The allowlist currently contains only `lua/shared/ISBaseObject.lua` and `lua/shared/Util/LuaTableUtil.lua`; the host does not serve the installation as a directory tree. Original bytes stay local and untracked. Both entries use a read-only mount while ordinary runtime files remain ephemeral.
+
+`season-runtime` remains a failing diagnostic: its original SandboxOptions path requires additional installed media and game Lua environment initialization.

@@ -6,9 +6,10 @@ import {createServer} from 'node:http';
 import {resolve, join, delimiter} from 'node:path';
 import {parseArgs} from 'node:util';
 import {chromium} from 'playwright-core';
+import {loadAssets} from './asset-host.mjs';
 
 const {values} = parseArgs({options: {...Object.fromEntries(
-    ['game-jar', 'java', 'jdk', 'maven-home', 'browser', 'probe'].map(key => [key, {type: 'string'}])),
+    ['game-jar', 'java', 'jdk', 'maven-home', 'browser', 'probe', 'media-root'].map(key => [key, {type: 'string'}])),
     'compile-only': {type: 'boolean', default: false}}});
 const probeName = values.probe || 'angles';
 const probes = {
@@ -66,6 +67,7 @@ const probes = {
         classes: [], symbols: []},
     channels: {mainClass: 'probe.ChannelProbe', category: 'runtime-compatibility', cases: 16, comparisons: 32,
         classes: [], symbols: []},
+    'format-exception': {mainClass: 'probe.FormatExceptionProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16, classes: [], symbols: []},
     watch: {mainClass: 'probe.WatchProbe', category: 'runtime-compatibility', watchService: true, cases: 8, comparisons: 16, classes: [], symbols: []},
     libraries: {mainClass: 'probe.LibraryProbe', category: 'runtime-compatibility', nativeLibraries: true, cases: 8, comparisons: 16,
         classes: [], symbols: []},
@@ -79,11 +81,15 @@ const probes = {
         symbols: ['ShaderParameter::<init>']},
     graphics: {mainClass: 'probe.GraphicsProbe', category: 'browser-graphics', browserOnly: true, webgl: true, memory: true,
         cases: 4, comparisons: 50, symbols: ['Color::scale']},
-    'graphics-worker': {mainClass: 'probe.GraphicsProbe', category: 'browser-graphics', browserOnly: true, webgl: true, memory: true,
+    'graphics-worker': {nativeCapabilities: true, mainClass: 'probe.GraphicsProbe', category: 'browser-graphics', browserOnly: true, webgl: true, memory: true,
         cases: 4, comparisons: 50, symbols: ['Color::scale'], worker: true},
     exit: {mainClass: 'probe.WorkerExitProbe', category: 'browser-process', browserOnly: true, workerProcess: true,
         cases: 1, comparisons: 2, symbols: []},
     'native-capabilities': {mainClass: 'probe.NativeCapabilitiesProbe', category: 'browser-native-capabilities', fixture: 'engine', browserOnly: true, webgl: true, resources: true, nativeCapabilities: true, cases: 1, comparisons: 2, symbols: []},
+    keyboard: {mainClass: 'probe.KeyboardProbe', category: 'browser-keyboard', browserOnly: true, keyboard: true, cases: 8, comparisons: 16, symbols: []},
+    'filesystem-runtime': {assets: true, nativeCapabilities: true, mainClass: 'probe.FilesystemRuntimeProbe', category: 'browser-core', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 2, comparisons: 6, symbols: ['ZomboidFileSystem::init']},
+    'asset-lua': {assets: true, nativeCapabilities: true, mainClass: 'probe.AssetLuaProbe', category: 'browser-assets', fixture: 'engine', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 4, comparisons: 8, symbols: []},
+    'lua-runtime': {nativeCapabilities: true, mainClass: 'probe.LuaRuntimeProbe', category: 'browser-lua-runtime', fixture: 'engine', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 2, comparisons: 4, symbols: []},
     'season-runtime': {nativeCapabilities: true, mainClass: 'probe.SeasonRuntimeProbe', category: 'browser-core', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 2, comparisons: 20, symbols: ['ErosionSeason::setDay']},
     'core-boot': {nativeCapabilities: true, mainClass: 'probe.CoreBootProbe', category: 'browser-core', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 1, comparisons: 4, symbols: ['Core::<clinit>']},
     'core-webgl': {nativeCapabilities: true, mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, watchService: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, symbols: ['Core::<clinit>']},
@@ -95,6 +101,7 @@ const probe = probes[probeName];
 if (probe.compileOnly && !values['compile-only']) throw new Error('This boundary is not qualified for execution. Use --compile-only.');
 const outputDir = join('target', probeName);
 const prerequisiteKeys = ['game-jar', 'jdk', 'maven-home', ...(!values['compile-only'] ? [...(!probe.browserOnly ? ['java'] : []), 'browser'] : [])];
+if (probe.assets) prerequisiteKeys.push('media-root');
 for (const key of prerequisiteKeys) {
     if (!values[key]) throw new Error('Required explicit prerequisite: --' + key);
 }
@@ -164,7 +171,7 @@ try {
     evidence.jdkVersion = (await run('jdk-version', java, ['-version'])).trim();
     const boot = (await readdir(join(paths['maven-home'], 'boot'))).filter(name => /^plexus-classworlds-.*\.jar$/.test(name));
     if (boot.length !== 1) throw new Error('Expected one Maven classworlds boot JAR');
-    const mavenArgs = ['-Xss16m', '-Dport.nativeCapabilities=' + !!probe.nativeCapabilities, '-Dport.watchService=' + !!probe.watchService, '-Dport.webgl=' + !!probe.webgl, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dport.regex=' + !!probe.regex, '-Dport.workerProcess=' + !!probe.workerProcess, '-Dport.nativeLibraries=' + !!probe.nativeLibraries, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
+    const mavenArgs = ['-Xss16m', '-Dport.browserKeyboard=' + !!probe.keyboard, '-Dport.nativeCapabilities=' + !!probe.nativeCapabilities, '-Dport.watchService=' + !!probe.watchService, '-Dport.webgl=' + !!probe.webgl, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dport.regex=' + !!probe.regex, '-Dport.workerProcess=' + !!probe.workerProcess, '-Dport.nativeLibraries=' + !!probe.nativeLibraries, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
         '-Dclassworlds.conf=' + join(paths['maven-home'], 'bin', 'm2.conf'),
         '-cp', join(paths['maven-home'], 'boot', boot[0]), 'org.codehaus.plexus.classworlds.launcher.Launcher',
         '-Dprobe.mainClass=' + probe.mainClass, '-Dprobe.output=' + output];
@@ -224,6 +231,7 @@ try {
     const routes = new Map([
         ['/', [probe.browserOnly ? 'src/main/webapp/' + (probe.fixture || (probe.worker ? 'graphics' : probe.category === 'browser-core' ? 'engine' : probeName)) + '.html' : 'src/main/webapp/index.html', 'text/html; charset=utf-8']],
         ['/graphics-worker.js', ['src/main/webapp/graphics-worker.js', 'text/javascript']],
+        ['/keyboard-worker.js', ['src/main/webapp/keyboard-worker.js', 'text/javascript']],
         ['/engine-worker.js', ['src/main/webapp/engine-worker.js', 'text/javascript']],
         ['/exit-worker.js', ['src/main/webapp/exit-worker.js', 'text/javascript']],
         ['/save-host.js', ['src/main/webapp/save-host.js', 'text/javascript']],
@@ -233,7 +241,23 @@ try {
         ['/wasm/classes.wasm-runtime.js', [join(outputDir, 'wasm/classes.wasm-runtime.js'), 'text/javascript']],
         ['/favicon.ico', [null, 'image/x-icon']]
     ]);
+    const assets = probe.assets ? await loadAssets(paths['media-root']) : {manifest: [], files: new Map()};
+    if (probe.assets) evidence.assets = assets.manifest;
     server = createServer(async (request, response) => {
+        if (request.url === '/asset-manifest.json') {
+            if (request.method !== 'GET') { response.writeHead(405); response.end(); return; }
+            response.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-store'});
+            response.end(JSON.stringify(assets.manifest));
+            return;
+        }
+        if (request.url.startsWith('/asset?')) {
+            const name = new URL(request.url, 'http://127.0.0.1').searchParams.get('path');
+            const bytes = assets.files.get(name);
+            if (request.method !== 'GET' || !bytes) { response.writeHead(404); response.end(); return; }
+            response.writeHead(200, {'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store'});
+            response.end(bytes);
+            return;
+        }
         if (resourceNames && request.url.startsWith('/classpath?')) {
             const name = new URL(request.url, 'http://127.0.0.1').searchParams.get('name');
             if (request.method !== 'GET' || !resourceNames.has(name)) { response.writeHead(404); response.end(); return; }
@@ -280,6 +304,49 @@ try {
     evidence.visibleStatus = await page.locator('#status').innerText();
     evidence.browserErrors = browserErrors;
     evidence.browserPageLoads = pageLoads;
+    if (probeName === 'keyboard') {
+        const states = [];
+        for (const [physical, original] of [['KeyW',17],['KeyA',30],['KeyS',31],['KeyD',32],['ArrowUp',200],['ArrowLeft',203],['ShiftLeft',42],['Space',57]]) {
+            await page.keyboard.down(physical);
+            const pressed = await page.evaluate(key => window.queryOriginalKey(key), original);
+            await page.keyboard.up(physical);
+            const released = await page.evaluate(key => window.queryOriginalKey(key), original);
+            if (pressed !== 1 || released !== 0) throw new Error('Original keyboard did not follow DOM input: ' + physical);
+            states.push({physical, original, pressed, released});
+        }
+        await page.keyboard.down('KeyW');
+        await page.keyboard.down('KeyA');
+        const chord = await page.evaluate(async () => [await window.queryOriginalKey(17), await window.queryOriginalKey(30)]);
+        await page.locator('#leave-input').click();
+        const cleared = await page.evaluate(async () => [await window.queryOriginalKey(17), await window.queryOriginalKey(30)]);
+        await page.keyboard.up('KeyW');
+        await page.keyboard.up('KeyA');
+        if (JSON.stringify(chord) !== '[1,1]' || JSON.stringify(cleared) !== '[0,0]') throw new Error('Original keyboard chord or blur state differs');
+        evidence.liveKeyboard = {states, chord, cleared, actualDomInput: true};
+    }
+    await writeFile(join(outputDir, 'browser.json'), JSON.stringify(evidence.browser, null, 2) + '\n');
+    if (!evidence.browser.pass) throw new Error('Browser execution failed; see ' + join(outputDir, 'browser.json'));
+    if (probe.assets) {
+        for (const entry of assets.manifest) {
+            const item = evidence.browser.actual?.cases.find(item => item.id === entry.path);
+            let hash = 1;
+            for (const value of assets.files.get(entry.path)) hash = (Math.imul(31, hash) + (value > 127 ? value - 256 : value)) | 0;
+            if (item?.outputs.size.value !== entry.size || item?.outputs.contentHash.value !== hash) {
+                throw new Error('Mounted Java file differs from the verified host bytes');
+            }
+        }
+        for (const name of ['/media/../projectzomboid.jar', '../save', '/media/unlisted.lua']) {
+            if ((await page.request.get('http://127.0.0.1:' + server.address().port + '/asset?path=' + encodeURIComponent(name))).status() !== 404) {
+                throw new Error('Asset allowlist accepted an unknown path');
+            }
+        }
+        if ((await page.request.post('http://127.0.0.1:' + server.address().port + '/asset-manifest.json')).status() !== 405) {
+            throw new Error('Asset manifest accepted a write request');
+        }
+        const after = await loadAssets(paths['media-root']);
+        if (JSON.stringify(after.manifest) !== JSON.stringify(assets.manifest)) throw new Error('Installed asset changed during probe');
+        evidence.assetBoundaryChecks = {exactJavaBytes: true, rejectedUnknownPaths: 3, rejectedWrite: true, installedInputsUnchanged: true};
+    }
     if (probe.category === 'browser-graphics' && (!evidence.browser.webgl2 || evidence.browser.errors.length || !evidence.interactiveFramebuffer)) {
         throw new Error('Expected real WebGL2 and verified browser input');
     }
@@ -300,8 +367,8 @@ try {
     if (evidence.browser.hostStorage) {
         evidence.measurement = 'Initialization sums eight module fetch/compile/instantiate/load calls; execution sums original adapter calls plus OPFS write/readback; excludes navigation and loader JS downloads';
     }
-    await writeFile(join(outputDir, 'browser.json'), JSON.stringify(evidence.browser, null, 2) + '\n');
-    if (!evidence.browser.pass || browserErrors.length || evidence.browser.comparisons !== probe.comparisons || !evidence.visibleStatus.startsWith('PASS')) {
+    if (!evidence.browser.pass || browserErrors.length || evidence.browser.cases !== probe.cases
+            || evidence.browser.comparisons !== probe.comparisons || !evidence.visibleStatus.startsWith('PASS')) {
         throw new Error('Browser comparison failed; see ' + join(outputDir, 'browser.json'));
     }
     evidence.pass = true;

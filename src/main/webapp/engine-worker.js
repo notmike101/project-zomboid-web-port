@@ -14,6 +14,24 @@ self.onmessage = async event => {
         started = true;
         self.portGraphicsCanvas = event.data.canvas;
         importScripts('/resource-host.js');
+        const assetResponse = await fetch('/asset-manifest.json');
+        if (!assetResponse.ok) throw new Error('Asset manifest HTTP ' + assetResponse.status);
+        self.portAssetManifest = await assetResponse.json();
+        self.portAssetFiles = new Map();
+        for (const entry of self.portAssetManifest) {
+            if (typeof entry.path !== 'string' || !entry.path.startsWith('/media/')
+                    || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 1024 * 1024
+                    || !/^[0-9a-f]{64}$/.test(entry.sha256) || self.portAssetFiles.has(entry.path)) {
+                throw new Error('Invalid asset manifest entry');
+            }
+            const response = await fetch('/asset?path=' + encodeURIComponent(entry.path));
+            if (!response.ok) throw new Error('Asset HTTP ' + response.status);
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+            const hash = Array.from(digest, value => value.toString(16).padStart(2, '0')).join('');
+            if (bytes.length !== entry.size || hash !== entry.sha256) throw new Error('Asset integrity mismatch');
+            self.portAssetFiles.set(entry.path, bytes);
+        }
         const module = await TeaVM.wasmGC.load('/wasm/probe.wasm', {installImports(imports) {
             imports.portNative = {steamWorkshopFolders() {
                 throw new Error('Steam Workshop is unavailable in this browser host');
