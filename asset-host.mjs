@@ -5,12 +5,19 @@ import {dirname, isAbsolute, relative, resolve, sep} from 'node:path';
 // Only this authored selection is exposed, never the installation or saves as a directory server.
 const selection = ['lua/shared/ISBaseObject.lua', 'lua/shared/Util/LuaTableUtil.lua'];
 
-export async function loadAssets(mediaRoot, standardLibrary = false) {
+export async function loadAssets(mediaRoot, profile = false) {
+    if (![false, true, 'sandbox', 'menu-image'].includes(profile)) throw new Error('Unknown asset selection');
     const root = await realpath(mediaRoot);
     const manifest = [];
     const files = new Map();
-    const selected = standardLibrary ? [{name: 'stdlib.lua', root: dirname(root), virtual: '/stdlib.lua'}]
+    const selected = profile === 'menu-image'
+        ? [{name: 'ui/avatarBackgroundWhite.png', root, virtual: '/media/ui/avatarBackgroundWhite.png'}]
+        : profile ? [{name: 'stdlib.lua', root: dirname(root), virtual: '/stdlib.lua'}]
         : selection.map(name => ({name, root, virtual: '/media/' + name}));
+    if (profile === 'sandbox') {
+        for (const name of ['lua/shared/defines.lua', 'lua/shared/Sandbox/Apocalypse.lua'])
+            selected.push({name, root, virtual: '/media/' + name});
+    }
     for (const asset of selected) {
         const path = await realpath(resolve(asset.root, asset.name));
         const local = relative(asset.root, path);

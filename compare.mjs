@@ -109,6 +109,12 @@ const probes = {
     season: {mainClass: 'probe.SeasonBoundaryProbe', compileOnly: true, symbols: ['ErosionSeason::<init>']},
     core: {mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, symbols: ['Core::<clinit>']}
 };
+probes['reflection-manifest'] = {...probes['reflection-exposure'], reflectionExposure: false, reflectionManifest: 'game-version'};
+probes['game-lua-exposure'] = {...probes['lua-manager-init'], reflectionManifest: 'all'};
+probes['game-lua-exposure-fast'] = {...probes['game-lua-exposure'], fastAnalysis: true};
+probes['season-bootstrap'] = {...probes['standard-environment'], mainClass: 'probe.SeasonBootstrapProbe', category: 'browser-core', threadGroups: true, assetProfile: 'sandbox', cases: 5, comparisons: 26};
+probes['menu-png'] = {...probes['standard-environment'], mainClass: 'probe.MenuPngProbe', category: 'browser-assets', assetProfile: 'menu-image', cases: 3, comparisons: 8};
+probes['game-boot'] = {...probes['lua-manager-init'], mainClass: 'zombie.gameStates.MainScreenState', keyboard: true, symbols: ['MainScreenState::main']};
 if (!Object.hasOwn(probes, probeName)) throw new Error('Unknown probe: ' + probeName);
 const probe = probes[probeName];
 if (probe.compileOnly && !values['compile-only']) throw new Error('This boundary is not qualified for execution. Use --compile-only.');
@@ -182,12 +188,44 @@ try {
     evidence.executionRequested = !values['compile-only'];
     if (evidence.executionRequested && !probe.browserOnly) evidence.jvmVersion = (await run('jvm-version', paths.java, ['-version'])).trim();
     evidence.jdkVersion = (await run('jdk-version', java, ['-version'])).trim();
+    let reflectionManifestPath;
+    if (probe.reflectionManifest) {
+        const inventoryPath = join(outputDir, 'exposure-inventory.json');
+        await run('exposure-inventory', java, ['tools/ExposureManifestTool.java', paths['game-jar'], inventoryPath]);
+        const inventory = JSON.parse(await readFile(inventoryPath, 'utf8'));
+        if (inventory.jarSha256 !== evidence.jarSha256Before) throw new Error('Reflection inventory original JAR hash differs');
+        const selected = probe.reflectionManifest === 'game-version' ? ['java.lang.Object', 'zombie.core.GameVersion']
+            : Object.keys(inventory.classes).sort();
+        const lines = selected.map(name => 'C\t' + name);
+        for (const name of selected) {
+            const cls = inventory.classes[name];
+            if (!cls || !Array.isArray(cls.methods) || !Array.isArray(cls.fields)) throw new Error('Incomplete reflection inventory: ' + name);
+            if (cls.origin === 'jdk-resource') {
+                lines.push('J\t' + name);
+                for (const method of cls.declaredPublicMethodCandidates) lines.push('M\t' + name + '\t' + method);
+                for (const field of cls.declaredPublicFieldCandidates) lines.push('F\t' + name + '\t' + field.split(':')[0]);
+            } else if (cls.origin === 'original-jar') {
+                for (const method of cls.methods) {
+                    if (method.name !== '<clinit>') lines.push('M\t' + name + '\t' + method.name + method.descriptor);
+                }
+                for (const field of cls.fields) lines.push('F\t' + name + '\t' + field.name);
+            } else throw new Error('Unknown reflection inventory origin: ' + name);
+        }
+        reflectionManifestPath = resolve(outputDir, 'reflection-manifest.tsv');
+        await writeFile(reflectionManifestPath, lines.join('\n') + '\n');
+        evidence.reflectionManifest = {path: reflectionManifestPath, sha256: await sha256(reflectionManifestPath),
+            scope: probe.reflectionManifest, classes: selected.length, records: lines.length,
+            inventoryStats: inventory.stats, originalJdkPublicApiOnly: true};
+    }
     const boot = (await readdir(join(paths['maven-home'], 'boot'))).filter(name => /^plexus-classworlds-.*\.jar$/.test(name));
     if (boot.length !== 1) throw new Error('Expected one Maven classworlds boot JAR');
     const mavenArgs = ['-Xss16m', '-Dport.threadGroups=' + !!probe.threadGroups, '-Dport.generics=' + !!probe.generics, '-Dport.reflectionExposure=' + !!probe.reflectionExposure, '-Dport.browserKeyboard=' + !!probe.keyboard, '-Dport.nativeCapabilities=' + !!probe.nativeCapabilities, '-Dport.watchService=' + !!probe.watchService, '-Dport.webgl=' + !!probe.webgl, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dport.regex=' + !!probe.regex, '-Dport.workerProcess=' + !!probe.workerProcess, '-Dport.nativeLibraries=' + !!probe.nativeLibraries, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
         '-Dclassworlds.conf=' + join(paths['maven-home'], 'bin', 'm2.conf'),
         '-cp', join(paths['maven-home'], 'boot', boot[0]), 'org.codehaus.plexus.classworlds.launcher.Launcher',
         '-Dprobe.mainClass=' + probe.mainClass, '-Dprobe.output=' + output];
+    if (reflectionManifestPath) mavenArgs.unshift('-Dport.reflectionManifest=' + reflectionManifestPath);
+    if (probe.fastAnalysis) mavenArgs.unshift('-Dteavm.fastGlobalAnalysis=true');
+    evidence.fastGlobalAnalysis = !!probe.fastAnalysis;
     evidence.mavenVersion = (await run('maven-version', java, [...mavenArgs, '--version'])).trim();
     await run('compile-adapter', java, [...mavenArgs, '-B', '-Dmaven.repo.local=' + resolve('.m2'),
         '-Dgame.jar=' + paths['game-jar'], 'compiler:compile']);
@@ -268,7 +306,7 @@ try {
         evidence.genericMetadataKeys = Object.keys(genericMetadata).length;
     }
     await writeFile(join(outputDir, 'generic-host.js'), 'globalThis.portGenericMetadata = ' + JSON.stringify(genericMetadata) + ';\n');
-    const assets = probe.assets ? await loadAssets(paths['media-root'], probe.standardLibrary) : {manifest: [], files: new Map()};
+    const assets = probe.assets ? await loadAssets(paths['media-root'], probe.assetProfile || probe.standardLibrary) : {manifest: [], files: new Map()};
     if (probe.assets) evidence.assets = assets.manifest;
     server = createServer(async (request, response) => {
         if (request.url === '/asset-manifest.json') {
@@ -366,6 +404,27 @@ try {
     }
     await writeFile(join(outputDir, 'browser.json'), JSON.stringify(evidence.browser, null, 2) + '\n');
     if (!evidence.browser.pass) throw new Error('Browser execution failed; see ' + join(outputDir, 'browser.json'));
+    if (probeName === 'menu-png') {
+        const reference = await page.evaluate(async () => {
+            const response = await fetch('/asset?path=' + encodeURIComponent('/media/ui/avatarBackgroundWhite.png'));
+            if (!response.ok) throw new Error('Menu PNG reference fetch failed');
+            const image = await createImageBitmap(new Blob([await response.arrayBuffer()], {type: 'image/png'}),
+                {premultiplyAlpha: 'none', colorSpaceConversion: 'none'});
+            try {
+                const canvas = new OffscreenCanvas(image.width, image.height);
+                const context = canvas.getContext('2d');
+                context.drawImage(image, 0, 0);
+                let hash = 1;
+                for (const value of context.getImageData(0, 0, image.width, image.height).data)
+                    hash = (Math.imul(31, hash) + (value > 127 ? value - 256 : value)) | 0;
+                return {width: image.width, height: image.height, pixelHash: hash};
+            } finally { image.close(); }
+        });
+        const decoded = evidence.browser.actual.cases.find(item => item.id === 'original-png-decoder').outputs;
+        if (Object.entries(reference).some(([name, value]) => decoded[name]?.value !== value))
+            throw new Error('Original PNG decoder differs from independent browser decoding');
+        evidence.independentPngDecode = reference;
+    }
     if (probe.assets) {
         for (const entry of assets.manifest) {
             const item = evidence.browser.actual?.cases.find(item => item.id === entry.path);
@@ -383,7 +442,7 @@ try {
         if ((await page.request.post('http://127.0.0.1:' + server.address().port + '/asset-manifest.json')).status() !== 405) {
             throw new Error('Asset manifest accepted a write request');
         }
-        const after = await loadAssets(paths['media-root'], probe.standardLibrary);
+        const after = await loadAssets(paths['media-root'], probe.assetProfile || probe.standardLibrary);
         if (JSON.stringify(after.manifest) !== JSON.stringify(assets.manifest)) throw new Error('Installed asset changed during probe');
         evidence.assetBoundaryChecks = {exactJavaBytes: true, rejectedUnknownPaths: 3, rejectedWrite: true, installedInputsUnchanged: true};
     }
@@ -417,6 +476,11 @@ try {
     evidence.errors.push(String(error.stack || error));
     process.exitCode = 1;
 } finally {
+    if (evidence.reflectionManifest) {
+        try {
+            evidence.reflectionManifest.diagnostics = JSON.parse(await readFile(evidence.reflectionManifest.path + '.diagnostics.json', 'utf8'));
+        } catch (error) { evidence.reflectionManifest.diagnosticsReadError = String(error); }
+    }
     if (browser) await browser.close().catch(error => { evidence.errors.push(String(error)); evidence.pass = false; process.exitCode = 1; });
     if (server) await new Promise(accept => server.close(accept));
     try {

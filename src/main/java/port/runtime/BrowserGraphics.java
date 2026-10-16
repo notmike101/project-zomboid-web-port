@@ -7,6 +7,10 @@ import org.teavm.jso.webgl.WebGL2RenderingContext;
 import org.teavm.jso.webgl.WebGLShader;
 import org.teavm.jso.webgl.WebGLProgram;
 import org.teavm.jso.webgl.WebGLUniformLocation;
+import org.teavm.jso.webgl.WebGLTexture;
+import org.teavm.jso.webgl.WebGLFramebuffer;
+import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.nio.FloatBuffer;
 import java.util.HashMap;
 import java.util.ArrayList;
@@ -18,6 +22,121 @@ public final class BrowserGraphics {
     private static final HashMap<Integer, WebGLShader> shaders = new HashMap<>();
     private static final HashMap<Integer, WebGLProgram> programs = new HashMap<>();
     private static final ArrayList<WebGLUniformLocation> uniforms = new ArrayList<>();
+    private static final HashMap<Integer, WebGLTexture> textures = new HashMap<>();
+    private static final HashMap<Integer, WebGLFramebuffer> framebuffers = new HashMap<>();
+
+    public static int glGenTextures() {
+        initialize();
+        WebGLTexture texture = context.createTexture();
+        if (texture == null) return 0;
+        int id = nextObject++;
+        textures.put(id, texture);
+        return id;
+    }
+
+    public static void glBindTexture(int target, int id) {
+        initialize();
+        context.bindTexture(target, texture(id));
+    }
+
+    public static void glDeleteTextures(int id) {
+        initialize();
+        WebGLTexture texture = textures.remove(id);
+        if (texture != null) context.deleteTexture(texture);
+    }
+
+    public static void glTexParameteri(int target, int parameter, int value) {
+        initialize();
+        context.texParameteri(target, parameter, value);
+    }
+
+    /** Bounded RGBA8 transfer. Absolute reads preserve the caller's buffer state. */
+    public static void glTexImage2D(int target, int level, int internalFormat, int width, int height,
+            int border, int format, int type, ByteBuffer pixels) {
+        initialize();
+        requireRgba(format, type);
+        if (internalFormat != 0x1908 && internalFormat != 0x8058)
+            throw new UnsupportedOperationException("Only RGBA/RGBA8 texture storage is supported");
+        int count = pixelCount(width, height);
+        Uint8Array data = null;
+        if (pixels != null) {
+            if (pixels.remaining() < count) throw new IllegalArgumentException("Insufficient texture pixel bytes");
+            data = new Uint8Array(count);
+            for (int i = 0; i < count; i++) data.set(i, (short) (pixels.get(pixels.position() + i) & 255));
+        }
+        context.texImage2D(target, level, internalFormat, width, height, border, format, type, data);
+    }
+
+    /** Copies actual WebGL framebuffer bytes without advancing position or limit. */
+    public static void glReadPixels(int x, int y, int width, int height, int format, int type, ByteBuffer pixels) {
+        initialize();
+        requireRgba(format, type);
+        int count = pixelCount(width, height);
+        if (pixels.isReadOnly()) throw new ReadOnlyBufferException();
+        if (pixels.remaining() < count) throw new IllegalArgumentException("Insufficient readback pixel bytes");
+        Uint8Array data = new Uint8Array(count);
+        // An unsuccessful GL read leaves destination contents untouched.
+        for (int i = 0; i < count; i++) data.set(i, (short) (pixels.get(pixels.position() + i) & 255));
+        context.readPixels(x, y, width, height, format, type, data);
+        for (int i = 0; i < count; i++) pixels.put(pixels.position() + i, (byte) data.get(i));
+    }
+
+    public static int glGenFramebuffers() {
+        initialize();
+        WebGLFramebuffer framebuffer = context.createFramebuffer();
+        if (framebuffer == null) return 0;
+        int id = nextObject++;
+        framebuffers.put(id, framebuffer);
+        return id;
+    }
+
+    public static void glBindFramebuffer(int target, int id) {
+        initialize();
+        context.bindFramebuffer(target, framebuffer(id));
+    }
+
+    public static void glDeleteFramebuffers(int id) {
+        initialize();
+        WebGLFramebuffer framebuffer = framebuffers.remove(id);
+        if (framebuffer != null) context.deleteFramebuffer(framebuffer);
+    }
+
+    public static int glCheckFramebufferStatus(int target) {
+        initialize();
+        return context.checkFramebufferStatus(target);
+    }
+
+    public static void glFramebufferTexture2D(int target, int attachment, int textureTarget, int id, int level) {
+        initialize();
+        context.framebufferTexture2D(target, attachment, textureTarget, texture(id), level);
+    }
+
+    private static WebGLTexture texture(int id) {
+        if (id == 0) return null;
+        WebGLTexture value = textures.get(id);
+        if (value == null) throw new IllegalArgumentException("Unknown texture handle: " + id);
+        return value;
+    }
+
+    private static WebGLFramebuffer framebuffer(int id) {
+        if (id == 0) return null;
+        WebGLFramebuffer value = framebuffers.get(id);
+        if (value == null) throw new IllegalArgumentException("Unknown framebuffer handle: " + id);
+        return value;
+    }
+
+    private static void requireRgba(int format, int type) {
+        if (format != 0x1908 || type != 0x1401)
+            throw new UnsupportedOperationException("Only RGBA UNSIGNED_BYTE pixel transfers are supported");
+    }
+
+    private static int pixelCount(int width, int height) {
+        // Negative sizes are forwarded to WebGL to produce its real INVALID_VALUE.
+        if (width < 0 || height < 0) return 0;
+        long pixels = (long) width * height;
+        if (pixels > Integer.MAX_VALUE / 4) throw new IllegalArgumentException("Pixel transfer is too large");
+        return (int) pixels * 4;
+    }
 
     public static void initialize() {
         if (context == null) context = createContext();

@@ -6,6 +6,12 @@ import zombie.erosion.season.ErosionSeason;
 /** Browser-only original season lifecycle. Never run this entry point on a desktop JVM. */
 public final class SeasonRuntimeProbe {
     public static void main(String[] args) {
+        StringBuilder json = new StringBuilder("{\"rule\":\"exact-raw-bits\",\"category\":\"browser-core\",\"cases\":[");
+        appendCases(json);
+        System.out.println(json.append("],\"pass\":true}"));
+    }
+
+    static void appendCases(StringBuilder json) {
         TimeZone.setDefault(TimeZone.getTimeZone("GMT"));
         // ErosionConfig.Season constructor defaults, passed in ErosionMain.init's original order.
         ErosionSeason season = new ErosionSeason();
@@ -15,7 +21,6 @@ public final class SeasonRuntimeProbe {
         if (season.getLat() != 38 || season.getTempMax() != 25 || season.getTempMin() != 0
                 || season.getSeedA() != 64 || season.getSeedB() != 128 || season.getSeedC() != 255)
             throw new AssertionError("Original season configuration was not retained");
-        StringBuilder json = new StringBuilder("{\"rule\":\"exact-raw-bits\",\"category\":\"browser-core\",\"cases\":[");
         float summerDaylight = 0;
         int summerSeason = -1;
         for (int index = 0; index < 2; index++) {
@@ -51,7 +56,6 @@ public final class SeasonRuntimeProbe {
                     | (season.isSunnyDay() ? 4 : 0));
             json.append("}}");
         }
-        System.out.println(json.append("],\"pass\":true}"));
     }
     private static void output(StringBuilder json, String name, float value) {
         if (!Float.isFinite(value)) throw new AssertionError("Non-finite original season output: " + name);

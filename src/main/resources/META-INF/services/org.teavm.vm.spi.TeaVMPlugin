@@ -14,3 +14,5 @@ port.runtime.BrowserKeyboardPlugin
 port.runtime.ClassNamePlugin
 port.runtime.GenericMetadataPlugin
 port.runtime.ThreadGroupPlugin
+port.runtime.ManifestReflectionMetadata
+port.runtime.InflaterPlugin

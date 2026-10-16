@@ -360,3 +360,11 @@ Twenty-six standard runtime probes currently pass 402 cases and 868 exact JVM/br
 The LuaManager.init compile-only entry now compiles after the thread-group and runtime-management boundaries. It has not executed, and its current retention does not supply the full exposure set. A parse-only manifest records all 1,002 registration sites and 999 unique seeds, with metadata for 1,145 classes. Full exposure still requires larger faithful retention and initialization qualification; empty metadata is not a valid success.
 
 The thread-group probe passes four cases/eight exact JVM/browser outputs: real parent/name relationships, creation-time group assignment, child inheritance and termination cleanup. The runtime-management browser probe reports the actual empty Wasm runtime JVM-argument list and its immutability, without exposing compiler arguments or claiming general JMX support. FMOD recording entry points currently fail with explicit native-capability errors; the browser proof verifies both failures, not audio functionality.
+
+## Manifest retention and actual sandbox scripts
+
+The independent `reflection-manifest` browser qualification passes three cases/six outputs with the older GameVersion supplier disabled. Its two-class manifest retains 22 methods and four fields, with no missing standard-library APIs. Two compiler visibility differences are recorded; no helper-only methods are added to the Lua API.
+
+The broad compile-only profile validates 1,145 requested classes, with no missing original members, and records 257 unavailable standard-library public API entries. The first precise compile exhausted its 8 GB heap before producing a full missing-reference frontier. A separate conservative-analysis diagnostic keeps this failure distinct; no full LuaManager initialization has executed.
+
+`season-bootstrap` passes five cases/26 outputs. It uses original ZomboidFileSystem, original Lua runtime components, unchanged defines.lua and Apocalypse.lua, original SandboxOptions and original ErosionSeason. The adapter establishes only the audited environment/thread prerequisites for these data scripts; full exposeAll is separate. It verifies representative actual preset values, loaded-script records, returned Lua tables, original seasonal changes and mounted file bytes. No world, player or native game save is involved.

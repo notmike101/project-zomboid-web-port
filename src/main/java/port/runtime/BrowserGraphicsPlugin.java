@@ -60,7 +60,28 @@ public final class BrowserGraphicsPlugin implements TeaVMPlugin {
                     if (descriptor.getResultType() == ValueType.VOID) body.exit();
                     else result.returnValue();
                 }
+            } else if (cls.getName().equals("org.lwjgl.opengl.GL30C")) {
+                for (MethodDescriptor descriptor : new MethodDescriptor[]{
+                    new MethodDescriptor("glGenFramebuffers", ValueType.INTEGER),
+                    new MethodDescriptor("glBindFramebuffer", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glDeleteFramebuffers", ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glCheckFramebufferStatus", ValueType.INTEGER, ValueType.INTEGER),
+                    new MethodDescriptor("glFramebufferTexture2D", ValueType.INTEGER, ValueType.INTEGER,
+                            ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID)
+                }) redirect(required(cls.getMethod(descriptor), descriptor.toString()), context.getHierarchy());
             } else if (cls.getName().equals("org.lwjgl.opengl.GL11C")) {
+                for (MethodDescriptor descriptor : new MethodDescriptor[]{
+                    new MethodDescriptor("glGenTextures", ValueType.INTEGER),
+                    new MethodDescriptor("glBindTexture", ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glDeleteTextures", ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glTexParameteri", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID),
+                    new MethodDescriptor("glTexImage2D", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER,
+                            ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER,
+                            ValueType.object("java.nio.ByteBuffer"), ValueType.VOID),
+                    new MethodDescriptor("glReadPixels", ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER,
+                            ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER,
+                            ValueType.object("java.nio.ByteBuffer"), ValueType.VOID)
+                }) redirect(required(cls.getMethod(descriptor), descriptor.toString()), context.getHierarchy());
                 for (String name : new String[]{"glGetError", "glEnable", "glDisable", "glClear", "glClearColor", "glDrawArrays"}) {
                     MethodDescriptor descriptor = switch (name) {
                         case "glGetError" -> new MethodDescriptor(name, ValueType.INTEGER);
@@ -85,6 +106,17 @@ public final class BrowserGraphicsPlugin implements TeaVMPlugin {
                 }
             }
         });
+    }
+
+    private static void redirect(MethodHolder method, org.teavm.model.ClassHierarchy hierarchy) {
+        MethodDescriptor descriptor = method.getDescriptor();
+        method.getModifiers().remove(ElementModifier.NATIVE);
+        ProgramEmitter body = ProgramEmitter.create(method, hierarchy);
+        ValueEmitter[] arguments = new ValueEmitter[descriptor.parameterCount()];
+        for (int i = 0; i < arguments.length; i++) arguments[i] = body.var(i + 1, descriptor.parameterType(i));
+        ValueEmitter result = body.invoke(new MethodReference(BrowserGraphics.class.getName(), descriptor), arguments);
+        if (descriptor.getResultType() == ValueType.VOID) body.exit();
+        else result.returnValue();
     }
 
     private static MethodHolder required(MethodHolder method, String name) {
