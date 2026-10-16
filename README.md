@@ -63,6 +63,15 @@ It returns nonzero for mismatches, initialization errors, browser errors, change
 Owned browser and server resources close before the command returns.
 Evidence and generated code remain ignored under `target/<probe>/`.
 
+After building `browser-save`, verify storage failures and input validation:
+
+```powershell
+node verify-host.mjs --browser $env:PZ_BROWSER
+```
+
+This runs the real OPFS bridge across reloads, then injects a result mismatch, corrupted reads, a truncated file, and a quota failure.
+It also checks malformed snapshots, invalid step indexes, and preservation of data after a rejected write.
+
 ## Current larger boundaries
 
 `season` and `core` are compile-only diagnostics. Their initialization closures are not qualified for execution.
