@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Original Color through browser graphics</title>
+<style>
+body{font:18px system-ui;max-width:700px;margin:3rem auto;padding:0 1rem;background:#172029;color:#edf3f7}
+canvas{width:256px;height:256px;border:1px solid #80909d;display:block;margin:1rem 0}
+label{display:block;margin:.75rem 0} input{width:220px;vertical-align:middle} pre{white-space:pre-wrap}
+</style>
+<h1>Original Color through WebGL2</h1>
+<p>The original game Color object clamps and scales these colors. Its unchanged bytecode drives real browser graphics.</p>
+<p id="status" role="status">RUNNING</p>
+<canvas id="graphics-canvas" width="96" height="96" aria-label="Original Color rendered through WebGL2"></canvas>
+<fieldset disabled id="controls"><legend>Change the original Color object</legend>
+<label>Red <input id="red" type="range" min="0" max="255" value="51"></label>
+<label>Green <input id="green" type="range" min="0" max="255" value="102"></label>
+<label>Blue <input id="blue" type="range" min="0" max="255" value="204"></label>
+<label>Brightness <input id="brightness" type="range" min="0" max="100" value="100"></label>
+</fieldset>
+<pre id="details"></pre>
+<script src="/wasm/classes.wasm-runtime.js"></script>
+<script>
+window.probeErrors = [];
+document.getElementById('graphics-canvas').addEventListener('webglcontextlost', () => {
+    window.probeErrors.push('WebGL context lost');
+    if (window.probeResult) window.probeResult.pass = false;
+    document.getElementById('status').textContent = 'FAIL: WebGL context lost';
+    document.getElementById('controls').disabled = true;
+});
+addEventListener('error', event => window.probeErrors.push(event.message));
+addEventListener('unhandledrejection', event => window.probeErrors.push(String(event.reason)));
+(async () => {
+    const status = document.getElementById('status');
+    const details = document.getElementById('details');
+    const lines = []; let pending = '';
+    try {
+        const module = await TeaVM.wasmGC.load('/wasm/probe.wasm', {installImports(imports) {
+            imports.teavmConsole = {
+                putcharStdout(c) { if (c === 10) { lines.push(pending); pending = ''; } else pending += String.fromCharCode(c); },
+                putcharStderr(c) { throw new Error('WASM stderr character: ' + c); }
+            };
+        }});
+        await module.exports.main([]);
+        if (lines.length !== 1 || pending) throw new Error('Expected one graphics result');
+        const result = JSON.parse(lines[0]);
+        if (!result.pass || result.cases.length !== 4 || result.invalidEnum !== 1280 || result.consumedError !== 0) throw new Error('Graphics assertions failed');
+        const webgl2 = document.getElementById('graphics-canvas').getContext('webgl2') instanceof WebGL2RenderingContext;
+        if (!webgl2) throw new Error('Expected actual WebGL2 context');
+        window.probeResult = {pass: result.pass, cases: result.cases.length, actual: result, comparisons: 34, matched: 34, webgl2, errors: window.probeErrors};
+        status.textContent = 'PASS: 16 exact color-state bits, 16 framebuffer channels, and real WebGL error state';
+        details.textContent = JSON.stringify(result, null, 2);
+        const controls = document.getElementById('controls'); controls.disabled = false;
+        controls.addEventListener('input', () => {
+            try {
+                const value = id => Number(document.getElementById(id).value);
+                const rendered = JSON.parse(module.exports.renderColor(value('red') / 255, value('green') / 255, value('blue') / 255, value('brightness') / 100));
+                details.textContent = JSON.stringify(rendered, null, 2);
+            } catch (error) { window.probeErrors.push(String(error)); status.textContent = 'FAIL'; details.textContent = String(error.stack || error); }
+        });
+    } catch (error) {
+        window.probeResult = {pass: false, stdout: lines, pending, errors: [...window.probeErrors, String(error.stack || error)]};
+        status.textContent = 'FAIL'; details.textContent = JSON.stringify(window.probeResult, null, 2);
+    }
+})();
+</script>
+</html>

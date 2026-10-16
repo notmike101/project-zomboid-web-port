@@ -33,7 +33,7 @@ Those need a compatible Java-library implementation, supported compiler integrat
 
 The compiler also retains exception and callback paths that a particular normal desktop execution might not take.
 An error in that graph is evidence about the build closure. It is not proof that the path runs every time.
-The current Core and seasonal entry points each report 160 missing references across the same 31 declarations.
+The initial Core and seasonal diagnostics each reported 160 missing references across 31 declarations. Standard-library extensions have since reduced the Core diagnostic to 133 references across 24 declarations; the freshly rerun seasonal diagnostic reports the same frontier.
 That count includes missing classes, which can conceal further method and native integration gaps.
 
 ## Current playability gates
@@ -79,3 +79,21 @@ That does not turn existing desktop DLLs into browser modules. Each native depen
 This work lives on the orphan branch `work/original-bytecode-browser-port`.
 Push only that exact branch. Do not update other branches or open pull requests.
 Keep original game input, generated modules, machine-specific handoffs, and raw inspection logs outside tracked files.
+
+## Supported runtime adaptation
+
+The first six standard-library probes now pass in both Java 25 and Chromium.
+Reader transfer, path conveniences, linkage errors, legacy String construction, a cooperative FIFO queue, and file-stream construction/lifecycle have real implementations.
+They retain validation and error behavior. They add no gameplay replacements.
+
+Core compilation still fails. A functional regex replacement overload exposed by the expanded graph needs mutation detection; a helper omitting that check is insufficient.
+LWJGL's `GL` initializer unconditionally loads the desktop OpenGL library before its explicit-init option can take effect.
+Its retained callers also reach native texture, matrix-uniform, image-decoding, memory, and ImGui operations.
+The next connected integration is an explicitly bounded WebGL backend for third-party graphics APIs, with real framebuffer readback and browser input.
+That integration must stay separate from claims of a running original world or player simulation.
+
+
+The first bounded WebGL backend now runs and responds to browser input. It verifies original Color values and actual framebuffer/error state.
+The larger opt-in Core diagnostic remains blocked (131 references, 24 declarations), so graphics interaction is not a playable milestone.
+The next native boundary is managed/direct buffer allocation, typed uniform uploads, image decoding, and other retained graphics calls.
+TeaVM WasmGC has actual linear-memory direct buffers; their ownership and release behavior must be preserved before replacing native allocation APIs.

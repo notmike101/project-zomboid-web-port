@@ -30,6 +30,21 @@ const probes = {
     'browser-save': {mainClass: 'probe.BrowserSaveProbe', cases: 8, comparisons: 112,
         classes: ['zombie.iso.weather.ClimateManager$AirFront'],
         symbols: ['ClimateManager$AirFront::addDaySample', 'ClimateManager$AirFront::save', 'ClimateManager$AirFront::load']},
+    reader: {mainClass: 'probe.ReaderProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16,
+        classes: [], symbols: []},
+    paths: {mainClass: 'probe.PathProbe', category: 'runtime-compatibility', cases: 19, comparisons: 38,
+        classes: [], symbols: []},
+    linkage: {mainClass: 'probe.LinkageProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16,
+        classes: [], symbols: []},
+    'legacy-string': {mainClass: 'probe.LegacyStringProbe', category: 'runtime-compatibility', cases: 16, comparisons: 32,
+        classes: [], symbols: []},
+    queue: {mainClass: 'probe.QueueProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16,
+        classes: [], symbols: []},
+    'file-stream': {mainClass: 'probe.FileStreamProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16,
+        classes: [], symbols: []},
+    graphics: {mainClass: 'probe.GraphicsProbe', category: 'browser-graphics', browserOnly: true, webgl: true,
+        cases: 4, comparisons: 34, symbols: ['Color::scale']},
+    'core-webgl': {mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, webgl: true, symbols: ['Core::<clinit>']},
     season: {mainClass: 'probe.SeasonBoundaryProbe', compileOnly: true, symbols: ['ErosionSeason::<init>']},
     core: {mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, symbols: ['Core::<clinit>']}
 };
@@ -37,13 +52,13 @@ if (!Object.hasOwn(probes, probeName)) throw new Error('Unknown probe: ' + probe
 const probe = probes[probeName];
 if (probe.compileOnly && !values['compile-only']) throw new Error('This boundary is not qualified for execution. Use --compile-only.');
 const outputDir = join('target', probeName);
-const prerequisiteKeys = values['compile-only'] ? ['game-jar', 'jdk', 'maven-home'] : ['game-jar', 'java', 'jdk', 'maven-home', 'browser'];
+const prerequisiteKeys = ['game-jar', 'jdk', 'maven-home', ...(!values['compile-only'] ? [...(!probe.browserOnly ? ['java'] : []), 'browser'] : [])];
 for (const key of prerequisiteKeys) {
     if (!values[key]) throw new Error('Required explicit prerequisite: --' + key);
 }
 const paths = Object.fromEntries(Object.entries(values).filter(([key]) => !['probe', 'compile-only'].includes(key)).map(([key, value]) => [key, resolve(value)]));
 const java = join(paths.jdk, 'bin', 'java.exe');
-const evidence = {schema: 1, pass: false, probe: probeName, compiler: 'TeaVM 0.16.0', backend: 'WEBASSEMBLY_GC',
+const evidence = {schema: 1, pass: false, probe: probeName, category: probe.category || 'original-code', compiler: 'TeaVM 0.16.0', backend: 'WEBASSEMBLY_GC',
     rule: 'exact-f32-raw-bits', measurement: 'performance.now before loader until loader resolves; includes fetch, compilation, instantiation and initialization; excludes loader JS and baseline fetch',
     prerequisites: paths, errors: []};
 let browser;
@@ -103,11 +118,11 @@ try {
     await mkdir(output, {recursive: true});
     evidence.jarSha256Before = await sha256(paths['game-jar']);
     evidence.executionRequested = !values['compile-only'];
-    if (evidence.executionRequested) evidence.jvmVersion = (await run('jvm-version', paths.java, ['-version'])).trim();
+    if (evidence.executionRequested && !probe.browserOnly) evidence.jvmVersion = (await run('jvm-version', paths.java, ['-version'])).trim();
     evidence.jdkVersion = (await run('jdk-version', java, ['-version'])).trim();
     const boot = (await readdir(join(paths['maven-home'], 'boot'))).filter(name => /^plexus-classworlds-.*\.jar$/.test(name));
     if (boot.length !== 1) throw new Error('Expected one Maven classworlds boot JAR');
-    const mavenArgs = ['-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
+    const mavenArgs = ['-Dport.webgl=' + !!probe.webgl, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
         '-Dclassworlds.conf=' + join(paths['maven-home'], 'bin', 'm2.conf'),
         '-cp', join(paths['maven-home'], 'boot', boot[0]), 'org.codehaus.plexus.classworlds.launcher.Launcher',
         '-Dprobe.mainClass=' + probe.mainClass, '-Dprobe.output=' + output];
@@ -127,6 +142,7 @@ try {
     evidence.sourceMapSources = JSON.parse(await readFile(join(outputDir, 'wasm/probe.wasm.map'), 'utf8')).sources;
     evidence.compilationSucceeded = true;
     if (evidence.executionRequested) {
+    if (!probe.browserOnly) {
     const baselineText = await run('baseline', paths.java, ['-Xlog:class+load=info:file=' + join(outputDir, 'baseline-classload.log').replaceAll('\\', '/'),
         '-cp', [join(outputDir, 'classes'), paths['game-jar']].join(delimiter), probe.mainClass]);
     const baseline = JSON.parse(baselineText.trim());
@@ -140,8 +156,13 @@ try {
     }
     evidence.rule = baseline.rule;
     await writeFile(join(outputDir, 'baseline.json'), JSON.stringify(baseline, null, 2) + '\n');
+    } else {
+        evidence.rule = 'framebuffer-readback-and-WebGL-errors';
+        evidence.jvmBaselineExecuted = false;
+        evidence.measurement = 'Browser-only framebuffer and error-state assertions, followed by real input controls; no JVM graphics baseline or timing benchmark';
+    }
     const routes = new Map([
-        ['/', ['src/main/webapp/index.html', 'text/html; charset=utf-8']],
+        ['/', [probe.browserOnly ? 'src/main/webapp/graphics.html' : 'src/main/webapp/index.html', 'text/html; charset=utf-8']],
         ['/save-host.js', ['src/main/webapp/save-host.js', 'text/javascript']],
         ['/baseline.json', [join(outputDir, 'baseline.json'), 'application/json']],
         ['/wasm/probe.wasm', [join(outputDir, 'wasm/probe.wasm'), 'application/wasm']],
@@ -169,10 +190,24 @@ try {
     page.on('requestfailed', request => browserErrors.push(request.url() + ': ' + request.failure()?.errorText));
     await page.goto('http://127.0.0.1:' + server.address().port + '/', {waitUntil: 'load', timeout: 30000});
     await page.waitForFunction(() => window.probeResult !== undefined, null, {timeout: 30000});
+    if (probe.browserOnly && await page.evaluate(() => window.probeResult.pass)) {
+        await page.locator('#red').fill('127');
+        await page.locator('#green').fill('64');
+        await page.locator('#blue').fill('255');
+        await page.locator('#brightness').fill('75');
+        const rendered = JSON.parse(await page.locator('#details').innerText());
+        if (JSON.stringify(rendered.pixels) !== JSON.stringify([95, 48, 191, 191]) || rendered.error !== 0) {
+            throw new Error('Browser input did not produce the expected original Color framebuffer');
+        }
+        evidence.interactiveFramebuffer = rendered;
+    }
     evidence.browser = await page.evaluate(() => window.probeResult);
     evidence.visibleStatus = await page.locator('#status').innerText();
     evidence.browserErrors = browserErrors;
     evidence.browserPageLoads = pageLoads;
+    if (probe.browserOnly && (!evidence.browser.webgl2 || evidence.browser.errors.length || !evidence.interactiveFramebuffer)) {
+        throw new Error('Expected real WebGL2 and verified browser input');
+    }
     if (probeName === 'colors' && !evidence.browser.directExport) throw new Error('Expected direct JavaScript color export execution');
     if (probeName === 'browser-save' && (pageLoads !== 8 || evidence.browser.hostStorage?.pageLoads !== 8 || evidence.browser.hostStorage?.writes !== 8 || evidence.browser.hostStorage?.readbacks !== 8)) {
         throw new Error('Expected eight original-state OPFS cycles across fresh page loads');

@@ -134,7 +134,7 @@ The first missing class in the `core` compiler output is `java.util.concurrent.C
 Other missing symbols include `java.nio.channels.FileChannel`, class-loader resource APIs, and method handles.
 The `season` output also identifies `System.exit`, `File.toPath`, newer `Path.resolve` signatures, and filesystem watch types.
 Exact diagnostics remain private in `target/core/compile-wasm.log` and `target/season/compile-wasm.log`.
-Each entry reports 160 missing references covering the same 31 distinct declarations.
+Before the runtime extension, both entries reported 160 missing references covering the same 31 declarations. The current Core and seasonal diagnostics are recorded below.
 Missing classes can hide additional method and native implementation gaps, so this is not a complete porting work estimate.
 
 Static refinement: Translator initializes its final text maps during class initialization.
@@ -238,3 +238,48 @@ Stop each branch when it requires original-byte changes, gameplay stubs, a large
 The evidence supports original calculations, connected stateful objects, direct JavaScript calls, and real browser record storage.
 The amount of reusable gameplay remains unknown until larger connected closures pass.
 See [PORTING.md](PORTING.md) for the current runtime strategy and remaining playability gates.
+
+## Standard-library runtime extension
+
+The supported TeaVM plugin adds missing standard Java methods without changing game classes.
+The class-library substitution mechanism supplies missing error and queue types.
+Six independent JVM/Chromium probes currently pass 67 cases and 134 exact output checks:
+
+| Probe | Cases | Checks | Exercised contract |
+|---|---:|---:|---|
+| `reader` | 8 | 16 | Character transfer, null precedence, buffer boundary, I/O propagation, stream ownership |
+| `paths` | 19 | 38 | File-to-path conversion, varargs resolution, lexical normalization, empty/root joins, null arguments |
+| `linkage` | 8 | 16 | Initializer/linkage error constructors and cause initialization |
+| `legacy-string` | 16 | 32 | Deprecated byte/high-byte constructor, UTF-16 mapping, overflow-safe range validation |
+| `queue` | 8 | 16 | FIFO, null rejection, collection operations, weak iteration, exact-node removal, spliterator contracts |
+| `file-stream` | 8 | 16 | Real virtual-file creation/truncation, default charset, healthy/repeated/recursive close, nested errors, invalid targets |
+
+These are runtime compatibility checks, not additional game behavior or playability evidence.
+The path tests normalize platform separators before comparing logical path text. They do not claim Windows drive semantics in the browser or alternate-provider compatibility.
+The queue runs synchronously within TeaVM's cooperative single-agent runtime; it does not support shared objects across workers.
+Serialization and automatic VM generation of the new error types remain unverified.
+
+The browser tests exposed existing TeaVM defects in relative path normalization and null cause reassignment.
+The extension corrects those exercised contracts instead of removing the failing cases. It also repairs TeaVM PrintStream lifecycle handling: healthy streams now close, and inspecting a closed healthy stream no longer creates an error. Browser Java file writes in this probe use the isolated in-memory virtual filesystem, not native disk or durable OPFS.
+The latest Core and seasonal compile-only runs each report 133 missing references across 24 declarations, including a newly exposed functional regex replacement overload.
+This is a build frontier, not a completion estimate. Native memory, rendering, image decoding, and runtime services remain unresolved.
+
+
+## Real graphics host integration
+
+The opt-in `graphics` probe passes four cases and 34 browser assertions:
+16 raw float clear-state checks against original Color fields, 16 framebuffer byte checks at unambiguous values, and two real WebGL error-state checks.
+The browser runner then changes RGB and brightness sliders and verifies the resulting pixel `[95,48,191,191]`.
+The rendered values come from original Color construction/clamping/scaling through the original GL11 wrappers.
+A supported TeaVM plugin connects selected third-party GL/GL11C entry points to an actual WebGL2 context.
+The plugin activates only when the compiler JVM receives `port.webgl=true`.
+
+This probe has no desktop JVM graphics baseline and contributes no additional original-game comparison cases.
+GPU conversion to eight-bit normalized channels has different midpoint behavior from Java Math.round on this browser.
+Fixed pixel cases avoid ambiguous midpoints; arbitrary interactive values enforce a one-byte quantization bound while checking the exact original float clear state.
+This distinction does not change any original-game JVM raw-bit comparison rule.
+Context loss marks the interaction failed and disables the controls.
+
+The `core-webgl` diagnostic still fails, with 131 missing references across the same 24 declarations.
+Fixing the first graphics-loader path does not eliminate other image, memory, UI, concurrency, and native dependencies.
+No original world, player, collision, animation, or gameplay loop is running.
