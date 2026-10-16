@@ -214,16 +214,46 @@ public final class BrowserGeometry {
         public IsoChunk getChunk() { return chunk; }
         public IsoGridSquare getSpawnSquare() { return spawnSquare; }
 
+        private static void awaitStreamerExit() {
+            try {
+                var field = WorldStreamer.class.getDeclaredField("worldStreamer");
+                field.setAccessible(true);
+                Thread worker = (Thread) field.get(WorldStreamer.instance);
+                if (worker == null) throw new IllegalStateException("Original streamer thread missing");
+                // Same public stop request as original stop(). Yield before its non-yielding spin,
+                // allowing the real browser-JVM worker to exit without starving its scheduler.
+                WorldStreamer.instance.finished = true;
+                worker.join(10000);
+                if (worker.isAlive()) throw new IllegalStateException("Original streamer did not exit");
+                stage("actual-streamer-exited");
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted waiting for original streamer", interrupted);
+            } catch (ReflectiveOperationException failure) {
+                throw new IllegalStateException("Cannot inspect original streamer thread", failure);
+            }
+        }
+
         @Override
         public void close() {
             if (closed) return;
-            closed = true;
             stage("close-streamer-before");
-            if (streamer) WorldStreamer.instance.stop();
+            if (streamer) {
+                awaitStreamerExit();
+                WorldStreamer.instance.stop();
+                streamer = false;
+            }
             stage("close-pathfinding-before");
-            if (pathfinding) PolygonalMap2.instance.stop();
+            if (pathfinding) {
+                PolygonalMap2.instance.stop();
+                pathfinding = false;
+            }
             stage("close-physics-before");
-            if (physics) WorldSimulation.instance.destroy();
+            if (physics) {
+                WorldSimulation.instance.destroy();
+                physics = false;
+            }
+            closed = true;
             stage("closed");
         }
     }
