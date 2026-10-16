@@ -128,6 +128,9 @@ public final class BrowserInteractivePlay {
                     String material = "/files/work/media/textures/Body/"
                             + (player.isFemale() ? "FemaleBody01.png" : "MaleBody01.png");
                     if (draw) {
+                        stage = "original-render-occlusion-init";
+                        progress(stage);
+                        zombie.iso.fboRenderChunk.FBORenderOcclusion.getInstance().init();
                         stage = "original-floor-renderer-init";
                         progress(stage);
                         zombie.core.SceneShaderStore.initGlobalShader();

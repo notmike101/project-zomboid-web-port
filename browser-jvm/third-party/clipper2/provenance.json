@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/micycle1/Clipper2-java",
+  "tag": "2.0.1b",
+  "commit": "33f876605afc9021e11411cf1bbc17a4fccdee99",
+  "artifact": "https://github.com/micycle1/Clipper2-java/releases/download/2.0.1b/clipper2-2.0.1b.jar",
+  "bytes": 120284,
+  "sha256": "f143c550014a15a45884b4506a5ed984c7467bd080880aa9cb80bb9aaabdf2ff",
+  "license": "BSL-1.0"
+}

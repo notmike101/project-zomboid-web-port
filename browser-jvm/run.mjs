@@ -59,6 +59,7 @@ const animationInputs = [
 const classes = path.join(output, 'classes');
 const tools = path.join(output, 'tools');
 const gameJar = options['game-jar'];
+const clipperJar = path.join(repository, '.tools', 'clipper2-2.0.1b.jar');
 const png = path.join(options['media-root'], 'ui', 'avatarBackgroundWhite.png');
 /**
  * Performs the executable operation for the owned browser runtime.
@@ -224,7 +225,7 @@ function command(binary, args) {
 }
 
 try {
-    await boundedReadOnly([gameJar, png, options.browser, executable('javac'), executable('java')], async (file) => {
+    await boundedReadOnly([gameJar, png, options.browser, executable('javac'), executable('java'), ...(profile === 'play' ? [clipperJar] : [])], async (file) => {
         if (!(await stat(file)).isFile()) {
             throw new Error(`Expected file: ${file}`);
         }
@@ -232,6 +233,16 @@ try {
 
     evidence.originalJarSha256Before = await hash(gameJar);
     evidence.pngSha256Before = await hash(png);
+
+    if (profile === 'play') {
+        const clipperSha256 = await hash(clipperJar);
+
+        if (clipperSha256 !== 'f143c550014a15a45884b4506a5ed984c7467bd080880aa9cb80bb9aaabdf2ff') {
+            throw new Error('Clipper2 dependency checksum mismatch; see README.md for the pinned release.');
+        }
+
+        assetHashes.push({ name: 'clipper2-2.0.1b.jar', file: clipperJar, sha256Before: clipperSha256 });
+    }
 
     if (runtimeProfile) {
         await boundedReadOnly(['stdlib.lua', 'media/lua/shared/defines.lua', 'media/lua/shared/Sandbox/Apocalypse.lua'], async (name) => {
@@ -375,7 +386,7 @@ try {
         command(executable('java'), ['-cp', tools, 'PrepareGeometryAssets', path.dirname(gameJar), geometry]);
         command(executable('java'), ['-cp', tools, 'PrepareContentAssets', path.dirname(gameJar), content]);
         command(executable('java'), ['-cp', tools, 'PrepareTilePack', path.join(options['media-root'], 'texturepacks/Tiles1x.pack'), path.join(options['media-root'], 'texturepacks/Tiles1x.floor.pack'), path.join(geometry, 'sprite-names.txt'), tiles]);
-        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', playClasses, ...['BrowserInteractivePlay.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserPlaySession.java', 'host/port/host/BrowserGeometry.java', 'host/port/host/BrowserTileTextures.java', 'host/port/host/CharacterRenderer.java', 'host/port/host/FloorMapRenderer.java', 'host/org/lwjgl/stb/STBImage.java'].map((name) => path.join(source, name))]);
+        command(executable('javac'), ['--release', '17', '-cp', [gameJar, clipperJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', playClasses, ...['BrowserInteractivePlay.java', 'host/port/host/ClipperSupport.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserPlaySession.java', 'host/port/host/BrowserGeometry.java', 'host/port/host/BrowserTileTextures.java', 'host/port/host/CharacterRenderer.java', 'host/port/host/FloorMapRenderer.java', 'host/org/lwjgl/stb/STBImage.java'].map((name) => path.join(source, name))]);
         command(executable('jar'), ['--create', '--file', path.join(output, 'play-entry.jar'), '-C', playClasses, '.']);
         const geometryRows = (await readFile(path.join(geometry, 'geometry-assets.tsv'), 'utf8')).trim().split(/\r?\n/u);
 
@@ -504,6 +515,7 @@ try {
 
     if (profile === 'play') {
         routes.set('/browser-physics.js', { file: path.join(source, 'browser-physics.js'), type: 'text/javascript' });
+        routes.set('/clipper2.jar', { file: clipperJar, type: 'application/java-archive' });
         routes.set('/ragdoll-definitions.js', { file: path.join(source, 'ragdoll-definitions.js'), type: 'text/javascript' });
         routes.set('/play-entry.jar', { file: path.join(output, 'play-entry.jar'), type: 'application/java-archive' });
         routes.set('/geometry-assets.jar', { file: path.join(output, 'geometry-data/geometry-assets.jar'), type: 'application/java-archive' });

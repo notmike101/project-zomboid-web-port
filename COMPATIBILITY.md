@@ -12,6 +12,14 @@ All 47,416 byte-served media files and the original JAR retained their before/af
 
 The graphics host now implements actual `glStencilMask`, `glStencilFunc`, `glStencilOp`, `glColorMask`, `glClearDepth(double)` and `glScissor` calls, with stencil storage requested on context creation. Twenty WebGL2 checks verify packed depth/stencil FBOs, clipped stencil pixels, preserved masked bits, all three stencil outcomes, color write masks, depth-clear visibility/clamping and actual invalid-enum/size errors. A separate fresh Java 17 browser check invokes all six through the original adapted `GL11C` ABI and observes the resulting WebGL state. Shader and texture readback regressions also pass with stencil enabled. Desktop alpha testing and complete original cell rendering remain unqualified.
 
+## Original polygon and render-occlusion calculations
+
+The real Clipper2 Java 2.0.1b engine passes 46 original JNI reference cases in a Java 17 browser, including 37 resulting polygons. Comparisons preserve ring winding, coordinates, byte order, transport positions/limits, sentinels and native return values; only equivalent ring starting points and multipart ordering are canonicalized. The qualified adapter implements closed-path, zero-offset intersection with positive fill, reproducing the native float32 multiplication and 0.001-coordinate quantization. Other operations and offsets fail explicitly.
+
+Original `FBORenderOcclusion.init()` separately matches the installed native implementation across all 64 cache slots (63 initialized) and all 738 recorded integers. Its 487 polygon intersections run in approximately 365 milliseconds in one cold browser measurement; the repeated initializer preserves its existing cache. The original method bodies and occlusion algorithm remain intact. This qualifies its geometric lookup construction, not native lighting, cell render ordering or whole-game visibility. The pinned third-party JAR remains a local ignored dependency, verified by SHA-256 before the public play build.
+
+The fresh public source build now initializes that original lookup before drawing and passes 21 original gameplay frames, genuine held-key movement, four consecutive zero-input release frames, complete definition counts and cleanup. Its physics evidence records 487 Clipper clears, all 5,870 monitored hashes match, initialization errors are empty and no requests are denied. `fullGamePlayable` remains false.
+
 ## Current answer
 
 The connected CheerpJ browser-JVM route runs original world/player updates and a bounded nine-chunk walking scene, with complete vanilla script definitions and separately qualified original object rendering. The full survival game remains incomplete. The sections below retain the incremental evidence for both runtime routes; later sections record the connected browser milestones.

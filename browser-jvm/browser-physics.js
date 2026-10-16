@@ -59,6 +59,7 @@ export function createBrowserPhysics() {
     const collision = new Map();
     const populationChunks = new Set();
     const clippers = [];
+    const clipperHelpers = new WeakMap();
     const vehicles = new Map();
     const vehicleDefinitions = new Map();
     const dynamicObjects = new Map();
@@ -142,6 +143,24 @@ export function createBrowserPhysics() {
         }
 
         return findClipper(receiver, index + 1);
+    }
+
+    /**
+     * Resolves one Java helper per runtime; polygon buffers stay inside the JVM.
+     *
+     * @param {object} lib - Actual CheerpJ library supplied to the native callback.
+     * @returns {Promise<object>} Qualified Java Clipper2 adapter.
+     */
+    async function clipperSupport(lib) {
+        if (!lib || !['object', 'function'].includes(typeof lib)) {
+            throw new TypeError('Polygon operations require the browser JVM');
+        }
+
+        if (!clipperHelpers.has(lib)) {
+            clipperHelpers.set(lib, lib.port.host.ClipperSupport);
+        }
+
+        return await clipperHelpers.get(lib);
     }
 
     /**
@@ -674,7 +693,6 @@ export function createBrowserPhysics() {
             },
             /**
              * Allocates an actual empty polygon container owned by the Java Clipper instance.
-             * Polygon operations remain unavailable until implemented and qualified.
              *
              * @param {unknown} lib - Reserved CheerpJ library context.
              * @param {object} receiver - Original Clipper instance supplied by the JVM.
@@ -684,6 +702,10 @@ export function createBrowserPhysics() {
 
                 if (!receiver || await findClipper(receiver)) {
                     throw new Error('Invalid or duplicate Clipper allocation');
+                }
+
+                if (lib) {
+                    await (await clipperSupport(lib)).allocate(receiver);
                 }
 
                 clippers.push({ receiver, paths: [], polygons: [] });
@@ -703,9 +725,51 @@ export function createBrowserPhysics() {
                     throw new Error('Unknown Clipper container');
                 }
 
+                if (lib) {
+                    await (await clipperSupport(lib)).clear(receiver);
+                }
+
                 state.paths.length = 0;
                 state.polygons.length = 0;
                 clipperClears++;
+            },
+            /**
+             * Passes a closed path through the qualified fixed-endian Java buffer adapter.
+             *
+             * @param {object} lib - Actual browser JVM library.
+             * @param {object} receiver - Original owned Clipper instance.
+             * @param {number} count - Original point count.
+             * @param {object} buffer - Original direct ByteBuffer.
+             * @param {boolean} isClip - Whether this is a clipping path.
+             * @param {boolean} closed - Whether the original path is closed.
+             */
+            async Java_zombie_vehicles_Clipper_addPath(lib, receiver, count, buffer, isClip, closed) {
+                await (await clipperSupport(lib)).addPath(receiver, count, buffer, isClip, closed);
+            },
+            /**
+             * Executes the real Clipper2 engine for native-qualified operations.
+             *
+             * @param {object} lib - Actual browser JVM library.
+             * @param {object} receiver - Original owned Clipper instance.
+             * @param {number} operation - Original clipping operation enum.
+             * @param {number} offset - Original requested offset.
+             * @param {number} join - Original join enum.
+             * @returns {Promise<number>} Actual number of resulting polygons.
+             */
+            async Java_zombie_vehicles_Clipper_generatePolygons(lib, receiver, operation, offset, join) {
+                return await (await clipperSupport(lib)).generate(receiver, operation, offset, join);
+            },
+            /**
+             * Serializes a real polygon after atomic capacity validation in Java.
+             *
+             * @param {object} lib - Actual browser JVM library.
+             * @param {object} receiver - Original owned Clipper instance.
+             * @param {number} index - Original polygon index.
+             * @param {object} buffer - Original direct output ByteBuffer.
+             * @returns {Promise<number>} Native-qualified success code.
+             */
+            async Java_zombie_vehicles_Clipper_getPolygon(lib, receiver, index, buffer) {
+                return await (await clipperSupport(lib)).getPolygon(receiver, index, buffer);
             },
         },
     };
