@@ -1,0 +1,15 @@
+target/
+.tools/
+.m2/
+node_modules/
+.local/
+*.jar
+*.class
+*.wasm
+*.wasm-runtime.js
+*.wasm.map
+*.teavmdbg
+
+# Local handoff and historical report contain machine-specific prerequisite paths.
+HANDOFF.md
+RESULTS.md

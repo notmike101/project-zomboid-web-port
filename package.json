@@ -1,0 +1,7 @@
+{
+  "name": "zomboid-bytecode-probe",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22"},
+  "dependencies": {"playwright-core": "1.61.1"}
+}

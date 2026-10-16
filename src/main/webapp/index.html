@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Original bytecode: JVM / WasmGC comparison</title>
+<h1>Original bytecode comparison</h1>
+<p id="status" role="status">RUNNING</p>
+<pre id="details"></pre>
+<script src="/wasm/classes.wasm-runtime.js"></script>
+<script src="/save-host.js"></script>
+<script>
+window.probeErrors = [];
+addEventListener('error', event => window.probeErrors.push(event.message));
+addEventListener('unhandledrejection', event => window.probeErrors.push(String(event.reason)));
+(async () => {
+    const status = document.getElementById('status');
+    const details = document.getElementById('details');
+    const lines = [];
+    let pending = '';
+    try {
+        const response = await fetch('/baseline.json');
+        if (!response.ok) throw new Error('Baseline HTTP ' + response.status);
+        const baseline = await response.json();
+        const start = performance.now();
+        const module = await TeaVM.wasmGC.load('/wasm/probe.wasm', {
+            installImports(imports) {
+                imports.teavmConsole = {
+                    putcharStdout(c) {
+                        if (c === 10) { lines.push(pending); pending = ''; }
+                        else pending += String.fromCharCode(c);
+                    },
+                    putcharStderr(c) { throw new Error('WASM stderr character: ' + c); }
+                };
+            }
+        });
+        let initializationMs = performance.now() - start;
+        if (!(module.instance instanceof WebAssembly.Instance)) throw new Error('No WASM instance');
+        let actual;
+        let hostStorage;
+        let cumulativeExecutionMs;
+        const directExport = typeof module.exports.colorCase === 'function';
+        if (typeof module.exports.advanceSnapshot === 'function') {
+            const operationStart = performance.now();
+            const progress = JSON.parse(sessionStorage.getItem('snapshot-progress') || 'null') ||
+                {cases: [], initializationMs: 0, executionMs: 0};
+            const index = progress.cases.length;
+            const input = index ? await saveHost.read() : module.exports.initialSnapshot();
+            const step = JSON.parse(module.exports.advanceSnapshot(input, index));
+            await saveHost.write(step.snapshot);
+            if (await saveHost.read() !== step.snapshot) throw new Error('OPFS readback differs from original saved bytes');
+            progress.cases.push(step.case);
+            progress.initializationMs += initializationMs;
+            progress.executionMs += performance.now() - operationStart;
+            if (progress.cases.length < baseline.cases.length) {
+                sessionStorage.setItem('snapshot-progress', JSON.stringify(progress));
+                status.textContent = 'STORED: ' + progress.cases.length + '/' + baseline.cases.length;
+                location.reload();
+                return;
+            }
+            sessionStorage.removeItem('snapshot-progress');
+            actual = {rule: 'exact-raw-bits', cases: progress.cases};
+            hostStorage = {backend: 'OPFS', pageLoads: progress.cases.length, writes: progress.cases.length,
+                readbacks: progress.cases.length, recordBytes: 36};
+            initializationMs = progress.initializationMs;
+            cumulativeExecutionMs = progress.executionMs;
+        } else if (directExport) {
+            actual = {rule: 'exact-raw-bits', cases: baseline.cases.map((_, i) => JSON.parse(module.exports.colorCase(i)))};
+        } else {
+            await module.exports.main([]);
+            if (lines.length !== 1 || pending) throw new Error('Expected one complete JSON output line');
+            actual = JSON.parse(lines[0]);
+        }
+        const executionMs = cumulativeExecutionMs ?? performance.now() - start - initializationMs;
+        const mismatches = [];
+        let comparisons = 0;
+        if (!['exact-f32-raw-bits', 'exact-ieee754-raw-bits', 'exact-raw-bits'].includes(actual.rule) || baseline.rule !== actual.rule) throw new Error('Invalid comparison rule');
+        if (!baseline.cases.length || actual.cases.length !== baseline.cases.length) throw new Error('Case count differs');
+        for (let i = 0; i < baseline.cases.length; i++) {
+            const expected = baseline.cases[i];
+            const observed = actual.cases[i];
+            if (expected.id !== observed.id) throw new Error('Case order differs');
+            if (JSON.stringify(expected.inputs) !== JSON.stringify(observed.inputs)) throw new Error('Case inputs differ: ' + expected.id);
+            const keys = Object.keys(expected.outputs);
+            if (!keys.length || JSON.stringify(keys) !== JSON.stringify(Object.keys(observed.outputs))) throw new Error('Output keys differ: ' + expected.id);
+            for (const key of keys) {
+                comparisons++;
+                const expectedBits = expected.outputs[key].bits;
+                const actualBits = observed.outputs[key].bits;
+                if (!/^(?:[0-9a-f]{8}|[0-9a-f]{16})$/.test(actualBits) || expectedBits !== actualBits) {
+                    mismatches.push({id: expected.id, output: key, expectedBits, actualBits});
+                }
+            }
+        }
+        const pass = mismatches.length === 0 && window.probeErrors.length === 0;
+        window.probeResult = {pass, cases: actual.cases.length, comparisons, matched: comparisons - mismatches.length,
+            mismatches, initializationMs, executionMs, actual, errors: window.probeErrors,
+            wasmInstance: true, directExport, hostStorage, imports: WebAssembly.Module.imports(module.module),
+            exports: WebAssembly.Module.exports(module.module), userAgent: navigator.userAgent};
+        status.textContent = (pass ? 'PASS' : 'FAIL') + ': ' + (comparisons - mismatches.length) + '/' + comparisons + ' exact bit comparisons';
+        details.textContent = JSON.stringify(window.probeResult, null, 2);
+    } catch (error) {
+        window.probeErrors.push(String(error.stack || error));
+        window.probeResult = {pass: false, errors: window.probeErrors};
+        status.textContent = 'FAIL';
+        details.textContent = JSON.stringify(window.probeResult, null, 2);
+    }
+})();
+</script>
+</html>
