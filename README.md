@@ -1,168 +1,115 @@
-# Original-bytecode browser port investigation
+# Project Zomboid browser port
 
-An incremental Project Zomboid browser-port investigation using the installed game's original Java class files.
-TeaVM 0.16.0 compiles selected dependency closures to WebAssembly GC.
-The same original implementation runs on the bundled JVM and in actual Chromium for comparison.
+An in-development browser port built around the installed game's original Java code and data. The goal is whole-game compatibility. **The full game is not ported yet:** the current verified milestone is an original-code walking scene in one genuine loaded map chunk.
 
-This is a compatibility and host-integration workbench. It is not a playable game yet.
-The repository contains authored adapters, build configuration, browser host code, and comparison tooling.
-It contains no original game classes, assets, downloaded toolchains, or generated WASM.
+This repository contains authored platform adapters, preparation tools and verification code. It does not distribute the game's JAR, assets, native libraries, downloaded toolchains or generated runtime files. Supply your own local installation.
 
-## Verified components
+## How it works
 
-| Probe | Behavior |
+The connected route runs original Java bytecode in **CheerpJ 4.3's Java 17 browser JVM**. Original player/world updates, action states, animation blending and movement remain original game code. Browser adapters provide keyboard input, WebGL calls, local asset access and session ownership. The current camera and floor/body composition are authored presentation code.
+
+This is distinct from the repository's **TeaVM 0.16.0 Java-to-WASM experiments**, which compile selected original-code dependency closures ahead of time. The connected walking session is not a whole-game standalone WASM build. See [TEAVM.md](TEAVM.md) for those comparisons and their compiler boundaries.
+
+The installed game files remain untouched. Preparation creates private copies with documented class-version and narrowly qualified Java SDK adaptations. Loaded compatibility copies are not byte-for-byte identical to the installed classes. Manifests record the changes and source hashes; no gameplay algorithms are replaced with successful stubs.
+
+## Dependencies
+
+The connected browser route is currently qualified on **Windows x64**.
+
+| Dependency | Requirement |
 |---|---|
-| `angles` | Original angle wrapping and interpolation |
-| `weather` | Stateful weather-value transitions and 2D/3D/4D simplex noise |
-| `airfront` | Original climate-front state and in-memory save/load |
-| `erosion` | Seeded layer construction, sampling, reset, and reconstruction |
-| `colors` | Connected original climate-color interpolation, aliasing, copying, scaling, and serialization |
-| `browser-save` | Original climate state restored from browser OPFS across eight page/module loads |
-| `lazy-value` | Original field-handle memoization, null results, retry, identity, and reentrant witness |
+| Node.js | 22.13 or newer in the 22.x line, or 24 or newer; see the exact engine range in package.json |
+| npm packages | Install the committed lockfile with npm ci; includes playwright-core and the lint configuration |
+| Project Zomboid installation | Matching projectzomboid.jar, media directory and installation-root jassimp64.dll |
+| JDK | Full JDK 25 with java, javac and jar; preparation uses its Class-File API |
+| Browser | A Chromium executable with WebGL2 support; Playwright Core does not install a browser automatically |
+| Network | Access to https://cjrtnc.leaningtech.com/4.3/ for the CheerpJ runtime |
 
-The seven original-game probes compare 72 cases and 440 raw output bit patterns with the JVM.
-These counts are behavioral checks, not a percentage of game coverage.
-The browser-save probe adds real browser filesystem persistence without replacing gameplay calculations or the original record format.
+The local importer uses the matching installed Jassimp DLL to prepare genuine model/animation data. It does not launch the installed game or server.
 
-The runtime compatibility extension uses TeaVM's supported plugin interface and class-library substitutions.
-Runtime probes compare standard Java API behavior against Java 25, including paths, streams, queues, fused arithmetic, field handles, classpath resources and manifest metadata, futures, executors, locks, time conversions, SHA-1, regular expressions, and integer rectangles.
-These checks are separate from original-game coverage. Path operations use the browser's virtual path provider; they do not provide OPFS-backed Java files.
-The queue supports TeaVM's cooperative single-agent execution, without cross-worker object sharing.
-The `graphics-worker` entry runs the same original shader integration inside a dedicated worker with a transferred OffscreenCanvas. The separate `exit` entry verifies terminating an owned worker runtime, including a real Wasm trap and absence of subsequent Java execution.
-The browser-only `core-boot` entry executes the original Core initializer. `lua-runtime` runs the shipped Lua compiler/interpreter, including closures and coroutines. `asset-lua` executes two unchanged installed Lua files through a verified read-only media mount, and `filesystem-runtime` builds the original selected-file index over that mount. These are connected engine milestones; no player/world loop runs yet.
+Apache Maven 3.9.16, a WasmGC-capable browser and the installed bundled Java runtime are additionally needed for the separate [TeaVM/reference comparisons](TEAVM.md). Maven is not required by the connected browser-JVM command below.
 
-See [COMPATIBILITY.md](COMPATIBILITY.md) for measured results and [PORTING.md](PORTING.md) for the route toward a playable slice.
+## Run the walking session
 
-## Prerequisites
+Run these commands in PowerShell from the repository root. Replace the example paths with your actual installation, JDK and browser paths.
 
-- Windows and Node.js 22.13 or newer in the 22.x line, or Node.js 24 or newer.
-- An installed Project Zomboid JAR and its bundled Java 25 runtime.
-- A local JDK 25, Apache Maven 3.9.16, and a Chromium executable with WasmGC support.
-- Locked Node dependencies installed with `npm ci --ignore-scripts --no-audit --no-fund`.
+~~~powershell
+npm ci --ignore-scripts --no-audit --no-fund
 
-Set these environment variables to your own absolute paths:
+$env:PZ_GAME_JAR = 'C:/Games/steam/steamapps/common/ProjectZomboid/projectzomboid.jar'
+$env:PZ_MEDIA_ROOT = 'C:/Games/steam/steamapps/common/ProjectZomboid/media'
+$env:PZ_JDK = 'D:/Tools/jdk-25'
+$env:PZ_BROWSER = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
 
-| Variable | Path |
+$portArgs = @(
+    '--game-jar', $env:PZ_GAME_JAR,
+    '--media-root', $env:PZ_MEDIA_ROOT,
+    '--jdk', $env:PZ_JDK,
+    '--browser', $env:PZ_BROWSER
+)
+
+node browser-jvm/run.mjs --profile play --interactive true @portArgs
+~~~
+
+The command prepares local inputs, starts a loopback asset server and opens an owned browser window. Allow time for preparation and browser-JVM startup. **Click the scene and use WASD to walk. Escape or Stop ends the session.** Keep the terminal running while playing.
+
+The current scene contains one loaded 8-by-8 chunk and renders its genuine floors plus the original animated body. Neighboring-world streaming, original object presentation and interactions are active development areas.
+
+## Run the automated browser qualification
+
+Use the same $portArgs but omit interactive mode:
+
+~~~powershell
+node browser-jvm/run.mjs --profile play @portArgs
+~~~
+
+This bounded run sends actual browser keyboard events, observes original input, verifies displacement across ten held-input frames, then requires four consecutive original zero-input frames after release. It also checks genuine floor visibility and a separate body-pixel contribution, source-file hashes and owned cleanup. Failures return a nonzero exit status.
+
+The latest clean public run passed. Separate longer browser runs passed 94 frames of directional/diagonal movement and blur release, 95 idle frames, and a 130-frame approach that stopped at the loaded chunk boundary. Interior loaded-wall and door collision remain unqualified.
+
+Generated evidence stays local under target/browser-jvm/play/:
+
+- result.json: outcome, requests, source hashes, adaptation manifests and cleanup.
+- character-frame.png: actual browser canvas screenshot.
+- build.json and preparation manifests: compiler/importer provenance.
+
+walkingSliceQualified records the bounded automated result. fullGamePlayable remains false.
+
+## Other connected profiles
+
+Pass one of these values to --profile using the same prerequisite arguments:
+
+| Profile | Qualified scope |
 |---|---|
-| `PZ_GAME_JAR` | Installed `projectzomboid.jar` |
-| `PZ_JAVA` | Installed bundled `jre64/bin/java.exe` |
-| `PZ_JDK` | JDK directory containing `bin/java.exe` and `bin/javac.exe` |
-| `PZ_MAVEN_HOME` | Maven directory containing `boot/` and `bin/m2.conf` |
-| `PZ_BROWSER` | Chromium `chrome.exe` |
+| graphics | Installed PNG decoding and actual GPU readback |
+| lua | Original LuaManager initialization and Java exposure |
+| input | Real DOM keyboard mapping and focus-loss release |
+| sprite | Original sprite batching and indexed GPU rendering |
+| world | Original world/player construction and input interpretation |
+| character-shader | Original skinning shader and palette/FBO boundary |
+| animation | Original body/animation loading and skinned GPU drawing |
+| food | Original food definitions, inventory insertion and eating formulas |
+| play | Connected original world/player updates and walking scene |
 
-Run all verified components from the repository root:
+These are bounded qualifications, not independent claims that the complete game works. Details are in [browser-jvm/README.md](browser-jvm/README.md), [COMPATIBILITY.md](COMPATIBILITY.md) and [PORTING.md](PORTING.md).
 
-```powershell
-& {
-    $probeArgs = @(
-        '--game-jar', $env:PZ_GAME_JAR,
-        '--java', $env:PZ_JAVA,
-        '--jdk', $env:PZ_JDK,
-        '--maven-home', $env:PZ_MAVEN_HOME,
-        '--browser', $env:PZ_BROWSER
-    )
-    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream', 'deque', 'fma', 'field-handles', 'resources', 'future', 'executors', 'time-units', 'digest', 'locks', 'regex', 'rectangles', 'channels', 'libraries', 'watch', 'format-exception', 'package-name', 'module-token', 'anonymous-class', 'generics', 'thread-groups', 'inflater', 'output-channel', 'lazy-value', 'joml') {
-        node compare.mjs --probe $probe @probeArgs
-        if ($LASTEXITCODE -ne 0) { throw "Probe failed: $probe" }
-    }
-}
-```
+## Current limits
 
-Each command rebuilds its module, runs the isolated JVM baseline, serves loopback, launches its own browser, and compares original output bits.
-It returns nonzero for mismatches, initialization errors, browser errors, changed input hashes, or unexpected game-class loading.
-Owned browser and server resources close before the command returns.
-Evidence and generated code remain ignored under `target/<probe>/`.
+The complete survival game, zombie population simulation, full Bullet dynamics, clothing composition, audio, menus, native saves and broad streaming are not qualified. The bounded bootstrap still logs missing loot/container and vehicle-definition initialization errors. Unsupported host operations fail explicitly.
 
-After building `browser-save`, verify storage failures and input validation:
+The original region worker belongs to the dedicated browser-JVM context lifetime because its original reset busy-waits without yielding. Closing the owned browser releases that runtime; same-JVM engine reset/reuse is not supported. Installed native saves are never mounted.
 
-```powershell
-node verify-host.mjs --browser $env:PZ_BROWSER
-```
+Prepared assets and generated archives are private local outputs. Keep snapshots and manifests from the same preparation generation together, and do not rebuild a profile's output while another browser is serving that same directory.
 
-This runs the real OPFS bridge across reloads, then injects a result mismatch, corrupted reads, a truncated file, and a quota failure.
-It also checks malformed snapshots, invalid step indexes, and preservation of data after a rejected write.
+## Development
 
-## Current larger boundaries
+Work continues on **main**. Use conventional commits, verify logical increments and push them regularly. Follow [AGENTS.md](AGENTS.md) for contribution identity, source preservation and verification rules.
 
-`season` and `core` are compile-only diagnostics. Their initialization closures are not qualified for execution.
-They currently fail TeaVM compilation on missing library APIs and reachable native integration paths.
-They require `--compile-only`, which prevents the runner from starting a JVM baseline or browser for them.
+~~~powershell
+npm run lint
+~~~
 
-```powershell
-node compare.mjs --probe core --compile-only --game-jar $env:PZ_GAME_JAR --jdk $env:PZ_JDK --maven-home $env:PZ_MAVEN_HOME
-```
+Lint runs ESLint with **--max-warnings 0**, using the actual @notmike101/eslint-config-js and @notmike101/eslint-config-jsdoc configurations. Authored Node, browser and inline HTML scripts are included. Package provenance is recorded in [vendor/eslint-configs/README.md](vendor/eslint-configs/README.md).
 
-Use `--probe season` to diagnose the seasonal constructor instead.
-A compile-only result is never reported as a browser pass.
-
-JavaScript host services are part of the investigation. The current OPFS adapter is one working example.
-It does not yet implement Java filesystem APIs, full game saves, graphics, audio, physics, or networking.
-Those integrations need their own behavior and runtime checks.
-The `libraries` probe verifies honest failure for unavailable desktop native libraries. Mapping a library name to a `.wasm` filename does not load a library or port its native functionality.
-
-All work on this checkout belongs to the isolated orphan branch `work/original-bytecode-browser-port`.
-
-
-## Browser graphics integration
-
-The opt-in `graphics` probe runs original `Color` bytecode through real WebGL2 calls behind selected LWJGL APIs.
-It verifies four shader-rendered cases driven by original ShaderParameter objects, exact clear/uniform float bits, framebuffer readback, and consumed error state.
-The runner also changes real browser sliders and verifies their rendered output.
-This is an interactive graphics integration, not a playable Project Zomboid world.
-
-```powershell
-node compare.mjs --probe graphics --game-jar $env:PZ_GAME_JAR --jdk $env:PZ_JDK --maven-home $env:PZ_MAVEN_HOME --browser $env:PZ_BROWSER
-```
-
-This entry never starts a desktop JVM baseline. Original arithmetic already has separate JVM comparisons.
-The compiler activates the third-party graphics plugin only for this probe and `core-webgl`.
-`core-webgl --compile-only` diagnoses the larger engine with that backend enabled. The separate `core-boot` entry now executes its audited initializer in an owned browser worker.
-Unsupported graphics APIs retain their original implementations; they have not been supplied with successful stubs.
-
-The `memory` entry uses the same browser-only command with `--probe memory` to verify real direct allocations, raw Wasm addresses, and release ownership.
-`joml` separately compares the shipped NIO matrix provider with the JVM, without adding to game coverage.
-The `resources` host exposes only entries in the configured local archive through loopback HTTP. It never extracts or executes an archived class or DLL.
-All executor workers cooperate within one browser agent; they do not supply parallel Java threads.
-
-## Original engine and installed assets
-
-Use the browser-only invocation shown for `graphics`, substituting `core-boot`, `lua-runtime`, or `keyboard` as the probe name. The keyboard fixture tests real DOM press/release, simultaneous keys and canvas focus loss through the shipped Keyboard/KeyCodes path. It does not implement desktop window creation.
-
-The two asset entries additionally require the explicit installed media directory:
-
-```powershell
-node compare.mjs --probe asset-lua --game-jar $env:PZ_GAME_JAR --media-root $env:PZ_MEDIA_ROOT --jdk $env:PZ_JDK --maven-home $env:PZ_MAVEN_HOME --browser $env:PZ_BROWSER
-```
-
-Use `--probe filesystem-runtime` for the original selected-file index. The allowlist currently contains only `lua/shared/ISBaseObject.lua` and `lua/shared/Util/LuaTableUtil.lua`; the host does not serve the installation as a directory tree. Original bytes stay local and untracked. Both entries use a read-only mount while ordinary runtime files remain ephemeral.
-
-`season-runtime` remains a diagnostic without bootstrap. The `season-bootstrap` entry mounts unchanged `stdlib.lua`, `defines.lua` and the Apocalypse preset, initializes the original filesystem and a deliberately partial Lua environment, then runs original SandboxOptions and ErosionSeason. Its five cases and 26 outputs pass in the browser, including independent file-byte checks. It does not qualify full LuaManager.init or a running world.
-
-The `game-keyboard` entry uses the same browser-only invocation as `keyboard` and verifies the original game input cache and transition lifecycle. It remains an input integration rather than a running player simulation.
-
-The `standard-environment` entry additionally mounts the exact installation-root `stdlib.lua` and lets original J2SEPlatform.newEnvironment load it. Use the same `--media-root` argument; its parent directory supplies only that explicitly allowlisted file. `reflection-exposure` uses the same invocation to expose original GameVersion through the original Java-to-Lua bridge, with actual reflective constructor/method calls and numeric conversion. `lua-manager-init --compile-only` remains a diagnostic for the much larger full game Lua environment.
-
-The `reflection-manifest` entry independently passes the same original GameVersion exposure using a generated, parse-only retention manifest instead of the old class-specific whitelist. Missing original members fail compilation; missing standard-library public APIs are listed explicitly. `game-lua-exposure --compile-only` expands that inventory to the full exposure hierarchy. Its first full compile exhausted the compiler's 8 GB heap after validating 29,027 methods and 23,892 fields; it has not executed. `game-lua-exposure-fast --compile-only` separately investigates TeaVM's supported conservative analysis mode. Neither diagnostic is a full Lua initialization success.
-
-`menu-png` now passes three cases/eight outputs for an actual installed character-menu PNG. It preserves original PNGDecoder, independently matches browser-decoded RGBA pixels, and checks a real texture upload/FBO readback byte for byte. A standard-library Inflater repair resolves the initial decoding failure. It is not a rendered game menu. Existing interactive graphics checks still pass. `game-boot --compile-only` separately inspects the original launcher entry without executing it or supplying full reflection retention.
-
-The separate fast-analysis full-exposure compile also exhausted the same 8 GB heap. Compiler-side separation of reflection discovery metadata from callable bodies is under investigation; removing private metadata would alter the original exposer's discovery and is not an acceptable workaround.
-
-
-`image-texture` now executes original ImageData and TextureID loading/upload with the same menu PNG profile. It verifies the original render-context callback and image disposal, and independently matches every 128-by-128 padded GPU pixel against browser decoding. This remains a texture integration, not a rendered game menu. The direct-memory check now includes owned byte allocation, range filling and real byte addresses (nine cases/59 assertions).
-
-`reflection-vectors` expands actual Lua reflection to original GameVersion, Vector2 and IsoDirections. Five browser cases/ten outputs pass, including vector normalization/scaling, copies, enum identity, rotation and direction conversion. All original declared members are retained; missing JDK Constable metadata is explicitly reported. This remains bounded exposure rather than full LuaManager.init.
-
-The original default shader now passes real browser compilation, linking, uniform and attribute checks (default-shader). The alternative [browser JVM workflow](browser-jvm/README.md) runs original bytecode using CheerpJ with an explicitly documented private compatibility copy. It now qualifies a bounded original-code walking slice with genuine map floors, animated body rendering, real keyboard-driven movement and release checks. This is separate from the selected-code TeaVM AOT/WASM experiments and is not a whole-game WASM build or complete survival game.
-
-
-The browser JVM --profile lua route now completes original LuaManager.init, including its full Java exposure list, and executes exposed vector/enum calls. It uses generated real static-field accessors and owned controller-state storage at documented third-party boundaries. The public `--profile play` route now runs original player/world updates in one genuine loaded chunk. Add `--interactive true` to its documented command to open the bounded walking session; see the [walking slice instructions](browser-jvm/README.md#original-walking-slice) for controls and limitations.
-
-
-Original SpriteRenderer now draws a shipped texture through its real batch/state handoff and indexed GPU submission: browser PASS 5 cases / 14 outputs, with all 128x128 RGBA pixels checked. GPU buffer mapping/upload/readback qualification passes separately. This frame is a renderer milestone; it is not yet a playable world.
-
-
-## JavaScript linting
-
-Install locked dependencies with `npm ci --ignore-scripts --no-audit --no-fund`, then run `npm run lint`. The script executes `eslint . --max-warnings 0` using `@notmike101/eslint-config-js` and `@notmike101/eslint-config-jsdoc` from the validated upstream package artifacts. `eslint-plugin-html` also checks inline browser scripts. Generated outputs, installed dependencies and private local experiments are excluded; authored browser and Node sources are included. `npm run lint:fix` applies available fixes with the same zero-warning threshold. Artifact provenance is recorded in [vendor/eslint-configs/README.md](vendor/eslint-configs/README.md).
+The earlier main was merged with milestone/m1 and preserved as an orphan snapshot at [backup/main-before-original-bytecode-port-20261016](https://github.com/notmike101/project-zomboid-web-port/tree/backup/main-before-original-bytecode-port-20261016). Main now contains the original-bytecode port; the older milestone and port-branch histories remain reachable.
 
