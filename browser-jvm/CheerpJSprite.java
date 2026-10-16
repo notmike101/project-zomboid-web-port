@@ -80,6 +80,10 @@ public final class CheerpJSprite {
             int[] surface = new int[]{SpriteGraphics.surfaceWidth(),SpriteGraphics.surfaceHeight()};
             if (surface[0] != SURFACE || surface[1] != SURFACE)
                 throw failure("Actual framebuffer must be 128x128: " + surface[0] + "x" + surface[1]);
+            var modes = org.lwjglx.opengl.Display.getAvailableDisplayModes();
+            if (modes.length != 1 || modes[0].getWidth() != surface[0] || modes[0].getHeight() != surface[1]
+                    || modes[0].isFullscreenCapable() || modes[0].getFrequency() != 0 || modes[0].getBitsPerPixel() != 0)
+                throw failure("Vendor display enumeration must describe the actual windowed browser surface");
             GL11.glViewport(0, 0, SURFACE, SURFACE);
             GL11.glClearColor(0, 0, 0, 1);
             GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);

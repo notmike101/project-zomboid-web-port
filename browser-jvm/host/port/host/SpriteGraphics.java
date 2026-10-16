@@ -32,6 +32,10 @@ public final class SpriteGraphics {
     public static native boolean wasResized();
     public static int getWidth(){return surfaceWidth();}
     public static int getHeight(){return surfaceHeight();}
+    /** The owned browser surface is windowed; monitor modes and refresh rates are unavailable. */
+    public static org.lwjglx.opengl.DisplayMode[] getAvailableDisplayModes() {
+        return new org.lwjglx.opengl.DisplayMode[]{new org.lwjglx.opengl.DisplayMode(surfaceWidth(), surfaceHeight())};
+    }
     public static native int getX();
     public static native int getY();
     public static native void report(String json);

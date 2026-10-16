@@ -73,7 +73,7 @@ public final class PrepareSpriteGraphics {
                             }
                             boolean selected=(method.flags().flagsMask()&0x8)!=0&&((gl&&methods.contains(helper+descriptor))||(legacyAlpha&&methodName.equals("glAlphaFunc")&&descriptor.equals("(IF)V")&&methods.contains(helper+descriptor))||(memory&&Set.of("memAlloc","memAllocFloat","memAllocInt","memFree","memSet").contains(helper)&&methods.contains(helper+descriptor))
                                     ||(api&&Set.of("initialize","getCapabilities").contains(helper)&&methods.contains(helper+descriptor))
-                                    ||(display&&Set.of("isCreated","makeCurrent","releaseContext","setVSyncEnabled","processMessages","isActive","isVisible","isCloseRequested","wasResized","getWidth","getHeight","getX","getY").contains(helper)&&methods.contains(helper+descriptor)));
+                                    ||(display&&Set.of("isCreated","makeCurrent","releaseContext","setVSyncEnabled","processMessages","isActive","isVisible","isCloseRequested","wasResized","getWidth","getHeight","getX","getY","getAvailableDisplayModes").contains(helper)&&methods.contains(helper+descriptor)));
                             if(!selected){builder.with(element);return;}
                             changes.add(methodName+descriptor+"->"+helper);
                             builder.withMethodBody(method.methodName(),method.methodType(),method.flags().flagsMask()&~0x100,code->{
