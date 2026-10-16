@@ -19,6 +19,7 @@ import org.teavm.vm.spi.TeaVMPlugin;
 public final class StandardLibraryPlugin implements TeaVMPlugin {
     @Override public void install(TeaVMHost host) {
         host.add((cls, context) -> {
+            RegexTransformer.transform(cls, context);
             PrintStreamTransformer.transform(cls, context);
             if (cls.getName().equals("java.nio.file.impl.DefaultPath")) {
                 ValueType type = ValueType.object("java.nio.file.impl.DefaultPath");

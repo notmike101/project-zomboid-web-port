@@ -25,9 +25,10 @@ These counts are behavioral checks, not a percentage of game coverage.
 The browser-save probe adds real browser filesystem persistence without replacing gameplay calculations or the original record format.
 
 The runtime compatibility extension uses TeaVM's supported plugin interface and class-library substitutions.
-Twelve runtime probes compare standard Java API behavior against Java 25, including paths, streams, queues, fused arithmetic, field handles, classpath resource reads, futures, and fixed executors.
+Runtime probes compare standard Java API behavior against Java 25, including paths, streams, queues, fused arithmetic, field handles, classpath resources and manifest metadata, futures, executors, locks, time conversions, SHA-1, regular expressions, and integer rectangles.
 These checks are separate from original-game coverage. Path operations use the browser's virtual path provider; they do not provide OPFS-backed Java files.
 The queue supports TeaVM's cooperative single-agent execution, without cross-worker object sharing.
+The `graphics-worker` entry runs the same original shader integration inside a dedicated worker with a transferred OffscreenCanvas. The separate `exit` entry verifies terminating an owned worker runtime, including a real Wasm trap and absence of subsequent Java execution.
 
 See [COMPATIBILITY.md](COMPATIBILITY.md) for measured results and [PORTING.md](PORTING.md) for the route toward a playable slice.
 
@@ -59,7 +60,7 @@ Run all verified components from the repository root:
         '--maven-home', $env:PZ_MAVEN_HOME,
         '--browser', $env:PZ_BROWSER
     )
-    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream', 'deque', 'fma', 'field-handles', 'resources', 'future', 'executors', 'lazy-value', 'joml') {
+    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream', 'deque', 'fma', 'field-handles', 'resources', 'future', 'executors', 'time-units', 'digest', 'locks', 'regex', 'rectangles', 'channels', 'libraries', 'lazy-value', 'joml') {
         node compare.mjs --probe $probe @probeArgs
         if ($LASTEXITCODE -ne 0) { throw "Probe failed: $probe" }
     }
@@ -96,6 +97,7 @@ A compile-only result is never reported as a browser pass.
 JavaScript host services are part of the investigation. The current OPFS adapter is one working example.
 It does not yet implement Java filesystem APIs, full game saves, graphics, audio, physics, or networking.
 Those integrations need their own behavior and runtime checks.
+The `libraries` probe verifies honest failure for unavailable desktop native libraries. Mapping a library name to a `.wasm` filename does not load a library or port its native functionality.
 
 All work on this checkout belongs to the isolated orphan branch `work/original-bytecode-browser-port`.
 

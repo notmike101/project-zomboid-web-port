@@ -198,8 +198,10 @@ public final class BrowserGraphics {
     }
 
     @JSBody(script = """
-            let canvas = document.getElementById('graphics-canvas');
+            let canvas = globalThis.portGraphicsCanvas;
+            if (!canvas && typeof document !== 'undefined') canvas = document.getElementById('graphics-canvas');
             if (!canvas) {
+                if (typeof document === 'undefined') throw new Error('Worker graphics canvas is not installed');
                 canvas = document.createElement('canvas');
                 canvas.id = 'graphics-canvas';
                 canvas.width = canvas.height = 96;

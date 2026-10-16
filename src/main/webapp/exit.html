@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Owned worker process exit</title>
+<h1>Owned worker process exit</h1>
+<p id="status" role="status">RUNNING</p>
+<pre id="details"></pre>
+<script>
+window.probeErrors = [];
+(async () => {
+    let worker;
+    const events = [];
+    const stdout = [];
+    let terminated = false;
+    let wasmInstance = false;
+    let exitCode;
+    let trap;
+    let timer;
+    const terminate = () => { if (worker && !terminated) { worker.terminate(); terminated = true; } };
+    try {
+        worker = new Worker('/exit-worker.js');
+        await new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Worker exit timed out')), 15000);
+            worker.onerror = event => {
+                const message = event.message || 'Worker failed';
+                window.probeErrors.push(message);
+                reject(new Error(message));
+            };
+            worker.onmessage = event => {
+                const message = event.data;
+                events.push(message);
+                if (message?.type === 'stdout') stdout.push(message.line);
+                else if (message?.type === 'status') {
+                    if (message.status === 'wasm-ready') wasmInstance = message.wasmInstance === true;
+                } else if (message?.type === 'failure') {
+                    window.probeErrors.push(message.error);
+                    reject(new Error(message.error));
+                } else if (message?.type === 'runtime-exit') {
+                    exitCode = message.code;
+                    if (trap) resolve();
+                } else if (message?.type === 'exit-trap') {
+                    trap = message;
+                    if (exitCode !== undefined) resolve();
+                } else {
+                    window.probeErrors.push('Unexpected worker message');
+                    reject(new Error('Unexpected worker message'));
+                }
+            };
+            worker.postMessage({type: 'start'});
+        });
+        clearTimeout(timer);
+        const observationStart = performance.now();
+        await new Promise(resolve => setTimeout(resolve, 200));
+        const observationMs = performance.now() - observationStart;
+        if (!wasmInstance || exitCode !== 7 || events.filter(event => event.type === 'runtime-exit').length !== 1
+                || events.filter(event => event.type === 'exit-trap').length !== 1
+                || trap.errorName !== 'RuntimeError' || !trap.errorMessage.includes('unreachable')) {
+            throw new Error('Expected one original System.exit(7) from the owned WASM worker');
+        }
+        if (JSON.stringify(stdout) !== JSON.stringify(['before-exit']) || window.probeErrors.length) {
+            throw new Error('Code continued after process exit or the worker failed');
+        }
+        terminate();
+        window.probeResult = {pass: true, cases: 1, comparisons: 2, matched: 2, exitCode,
+            worker: true, workerTerminated: terminated, wasmInstance, trapObserved: true,
+            trapMessage: trap.errorMessage, observationMs, stdout, events,
+            errors: window.probeErrors};
+        document.getElementById('status').textContent = 'PASS: 2 owned-worker exit assertions';
+    } catch (error) {
+        window.probeErrors.push(String(error.stack || error));
+        window.probeResult = {pass: false, stdout, events, errors: window.probeErrors};
+        document.getElementById('status').textContent = 'FAIL';
+    } finally {
+        clearTimeout(timer);
+        terminate();
+    }
+    document.getElementById('details').textContent = JSON.stringify(window.probeResult, null, 2);
+})();
+</script>
+</html>

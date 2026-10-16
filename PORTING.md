@@ -82,11 +82,11 @@ Keep original game input, generated modules, machine-specific handoffs, and raw 
 
 ## Supported runtime adaptation
 
-Twelve standard-library probes now pass in both Java 25 and Chromium.
+Standard-library probes compare the adapted contracts in both Java 25 and Chromium.
 Reader transfer, path conveniences, linkage errors, legacy String construction, a cooperative FIFO queue, and file-stream construction/lifecycle have real implementations.
 They retain validation and error behavior. They add no gameplay replacements.
 
-Core compilation still fails. A functional regex replacement overload exposed by the expanded graph needs mutation detection; a helper omitting that check is insufficient.
+Functional regex replacement now includes mutation detection and exact group/escaping behavior, with passing JVM/browser comparisons.
 LWJGL's `GL` initializer unconditionally loads the desktop OpenGL library before its explicit-init option can take effect.
 Its retained callers also reach native texture, matrix-uniform, image-decoding, memory, and ImGui operations.
 The next connected integration is an explicitly bounded WebGL backend for third-party graphics APIs, with real framebuffer readback and browser input.
@@ -94,10 +94,12 @@ That integration must stay separate from claims of a running original world or p
 
 
 The first bounded WebGL backend now runs and responds to browser input. It verifies original Color values and actual framebuffer/error state.
-The larger opt-in Core diagnostic remains blocked (38 references, 12 declarations), so graphics interaction is not a playable milestone.
+The larger opt-in Core diagnostic previously exposed 38 references across 12 declarations. These are being reduced through real API implementations; graphics interaction is not a playable milestone.
 The next native boundary is managed/direct buffer allocation, typed uniform uploads, image decoding, and other retained graphics calls.
 TeaVM WasmGC has actual linear-memory direct buffers; their ownership and release behavior must be preserved before replacing native allocation APIs.
 
 The graphics path now passes original ShaderParameter vector-four dispatch into a real compiled shader, in addition to original Color arithmetic.
 Real Wasm direct allocations/addresses, original LazyValue field-handle behavior, archive resource reads, and cooperative asset-task execution primitives have browser evidence.
-These pieces still do not form the original input/world/render loop. The remaining Core frontier includes geometry, file channels/watch types, locks, digest checks, native loading/exit, package metadata, and functional regex replacement.
+These pieces still do not form the original input/world/render loop. Integer geometry, file channels, locks, SHA-1, native-load failure handling, owned-worker exit, package metadata, and functional regex replacement now have individual runtime evidence. A real polling watch service now passes its JVM/browser checks. The expanded Core initializer compiles, but browser validation rejects a TeaVM-generated cast before execution. Fixing that compiler boundary is the next step.
+
+Core initialization must run first inside an owned browser worker with an isolated virtual filesystem. Constructor inspection distinguishes retained callbacks from callbacks actually invoked: initial configuration values are set before change callbacks are installed. This permits a bounded initializer probe without starting the installed desktop game. Successful initialization will still require a connected original simulation, asset filesystem, input and renderer before playability can be claimed.

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Original engine initialization</title>
+<h1>Original engine initialization</h1>
+<p id="status" role="status">RUNNING</p>
+<canvas id="engine-canvas" width="96" height="96" aria-label="Engine graphics target"></canvas>
+<pre id="details"></pre>
+<script>
+window.probeErrors = [];
+(async () => {
+    const worker = new Worker('/engine-worker.js');
+    let timer;
+    try {
+        const message = await new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Engine initialization timed out')), 20000);
+            worker.onerror = event => reject(new Error(event.message));
+            worker.onmessage = event => event.data.error ? reject(new Error(event.data.error + '\n' + JSON.stringify(event.data))) : resolve(event.data);
+            const canvas = document.getElementById('engine-canvas').transferControlToOffscreen();
+            worker.postMessage({canvas}, [canvas]);
+        });
+        if (!message.wasmInstance || !message.result.pass) throw new Error('Original engine assertions failed');
+        const cases = message.result.cases.length;
+        const comparisons = message.result.cases.reduce((count, item) => count + Object.keys(item.outputs).length, 0);
+        window.probeResult = {pass: true, cases, comparisons, matched: comparisons,
+            actual: message.result, worker: true, wasmInstance: true, errors: []};
+        document.getElementById('status').textContent = 'PASS: original engine initialization';
+    } catch (error) {
+        window.probeErrors.push(String(error.stack || error));
+        window.probeResult = {pass: false, errors: window.probeErrors};
+        document.getElementById('status').textContent = 'FAIL';
+    } finally {
+        clearTimeout(timer);
+        worker.terminate();
+    }
+    document.getElementById('details').textContent = JSON.stringify(window.probeResult, null, 2);
+})();
+</script>
+</html>

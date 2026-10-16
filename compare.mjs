@@ -51,10 +51,25 @@ const probes = {
     'lazy-value': {mainClass: 'probe.LazyValueProbe', fieldHandles: true, cases: 8, comparisons: 16,
         classes: ['zombie.util.LazyValue'], symbols: ['LazyValue::get', 'LazyValue::<init>']},
     resources: {mainClass: 'probe.ResourceProbe', category: 'runtime-compatibility', resources: true,
-        cases: 8, comparisons: 16, classes: [], symbols: []},
+        cases: 18, comparisons: 36, classes: [], symbols: []},
     future: {mainClass: 'probe.FutureProbe', category: 'runtime-compatibility', cases: 16, comparisons: 32,
         classes: [], symbols: []},
     executors: {mainClass: 'probe.ExecutorProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16,
+        classes: [], symbols: []},
+    'time-units': {mainClass: 'probe.TimeUnitProbe', category: 'runtime-compatibility', cases: 16, comparisons: 112,
+        classes: [], symbols: []},
+    digest: {mainClass: 'probe.DigestProbe', category: 'runtime-compatibility', cases: 16, comparisons: 96,
+        classes: [], symbols: []},
+    locks: {mainClass: 'probe.LockProbe', category: 'runtime-compatibility', cases: 16, comparisons: 32,
+        classes: [], symbols: []},
+    rectangles: {mainClass: 'probe.RectangleProbe', category: 'runtime-compatibility', cases: 16, comparisons: 80,
+        classes: [], symbols: []},
+    channels: {mainClass: 'probe.ChannelProbe', category: 'runtime-compatibility', cases: 16, comparisons: 32,
+        classes: [], symbols: []},
+    watch: {mainClass: 'probe.WatchProbe', category: 'runtime-compatibility', watchService: true, cases: 8, comparisons: 16, classes: [], symbols: []},
+    libraries: {mainClass: 'probe.LibraryProbe', category: 'runtime-compatibility', nativeLibraries: true, cases: 8, comparisons: 16,
+        classes: [], symbols: []},
+    regex: {mainClass: 'probe.RegexProbe', category: 'runtime-compatibility', regex: true, cases: 16, comparisons: 32,
         classes: [], symbols: []},
     memory: {mainClass: 'probe.MemoryProbe', category: 'browser-memory', browserOnly: true, memory: true,
         cases: 8, comparisons: 50, symbols: []},
@@ -64,7 +79,14 @@ const probes = {
         symbols: ['ShaderParameter::<init>']},
     graphics: {mainClass: 'probe.GraphicsProbe', category: 'browser-graphics', browserOnly: true, webgl: true, memory: true,
         cases: 4, comparisons: 50, symbols: ['Color::scale']},
-    'core-webgl': {mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, symbols: ['Core::<clinit>']},
+    'graphics-worker': {mainClass: 'probe.GraphicsProbe', category: 'browser-graphics', browserOnly: true, webgl: true, memory: true,
+        cases: 4, comparisons: 50, symbols: ['Color::scale'], worker: true},
+    exit: {mainClass: 'probe.WorkerExitProbe', category: 'browser-process', browserOnly: true, workerProcess: true,
+        cases: 1, comparisons: 2, symbols: []},
+    'native-capabilities': {mainClass: 'probe.NativeCapabilitiesProbe', category: 'browser-native-capabilities', fixture: 'engine', browserOnly: true, webgl: true, resources: true, nativeCapabilities: true, cases: 1, comparisons: 2, symbols: []},
+    'season-runtime': {nativeCapabilities: true, mainClass: 'probe.SeasonRuntimeProbe', category: 'browser-core', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 2, comparisons: 20, symbols: ['ErosionSeason::setDay']},
+    'core-boot': {nativeCapabilities: true, mainClass: 'probe.CoreBootProbe', category: 'browser-core', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 1, comparisons: 4, symbols: ['Core::<clinit>']},
+    'core-webgl': {nativeCapabilities: true, mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, watchService: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, symbols: ['Core::<clinit>']},
     season: {mainClass: 'probe.SeasonBoundaryProbe', compileOnly: true, symbols: ['ErosionSeason::<init>']},
     core: {mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, symbols: ['Core::<clinit>']}
 };
@@ -96,7 +118,7 @@ async function run(label, executable, args) {
         env: {...process.env, JAVA_HOME: paths.jdk}});
     await writeFile(join(outputDir, label + '.log'), (result.stdout || '') + (result.stderr || ''));
     if (result.error || result.status !== 0) throw new Error(label + ' failed: ' + (result.error?.message || result.status) + '; see ' + join(outputDir, label + '.log'));
-    return ['baseline', 'resource-index'].includes(label) ? (result.stdout || '') : (result.stdout || '') + (result.stderr || '');
+    return ['baseline', 'resource-index', 'package-metadata'].includes(label) ? (result.stdout || '') : (result.stdout || '') + (result.stderr || '');
 }
 
 // Decode only the standard WASM name section. This is metadata, not a VM.
@@ -142,7 +164,7 @@ try {
     evidence.jdkVersion = (await run('jdk-version', java, ['-version'])).trim();
     const boot = (await readdir(join(paths['maven-home'], 'boot'))).filter(name => /^plexus-classworlds-.*\.jar$/.test(name));
     if (boot.length !== 1) throw new Error('Expected one Maven classworlds boot JAR');
-    const mavenArgs = ['-Dport.webgl=' + !!probe.webgl, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
+    const mavenArgs = ['-Xss16m', '-Dport.nativeCapabilities=' + !!probe.nativeCapabilities, '-Dport.watchService=' + !!probe.watchService, '-Dport.webgl=' + !!probe.webgl, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dport.regex=' + !!probe.regex, '-Dport.workerProcess=' + !!probe.workerProcess, '-Dport.nativeLibraries=' + !!probe.nativeLibraries, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
         '-Dclassworlds.conf=' + join(paths['maven-home'], 'bin', 'm2.conf'),
         '-cp', join(paths['maven-home'], 'boot', boot[0]), 'org.codehaus.plexus.classworlds.launcher.Launcher',
         '-Dprobe.mainClass=' + probe.mainClass, '-Dprobe.output=' + output];
@@ -183,20 +205,27 @@ try {
     evidence.rule = baseline.rule;
     await writeFile(join(outputDir, 'baseline.json'), JSON.stringify(baseline, null, 2) + '\n');
     } else {
-        evidence.rule = probeName === 'graphics' ? 'framebuffer-readback-and-WebGL-errors' : 'direct-memory-contract';
+        evidence.rule = probe.category === 'browser-graphics' ? 'framebuffer-readback-and-WebGL-errors' : probe.category === 'browser-process' ? 'owned-worker-exit' : probe.category === 'browser-core' ? 'original-engine-initialization' : 'direct-memory-contract';
         evidence.jvmBaselineExecuted = false;
-        evidence.measurement = probeName === 'graphics' ? 'Browser-only graphics assertions and real input controls; no JVM graphics baseline or timing benchmark' : 'Browser-only direct-memory assertions; no JVM native-memory baseline or timing benchmark';
+        evidence.measurement = 'Browser-only ' + probe.category + ' assertions; no native JVM baseline or timing benchmark';
     }
     let resourceNames;
     const resourceToolArgs = ['-cp', join(outputDir, 'classes'), 'port.tool.ResourceTool', paths['game-jar']];
     if (probe.resources) {
-        const encodedNames = await run('resource-index', java, resourceToolArgs);
+        const encodedNames = await run('resource-index', java, [...resourceToolArgs, 'list']);
         resourceNames = new Set(encodedNames.trim().split(/\r?\n/).filter(Boolean).map(name => Buffer.from(name, 'base64').toString('utf8')));
-        await writeFile(join(outputDir, 'resource-host.js'), 'window.portResources = new Set(' + JSON.stringify([...resourceNames]) + ');\n');
+        const encodedMetadata = await run('package-metadata', java, [...resourceToolArgs, 'packages']);
+        const packageMetadata = encodedMetadata.split(/\r?\n/).filter(Boolean).map(line => line.split('\t').map(value => Buffer.from(value, 'base64').toString('utf8')));
+        const packages = [...new Set([...resourceNames].filter(name => name.endsWith('.class') && !name.startsWith('META-INF/') && name.includes('/'))
+            .map(name => name.slice(0, name.lastIndexOf('/')).replaceAll('/', '.')))];
+        await writeFile(join(outputDir, 'resource-host.js'), 'window.portResources = new Set(' + JSON.stringify([...resourceNames]) + ');\nwindow.portPackageMetadata = new Map(' + JSON.stringify(packageMetadata) + ');\nwindow.portArchivePackages = new Set(' + JSON.stringify(packages) + ');\n');
         evidence.classpathResourceCount = resourceNames.size;
     }
     const routes = new Map([
-        ['/', [probe.browserOnly ? 'src/main/webapp/' + probeName + '.html' : 'src/main/webapp/index.html', 'text/html; charset=utf-8']],
+        ['/', [probe.browserOnly ? 'src/main/webapp/' + (probe.fixture || (probe.worker ? 'graphics' : probe.category === 'browser-core' ? 'engine' : probeName)) + '.html' : 'src/main/webapp/index.html', 'text/html; charset=utf-8']],
+        ['/graphics-worker.js', ['src/main/webapp/graphics-worker.js', 'text/javascript']],
+        ['/engine-worker.js', ['src/main/webapp/engine-worker.js', 'text/javascript']],
+        ['/exit-worker.js', ['src/main/webapp/exit-worker.js', 'text/javascript']],
         ['/save-host.js', ['src/main/webapp/save-host.js', 'text/javascript']],
         ['/resource-host.js', [join(outputDir, 'resource-host.js'), 'text/javascript']],
         ['/baseline.json', [join(outputDir, 'baseline.json'), 'application/json']],
@@ -208,13 +237,13 @@ try {
         if (resourceNames && request.url.startsWith('/classpath?')) {
             const name = new URL(request.url, 'http://127.0.0.1').searchParams.get('name');
             if (request.method !== 'GET' || !resourceNames.has(name)) { response.writeHead(404); response.end(); return; }
-            const result = spawnSync(java, [...resourceToolArgs, name], {timeout: 30000, maxBuffer: 64 * 1024 * 1024, windowsHide: true});
+            const result = spawnSync(java, [...resourceToolArgs, 'read', name], {timeout: 30000, maxBuffer: 64 * 1024 * 1024, windowsHide: true});
             if (result.error || result.status !== 0) { response.writeHead(500); response.end('Archive read failed'); return; }
             response.writeHead(200, {'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store'});
             response.end(result.stdout);
             return;
         }
-        const route = routes.get(request.url);
+        const route = routes.get(request.url.split('?')[0]);
         if (!route) { response.writeHead(404); response.end(); return; }
         try {
             let body = route[0] ? await readFile(route[0]) : Buffer.alloc(0);
@@ -233,13 +262,14 @@ try {
     page.on('pageerror', error => browserErrors.push(String(error)));
     page.on('console', message => { if (message.type() === 'error') browserErrors.push(message.text()); });
     page.on('requestfailed', request => browserErrors.push(request.url() + ': ' + request.failure()?.errorText));
-    await page.goto('http://127.0.0.1:' + server.address().port + '/', {waitUntil: 'load', timeout: 30000});
+    await page.goto('http://127.0.0.1:' + server.address().port + '/' + (probe.worker ? '?worker' : ''), {waitUntil: 'load', timeout: 30000});
     await page.waitForFunction(() => window.probeResult !== undefined, null, {timeout: 30000});
-    if (probeName === 'graphics' && await page.evaluate(() => window.probeResult.pass)) {
+    if (probe.category === 'browser-graphics' && await page.evaluate(() => window.probeResult.pass)) {
         await page.locator('#red').fill('127');
         await page.locator('#green').fill('64');
         await page.locator('#blue').fill('255');
         await page.locator('#brightness').fill('75');
+        await page.waitForFunction(() => JSON.parse(document.getElementById('details').textContent).pixels?.join(',') === '95,48,191,191', null, {timeout: 10000});
         const rendered = JSON.parse(await page.locator('#details').innerText());
         if (JSON.stringify(rendered.pixels) !== JSON.stringify([95, 48, 191, 191]) || rendered.error !== 0) {
             throw new Error('Browser input did not produce the expected original Color framebuffer');
@@ -250,14 +280,18 @@ try {
     evidence.visibleStatus = await page.locator('#status').innerText();
     evidence.browserErrors = browserErrors;
     evidence.browserPageLoads = pageLoads;
-    if (probeName === 'graphics' && (!evidence.browser.webgl2 || evidence.browser.errors.length || !evidence.interactiveFramebuffer)) {
+    if (probe.category === 'browser-graphics' && (!evidence.browser.webgl2 || evidence.browser.errors.length || !evidence.interactiveFramebuffer)) {
         throw new Error('Expected real WebGL2 and verified browser input');
     }
-    if (probeName === 'graphics' && !evidence.browser.actual.cases.every(result => result.originalParameter && result.shaderDraw)) {
+    if (probe.category === 'browser-graphics' && !evidence.browser.actual.cases.every(result => result.originalParameter && result.shaderDraw)) {
         throw new Error('Expected original ShaderParameter dispatch and real shader drawing');
     }
+    if (probe.worker && !evidence.browser.workerMode) throw new Error('Expected dedicated worker execution');
     if (probeName === 'memory' && (!evidence.browser.linearMemory || evidence.browser.allocationsRemaining !== 0)) {
         throw new Error('Expected real linear-memory checks and no retained allocations');
+    }
+    if (probeName === 'exit' && (!evidence.browser.worker || !evidence.browser.workerTerminated || !evidence.browser.wasmInstance || evidence.browser.exitCode !== 7 || evidence.browser.observationMs < 200)) {
+        throw new Error('Expected owned-worker termination and post-exit observation');
     }
     if (probeName === 'colors' && !evidence.browser.directExport) throw new Error('Expected direct JavaScript color export execution');
     if (probeName === 'browser-save' && (pageLoads !== 8 || evidence.browser.hostStorage?.pageLoads !== 8 || evidence.browser.hostStorage?.writes !== 8 || evidence.browser.hostStorage?.readbacks !== 8)) {

@@ -4,3 +4,9 @@ port.runtime.BrowserMemoryPlugin
 port.runtime.BrowserJomlPlugin
 port.runtime.FieldHandlePlugin
 port.runtime.ResourcePlugin
+port.runtime.TimeUnitPlugin
+port.runtime.BrowserProcessPlugin
+port.runtime.BrowserLibraryPlugin
+port.runtime.WatchServicePlugin
+port.runtime.SteamWorkshopImportPlugin
+port.runtime.NativeCapabilitiesPlugin

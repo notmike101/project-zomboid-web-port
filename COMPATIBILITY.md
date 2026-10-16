@@ -281,7 +281,7 @@ Fixed pixel cases avoid ambiguous midpoints; arbitrary interactive values enforc
 This distinction does not change any original-game JVM raw-bit comparison rule.
 Context loss marks the interaction failed and disables the controls.
 
-The latest `core-webgl` diagnostic still fails, with 38 missing references across 12 declarations. The expanded graph newly exposes MessageDigest.
+The preceding `core-webgl` checkpoint failed with 38 missing references across 12 declarations. Implementing those boundaries exposed package implementation metadata and class-relative resource lookup, which now have browser comparisons. The expanded Core initializer now compiles 2,439 classes and 34,210 methods after explicit native capability boundaries. Chromium rejects the resulting module before initialization because TeaVM emits an invalid br_on_cast type in Translator.reportMissingArgumentsFormatString. This compiler failure is under investigation; Core has not executed successfully. The preceding native frontier contained 215 entries, which remain unsupported operations unless a real browser backend exists.
 Fixing the first graphics-loader path does not eliminate other image, memory, UI, concurrency, and native dependencies.
 No original world, player, collision, animation, or gameplay loop is running.
 
@@ -292,9 +292,16 @@ Additional runtime comparison probes:
 | `deque` | 8 | 16 | Both ends, occurrence removal, nulls, retained iterators, bulk validation, spliterator |
 | `fma` | 128 | 128 | Exact fused binary32 rounding, overflow/underflow/cancellation/signed zero; only NaNs use declared canonical bits |
 | `field-handles` | 8 | 16 | Caller-owned private lookup, volatile reference reads, identity exchange witnesses, nulls, lookup errors |
-| `resources` | 8 | 16 | Actual archive bytes through HTTP, enumeration, missing/null/invalid names |
+| `resources` | 18 | 36 | Actual archive bytes, enumeration, package manifest metadata, absolute/relative/array-class resource lookup, missing/null names |
 | `future` | 16 | 32 | Real task results/failures, cancellation/interruption, timed waits, completion hooks, Java 25 state queries |
 | `executors` | 8 | 16 | Real cooperative workers, pool width, submission, draining/rejected/immediate shutdown, bulk timeouts, interrupted close |
+| `time-units` | 16 | 112 | All seven time units, saturated overflow, negative division and conversion |
+| `digest` | 16 | 96 | Incremental SHA-1, byte/array/buffer updates, padding boundaries, reset and output bounds |
+| `locks` | 16 | 32 | Reentrant ownership, fairness, interruption/timeouts, conditions and hold restoration |
+| `regex` | 16 | 32 | Functional replacement, callback mutation detection, groups and escaping |
+| `rectangles` | 16 | 80 | Observed integer geometry API, exclusive edges, empty/negative rectangles and overflow |
+| `channels` | 16 | 32 | Actual virtual-file reads/writes, position/truncation/options, overlap locks and close |
+| `libraries` | 8 | 16 | Native-load validation and honest unavailable-library errors |
 
 Field-handle metadata is explicitly limited to original LazyValue.value and the two probe targets.
 The compiler captures the actual lookup caller; reference exchanges execute without yielding within one agent.
@@ -305,9 +312,16 @@ FMA uses an exact BigInteger implementation before a single ties-to-even roundin
 The resource host reads the configured archive with the JDK ZIP API and serves only indexed entries; no archive entry is extracted or executed.
 Futures/executors use TeaVM's actual cooperative threads, with real waiting, interruption, timeouts, cancellation, and shutdown.
 Review caught and corrected extreme-negative-timeout overflow and retained exited-worker objects before the passing executor rerun.
+Shared time-unit conversions now saturate rather than wrapping a long positive timeout negative. SHA-1 is the supported digest; other algorithms fail explicitly. Rectangle support covers the observed integer API, without an AWT Shape hierarchy.
+File channels use the actual ephemeral VFS and locks within one browser agent. Opening a second writable channel preserves existing bytes despite a stock RandomAccessFile truncation bug. Positions beyond the VFS integer limit fail explicitly; memory mapping, durable force, and cross-process locks are unsupported.
+Manifest fixtures currently contain no non-null implementation version, so a populated implementation-version fallback is not yet exercised. Class-resource visibility is limited to the indexed application archive.
+
+The same graphics probe also passes in an actual dedicated worker using OffscreenCanvas. This changes its host, not its original-game coverage count. A separate browser-only `exit` probe passes two assertions: an owned runtime reports exit code 7 and reaches a real Wasm trap, with no subsequent Java catch/finally/task output during the observation window. JVM shutdown hooks are outside this boundary.
 
 The separate `joml` vendor probe passes 8 cases and 128 raw float checks, selecting the library's shipped NIO provider instead of unavailable Unsafe.
 The browser-only `memory` probe passes 8 cases and 50 assertions, including actual Wasm address reads/writes and zero retained owners after release.
 The bounded MemoryUtil backend supports owned float/int allocations, addresses, and typed release. Other operations throw UnsupportedOperationException; unsupported desktop allocator fields are not initialized and must not be used.
 This explicit native capability boundary reduces build reachability without claiming those native operations were ported.
 Shader matrix uploads honor position/limit and implement actual three/four-dimensional transposition. The vector-four original parameter path and direct matrix-four tests ran; the other dispatch branches only compile.
+
+The standard runtime table also includes the watch probe: 8 cases and 16 exact JVM/browser outputs for actual file changes, filtering, key lifecycle, interruption and close wakeup. It polls the ephemeral default VFS every 25 ms using the verified locks/conditions. Short-lived files or same-size changes within timestamp resolution can be missed. Alternate providers and cross-worker sharing are unsupported.

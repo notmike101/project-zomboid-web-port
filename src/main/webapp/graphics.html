@@ -35,6 +35,40 @@ addEventListener('unhandledrejection', event => window.probeErrors.push(String(e
     const details = document.getElementById('details');
     const lines = []; let pending = '';
     try {
+        let render, result, webgl2;
+        const workerMode = new URLSearchParams(location.search).has('worker');
+        if (workerMode) {
+            const worker = new Worker('/graphics-worker.js');
+            addEventListener('pagehide', () => worker.terminate(), {once: true});
+            let sequence = 0;
+            const requests = new Map();
+            const fail = error => {
+                for (const request of requests.values()) request.reject(error);
+                requests.clear();
+                window.probeErrors.push(String(error));
+                if (window.probeResult) window.probeResult.pass = false;
+                status.textContent = 'FAIL';
+                document.getElementById('controls').disabled = true;
+                worker.terminate();
+            };
+            worker.onerror = event => fail(new Error(event.message));
+            worker.onmessage = event => {
+                if (event.data.type === 'failure') { fail(new Error(event.data.error)); return; }
+                const request = requests.get(event.data.id);
+                if (!request) { fail(new Error('Unexpected worker response')); return; }
+                requests.delete(event.data.id);
+                request.resolve(event.data.result);
+            };
+            const request = (data, transfer = []) => new Promise((resolve, reject) => {
+                const id = ++sequence;
+                requests.set(id, {resolve, reject});
+                try { worker.postMessage({id, ...data}, transfer); }
+                catch (error) { requests.delete(id); reject(error); }
+            });
+            const canvas = document.getElementById('graphics-canvas').transferControlToOffscreen();
+            ({result, webgl2} = await request({type: 'start', canvas, resources: window.portResources instanceof Set}, [canvas]));
+            render = (...values) => request({type: 'render', values});
+        } else {
         const module = await TeaVM.wasmGC.load('/wasm/probe.wasm', {installImports(imports) {
             imports.teavmConsole = {
                 putcharStdout(c) { if (c === 10) { lines.push(pending); pending = ''; } else pending += String.fromCharCode(c); },
@@ -43,18 +77,20 @@ addEventListener('unhandledrejection', event => window.probeErrors.push(String(e
         }});
         await module.exports.main([]);
         if (lines.length !== 1 || pending) throw new Error('Expected one graphics result');
-        const result = JSON.parse(lines[0]);
+        result = JSON.parse(lines[0]);
+        webgl2 = document.getElementById('graphics-canvas').getContext('webgl2') instanceof WebGL2RenderingContext;
+        render = async (...values) => JSON.parse(module.exports.renderColor(...values));
+        }
         if (!result.pass || result.cases.length !== 4 || result.invalidEnum !== 1280 || result.consumedError !== 0) throw new Error('Graphics assertions failed');
-        const webgl2 = document.getElementById('graphics-canvas').getContext('webgl2') instanceof WebGL2RenderingContext;
         if (!webgl2) throw new Error('Expected actual WebGL2 context');
-        window.probeResult = {pass: result.pass, cases: result.cases.length, actual: result, comparisons: 50, matched: 50, webgl2, errors: window.probeErrors};
+        window.probeResult = {pass: result.pass, cases: result.cases.length, actual: result, comparisons: 50, matched: 50, webgl2, workerMode, errors: window.probeErrors};
         status.textContent = 'PASS: original Color through compiled shaders, exact uniform bits, framebuffer pixels, and GL error state';
         details.textContent = JSON.stringify(result, null, 2);
         const controls = document.getElementById('controls'); controls.disabled = false;
-        controls.addEventListener('input', () => {
+        controls.addEventListener('input', async () => {
             try {
                 const value = id => Number(document.getElementById(id).value);
-                const rendered = JSON.parse(module.exports.renderColor(value('red') / 255, value('green') / 255, value('blue') / 255, value('brightness') / 100));
+                const rendered = await render(value('red') / 255, value('green') / 255, value('blue') / 255, value('brightness') / 100);
                 details.textContent = JSON.stringify(rendered, null, 2);
             } catch (error) { window.probeErrors.push(String(error)); status.textContent = 'FAIL'; details.textContent = String(error.stack || error); }
         });
