@@ -24,6 +24,7 @@ public class TFileChannel implements TSeekableByteChannel {
     private final TFile path;
     private final String key;
     private final boolean readable, writable, append, deleteOnClose;
+    private java.io.Closeable owner;
     private boolean open = true;
     private TFileChannel(TFile path, boolean readable, boolean writable, boolean append, boolean deleteOnClose) throws IOException {
         this.path = path; this.readable = readable; this.writable = writable;
@@ -32,9 +33,16 @@ public class TFileChannel implements TSeekableByteChannel {
         VirtualFile target = VirtualFileSystemProvider.getInstance().getFile(key);
         // Writable non-append VFS accessors truncate at construction. Open preserving
         // contents, then establish the channel's own initial position explicitly.
-        file = target.createAccessor(readable, writable, true);
+        file = target.createAccessor(readable, writable, writable);
         if (file == null) throw new java.io.FileNotFoundException(key);
         file.seek(append ? file.size() : 0);
+    }
+    /** Shares a stream's already-open accessor, position, and close ownership without reopening its path. */
+    public TFileChannel(VirtualFileAccessor accessor, TFile path, boolean append, java.io.Closeable owner) throws IOException {
+        this.file = accessor; this.path = path; this.append = append; this.owner = owner;
+        key = path.getCanonicalPath();
+        readable = false; writable = true; deleteOnClose = false;
+        open = accessor != null;
     }
     public static TFileChannel open(TPath path, TOpenOption... options) throws IOException {
         Objects.requireNonNull(options);
@@ -99,6 +107,7 @@ public class TFileChannel implements TSeekableByteChannel {
         ensureOpen(); if (!writable) throw new TNonWritableChannelException();
         Objects.requireNonNull(src); beginIO();
         int count = Math.min(src.remaining(), 8192);
+        if (count == 0) return 0;
         if (append) file.seek(file.size());
         if ((long) file.tell() + count > Integer.MAX_VALUE) throw new IOException("VFS file size exceeds supported integer range");
         byte[] bytes = new byte[count];
@@ -151,7 +160,7 @@ public class TFileChannel implements TSeekableByteChannel {
             TFileLock lock = LOCKS.get(i);
             if (lock.channel() == this) { lock.invalidate(); LOCKS.remove(i); }
         }
-        try { file.close(); }
+        try { if (owner != null) owner.close(); else file.close(); }
         finally { if (deleteOnClose && path.exists() && !path.delete()) throw new IOException("Cannot delete channel file"); }
     }
 }

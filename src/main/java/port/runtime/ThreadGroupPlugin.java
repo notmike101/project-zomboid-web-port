@@ -67,6 +67,16 @@ public final class ThreadGroupPlugin implements TeaVMPlugin {
             body.var(0, Thread.class).invokeSpecial("<init>", body.var(2, Runnable.class));
             body.invoke(ThreadGroupSupport.class, "assign", body.var(0, Thread.class), body.var(1, GROUP));
             body.exit();
+            descriptor = new MethodDescriptor("<init>", ThreadGroup.class, Runnable.class, String.class, void.class);
+            if (cls.getMethod(descriptor) != null) throw new IllegalStateException("Named thread group constructor already exists");
+            MethodHolder named = new MethodHolder(descriptor);
+            named.setLevel(AccessLevel.PUBLIC);
+            cls.addMethod(named);
+            body = ProgramEmitter.create(named, context.getHierarchy());
+            body.invoke(new MethodReference(java.util.Objects.class, "requireNonNull", Object.class, Object.class), body.var(3, String.class));
+            body.var(0, Thread.class).invokeSpecial("<init>", body.var(2, Runnable.class), body.var(3, String.class));
+            body.invoke(ThreadGroupSupport.class, "assign", body.var(0, Thread.class), body.var(1, GROUP));
+            body.exit();
             MethodHolder getter = new MethodHolder(new MethodDescriptor("getThreadGroup", ThreadGroup.class));
             if (cls.getMethod(getter.getDescriptor()) != null) throw new IllegalStateException("Thread group accessor already exists");
             getter.setLevel(AccessLevel.PUBLIC);

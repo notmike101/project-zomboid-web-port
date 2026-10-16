@@ -23,8 +23,7 @@ public final class ThreadGroupProbe {
             nested.start();
             try { nested.join(2000); } catch (InterruptedException failure) { throw new AssertionError(failure); }
             if (nested.getThreadGroup() == null) observed[1] |= 4;
-        });
-        worker.setName("group-worker");
+        }, "group-worker");
         if (worker.getThreadGroup() != child) throw new AssertionError("Explicit group absent before start");
         worker.start();
         worker.join(3000);
@@ -37,8 +36,10 @@ public final class ThreadGroupProbe {
         if (inherited.getThreadGroup() == current) validation |= 2;
         ThreadGroup nullableName = new ThreadGroup(root, null);
         if (nullableName.getName() == null && nullableName.getParent() == root) validation |= 4;
+        try { new Thread(child, () -> { }, null); throw new AssertionError("Null thread name accepted"); }
+        catch (NullPointerException expected) { validation |= 8; }
         inherited.start(); inherited.join(2000);
-        if (validation != 7) throw new AssertionError("Thread group validation differs");
+        if (validation != 15) throw new AssertionError("Thread group validation differs");
         StringBuilder json = new StringBuilder("{\"rule\":\"exact-raw-bits\",\"cases\":[");
         row(json, "hierarchy", hierarchy, root.getName().hashCode()); json.append(',');
         row(json, "explicit-worker", observed[0], worker.getName().hashCode()); json.append(',');

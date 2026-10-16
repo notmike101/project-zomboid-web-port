@@ -16,3 +16,4 @@ port.runtime.GenericMetadataPlugin
 port.runtime.ThreadGroupPlugin
 port.runtime.ManifestReflectionMetadata
 port.runtime.InflaterPlugin
+port.runtime.FileOutputChannelPlugin
