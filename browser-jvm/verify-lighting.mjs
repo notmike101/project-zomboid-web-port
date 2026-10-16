@@ -428,7 +428,7 @@ function verifyValidation() {
 
     stageValidationPlane(backend.methods, false);
     assert.throws(() => backend.methods.playerSet(-0.5, 1.5, 32, 1, 0,
-        false, false, false, false, 0, 20, Math.fround(-0.2)), /moving-player history/u);
+        false, false, false, false, 0, 20, Math.fround(-0.2)), /player outside qualified region/u);
     const afterFailure = new Int32Array(49);
 
     backend.methods.getSquareLighting(0, 1, 1, 32, afterFailure);

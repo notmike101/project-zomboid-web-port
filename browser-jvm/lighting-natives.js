@@ -393,10 +393,11 @@ export function createLightingNatives() {
                 ranges: new Map(state.deferred?.ranges ?? state.ranges),
                 playerPosition: state.deferred?.playerPosition, worldPlayer: state.deferred?.worldPlayer,
                 perception: state.deferred?.perception, sky: state.deferred?.sky,
+                sourceUpdate: state.deferred?.sourceUpdate,
             };
         },
         /**
-         * Accepts the original player input inside the qualified near-detection region.
+         * Stages one player's position and view while retaining computed visibility history.
          *
          * @param {number} x - World player X.
          * @param {number} y - World player Y.
@@ -419,13 +420,18 @@ export function createLightingNatives() {
 
             integer(z, 0, 63, 'player native level');
 
+            if (x < state.x * 8 || y < state.y * 8
+                || x >= (state.x + state.width) * 8 || y >= (state.y + state.height) * 8) {
+                unsupported('player outside qualified region');
+            }
+
             if (flagA !== false || flagB !== false || flagC !== false || flagD !== false
                 || fatigue !== 0 || range < 0 || range > 20 || cone < -1 || cone > 1) {
                 unsupported('player flags or perception');
             }
 
-            if (state.previousPlayer && (state.previousPlayer[0] !== x || state.previousPlayer[1] !== y || state.previousPlayer[2] !== z)) {
-                unsupported('moving-player history');
+            if (state.previousPlayer && state.previousPlayer[2] !== z) {
+                unsupported('moving-player level transition');
             }
 
             update.playerPosition = [x - state.x * 8, y - state.y * 8, z];
@@ -453,12 +459,13 @@ export function createLightingNatives() {
 
             if ([red, green, blue, ambient, night].some((value) => value < 0 || value > 1)
                 || view <= 0 || maximumView < view || maximumView > 256 || typeof cleared !== 'boolean'
-                || sourceUpdate !== 100) {
+                || ![0, 100].includes(sourceUpdate)) {
                 unsupported('ambient, sunlight or frame settings');
             }
 
             integer(sky, 0, 0xFF_FF_FF, 'skylight');
             update.sky = sky;
+            update.sourceUpdate = sourceUpdate;
 
             update.cleared = Boolean(update.cleared || cleared);
         },
@@ -727,13 +734,15 @@ export function createLightingNatives() {
          */
         stateEndUpdate() {
             const update = requireUpdate();
-            const { state, cells, chunks, player, ranges, perception, sky } = update;
+            const { state, cells, chunks, player, ranges, perception, sky, sourceUpdate } = update;
             const playerPosition = update.playerPosition ?? state.pending?.player;
             const cleared = update.cleared ?? state.pending?.cleared;
             const worldPlayer = update.worldPlayer ?? state.previousPlayer;
+            const pendingSourceUpdate = sourceUpdate ?? state.pending?.sourceUpdate;
 
             if (chunk || square || level !== null || cells.includes(undefined)
-                || !playerPosition || cleared === undefined || ranges.size === 0 || ranges.size > 9) {
+                || !playerPosition || cleared === undefined || pendingSourceUpdate === undefined
+                || ranges.size === 0 || ranges.size > 9) {
                 unsupported('incomplete region update');
             }
 
@@ -763,7 +772,14 @@ export function createLightingNatives() {
                 origin: [state.x * 8, state.y * 8, 0],
                 perception: perception ?? state.pending?.perception,
                 sky: sky ?? state.pending?.sky,
+                sourceUpdate: pendingSourceUpdate,
             };
+            const [playerX, playerY, playerZ] = playerPosition;
+            const playerIndex = playerZ * pending.width * pending.height + Math.floor(playerY) * pending.width + Math.floor(playerX);
+
+            if (cells[playerIndex] === null) {
+                unsupported('player on absent square');
+            }
 
             // Validate and calculate before committing any retained geometry or publication.
             const calculated = calculateRetainedLighting(pending);
@@ -775,6 +791,7 @@ export function createLightingNatives() {
                 state.deferred = {
                     cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
                     playerPosition, worldPlayer, perception: pending.perception, sky: pending.sky,
+                    sourceUpdate: pending.sourceUpdate,
                 };
                 active = null;
 
@@ -811,8 +828,13 @@ export function createLightingNatives() {
          * @param {boolean} dirty - Original global-light invalidation flag.
          */
         DoLightingUpdateNew(time, dirty) {
-            if (typeof time !== 'bigint' || time < 0n || dirty !== false) {
+            if (typeof time !== 'bigint' || time < 0n || typeof dirty !== 'boolean') {
                 unsupported('worker timestamp or global-light invalidation');
+            }
+
+            // Native 0x180009c30 uses global invalidation to request the full calculation at 0x180008650.
+            if (!dirty && [...states.values()].some((state) => state.pending && !state.workerReady && state.pending.sourceUpdate === 0)) {
+                unsupported('retained source update without global invalidation');
             }
 
             for (const state of states.values()) {
