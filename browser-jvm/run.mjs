@@ -459,6 +459,14 @@ try {
 
     if (graphicsProfile) {
         routes.set('/sprite-webgl.js', { file: path.join(source, 'sprite-webgl.js'), type: 'text/javascript' });
+        routes.set('/glsl-compat.js', { file: path.join(source, 'glsl-compat.js'), type: 'text/javascript' });
+
+        for (const name of ['index.js', 'error.js', 'ast/index.js', 'ast/ast.js', 'ast/visit.js', 'ast/ast-types.js', 'parser/index.js', 'parser/parser.js', 'parser/generator.js', 'parser/grammar.js', 'parser/scope.js', 'parser/utils.js']) {
+            const relative = `node_modules/@shaderfrog/glsl-parser/${name}`;
+
+            routes.set(`/${relative}`, { file: path.join(repository, relative), type: 'text/javascript' });
+        }
+
         routes.set('/sprite-view.jar', { file: path.join(output, 'sprite-view.jar'), type: 'application/java-archive' });
 
         if (!animationProfile) {

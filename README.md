@@ -19,7 +19,7 @@ The connected browser route is currently qualified on **Windows x64**.
 | Dependency | Requirement |
 |---|---|
 | Node.js | 22.13 or newer in the 22.x line, or 24 or newer; see the exact engine range in package.json |
-| npm packages | Install the committed lockfile with npm ci; includes playwright-core and the lint configuration |
+| npm packages | Install the committed lockfile with npm ci; includes playwright-core, ShaderFrog GLSL parser 7.0.1 and the lint configuration |
 | Project Zomboid installation | Matching projectzomboid.jar, media directory and installation-root jassimp64.dll |
 | JDK | Full JDK 25 with java, javac and jar; preparation uses its Class-File API |
 | Browser | A Chromium executable with WebGL2 support; Playwright Core does not install a browser automatically |
@@ -97,6 +97,8 @@ These are bounded qualifications, not independent claims that the complete game 
 
 The complete survival game, zombie population simulation, full Bullet dynamics, clothing composition, audio, menus, native saves and broad streaming are not qualified. The connected bootstrap loads all 1,004 vanilla script files, genuine clothing XML and the bounded loot/container Lua dependencies. This preserves original definition loading; complete game Lua, additional model/texture readiness and original object rendering remain separate work. Unsupported host operations fail explicitly.
 
+A separate original-renderer qualification now creates all eight original scene shader programs and renders 35 genuine non-floor map objects, including walls and furniture, with an observed 44,177-pixel contribution. That bounded check mounts five genuine depth images; the full 219-image initialization still reaches JNI exhaustion. The public walking session continues to present floors and the body while full depth loading and continuous object presentation are integrated.
+
 The original region worker belongs to the dedicated browser-JVM context lifetime because its original reset busy-waits without yielding. Closing the owned browser releases that runtime; same-JVM engine reset/reuse is not supported. Installed native saves are never mounted.
 
 Prepared assets and generated archives are private local outputs. Keep snapshots and manifests from the same preparation generation together, and do not rebuild a profile's output while another browser is serving that same directory.
@@ -107,7 +109,10 @@ Work continues on **main**. Use conventional commits, verify logical increments 
 
 ~~~powershell
 npm run lint
+node browser-jvm/verify-glsl-compat.mjs
 ~~~
+
+The shader qualification uses the `PZ_BROWSER` executable set above. It checks actual WebGL2 compilation and exact pixels with Chromium's SwiftShader backend, including overload selection, integer arithmetic, legacy color varyings and uniform-dependent global initialization across composed shader units. It does not establish physical-GPU or complete GLSL conformance.
 
 Lint runs ESLint with **--max-warnings 0**, using the actual @notmike101/eslint-config-js and @notmike101/eslint-config-jsdoc configurations. Authored Node, browser and inline HTML scripts are included. Package provenance is recorded in [vendor/eslint-configs/README.md](vendor/eslint-configs/README.md).
 

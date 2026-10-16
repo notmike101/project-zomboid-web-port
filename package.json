@@ -6,6 +6,7 @@
     "node": "^22.13.0 || >=24.0.0"
   },
   "dependencies": {
+    "@shaderfrog/glsl-parser": "7.0.1",
     "playwright-core": "1.61.1"
   },
   "devDependencies": {

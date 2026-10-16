@@ -1,3 +1,5 @@
+import { normalizeDesktopShader } from './glsl-compat.js';
+
 /**
  * Resolves an owned graphics handle and rejects foreign handles.
  *
@@ -199,16 +201,6 @@ export function createSpriteNatives(canvas, report) {
 
             return `${declaration};`;
         });
-        // Desktop GLSL accepts these implicit scalar conversions; ES requires explicit float literals.
-        source = source.replaceAll(/\(clip\s*\*\s*2\)\s*-\s*1\b/g, '(clip*2.0)-1.0');
-
-        // ES reserves builtin names even when desktop GLSL supplies custom overloads.
-        for (const name of ['max', 'min', 'clamp']) {
-            if (new RegExp(`\\b(?:float|vec[234])\\s+${name}\\s*\\(`).test(source)) {
-                source = source.replaceAll(new RegExp(`\\b${name}\\s*\\(`, 'g'), `portDesktop_${name}(`);
-            }
-        }
-
         source = source.replaceAll(/\btexture2D\b/g, 'texture');
 
         if (legacy) {
@@ -679,7 +671,7 @@ export function createSpriteNatives(canvas, report) {
             const source = translate(id, String(text));
 
             shaderSources.set(id, source);
-            gl.shaderSource(object(shaders, id), source);
+            gl.shaderSource(object(shaders, id), normalizeDesktopShader(source, shaderTypes.get(id) === gl.VERTEX_SHADER ? 'vertex' : 'fragment'));
         },
         /**
          * Executes the selected glCompileShader operation against the actual WebGL context.
@@ -807,17 +799,9 @@ export function createSpriteNatives(canvas, report) {
 
                 if (sources.length > 1) {
                     source = `#version 300 es\nprecision highp float;\nprecision highp int;\n${source.replaceAll(/^\s*#version[^\n]*$/gm, '').replaceAll(/^\s*precision\s+highp\s+(float|int)\s*;/gm, '')}`;
-
-                    for (const name of ['max', 'min', 'clamp']) {
-                        if (source.includes(`portDesktop_${name}(`)) {
-                            source = source.replaceAll(new RegExp(`\\b${name}\\s*\\(`, 'g'), `portDesktop_${name}(`);
-                        }
-                    }
                 }
 
-                if (source.includes('portDesktop_min(')) {
-                    source = source.replace(/(precision highp int;)/, '$1\nfloat portDesktop_min(float a,float b);');
-                }
+                source = normalizeDesktopShader(source, type === gl.VERTEX_SHADER ? 'vertex' : 'fragment');
 
                 const shader = gl.createShader(type);
 
