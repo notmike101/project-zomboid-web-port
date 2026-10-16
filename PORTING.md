@@ -6,6 +6,8 @@ The production indoor lighting backend now has a reproducible original-DLL/brows
 
 Pending main-thread updates and worker completion during an active draft now match the native protocol across 38 additional lines. Keep the separate deferred-write, worker and published buffers, including worker-time inheritance of dirty readback bytes. Changed vision without LOS-cache invalidation rejects until its native cached behavior is ported. Use the actual normal RenderSettings and LightingThread update order for the next world-input qualification.
 
+That normal caller now reaches a concrete boundary after four world frames and real RenderSettings.update: checkLights registers four level32 lamps, then its fifth lamp is at native level33 (world floor1). Port genuine vertical lighting; do not drop it, clamp its level or mistake the per-square result-light cap for the total registered-light count. The JNI adapter now throws real Java exceptions on unsupported inputs so original catch/finally cleanup can run; the previous raw JavaScript error stopped the Java thread. Fresh frozen-SDK browser qualification preserves all five native protocols and checks both Java exception types and cleanup.
+
 ## Full installed media discovery
 
 The lazy media service removes the prepared-file whitelist as a filesystem discovery limit. In a separate fresh browser JVM with `user.dir=/app`, original `ZomboidFileSystem.init()` discovers 47,437 active paths through the real installed tree. Original script access returns matching bytes; 47,416 byte-served source files and the installed JAR retain their hashes after the run. Directory metadata is generated in server memory, and canonical-path containment prevents traversal or external-junction reads.

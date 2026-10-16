@@ -487,15 +487,31 @@ try {
     await command('jar', ['--create', '--file', archive, '-C', classes, 'LightingQualification.class']);
     evidence.before[archive] = await hashFile(archive);
 
-    await Promise.all(modes.map(async (mode) => {
+    const nativeResults = await Promise.allSettled(modes.map(async (mode) => {
         const args = ['-cp', `${classes};${gameJar}`, 'LightingQualification', nativeLibrary, mode, fixture];
-        const [first, repeated] = await Promise.all([command('java', args), command('java', args)]);
+        const runs = await Promise.allSettled([command('java', args), command('java', args)]);
 
-        assert.equal(first, repeated, `fresh native JVM determinism: ${mode}`);
+        for (const result of runs) {
+            assert.equal(result.status, 'fulfilled', String(result.reason));
+        }
+
+        const [first, repeated] = runs.map((result) => result.value);
+
+        await writeFile(path.join(output, `native-${mode}.txt`), first);
+        await writeFile(path.join(output, `native-${mode}-repeated.txt`), repeated);
+        const originalLines = first.split(/\r?\n/u);
+        const repeatedLines = repeated.split(/\r?\n/u);
+        const difference = originalLines.findIndex((line, index) => line !== repeatedLines[index]);
+
+        assert.ok(first === repeated, `fresh native JVM determinism: ${mode}, line ${difference + 1}: `
+        + `${originalLines[difference]} versus ${repeatedLines[difference]}`);
         evidence.native[mode] = { deterministic: true, lines: referenceLines(first) };
         assert.equal(evidence.native[mode].lines.length, expectedLines[mode]);
-        await writeFile(path.join(output, `native-${mode}.txt`), first);
     }));
+
+    for (const result of nativeResults) {
+        assert.equal(result.status, 'fulfilled', String(result.reason));
+    }
 
     let compared = 0;
     const predictions = new Map(scenes.map((scene) => [scene.name, calculateLighting(scene)]));
@@ -657,6 +673,7 @@ try {
         evidence.browser[mode] = { result, lines: actual, logs };
         assert.equal(result.pass, true, result.error);
         assert.equal(result.originalInitialization, true);
+        assert.equal(result.javaFailureCleanup, true);
         assert.deepEqual(actual, evidence.native[mode].lines, `browser/native ${mode}`);
         await context.close();
     }

@@ -266,6 +266,28 @@ public final class LightingQualification {
         }
     }
 
+    private static void verifyJavaFailures() {
+        boolean unsupportedCaught = false, lifecycleCaught = false;
+        int cleanup = 0;
+        try {
+            LightingJNI.scrollLeft(0);
+        } catch (UnsupportedOperationException expected) {
+            unsupportedCaught = expected.getMessage().equals("Unsupported lighting boundary: scrollLeft");
+        } finally {
+            cleanup++;
+        }
+        try {
+            LightingJNI.stateEndUpdate();
+        } catch (IllegalStateException expected) {
+            lifecycleCaught = expected.getMessage().equals("LightingJNI: missing stateBeginUpdate");
+        } finally {
+            cleanup++;
+        }
+        if (!unsupportedCaught || !lifecycleCaught || cleanup != 2) {
+            throw new AssertionError("native failure did not preserve Java catch/finally");
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         boolean browser = args[0].equals("browser");
         if (!browser) {
@@ -289,6 +311,7 @@ public final class LightingQualification {
             if (!LightingJNI.init || !Arrays.equals((int[]) field.get(null), new int[]{-1, -1, -1, -1})) {
                 throw new AssertionError("original lighting initialization did not complete");
             }
+            verifyJavaFailures();
         }
         if (args[1].equals("general")) {
             general(args[2]);
@@ -302,7 +325,7 @@ public final class LightingQualification {
             throw new IllegalArgumentException("unknown qualification mode");
         }
         if (browser) {
-            report("{\"pass\":true,\"originalInitialization\":true}");
+            report("{\"pass\":true,\"originalInitialization\":true,\"javaFailureCleanup\":true}");
         } else {
             System.out.println("PASS lighting qualification " + args[1]);
         }

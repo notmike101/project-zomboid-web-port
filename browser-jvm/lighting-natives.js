@@ -11,6 +11,20 @@ function unsupported(reason) {
 }
 
 /**
+ * Returns a real Java failure so the original caller can catch it and clean up.
+ *
+ * @param {object} lib - Calling Java library namespace.
+ * @param {Error} error - Explicit unsupported boundary or protocol failure.
+ * @returns {Promise<never>} Rejected with the corresponding Java exception.
+ */
+async function throwJavaFailure(lib, error) {
+    const name = error instanceof RangeError ? 'UnsupportedOperationException' : 'IllegalStateException';
+    const Exception = await lib.java.lang[name];
+
+    throw await new Exception(error.message);
+}
+
+/**
  * Validates one bounded integer before mutating backend state.
  *
  * @param {number} value - Native integer argument.
@@ -710,7 +724,13 @@ export function createLightingNatives() {
 
     const natives = Object.fromEntries(Object.entries(methods).map(([name, method]) => [
         `Java_zombie_iso_LightingJNI_${name}`,
-        (lib, ...args) => method(...args),
+        (lib, ...args) => {
+            try {
+                return method(...args);
+            } catch (error) {
+                return throwJavaFailure(lib, error);
+            }
+        },
     ]));
 
     return {

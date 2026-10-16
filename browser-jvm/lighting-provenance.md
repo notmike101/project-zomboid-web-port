@@ -31,6 +31,8 @@ The payload is the original49-int format: visibility bits; packed center RGB; da
 
 The main write queue and worker buffer remain separate when a second update arrives before the worker finishes. Deferred geometry accumulates, and the worker can complete while another main-thread draft is open. Native ready chunks inherit readback dirty bytes at worker time before marking changed payloads or submitted geometry. Consequently, consuming a dirty bit before versus after the worker can change the next publication's dirty state even when lighting values match. The service preserves that ordering. Diagnostics retain only the last completed update and clear it on destroy.
 
+At the JNI boundary, unsupported inputs reject with a real Java `UnsupportedOperationException`; invalid protocol state rejects with `IllegalStateException`. Successful native calls retain their synchronous fast path. A raw JavaScript exception would stop the CheerpJ Java thread before its catch/finally blocks, so the adapter constructs and throws the actual Java exception through the calling library. The browser qualification requires both Java catch clauses and finally cleanup to run before the normal native comparisons.
+
 ## Qualified scope and explicit rejection
 
 The native service accepts one player, a fixed rectangular region of complete8x8 chunks, flat level32, indoor squares, opaque directional geometry, no rooms/buildings, and at most five static point lights inside the region. It retains unchanged chunks when original Java stops submitting geometry and accepts selective changed-chunk updates. Previously seen squares remain seen after an opaque geometry change.
