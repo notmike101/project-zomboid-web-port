@@ -9,7 +9,6 @@ import {chromium} from 'playwright-core';
 
 const source = fileURLToPath(new URL('./', import.meta.url));
 const repository = path.resolve(source, '..');
-const output = path.join(repository, 'target', 'browser-jvm');
 const names = new Set(['game-jar', 'media-root', 'jdk', 'browser', 'profile']);
 const options = {};
 for (let i = 2; i < process.argv.length; i += 2) {
@@ -22,6 +21,7 @@ if (!['game-jar','media-root','jdk','browser'].every(name => options[name]))
   throw new Error('Required: --game-jar PATH --media-root PATH --jdk JDK25_DIRECTORY --browser CHROMIUM_EXECUTABLE');
 const profile = options.profile || 'graphics';
 if (!['graphics','lua','input','sprite','world','character-shader'].includes(profile)) throw new Error('Profile must be graphics, lua, input, sprite, world or character-shader');
+const output = path.join(repository, 'target', 'browser-jvm', profile);
 
 const classes = path.join(output, 'classes');
 const tools = path.join(output, 'tools');
@@ -268,6 +268,7 @@ try {
   console.log(JSON.stringify({...evidence, requests: requests.length, logs: logs.length, resultFile: path.join(output, 'result.json')}, null, 2));
   if (!evidence.pass) process.exitCode = 1;
 }
+
 
 
 

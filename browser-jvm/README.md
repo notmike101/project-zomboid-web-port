@@ -23,7 +23,7 @@ Two additional third-party host boundaries are adapted for this route:
 
 `PrepareRuntime.java` preserves original game class bytes from the header-only load view. Its only new vendor changes are the Kahlua call boundary, the two vendor buffer allocation calls and the explicit gamepad value facade. The existing graphics adaptations remain available in the same runtime view. The build briefly uses an authored native declaration solely to compile the entry's reference to the getter helper; the generated real getter implementation replaces it before any browser execution. No installed class initializes during preparation.
 
-All generated classes, private archive copies and logs are written under `target/browser-jvm/`. `result.json` contains the pass/fail outcome, original archive/PNG hashes before and after, generated archive hash, browser requests and cleanup status. `class-manifest.json` records every original class's original/view SHA256, class-file versions and exact selected vendor method adaptations. `build.json` records compiler/preparation results. A failed run exits with a nonzero status.
+Each profile uses its own output directory so rebuilding another profile cannot change archive bytes during browser range requests. All generated classes, private archive copies and logs are written under `target/browser-jvm/<profile>/`. `result.json` contains the pass/fail outcome, original archive/PNG hashes before and after, generated archive hash, browser requests and cleanup status. `class-manifest.json` records every original class's original/view SHA256, class-file versions and exact selected vendor method adaptations. `build.json` records compiler/preparation results. A failed run exits with a nonzero status.
 
 Before writing, the runner rejects prerequisites inside generated output, resolves existing path aliases and checks that output destinations stay within the workspace target directory. The preparation tool independently rejects an input/output archive alias, including `Files.isSameFile` aliases. Shader/program integer queries are qualified only for compile/link status; other enums explicitly fail rather than returning a misleading zero.
 
@@ -55,4 +55,5 @@ Use --profile world for actual original IsoCell/IsoPlayer construction, 92 loade
 
 
 Use --profile character-shader to load the original basicEffect skinning shader, verify UVScale and actual matrix-palette upload (two matrices including off-diagonal transpose checks). The runtime qualifies real color/depth FBO completeness before exposing its bounded ARB framebuffer facade. Desktop shader units are composed into one actual WebGL stage at link; individual library-unit compile failures remain visible, while the complete composed stages, link and validation must succeed. The installed shader files are unchanged. Actual skinned mesh drawing is not yet qualified.
+
 
