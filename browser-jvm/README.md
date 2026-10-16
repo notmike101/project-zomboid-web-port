@@ -142,3 +142,24 @@ node browser-jvm/verify-unsafe-short.mjs
 ```
 
 Use your local dependency paths. This gate compares 140 primitive rows and 26 original UTF/table rows exactly against the JVM: heap/direct buffers, alignment, byte order, negative values, character writes, slices, bounds/read-only/overflow behavior, actual Unsafe short-array/Java-field delegation, and null/empty/Unicode/astral/embedded-NUL strings. It also checks idempotence, wrapper replacement rejection and unchanged inputs. It runs authored data-only qualifiers; it does not start the installed game or server.
+
+## SQLite host service
+
+Install the locked npm dependencies and prepare the public play SDK first. This independent qualification snapshots its nine explicitly ordered prepared SDK archives from `target/browser-jvm/play`, then uses only `target/browser-jvm/sqlite` for its authored entry, copied inputs and owned browser profile. Do not rebuild the play profile during that initial snapshot. The Windows native comparison extracts the original bundled sqlitejdbc.dll into the qualification output; it does not start the installed game/server or use native saves.
+
+Run from the repository root, substituting your actual dependency paths:
+
+```powershell
+$env:PZ_JDK = 'D:/zomboid-web-2/.tools/jdk-25.0.1+8'
+$env:PZ_BROWSER = 'C:/Users/me/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe'
+$env:PZ_GAME_JAR = 'C:/Games/steam/steamapps/common/ProjectZomboid/projectzomboid.jar'
+node browser-jvm/verify-sqlite.mjs
+```
+
+The exact dependency is `@sqlite.org/sqlite-wasm@3.48.0-build4`; its generated engine/WASM stay in ignored node_modules. The verifier enforces the known engine JS/WASM hashes. The backend itself checks SQLite 3.48.0 and the real exports it requires. Original JDBC loading uses explicit org.sqlite.lib.path/lib.name properties and the real sqlitejdbc.js module. No game or JDBC method body is replaced.
+
+Five fresh-VM phases test original JDBC bindings/transactions, original AccountDBHelper CRUD, authorization and publication-failure cleanup, a persistent AccountDB writer, then a reader after complete Chromium closure at the same origin/profile. The unchanged native JVM driver independently checks integrity and exact nonempty server/account payloads in both final images. Signed 64-bit values, Unicode/embedded NUL, blobs/null, generated keys, rollback and actual SQLite errors are covered. The boundary phase requires real Java exceptions/finally for rejected READONLY, OPEN_MEMORY, SHAREDCACHE and WAL-format inputs, preserving image bytes and receiver ownership. Every phase requires zero open databases/statements, WASM working files, Java receiver identities and pending failures, plus unchanged inputs, zero denied requests and browser/server cleanup. Evidence is written to `target/browser-jvm/sqlite/result.json`.
+
+The service admits only flags 70, the original READWRITE | CREATE | OPEN_URI default, and ordinary trusted paths inside an explicitly configured browser-owned cache root. URI/memory paths and other flag combinations reject. SQLite header read/write version 2 rejects before import because no WAL sidecar is imported; checkpoint the source database first. ATTACH/DETACH, WAL selection, extension loading and unqualified directory-changing PRAGMAs also reject. All 61 NativeDB JNI names are registered; unimplemented methods throw real Java UnsupportedOperationException. Backup/restore, user-defined functions/collations, progress/listener callbacks and general SQLite JNI coverage remain unqualified.
+
+A required real Web Lock is acquired before Java VM initialization and held for the entire browsing context. Missing Web Locks, another owning VM/tab and late acquisition reject; concurrent leases for the same Java filepath also reject. Atomic publication uses the same Java database path and verifies the previous image before replacement. Publication failure preserves the external target, poisons subsequent queries and retains real cleanup. This is a trusted-original-URL, single-VM service: the original driver can create/delete a file before NativeDB._open, so the backend is not a filesystem sandbox for arbitrary JDBC URLs. Runtime force(true) logs unfinished fsync; graceful fresh-browser persistence is qualified, crash/power-loss durability is not. The package is not installed by public play yet, and these service checks do not qualify the complete menu.

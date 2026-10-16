@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@shaderfrog/glsl-parser": "7.0.1",
+    "@sqlite.org/sqlite-wasm": "3.48.0-build4",
     "playwright-core": "1.61.1"
   },
   "devDependencies": {
