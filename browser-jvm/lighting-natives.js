@@ -1,5 +1,10 @@
 import { calculateLighting } from './lighting-kernel.js';
 
+/** Native argument failure that original Java callers can catch without losing cleanup. */
+class NativeArgumentError extends Error {
+    name = 'NativeArgumentError';
+}
+
 /**
  * Rejects host inputs outside the genuine native-reference closure.
  *
@@ -18,7 +23,14 @@ function unsupported(reason) {
  * @returns {Promise<never>} Rejected with the corresponding Java exception.
  */
 async function throwJavaFailure(lib, error) {
-    const name = error instanceof RangeError ? 'UnsupportedOperationException' : 'IllegalStateException';
+    let name = 'IllegalStateException';
+
+    if (error instanceof NativeArgumentError) {
+        name = 'IllegalArgumentException';
+    } else if (error instanceof RangeError) {
+        name = 'UnsupportedOperationException';
+    }
+
     const Exception = await lib.java.lang[name];
 
     throw await new Exception(error.message);
@@ -135,7 +147,84 @@ function restoreCoordinates(state, output) {
 }
 
 /**
- * Creates a native lighting service for the qualified indoor opaque closure.
+ * Calculates only the actual loaded level span while retaining the native64-level indices.
+ * Sparse region slots remain absent and are never exposed as invented square payloads.
+ *
+ * @param {object} scene - Staged native region.
+ * @returns {number[][]} Owned64-level payload array with explicit absent slots.
+ */
+function calculateRetainedLighting(scene) {
+    const plane = scene.width * scene.height;
+    let minimum = 64;
+    let maximum = -1;
+
+    for (let index = 0; index < scene.cells.length; index++) {
+        if (scene.cells[index] !== null) {
+            const z = Math.floor(index / plane);
+
+            minimum = Math.min(minimum, z);
+            maximum = Math.max(maximum, z);
+        }
+    }
+
+    if (maximum < minimum) {
+        unsupported('empty geometry');
+    }
+
+    const compact = calculateLighting({
+        ...scene, minimum, maximum, cells: scene.cells.slice(minimum * plane, (maximum + 1) * plane),
+        seen: scene.seen?.slice(minimum * plane, (maximum + 1) * plane),
+    });
+    const output = Array.from({ length: scene.cells.length }, () => null);
+
+    for (const [index, element] of compact.entries()) {
+        output[minimum * plane + index] = element;
+    }
+
+    return output;
+}
+
+/**
+ * Builds native0x41a0's LOS-visible room set using its unsigned64-bit tree ordering.
+ *
+ * @param {object[]} cells - Geometry belonging to the computed buffer.
+ * @param {number[][]} payloads - Completed worker payloads.
+ * @returns {bigint[]} Ordered native room identifiers.
+ */
+function visibleRooms(cells, payloads) {
+    const identifiers = new Set();
+
+    for (const [index, payload] of payloads.entries()) {
+        if (payload?.[0] & 4) {
+            const room = BigInt(cells[index].room ?? -1);
+
+            if (room !== -1n) {
+                identifiers.add(room);
+            }
+        }
+    }
+
+    return [...identifiers].sort((first, second) => BigInt.asUintN(64, first) < BigInt.asUintN(64, second) ? -1 : 1);
+}
+
+/**
+ * Detects geometry that changes native cached rays, including newly admitted objects.
+ *
+ * @param {object[]} cells - Staged geometry.
+ * @param {object[]} previous - Retained geometry.
+ * @returns {boolean} Whether LOS invalidation is required.
+ */
+function visionChanged(cells, previous) {
+    return cells.some((cell, index) => {
+        const old = previous[index];
+
+        return cell !== old && (cell?.vision !== old?.vision || cell?.stairs !== old?.stairs
+            || JSON.stringify(cell?.objects ?? []) !== JSON.stringify(old?.objects ?? []));
+    });
+}
+
+/**
+ * Creates a native lighting service for the qualified static sparse-world closure.
  * Registration does not load a library or change original LightingJNI.init fields.
  * See lighting-provenance.md for evidence and unsupported engine boundaries.
  *
@@ -162,6 +251,28 @@ export function createLightingNatives() {
         }
 
         return active;
+    }
+
+    /**
+     * Stages an admitted native object without changing published geometry.
+     *
+     * @param {string} type - Original native method name.
+     * @param {Array<number|boolean>} args - Literal original arguments.
+     */
+    function stageObject(type, args) {
+        if (!square || square.mask === undefined) {
+            unsupported('object square lifecycle');
+        }
+
+        const curtain = type === 'squareAddCurtain';
+
+        if ((curtain && (![4, 8].includes(args[0]) || args[1] !== true))
+            || (!curtain && (typeof args[0] !== 'boolean' || args[1] !== false || args[2] !== false))) {
+            unsupported(`${type} state`);
+        }
+
+        square.objects ??= [];
+        square.objects.push({ type, args: [...args] });
     }
 
     /**
@@ -249,8 +360,8 @@ export function createLightingNatives() {
 
             integer(x, 0, 65_535, 'region X');
             integer(y, 0, 65_535, 'region Y');
-            integer(width, 1, 3, 'region width');
-            integer(height, 1, 3, 'region height');
+            integer(width, 1, 13, 'region width');
+            integer(height, 1, 13, 'region height');
 
             let state = playerState(player);
 
@@ -280,6 +391,8 @@ export function createLightingNatives() {
             active = {
                 state, player, cells, chunks: new Set(state.deferred?.chunks), cleared: state.deferred?.cleared,
                 ranges: new Map(state.deferred?.ranges ?? state.ranges),
+                playerPosition: state.deferred?.playerPosition, worldPlayer: state.deferred?.worldPlayer,
+                perception: state.deferred?.perception, sky: state.deferred?.sky,
             };
         },
         /**
@@ -307,7 +420,7 @@ export function createLightingNatives() {
             integer(z, 0, 63, 'player native level');
 
             if (flagA !== false || flagB !== false || flagC !== false || flagD !== false
-                || fatigue !== 0 || range !== 20 || Math.fround(cone) !== Math.fround(-0.2)) {
+                || fatigue !== 0 || range < 0 || range > 20 || cone < -1 || cone > 1) {
                 unsupported('player flags or perception');
             }
 
@@ -317,6 +430,7 @@ export function createLightingNatives() {
 
             update.playerPosition = [x - state.x * 8, y - state.y * 8, z];
             update.worldPlayer = [x, y, z];
+            update.perception = { directionX, directionY, range, fatigue, cone };
         },
         /**
          * Stages original frame settings and LOS invalidation.
@@ -337,11 +451,14 @@ export function createLightingNatives() {
 
             finite([red, green, blue, ambient, night, view, maximumView, sourceUpdate, sky], 'frame input');
 
-            if (red !== 1 || green !== 1 || blue !== 1 || Math.fround(ambient) !== Math.fround(0.1)
-                || night !== 1 || view !== 20 || maximumView !== 20 || typeof cleared !== 'boolean'
-                || sourceUpdate !== 100 || sky !== 0) {
+            if ([red, green, blue, ambient, night].some((value) => value < 0 || value > 1)
+                || view <= 0 || maximumView < view || maximumView > 256 || typeof cleared !== 'boolean'
+                || sourceUpdate !== 100) {
                 unsupported('ambient, sunlight or frame settings');
             }
+
+            integer(sky, 0, 0xFF_FF_FF, 'skylight');
+            update.sky = sky;
 
             update.cleared = Boolean(update.cleared || cleared);
         },
@@ -426,25 +543,56 @@ export function createLightingNatives() {
 
             integer(mask, 0, 255, 'flat adjacency');
             integer(vision, 0, 0x7_FF_FF_FF, 'vision matrix');
+            integer(lightLevel, 0, 0xFF_FF_FF, 'square ambient');
 
             if (typeof up !== 'boolean' || typeof down !== 'boolean' || typeof stairs !== 'boolean'
-                || building !== -1n || room !== -1n || lightLevel !== 0 || openAir !== false) {
+                || typeof building !== 'bigint' || typeof room !== 'bigint' || typeof openAir !== 'boolean') {
                 unsupported('vertical flags, rooms, buildings, ambient or outdoors');
             }
 
-            Object.assign(square, { mask, vision, up, down, stairs });
+            // Retain the JNI input for diagnostics; native worker 0x180008650 resets lightLevel before seeding ambient.
+            Object.assign(square, { mask, vision, up, down, stairs, building, room, lightLevel, openAir });
         },
         /**
-         * Admits only the original no-object opaque-edge transmission tuples.
+         * Stages the native four RGB/transmission/coefficient endpoint tuples.
          *
          * @param {...number} values - Four original RGB/transmission/coefficient tuples.
          */
         squareSetLightTransmission(...values) {
-            if (!square || values.length !== 20 || values.some((value, index) => value !== Number(index % 5 < 3))) {
+            if (!square || values.length !== 20 || values.some((value) => !Number.isFinite(value) || value < 0 || value > 1)) {
                 unsupported('colored or translucent edges');
             }
 
-            square.transmission = true;
+            square.transmission = [...values];
+        },
+        /**
+         * Stages an original open curtain in its qualified north or west orientation.
+         *
+         * @param {number} mask - Original curtain attachment bits.
+         * @param {boolean} open - Original open flag.
+         */
+        squareAddCurtain(mask, open) {
+            stageObject('squareAddCurtain', [mask, open]);
+        },
+        /**
+         * Stages an original closed door and its actual ray-blocking plane.
+         *
+         * @param {boolean} north - Original north-facing flag.
+         * @param {boolean} open - Original open flag.
+         * @param {boolean} transparent - Original transparent-door flag.
+         */
+        squareAddDoor(north, open, transparent) {
+            stageObject('squareAddDoor', [north, open, transparent]);
+        },
+        /**
+         * Stages an original intact unbarricaded window.
+         *
+         * @param {boolean} north - Original north-facing flag.
+         * @param {boolean} open - Original open flag.
+         * @param {boolean} opaque - Original visibility-blocking flag.
+         */
+        squareAddWindow(north, open, opaque) {
+            stageObject('squareAddWindow', [north, open, opaque]);
         },
         /**
          * Commits one validated square only to the staged update.
@@ -459,7 +607,12 @@ export function createLightingNatives() {
             const index = square.z * state.width * state.height * 64
                 + (square.y - state.y * 8) * state.width * 8 + square.x - state.x * 8;
 
-            cells[index] = { mask: square.mask, vision: square.vision, up: square.up, down: square.down, stairs: square.stairs };
+            cells[index] = {
+                mask: square.mask, vision: square.vision, up: square.up, down: square.down, stairs: square.stairs,
+                building: square.building, room: square.room === -1n ? -1 : square.room,
+                lightLevel: square.lightLevel, openAir: square.openAir,
+                transmission: square.transmission, objects: square.objects ?? [],
+            };
             square = null;
         },
         /**
@@ -574,10 +727,13 @@ export function createLightingNatives() {
          */
         stateEndUpdate() {
             const update = requireUpdate();
-            const { state, cells, playerPosition, cleared, chunks, worldPlayer, player, ranges } = update;
+            const { state, cells, chunks, player, ranges, perception, sky } = update;
+            const playerPosition = update.playerPosition ?? state.pending?.player;
+            const cleared = update.cleared ?? state.pending?.cleared;
+            const worldPlayer = update.worldPlayer ?? state.previousPlayer;
 
             if (chunk || square || level !== null || cells.includes(undefined)
-                || !playerPosition || cleared === undefined || ranges.size !== state.width * state.height) {
+                || !playerPosition || cleared === undefined || ranges.size === 0 || ranges.size > 9) {
                 unsupported('incomplete region update');
             }
 
@@ -588,7 +744,7 @@ export function createLightingNatives() {
                 }
             }
 
-            if (!cleared && state.cells && cells.some((cell, index) => cell?.vision !== state.cells[index]?.vision)) {
+            if (!cleared && state.cells && visionChanged(cells, state.cells)) {
                 unsupported('changed vision geometry without LOS invalidation');
             }
 
@@ -605,16 +761,21 @@ export function createLightingNatives() {
                 player: playerPosition, seen: state.computed?.map((payload) => Boolean(payload?.[0] & 1)),
                 lights: sceneLights, cleared, submitted: new Set(chunks),
                 origin: [state.x * 8, state.y * 8, 0],
+                perception: perception ?? state.pending?.perception,
+                sky: sky ?? state.pending?.sky,
             };
 
             // Validate and calculate before committing any retained geometry or publication.
-            const calculated = calculateLighting(pending);
+            const calculated = calculateRetainedLighting(pending);
 
             restoreCoordinates(state, calculated);
 
             // The native write queue accumulates while its separate worker buffer is pending.
             if (state.pending && !state.workerReady) {
-                state.deferred = { cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared };
+                state.deferred = {
+                    cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
+                    playerPosition, worldPlayer, perception: pending.perception, sky: pending.sky,
+                };
                 active = null;
 
                 return;
@@ -624,6 +785,7 @@ export function createLightingNatives() {
                 // Native0xea50 swaps dirty-map buffers; unread old readback flags become the next worker buffer.
                 state.recycledChunkDirty = new Set(state.chunkDirty);
                 state.published = state.computed;
+                state.publishedRooms = state.computedRooms;
                 state.counter++;
                 state.squareDirty = new Set(state.computedSquareDirty);
                 state.chunkDirty = new Set(state.computedChunkDirty);
@@ -658,6 +820,7 @@ export function createLightingNatives() {
                     const previous = state.computed;
 
                     state.computed = state.pendingResult;
+                    state.computedRooms = visibleRooms(state.pending.cells, state.computed);
                     const changed = changedSquares(state, previous, state.computed, state.pending.submitted);
 
                     // Native ready chunks inherit readback dirty bytes at worker time, before marking changes.
@@ -767,6 +930,37 @@ export function createLightingNatives() {
             return true;
         },
         /**
+         * Reads the room count belonging to the actual published worker buffer.
+         *
+         * @param {number} player - Original player index.
+         * @returns {number} Number of published LOS-visible rooms.
+         */
+        getVisibleRoomCount(player) {
+            return playerState(player)?.publishedRooms?.length ?? 0;
+        },
+        /**
+         * Copies native unsigned-tree room order while preserving the Java array tail.
+         *
+         * @param {number} player - Original player index.
+         * @param {BigInt64Array} output - Original Java long-array storage.
+         * @returns {number} Number of copied room identifiers.
+         */
+        getVisibleRooms(player, output) {
+            const rooms = playerState(player)?.publishedRooms ?? [];
+
+            if (!(output instanceof BigInt64Array)) {
+                unsupported('Java long output storage');
+            }
+
+            if (output.length < rooms.length) {
+                throw new NativeArgumentError('output array is too small');
+            }
+
+            output.set(rooms);
+
+            return rooms.length;
+        },
+        /**
          * Releases all backend-owned state without modifying the original Java classes.
          */
         destroy() {
@@ -782,9 +976,9 @@ export function createLightingNatives() {
 
     for (const name of [
         'scrollLeft', 'scrollRight', 'scrollUp', 'scrollDown', 'teleport',
-        'squareAddCurtain', 'squareAddDoor', 'squareAddThumpable', 'squareAddWindow',
+        'squareAddThumpable',
         'addTempLight', 'removeLight', 'setLightActive', 'addRoomLight', 'removeRoomLight',
-        'setRoomLightActive', 'updateTorch', 'removeTorch', 'getVisibleRoomCount', 'getVisibleRooms',
+        'setRoomLightActive', 'updateTorch', 'removeTorch',
         'getVertLight', 'getLightInfo', 'getDarkMulti', 'getTargetDarkMulti', 'getSeen', 'getCanSee', 'getCouldSee',
     ]) {
         /**

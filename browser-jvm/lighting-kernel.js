@@ -1,5 +1,6 @@
 const directions = [[0, -1, 0], [-1, -1, 0], [-1, 0, 0], [-1, 1, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0], [1, -1, 0], [0, 0, 1], [0, 0, -1]];
 const propagationOrder = [2, 6, 0, 4, 1, 7, 5, 3, 8, 9];
+const transmissionOffsets = [5, -1, 0, -1, 15, -1, 10, -1];
 const cornerNeighbors = [
     [[1, 2], [0, 3], [2, 1]],
     [[7, 3], [0, 2], [6, 0]],
@@ -32,6 +33,86 @@ function integer(value, minimum, maximum, name) {
 }
 
 /**
+ * Validates world metadata and the object states exercised by the native references.
+ *
+ * @param {object} cell - One present square.
+ */
+function validateWorldSquare(cell) {
+    for (const identifier of [cell.room, cell.building]) {
+        if (identifier !== undefined && typeof identifier !== 'bigint' && !Number.isSafeInteger(identifier)) {
+            unsupported('square room or building identifier');
+        }
+    }
+
+    if (cell.openAir !== undefined && typeof cell.openAir !== 'boolean') {
+        unsupported('outdoor square flag');
+    }
+
+    if (cell.transmission !== undefined && (!Array.isArray(cell.transmission) || cell.transmission.length !== 20
+        || Array.from(cell.transmission).some((value) => !Number.isFinite(value) || value < 0 || value > 1))) {
+        unsupported('square transmission');
+    }
+
+    if (cell.objects !== undefined && !Array.isArray(cell.objects)) {
+        unsupported('square object list');
+    }
+
+    for (const object of cell.objects ?? []) {
+        if (!object || typeof object !== 'object') {
+            unsupported('square object');
+        }
+
+        const { type, args } = object;
+
+        if (type === 'squareAddCurtain') {
+            if (!Array.isArray(args) || args.length !== 2 || ![4, 8].includes(args[0]) || args[1] !== true) {
+                unsupported('curtain state');
+            }
+        } else if (type === 'squareAddDoor' || type === 'squareAddWindow') {
+            if (!Array.isArray(args) || args.length !== 3 || typeof args[0] !== 'boolean'
+                || args[1] !== false || args[2] !== false) {
+                unsupported('door or window state');
+            }
+        } else {
+            unsupported('square object type');
+        }
+    }
+}
+
+/**
+ * Rejects order-dependent ambient filters until native pointer-seed ordering is qualified.
+ * Native0x8650/0x6a40 iterates a pointer-hashed seed set; whole-RGB replacements
+ * can disagree across native allocations when competing paths have different hues.
+ *
+ * @param {object} scene - Validated geometry and skylight.
+ */
+function validateAmbient(scene) {
+    if (!scene.sky) {
+        return;
+    }
+
+    const red = scene.sky & 255;
+    const green = scene.sky >>> 8 & 255;
+    const blue = scene.sky >>> 16 & 255;
+    const coloredSky = red !== green || red !== blue;
+
+    for (const cell of scene.cells) {
+        if (!cell?.transmission) {
+            continue;
+        }
+
+        for (const offset of [0, 5, 10, 15]) {
+            const values = cell.transmission;
+
+            if (values[offset + 3] > 0 && (coloredSky
+                || values[offset] !== values[offset + 1] || values[offset] !== values[offset + 2])) {
+                unsupported('colored ambient transmission');
+            }
+        }
+    }
+}
+
+/**
  * Validates the loaded indoor levels and opaque geometry before calculation begins.
  *
  * @param {object} scene - Geometry and lights from the JNI transport.
@@ -41,10 +122,10 @@ function validate(scene) {
         unsupported('scene');
     }
 
-    const { width, height, cells, lights, player, seen, minimum, maximum } = scene;
+    const { width, height, cells, lights, player, seen, minimum, maximum, perception, sky } = scene;
 
-    integer(width, 8, 24, 'region width');
-    integer(height, 8, 24, 'region height');
+    integer(width, 8, 104, 'region width');
+    integer(height, 8, 104, 'region height');
     integer(minimum, 0, 63, 'minimum level');
     integer(maximum, minimum, 63, 'maximum level');
 
@@ -70,6 +151,8 @@ function validate(scene) {
                 unsupported('vertical adjacency flags');
             }
         }
+
+        validateWorldSquare(cell);
     }
 
     if (!Array.from(player).every(Number.isFinite) || player[0] < 0 || player[1] < 0
@@ -93,13 +176,29 @@ function validate(scene) {
         }
     }
 
-    for (const x of [0.5, width - 0.5]) {
-        for (const y of [0.5, height - 0.5]) {
-            if (Math.hypot(x - player[0], y - player[1]) >= 20) {
+    if (!perception) {
+        for (const [index, cell] of cells.entries()) {
+            if (cell !== null
+                && Math.hypot(index % width + 0.5 - player[0], Math.floor(index / width) % height + 0.5 - player[1]) >= 20) {
                 unsupported('far-field vision cone');
             }
         }
+    } else {
+        const { directionX, directionY, range, fatigue, cone } = perception;
+
+        if (![directionX, directionY, range, fatigue, cone].every(Number.isFinite)
+            || range < 0 || range > 20 || fatigue !== 0 || cone < -1 || cone > 1) {
+            unsupported('player perception');
+        }
     }
+
+    integer(sky ?? 0, 0, 0xFF_FF_FF, 'skylight');
+
+    if (sky && minimum < 32) {
+        unsupported('outdoor basement lighting');
+    }
+
+    validateAmbient(scene);
 
     if (seen !== undefined && (!Array.isArray(seen) || seen.length !== cells.length
         || Array.from(seen).some((value) => typeof value !== 'boolean'))) {
@@ -118,6 +217,10 @@ function validate(scene) {
         integer(light.y, 0, height - 1, 'light Y');
         integer(light.z, minimum, maximum, 'light level');
         integer(light.radius, 1, 255, 'light radius');
+
+        if (squareIndex(scene, light.x, light.y, light.z) < 0) {
+            unsupported('static light on absent square');
+        }
 
         if (identifiers.has(light.id) || !Array.isArray(light.color) || light.color.length !== 3
             || Array.from(light.color).some((value) => !Number.isFinite(value) || value < 0 || value > 1)) {
@@ -318,14 +421,83 @@ function pack(color) {
 }
 
 /**
+ * Finds the two native cardinal transmission tuples when an opaque edge is absent.
+ * Native0x4d50 stores west, north, east and south tuples in that order.
+ *
+ * @param {object} scene - Validated geometry.
+ * @param {number} index - Source square.
+ * @param {number} direction - Original direction ordinal.
+ * @returns {number[][]|null} Endpoint tuples, or no transmissive connection.
+ */
+function transmissionEdge(scene, index, direction) {
+    if (direction >= 8 || direction % 2 !== 0) {
+        return null;
+    }
+
+    const adjacent = neighbor(scene, index, direction);
+
+    if (adjacent < 0) {
+        return null;
+    }
+
+    const offset = transmissionOffsets[direction];
+    const opposite = transmissionOffsets[(direction + 4) % 8];
+    const first = scene.cells[index].transmission?.slice(offset, offset + 5) ?? [0, 0, 0, 0, 0];
+    const second = scene.cells[adjacent].transmission?.slice(opposite, opposite + 5) ?? [0, 0, 0, 0, 0];
+
+    return first[3] > 0 || second[3] > 0 ? [first, second] : null;
+}
+
+/**
+ * Applies native0x4800/0x5240 float32 endpoint filtering before destination quantization.
+ *
+ * @param {number[]} bytes - Source integer RGB.
+ * @param {number[][]} tuples - Ordered source and destination tuples.
+ * @returns {number[]} Filtered normalized float32 RGB.
+ */
+function transmitComponents(bytes, tuples) {
+    let color = bytes.map((value) => Math.fround(value / 255));
+
+    for (const tuple of tuples) {
+        if (tuple[3] <= 0) {
+            continue;
+        }
+
+        const intensity = Math.fround(Math.max(...color) * tuple[3]);
+
+        if (tuple.slice(0, 3).some((value) => value > 0)) {
+            color = color.map((value, channel) => Math.max(
+                Math.fround(tuple[channel] * intensity), Math.fround(value * tuple[4]),
+            ));
+        } else {
+            color = color.map((value) => Math.fround(value * tuple[3]));
+        }
+    }
+
+    return color;
+}
+
+/**
+ * Quantizes the native point-light endpoint filtering at its destination.
+ *
+ * @param {number[]} bytes - Source integer RGB.
+ * @param {number[][]} tuples - Ordered endpoint tuples.
+ * @returns {number[]} Filtered integer RGB.
+ */
+function transmit(bytes, tuples) {
+    return transmitComponents(bytes, tuples).map((value) => Math.trunc(Math.fround(Math.min(value, 1) * 255)));
+}
+
+/**
  * Updates one neighbor's ordered records only when a source reaches it sooner.
  *
  * @param {object[]} source - Source records.
  * @param {object[]} target - Mutable target records.
  * @param {number} cost - Native float32 edge cost.
+ * @param {number[][]|null} transforms - Optional cardinal endpoint filtering.
  * @returns {boolean} Whether any record improved.
  */
-function relax(source, target, cost) {
+function relax(source, target, cost, transforms) {
     let improved = false;
 
     for (const record of source) {
@@ -343,8 +515,9 @@ function relax(source, target, cost) {
 
         if (existing) {
             existing.distance = distance;
+            existing.color = transforms ? transmit(record.color, transforms) : record.color;
         } else if (target.length < 5) {
-            target.push({ ...record, distance });
+            target.push({ ...record, distance, color: transforms ? transmit(record.color, transforms) : record.color });
         } else {
             let worst = 0;
 
@@ -360,7 +533,7 @@ function relax(source, target, cost) {
                 continue;
             }
 
-            target[worst] = { ...record, distance };
+            target[worst] = { ...record, distance, color: transforms ? transmit(record.color, transforms) : record.color };
         }
 
         improved = true;
@@ -406,7 +579,10 @@ function propagate(scene, order) {
             const index = queue[cursor];
 
             for (const direction of propagationOrder) {
-                if (!propagationAllowed(scene, index, direction)) {
+                const opaque = propagationAllowed(scene, index, direction);
+                const transforms = opaque ? null : transmissionEdge(scene, index, direction);
+
+                if (!opaque && !transforms) {
                     continue;
                 }
 
@@ -419,7 +595,7 @@ function propagate(scene, order) {
                     cost = Math.fround(Math.sqrt(2));
                 }
 
-                if (relax(records[index], records[adjacent], cost)) {
+                if (relax(records[index], records[adjacent], cost, transforms)) {
                     queue.push(adjacent);
                 }
             }
@@ -440,7 +616,47 @@ function propagate(scene, order) {
  * @returns {boolean} Whether this matrix entry is clear.
  */
 function clearVision(scene, index, dx, dy, dz) {
-    return index < 0 || (scene.cells[index].vision & 1 << dx + 1 + (dy + 1) * 3 + (dz + 1) * 9) === 0;
+    if (index < 0) {
+        return true;
+    }
+
+    const [x, y, z] = coordinates(scene, index);
+    const adjacent = squareIndex(scene, x + dx, y + dy, z + dz);
+
+    if (adjacent >= 0 && dz === 0) {
+        for (const owner of [index, adjacent]) {
+            for (const object of scene.cells[owner].objects ?? []) {
+                if (objectBlocks(scene, owner, index, adjacent, object)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return (scene.cells[index].vision & 1 << dx + 1 + (dy + 1) * 3 + (dz + 1) * 9) === 0;
+}
+
+/**
+ * Classifies an admitted object's crossing edge using native0x3310/0x60e0.
+ * Open curtains and intact unbarricaded windows are transparent. Closed doors
+ * produce blocking class1 when the ray crosses their north or west plane.
+ *
+ * @param {object} scene - Validated geometry.
+ * @param {number} owner - Object-owning square index.
+ * @param {number} from - Ray's current square index.
+ * @param {number} to - Ray's previous square index.
+ * @param {object} object - Admitted original object arguments.
+ * @returns {boolean} Whether this object blocks the original ray.
+ */
+function objectBlocks(scene, owner, from, to, object) {
+    if (object.type !== 'squareAddDoor') {
+        return false;
+    }
+
+    const axis = object.args[0] ? 1 : 0;
+    const edge = coordinates(scene, to)[axis] - coordinates(scene, from)[axis];
+
+    return owner === from ? edge < 0 : edge > 0;
 }
 
 /**
@@ -583,6 +799,115 @@ function visibility(scene) {
 }
 
 /**
+ * Applies native0x41a0 near detection and normalized reverse-direction vision cone.
+ *
+ * @param {object} scene - Validated scene and optional perception parameters.
+ * @param {number} index - Target square index.
+ * @returns {boolean} Whether the target is within the original player cone.
+ */
+function withinCone(scene, index) {
+    if (!scene.perception) {
+        return true;
+    }
+
+    const { directionX, directionY, range, fatigue, cone } = scene.perception;
+    const [x, y, z] = coordinates(scene, index);
+    const origin = scene.origin ?? [0, 0, 0];
+    let dx = Math.fround(Math.fround(scene.player[0] + origin[0]) - Math.fround(x + 0.5 + origin[0]));
+    let dy = Math.fround(Math.fround(scene.player[1] + origin[1]) - Math.fround(y + 0.5 + origin[1]));
+    const distance = Math.fround(Math.sqrt(Math.fround(Math.fround(dx * dx) + Math.fround(dy * dy))));
+
+    if (distance < Math.fround(Math.fround(1 - fatigue) * range)
+        || (x === Math.floor(scene.player[0]) && y === Math.floor(scene.player[1]) && z === scene.player[2])) {
+        return true;
+    }
+
+    dx = distance === 0 ? 0 : Math.fround(dx / distance);
+    dy = distance === 0 ? 0 : Math.fround(dy / distance);
+
+    const length = Math.fround(Math.sqrt(Math.fround(Math.fround(directionX * directionX) + Math.fround(directionY * directionY))));
+    const nx = length === 0 ? 0 : Math.fround(directionX / length);
+    const ny = length === 0 ? 0 : Math.fround(directionY / length);
+    const dot = Math.fround(Math.fround(dx * nx) + Math.fround(dy * ny));
+
+    return dot <= cone;
+}
+
+/**
+ * Seeds exposed columns and propagates native0x54e0 skylight through cardinal edges.
+ * Native0x5240 filters translucent connections without the opaque edge's16-byte loss.
+ *
+ * @param {object} scene - Validated geometry and packed skylight.
+ * @returns {number[][]} Per-square integer ambient RGB.
+ */
+function ambientColors(scene) {
+    const ambient = scene.cells.map(() => [0, 0, 0]);
+
+    if (!scene.sky) {
+        return ambient;
+    }
+
+    const seed = [scene.sky & 255, scene.sky >>> 8 & 255, scene.sky >>> 16 & 255];
+    const seeds = [];
+
+    for (let y = 0; y < scene.height; y++) {
+        for (let x = 0; x < scene.width; x++) {
+            for (let z = scene.maximum; z >= scene.minimum; z--) {
+                const index = squareIndex(scene, x, y, z);
+
+                if (index < 0) {
+                    continue;
+                }
+
+                const cell = scene.cells[index];
+
+                if (!cell.openAir || BigInt(cell.room ?? -1) !== -1n) {
+                    break;
+                }
+
+                ambient[index] = [...seed];
+                seeds.push(index);
+            }
+        }
+    }
+
+    for (const seedIndex of seeds) {
+        const queue = [seedIndex];
+
+        for (let cursor = 0; cursor < queue.length; cursor++) {
+            const index = queue[cursor];
+
+            for (const direction of [2, 6, 0, 4]) {
+                const opaque = propagationAllowed(scene, index, direction);
+                const transforms = opaque ? null : transmissionEdge(scene, index, direction);
+
+                if (!opaque && !transforms) {
+                    continue;
+                }
+
+                const adjacent = neighbor(scene, index, direction);
+                const color = transforms
+                    ? transmitComponents(ambient[index], transforms).map((value) => Math.fround(value * 255))
+                    : ambient[index].map((value) => value - 16);
+
+                if (color.some((value, channel) => value > ambient[adjacent][channel])) {
+                    ambient[adjacent] = color.map((value) => Math.max(0, Math.trunc(value)));
+                    queue.push(adjacent);
+                }
+            }
+        }
+    }
+
+    for (let index = 0; index < scene.cells.length; index++) {
+        if (scene.cells[index]?.openAir) {
+            ambient[index] = maximumColor(ambient[index], seed);
+        }
+    }
+
+    return ambient;
+}
+
+/**
  * Averages darker squares with admitted brighter seen cardinal neighbors.
  *
  * @param {object} scene - Validated scene.
@@ -616,11 +941,12 @@ function darknessMultipliers(scene, seen) {
  *
  * @param {object[][]} records - Per-square native light records.
  * @param {number[]} darkness - Per-square darkness multipliers.
+ * @param {number[][]} ambient - Per-square ambient RGB.
  * @returns {number[][]} Per-square integer center RGB.
  */
-function centerColors(records, darkness) {
+function centerColors(records, darkness, ambient) {
     return records.map((squareRecords, index) => {
-        let color = [0, 0, 0];
+        let color = ambient[index];
 
         for (const record of squareRecords) {
             const attenuation = Math.fround(1 - Math.fround(record.distance / record.light.radius));
@@ -655,7 +981,7 @@ function sharedCorner(scene, work, index, corner) {
 }
 
 /**
- * Calculates native-reference lighting for retained indoor opaque levels.
+ * Calculates native-reference static lighting for the qualified sparse world.
  * The bounded closure and native function provenance are in lighting-provenance.md.
  *
  * @param {object} scene - Complete local geometry, static lights, player and optional seen history.
@@ -671,10 +997,12 @@ export function calculateLighting(scene) {
 
     const order = traversalOrder(scene);
     const records = propagate(scene, traversalOrder(scene, true));
-    const canSee = visibility(scene);
+    const couldSee = visibility(scene);
+    const canSee = couldSee.map((value, index) => value && withinCone(scene, index));
     const seen = canSee.map((value, index) => value || Boolean(scene.seen?.[index]));
     const darkness = darknessMultipliers(scene, seen);
-    const colors = centerColors(records, darkness);
+    const ambient = ambientColors(scene);
+    const colors = centerColors(records, darkness, ambient);
     const work = scene.cells.map(() => []);
     const lower = colors.map((color, index) => allowed(scene, index, 9)
         ? maximumColor(color, colors[neighbor(scene, index, 9)])
@@ -709,10 +1037,11 @@ export function calculateLighting(scene) {
     for (const index of order) {
         const payload = output[index];
 
-        payload[0] = Number(seen[index]) | Number(canSee[index]) * 6;
+        payload[0] = Number(seen[index]) | Number(canSee[index]) * 2 | Number(couldSee[index]) * 4;
         payload[1] = pack(colors[index]);
         payload[2] = Math.trunc(Math.fround(darkness[index] * 100_000));
         payload[3] = Number(seen[index]) * 100_000;
+        payload[4] = pack(ambient[index]);
 
         for (let corner = 0; corner < 8; corner++) {
             const color = sharedCorner(scene, work, index, corner);
