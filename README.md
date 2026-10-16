@@ -130,6 +130,7 @@ npm run lint
 node browser-jvm/verify-media-files.mjs
 node browser-jvm/verify-stencil.mjs
 node browser-jvm/verify-alpha.mjs
+node browser-jvm/verify-viewport.mjs
 node browser-jvm/verify-glsl-compat.mjs
 node browser-jvm/verify-native-memory.mjs
 node browser-jvm/verify-clipper-callbacks.mjs

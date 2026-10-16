@@ -143,6 +143,16 @@ public final class SpriteGraphics {
     public static native void glBlendFuncSeparate(int srcRgb,int dstRgb,int srcAlpha,int dstAlpha);
     public static native void glBlendEquation(int mode);
     public static native void glViewport(int x,int y,int width,int height);
+    /** Only the qualified viewport group is implemented; undefined group bits are ignored by GL. */
+    public static void glPushAttrib(int mask) {
+        int groups = mask & 0x200fffff;
+        if ((groups & ~0x800) != 0) {
+            throw new UnsupportedOperationException("Unqualified desktop attribute groups: " + groups);
+        }
+        pushViewportAttributes((groups & 0x800) != 0);
+    }
+    private static native void pushViewportAttributes(boolean viewport);
+    public static native void glPopAttrib();
     public static native void glClearColor(float red,float green,float blue,float alpha);
     public static native void glClear(int mask);
     public static native void glStencilMask(int mask);

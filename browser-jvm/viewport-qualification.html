@@ -1,0 +1,171 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Original viewport attribute stack qualification</title>
+<canvas width="4" height="2"></canvas>
+<script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script>
+<script type="module">
+/* eslint-disable no-await-in-loop -- Attribute stack mutations must execute in order. */
+import { createSpriteNatives } from './sprite-webgl.js';
+
+const canvas = document.querySelector('canvas');
+const backend = createSpriteNatives(canvas, () => undefined);
+const gl = canvas.getContext('webgl2');
+const checks = [];
+/**
+ * Checks one actual GPU result.
+ *
+ * @param {boolean} condition - Required GPU condition.
+ * @param {string} label - Assertion description.
+ */
+const require = (condition, label) => {
+    if (!condition) {
+        throw new Error(label);
+    }
+
+    checks.push(label);
+};
+
+/**
+ * Calls an actual host native entry.
+ *
+ * @param {string} name - Actual host native entry.
+ * @param {...unknown} args - Native operation arguments.
+ * @returns {Promise<unknown>} Actual host result.
+ */
+const call = (name, ...args) => backend.natives[`Java_port_host_SpriteGraphics_${name}`](null, ...args);
+/**
+ * Copies actual viewport and depth-range state.
+ *
+ * @returns {string} Exact state for comparison.
+ */
+const state = () => JSON.stringify({ viewport: [...gl.getParameter(gl.VIEWPORT)], range: [...gl.getParameter(gl.DEPTH_RANGE)] });
+const shaders = [];
+let program;
+
+try {
+    const initial = state();
+
+    require(await call('integerState', 2_992) === 0, 'Initial compatibility stack depth');
+    require(await call('integerState', 3_381) === 16, 'Supported stack limit');
+    require(gl.getError() === gl.NO_ERROR, 'Compatibility queries never call unsupported WebGL enums');
+    gl.viewport(0, 0, 2, 2);
+    gl.depthRange(0.125, 0.375);
+    const first = state();
+
+    await call('pushViewportAttributes', true);
+    gl.viewport(2, 0, 2, 2);
+    gl.depthRange(0.625, 0.875);
+    const second = state();
+
+    await call('pushViewportAttributes', true);
+    gl.viewport(1, 1, 1, 1);
+    gl.depthRange(0, 1);
+    await call('glPopAttrib');
+    require(state() === second, 'Nested pop restores copied viewport and depth range');
+    await call('glPopAttrib');
+    require(state() === first, 'Outer pop restores original viewport and depth range');
+    await call('pushViewportAttributes', false);
+    gl.viewport(2, 0, 2, 2);
+    gl.depthRange(0.625, 0.875);
+    await call('glPopAttrib');
+    require(state() === second, 'Empty mask leaves actual viewport and depth range unchanged');
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, 1, 1);
+    await call('pushViewportAttributes', true);
+    gl.scissor(1, 0, 1, 1);
+    gl.disable(gl.SCISSOR_TEST);
+    await call('glPopAttrib');
+    require(!gl.isEnabled(gl.SCISSOR_TEST) && [...gl.getParameter(gl.SCISSOR_BOX)].join(',') === '1,0,1,1', 'Viewport group does not restore unrelated scissor state');
+    await call('glPopAttrib');
+    require(await call('rawError') === 1_284 && state() === second, 'Underflow preserves actual state');
+
+    for (let i = 0; i < 16; i++) {
+        await call('pushViewportAttributes', true);
+    }
+
+    await call('pushViewportAttributes', true);
+    require(await call('rawError') === 1_283 && await call('integerState', 2_992) === 16 && state() === second, 'Overflow preserves state and stack');
+
+    for (let i = 0; i < 16; i++) {
+        await call('glPopAttrib');
+    }
+
+    require(await call('integerState', 2_992) === 0, 'All owned entries popped');
+    program = gl.createProgram();
+
+    for (const [type, source] of [
+        [gl.VERTEX_SHADER, '#version 300 es\nvoid main(){gl_Position=vec4(float((gl_VertexID<<1)&2)*2.-1.,float(gl_VertexID&2)*2.-1.,0.,1.);}'],
+        [gl.FRAGMENT_SHADER, '#version 300 es\nprecision highp float;out vec4 color;void main(){color=vec4(gl_FragCoord.z,0.,0.,1.);}'],
+    ]) {
+        const shader = gl.createShader(type);
+
+        shaders.push(shader);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        require(gl.getShaderParameter(shader, gl.COMPILE_STATUS), 'Actual shader compiles');
+        gl.attachShader(program, shader);
+    }
+
+    gl.linkProgram(program);
+    require(gl.getProgramParameter(program, gl.LINK_STATUS), 'Actual pixel program links');
+    gl.useProgram(program);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.viewport(0, 0, 2, 2);
+    gl.depthRange(0.125, 0.375);
+    await call('pushViewportAttributes', true);
+    gl.viewport(2, 0, 2, 2);
+    gl.depthRange(0.625, 0.875);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    await call('glPopAttrib');
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const pixels = new Uint8Array(32);
+
+    gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    require([...pixels].every((value, i) => value === [((i >> 2) % 4 < 2 ? 64 : 191), 0, 0, 255][i % 4]), 'Exact eight GPU pixels prove restored viewport and depth-range effect');
+    require(await call('rawError') === gl.NO_ERROR, 'GPU path has no unconsumed error');
+    await cheerpjInit({
+        version: 17, status: 'none', natives: {
+            ...backend.natives,
+            /**
+             * Observes the original Java fixture result.
+             *
+             * @param {object} lib - Actual Java callback library.
+             * @param {number} x - Viewport origin X.
+             * @param {number} y - Viewport origin Y.
+             * @param {number} width - Viewport width.
+             * @param {number} height - Viewport height.
+             */
+            Java_ViewportQualification_state(lib, x, y, width, height) {
+                require([...gl.getParameter(gl.VIEWPORT)].join(',') === [x, y, width, height].join(','), 'Original Java vendor entry restores actual viewport');
+            },
+            /**
+             * Observes the original Java fixture result.
+             *
+             * @param {object} lib - Actual Java callback library.
+             * @param {number} count - Passed original Java assertions.
+             */
+            Java_ViewportQualification_report(lib, count) {
+                globalThis.javaChecks = count;
+            },
+        },
+    });
+    const exit = await cheerpjRunMain('ViewportQualification', '/app/qualification.jar:/app/sprite-view.jar');
+
+    require(exit === 0 && globalThis.javaChecks === 13, 'Actual original GL11 Java ABI passes');
+    globalThis.result = { pass: true, checks, javaChecks: globalThis.javaChecks, pixels: [...pixels], initial, stackDepth: await call('integerState', 2_992) };
+} catch (error) {
+    globalThis.result = { pass: false, error: String(error.stack || error), checks };
+} finally {
+    if (program) {
+        gl.deleteProgram(program);
+    }
+
+    for (const shader of shaders) {
+        gl.deleteShader(shader);
+    }
+
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    globalThis.completed = true;
+}
+</script>

@@ -592,3 +592,9 @@ A real Web Lock must reserve the SQLite filesystem namespace before Java VM init
 
 
 The host world bootstrap no longer repeats `PopTemplateManager.init` after original `ModelManager.create` has already populated its skin lists. Selective world-only qualifications still invoke that original initializer when both lists are empty. The final connected gate asserts exactly five male and five female skin templates, preserving original initialization rather than accepting duplicate entries.
+
+## Original viewport attribute stack
+
+The original Core menu render path reaches desktop GL11.glPushAttrib(GL_VIEWPORT_BIT), glPopAttrib and GL_ATTRIB_STACK_DEPTH. The browser host now preserves actual WebGL viewport and depth-range state in a 16-entry stack. Empty masks push real empty entries; undefined bits are ignored as specified by OpenGL 2.1 section 6.1.15. Other defined attribute groups throw an actual Java UnsupportedOperationException before changing state. Overflow/underflow retain state and report GL_STACK_OVERFLOW/GL_STACK_UNDERFLOW; the depth/limit queries do not pass unsupported enums to WebGL. This does not add the separate desktop glDepthRange API or general attribute-group coverage.
+
+The public viewport gate passes 13 assertions through the actual prepared vendor GL11 entry points and 20 browser observations, including eight exact GPU pixel comparisons, nested viewport/depth-range restoration and unrelated-state exclusion. Its preparation manifest records exactly alpha/push/pop GL11 redirects, preserved vendor initialization and unchanged game method bodies. Input hashes, zero denied requests, empty stack and owned browser/server cleanup pass. Existing alpha (113), stencil (20) and GLSL (nine) gates also pass. This qualifies the host service; original menu visibility and interaction remain separate checks.

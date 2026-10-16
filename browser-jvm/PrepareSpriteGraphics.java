@@ -48,9 +48,9 @@ public final class PrepareSpriteGraphics {
                 if(entry.getName().endsWith(".class")){
                     var model=cf.parse(original);String simple=name.substring(name.lastIndexOf('/')+1);var changes=new ArrayList<String>();
                     boolean gl=name.startsWith("org/lwjgl/opengl/")&&GL_CLASSES.contains(simple);
-                    boolean legacyAlpha=name.equals("org/lwjgl/opengl/GL11");
+                    boolean legacyAttributes=name.equals("org/lwjgl/opengl/GL11");
                     boolean memory=name.equals("org/lwjgl/system/MemoryUtil"), api=name.equals("org/lwjgl/opengl/GL"), display=name.equals("org/lwjglx/opengl/Display");
-                    if(gl||legacyAlpha||memory||api||display||name.equals("org/lwjgl/opengl/GLCapabilities")){
+                    if(gl||legacyAttributes||memory||api||display||name.equals("org/lwjgl/opengl/GLCapabilities")){
                         bytes=cf.transformClass(model,(builder,element)->{
                             if(!(element instanceof MethodModel method)){builder.with(element);return;}
                             String methodName=method.methodName().stringValue(),descriptor=method.methodType().stringValue();
@@ -71,7 +71,7 @@ public final class PrepareSpriteGraphics {
                                     code.return_();
                                 });return;
                             }
-                            boolean selected=(method.flags().flagsMask()&0x8)!=0&&((gl&&methods.contains(helper+descriptor))||(legacyAlpha&&methodName.equals("glAlphaFunc")&&descriptor.equals("(IF)V")&&methods.contains(helper+descriptor))||(memory&&Set.of("memAlloc","memAllocFloat","memAllocInt","memFree","memSet").contains(helper)&&methods.contains(helper+descriptor))
+                            boolean selected=(method.flags().flagsMask()&0x8)!=0&&((gl&&methods.contains(helper+descriptor))||(legacyAttributes&&Set.of("glAlphaFunc(IF)V","glPushAttrib(I)V","glPopAttrib()V").contains(methodName+descriptor)&&methods.contains(helper+descriptor))||(memory&&Set.of("memAlloc","memAllocFloat","memAllocInt","memFree","memSet").contains(helper)&&methods.contains(helper+descriptor))
                                     ||(api&&Set.of("initialize","getCapabilities").contains(helper)&&methods.contains(helper+descriptor))
                                     ||(display&&Set.of("isCreated","makeCurrent","releaseContext","setVSyncEnabled","processMessages","isActive","isVisible","isCloseRequested","wasResized","getWidth","getHeight","getX","getY","getAvailableDisplayModes").contains(helper)&&methods.contains(helper+descriptor)));
                             if(!selected){builder.with(element);return;}
@@ -97,7 +97,7 @@ public final class PrepareSpriteGraphics {
                             });changes.add("<init>(Z):bounded-ARB-buffer-descriptor");
                         }
                     }
-                    if(gl||legacyAlpha||memory||api||display||name.equals("org/lwjgl/opengl/GLCapabilities"))constructorChecks+=verifyConstructors(model,bytes);
+                    if(gl||legacyAttributes||memory||api||display||name.equals("org/lwjgl/opengl/GLCapabilities"))constructorChecks+=verifyConstructors(model,bytes);
                     if(name.startsWith("zombie/")){gameClasses[0]++;if(!Arrays.equals(original,bytes))throw new AssertionError("Original game class changed: "+name);}
                     if(!Arrays.equals(original,bytes))changed.add("{\"class\":"+quote(name)+",\"inputSha256\":"+quote(hash(original))+",\"outputSha256\":"+quote(hash(bytes))+",\"methods\":["+String.join(",",changes.stream().map(PrepareSpriteGraphics::quote).toList())+"]}");
                 }

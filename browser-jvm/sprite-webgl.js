@@ -75,6 +75,8 @@ export function createSpriteNatives(canvas, report) {
     let alphaFunction = 519;
     let alphaReference = 0;
     let compatibilityError = 0;
+    const attributeStack = [];
+    const maxAttributeStackDepth = 16;
     const alphaPrograms = new WeakMap();
     /**
      * Excludes injected uniforms while retaining every original uniform on unsupported programs.
@@ -514,6 +516,14 @@ export function createSpriteNatives(canvas, report) {
          * @returns {number} Actual scalar state or the corresponding owned object handle.
          */
         integerState: (name) => {
+            if (name === 0x0B_B0) {
+                return attributeStack.length;
+            }
+
+            if (name === 0x0D_35) {
+                return maxAttributeStackDepth;
+            }
+
             if (name === 0x0B_C1) {
                 return alphaFunction;
             }
@@ -710,6 +720,41 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         glViewport: (x, y, w, h) => gl.viewport(x, y, w, h),
+        /**
+         * Saves a copy of the actual viewport group, or an empty mask entry.
+         * Unsupported defined groups are rejected by the Java facade before this call.
+         *
+         * @param {boolean} viewport - Whether GL_VIEWPORT_BIT was selected.
+         */
+        pushViewportAttributes: (viewport) => {
+            if (attributeStack.length === maxAttributeStackDepth) {
+                compatibilityError ||= 0x05_03;
+
+                return;
+            }
+
+            attributeStack.push(viewport
+                ? {
+                        viewport: Array.from(gl.getParameter(gl.VIEWPORT)),
+                        depthRange: Array.from(gl.getParameter(gl.DEPTH_RANGE)),
+                    }
+                : null);
+        },
+        /** Restores only groups selected by the matching original push. */
+        glPopAttrib: () => {
+            if (attributeStack.length === 0) {
+                compatibilityError ||= 0x05_04;
+
+                return;
+            }
+
+            const saved = attributeStack.pop();
+
+            if (saved) {
+                gl.viewport(...saved.viewport);
+                gl.depthRange(...saved.depthRange);
+            }
+        },
         /**
          * Executes the selected glClearColor operation against the actual WebGL context.
          *
