@@ -10,6 +10,8 @@ node_modules/
 *.wasm.map
 *.teavmdbg
 *.teadbg
+*.pack
+*.ais
 
 # Local handoff and historical report contain machine-specific prerequisite paths.
 HANDOFF.md
