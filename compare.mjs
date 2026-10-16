@@ -114,6 +114,8 @@ probes['game-lua-exposure'] = {...probes['lua-manager-init'], reflectionManifest
 probes['game-lua-exposure-fast'] = {...probes['game-lua-exposure'], fastAnalysis: true};
 probes['season-bootstrap'] = {...probes['standard-environment'], mainClass: 'probe.SeasonBootstrapProbe', category: 'browser-core', threadGroups: true, assetProfile: 'sandbox', cases: 5, comparisons: 26};
 probes['menu-png'] = {...probes['standard-environment'], mainClass: 'probe.MenuPngProbe', category: 'browser-assets', assetProfile: 'menu-image', cases: 3, comparisons: 8};
+probes['menu-png'].inflater = true;
+probes.inflater = {mainClass: 'probe.InflaterProbe', category: 'runtime-compatibility', inflater: true, cases: 8, comparisons: 16, classes: [], symbols: []};
 probes['game-boot'] = {...probes['lua-manager-init'], mainClass: 'zombie.gameStates.MainScreenState', keyboard: true, symbols: ['MainScreenState::main']};
 if (!Object.hasOwn(probes, probeName)) throw new Error('Unknown probe: ' + probeName);
 const probe = probes[probeName];
@@ -225,6 +227,7 @@ try {
         '-Dprobe.mainClass=' + probe.mainClass, '-Dprobe.output=' + output];
     if (reflectionManifestPath) mavenArgs.unshift('-Dport.reflectionManifest=' + reflectionManifestPath);
     if (probe.fastAnalysis) mavenArgs.unshift('-Dteavm.fastGlobalAnalysis=true');
+    mavenArgs.unshift('-Dport.inflater=' + !!probe.inflater);
     evidence.fastGlobalAnalysis = !!probe.fastAnalysis;
     evidence.mavenVersion = (await run('maven-version', java, [...mavenArgs, '--version'])).trim();
     await run('compile-adapter', java, [...mavenArgs, '-B', '-Dmaven.repo.local=' + resolve('.m2'),
