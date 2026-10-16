@@ -187,3 +187,21 @@ node browser-jvm/verify-clock.mjs
 It snapshots the prepared SDK for an isolated `target/browser-jvm/clock` qualification, checks actual original Sys elapsed/monotonic behavior and original Display.sync pacing, and rejects an intentionally mismatched vendor source without producing an adapted output. The qualified 50 ms Java sleep measured 51 ms, four 20 Hz sync calls measured 198,700,001 ns, and 272 real browser-clock reads remained monotonic. Exact LazyValue output preservation, monitored source hashes, zero denied requests/logged errors and browser/server cleanup are required. This establishes a browser clock service, not GLFW initialization/windowing or general native-library support. The qualifier has no authored timer worker and does not repair or qualify the default LightingThread.stop busy-join/cooperative-scheduling issue.
 
 The connected source-build regression also passes 132 play frames, 262,144 visible floor pixels, 578 body-changed pixels, original keyboard movement/release, and the original navigation action with both Java/Lua queues empty and idle cleanup. All 9,184 monitored asset hashes match, initialization/Lua errors and denied requests are zero, and the owned browser closes. The walking route records zero clock reads; actual clock execution is established by the separate timing qualifier above. The additional food-caller smoke passes original Player.Eat with 959 matching monitored hashes and clean shutdown.
+
+
+### Standalone browser mouse component
+
+Prepare the current public play SDK first, then run the bounded vendor-input qualification:
+
+```powershell
+$env:PZ_JDK = 'D:/zomboid-web-2/.tools/jdk-25.0.1+8'
+$env:PZ_BROWSER = 'C:/Users/me/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe'
+$env:PZ_GAME_JAR = 'C:/Games/steam/steamapps/common/ProjectZomboid/projectzomboid.jar'
+node browser-jvm/verify-mouse.mjs
+```
+
+This writes only `target/browser-jvm/mouse`, snapshots the explicitly ordered nine prepared play SDK archives, and uses the production browser clock already compiled into that SDK. `PrepareMouse` admits the exact prepared Java 17 `org.lwjglx.input.Mouse` class SHA-256 `222c9f1d55624bb6749b1888437ad32f6b7c74b09a812c616b4b4c76a437df24`. It redirects only the `isButtonDown(I)Z` call at original BCI 4 from `GLFW.glfwGetMouseButton(JI)I` to `BrowserMouse.button(JI)I`. Its manifest records the input/output class digests and exact call site, and preparation verifies that every other instruction byte remains unchanged. The installed class's original newer header is deliberately rejected before any output publication. Original game classes remain unchanged.
+
+`createBrowserMouse(canvas)` owns DOM listeners and held buttons; `BrowserMouse.poll()` delivers ordered motion/button events through original vendor `Mouse.addMoveEvent`, `addButtonEvent`, `next`, and `poll`. Thirteen phases use real browser mouse and keyboard input to check CSS scaling, left/right/middle mapping, same-frame press/release, independent chord release, actual Tab focus loss, event timestamps, and disposal through a genuine Java `IllegalStateException` with `finally` executed. An outside drag release preserves original event coordinates `(800,-144)` while original vendor polling clips the current position to `(511,0)`. Cleanup checks no held or queued events, closes Chromium, and verifies unchanged source digests. The gate stores its adaptation, observations, clock reads, and cleanup evidence in `target/browser-jvm/mouse/result.json`.
+
+This component is not installed in public play profiles yet. Wheel input, pointer lock, native cursors, touch, full original `GameInput` polling, and original UI click delivery remain outside this qualification.

@@ -141,6 +141,7 @@ node browser-jvm/verify-lighting-world.mjs
 node browser-jvm/verify-lighting-moving.mjs
 node browser-jvm/verify-native-long.mjs
 node browser-jvm/verify-clock.mjs
+node browser-jvm/verify-mouse.mjs
 node browser-jvm/verify-sqlite.mjs
 ~~~
 
