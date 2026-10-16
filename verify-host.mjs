@@ -86,8 +86,11 @@ try {
         }
     }
 } finally {
-    if (browser) await browser.close();
-    await new Promise(accept => server.close(accept));
+    try {
+        if (browser) await browser.close();
+    } finally {
+        await new Promise(accept => server.close(accept));
+    }
 }
 assert.ok(!browser.isConnected() && !server.listening);
 await writeFile('target/host-check.json', JSON.stringify({checks, invalidInputsRejected: 6,

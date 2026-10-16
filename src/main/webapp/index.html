@@ -38,7 +38,7 @@ addEventListener('unhandledrejection', event => window.probeErrors.push(String(e
         let actual;
         let hostStorage;
         let cumulativeExecutionMs;
-        const directExport = typeof module.exports.colorCase === 'function';
+        const directExport = typeof module.exports.colorCase === 'function' || typeof module.exports.advanceSnapshot === 'function';
         if (typeof module.exports.advanceSnapshot === 'function') {
             const operationStart = performance.now();
             const progress = JSON.parse(sessionStorage.getItem('snapshot-progress') || 'null') ||

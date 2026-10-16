@@ -173,8 +173,12 @@ try {
     evidence.visibleStatus = await page.locator('#status').innerText();
     evidence.browserErrors = browserErrors;
     evidence.browserPageLoads = pageLoads;
+    if (probeName === 'colors' && !evidence.browser.directExport) throw new Error('Expected direct JavaScript color export execution');
     if (probeName === 'browser-save' && (pageLoads !== 8 || evidence.browser.hostStorage?.pageLoads !== 8 || evidence.browser.hostStorage?.writes !== 8 || evidence.browser.hostStorage?.readbacks !== 8)) {
         throw new Error('Expected eight original-state OPFS cycles across fresh page loads');
+    }
+    if (evidence.browser.hostStorage) {
+        evidence.measurement = 'Initialization sums eight module fetch/compile/instantiate/load calls; execution sums original adapter calls plus OPFS write/readback; excludes navigation and loader JS downloads';
     }
     await writeFile(join(outputDir, 'browser.json'), JSON.stringify(evidence.browser, null, 2) + '\n');
     if (!evidence.browser.pass || browserErrors.length || evidence.browser.comparisons !== probe.comparisons || !evidence.visibleStatus.startsWith('PASS')) {
