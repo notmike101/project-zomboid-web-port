@@ -57,12 +57,69 @@ export function createBrowserPhysics() {
     const populationChunks = new Set();
     const clippers = [];
     const vehicles = new Map();
+    const vehicleDefinitions = new Map();
     const dynamicObjects = new Map();
     let simulation = null;
     let clipperAllocations = 0;
     let clipperClears = 0;
     let world = null;
     let revision = 0;
+
+    /**
+     * Retains the original fixed-size vehicle ABI without inventing vehicle dynamics.
+     * Definitions precede world creation and therefore survive world destruction.
+     *
+     * @param {string} name - Original fully qualified vehicle script name.
+     * @param {Float32Array} values - Original VehicleScript.toBullet payload.
+     */
+    function defineVehicleScript(name, values) {
+        if (typeof name !== 'string' || name.length === 0 || !(values instanceof Float32Array) || values.length !== 200) {
+            throw new TypeError('Vehicle definition requires its name and original 200-float payload');
+        }
+
+        if (!values.every(Number.isFinite)) {
+            throw new RangeError('Vehicle definition contains nonfinite values');
+        }
+
+        const wheelCount = values[10];
+        let cursor = 11;
+
+        if (!Number.isInteger(wheelCount) || wheelCount < 0 || cursor + wheelCount * 5 >= values.length) {
+            throw new RangeError('Invalid vehicle wheel count');
+        }
+
+        for (let index = 0; index < wheelCount; index++) {
+            if (values[cursor] !== 0 && values[cursor] !== 1) {
+                throw new RangeError('Invalid vehicle wheel front flag');
+            }
+
+            cursor += 5;
+        }
+
+        const shapeCount = values[cursor++];
+
+        if (!Number.isInteger(shapeCount) || shapeCount < 1 || shapeCount > values.length - cursor) {
+            throw new RangeError('Invalid vehicle shape count');
+        }
+
+        for (let index = 0; index < shapeCount; index++) {
+            const type = values[cursor];
+            const width = new Map([[1, 10], [2, 5], [3, 4]]).get(type) ?? 0;
+
+            if (width === 0 || cursor + width > values.length) {
+                throw new RangeError('Invalid or truncated vehicle shape');
+            }
+
+            cursor += width;
+        }
+
+        if (values.subarray(cursor).some((value) => value !== 0)) {
+            throw new RangeError('Unexpected data after vehicle shape payload');
+        }
+
+        vehicleDefinitions.set(name, new Float32Array(values));
+        revision++;
+    }
 
     /**
      * Finds the actual Java object across freshly wrapped native-call proxies.
@@ -259,6 +316,7 @@ export function createBrowserPhysics() {
             world: world && { ...world }, revision,
             simulation: simulation && { ...simulation },
             dynamicBodies: { vehicles: vehicles.size, objects: dynamicObjects.size },
+            vehicleDefinitions: [...vehicleDefinitions].map(([name, values]) => ({ name, values: [...values] })),
             collision: [...collision].map(([square, flags]) => ({ square, flags })),
             populationChunks: [...populationChunks],
             clipperContainers: { allocations: clipperAllocations, clears: clipperClears },
@@ -419,8 +477,18 @@ export function createBrowserPhysics() {
     }
 
     return {
-        initialize, setLevels, submit, snapshot, setCollisionChunk, setCollisionSquares, collisionAt, stepSimulation,
+        initialize, setLevels, submit, snapshot, setCollisionChunk, setCollisionSquares, collisionAt, stepSimulation, defineVehicleScript,
         natives: {
+            /**
+             * Registers genuine original script metadata independently of dynamic bodies.
+             *
+             * @param {unknown} lib - Reserved CheerpJ library context.
+             * @param {string} name - Original script name.
+             * @param {Float32Array} values - Original Java float-array storage.
+             */
+            Java_zombie_core_physics_Bullet_defineVehicleScript(lib, name, values) {
+                defineVehicleScript(name, values);
+            },
             /**
              * Creates the world from the original WorldSimulation call.
              *
