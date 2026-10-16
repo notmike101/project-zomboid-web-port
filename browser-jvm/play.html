@@ -123,7 +123,7 @@ try {
             },
         },
     });
-    globalThis.exitCode = await cheerpjRunMain('BrowserInteractivePlay', '/app/play-entry.jar:/app/clipper2.jar:/app/animation-entry.jar:/app/animation-view.jar:/app/animation-sdk-view.jar:/app/path-view.jar:/app/float-bridge.jar:/app/memory-bridge.jar:/app/world-entry.jar:/app/atomic-view.jar', interactive ? '0' : '240', 'draw');
+    globalThis.exitCode = await cheerpjRunMain('BrowserInteractivePlay', '/app/play-entry.jar:/app/clipper2.jar:/app/animation-entry.jar:/app/animation-view.jar:/app/animation-sdk-view.jar:/app/path-view.jar:/app/float-bridge.jar:/app/memory-bridge.jar:/app/world-entry.jar:/app/atomic-view.jar', interactive ? '0' : '240', 'draw', interactive ? '' : 'verify-navigation');
 
     if (!globalThis.probeResult) {
         throw new Error(`Original session exited without a result (${globalThis.exitCode})`);

@@ -29,7 +29,8 @@ public final class BrowserInteractivePlay {
 
     public static void main(String[] args) {
         try {
-            run(args.length == 0 ? 0 : Integer.parseInt(args[0]), args.length < 2 || !args[1].equals("step-only"));
+            run(args.length == 0 ? 0 : Integer.parseInt(args[0]), args.length < 2 || !args[1].equals("step-only"),
+                    args.length > 2 && args[2].equals("verify-navigation"));
         } catch (Throwable failure) {
             failure.printStackTrace();
             StringWriter trace = new StringWriter();
@@ -39,7 +40,7 @@ public final class BrowserInteractivePlay {
         }
     }
 
-    private static void run(int frameLimit, boolean draw) throws Exception {
+    private static void run(int frameLimit, boolean draw, boolean verifyNavigation) throws Exception {
         if (frameLimit < 0) throw new IllegalArgumentException("Negative frame limit");
         BrowserGeometry.Session[] geometry = new BrowserGeometry.Session[1];
         Throwable failure = null;
@@ -56,6 +57,7 @@ public final class BrowserInteractivePlay {
             mountFile("media/textures/weather/fogwhite_tex.png");
             for (String name : STASH_FILES) mountFile("media/lua/shared/StashDescriptions/" + name + ".lua");
             for (String name : SPEED_IMAGES) mountFile("media/ui/speedControls/" + name + ".png");
+            if (verifyNavigation) PlayerNavigationQualification.mountAssets();
             BrowserModelBootstrap.open(value -> { stage = value; progress(value); });
             installRuntimeLogTransport();
             stage = "original-spawn-in-loaded-cell";
@@ -171,6 +173,14 @@ public final class BrowserInteractivePlay {
                         stage = "capture-final-original-frame";
                         if (frames == 0) throw new AssertionError("No original world frame completed");
                         if (draw && drawnFrames == 0) throw new AssertionError("Original animation pose never became ready for drawing");
+                        String navigation = "null";
+                        if (verifyNavigation) {
+                            stage = "original-player-navigation-qualification";
+                            progress(stage);
+                            var qualification = PlayerNavigationQualification.run(session);
+                            frames += qualification.frames();
+                            navigation = qualification.json();
+                        }
                         String composition = "null";
                         if (draw) {
                             var liveAnimation = player.getAnimationPlayer();
@@ -199,7 +209,7 @@ public final class BrowserInteractivePlay {
                                 + ",\"vanillaContent\":{\"items\":" + zombie.scripting.ScriptManager.instance.getAllItems().size()
                                 + ",\"vehicleScripts\":" + zombie.scripting.ScriptManager.instance.getAllVehicleScripts().size()
                                 + ",\"lootRooms\":" + zombie.inventory.ItemPickerJava.rooms.size() + "}"
-                                + ",\"final\":" + session.snapshot() + ",\"composition\":" + composition + ",\"frame\":" + capture + "}";
+                                + ",\"navigation\":" + navigation + ",\"final\":" + session.snapshot() + ",\"composition\":" + composition + ",\"frame\":" + capture + "}";
                     }
                 } finally { player.releaseAnimationPlayer(); }
             }

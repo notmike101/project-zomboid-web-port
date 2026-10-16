@@ -386,7 +386,7 @@ try {
         command(executable('java'), ['-cp', tools, 'PrepareGeometryAssets', path.dirname(gameJar), geometry]);
         command(executable('java'), ['-cp', tools, 'PrepareContentAssets', path.dirname(gameJar), content]);
         command(executable('java'), ['-cp', tools, 'PrepareTilePack', path.join(options['media-root'], 'texturepacks/Tiles1x.pack'), path.join(options['media-root'], 'texturepacks/Tiles1x.floor.pack'), path.join(geometry, 'sprite-names.txt'), tiles]);
-        command(executable('javac'), ['--release', '17', '-cp', [gameJar, clipperJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', playClasses, ...['BrowserInteractivePlay.java', 'host/port/host/ClipperSupport.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserPlaySession.java', 'host/port/host/BrowserGeometry.java', 'host/port/host/BrowserTileTextures.java', 'host/port/host/CharacterRenderer.java', 'host/port/host/FloorMapRenderer.java', 'host/org/lwjgl/stb/STBImage.java'].map((name) => path.join(source, name))]);
+        command(executable('javac'), ['--release', '17', '-cp', [gameJar, clipperJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', playClasses, ...['BrowserInteractivePlay.java', 'PlayerNavigationQualification.java', 'host/port/host/ClipperSupport.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserPlaySession.java', 'host/port/host/BrowserGeometry.java', 'host/port/host/BrowserTileTextures.java', 'host/port/host/CharacterRenderer.java', 'host/port/host/FloorMapRenderer.java', 'host/org/lwjgl/stb/STBImage.java'].map((name) => path.join(source, name))]);
         command(executable('jar'), ['--create', '--file', path.join(output, 'play-entry.jar'), '-C', playClasses, '.']);
         const geometryRows = (await readFile(path.join(geometry, 'geometry-assets.tsv'), 'utf8')).trim().split(/\r?\n/u);
 
@@ -529,6 +529,8 @@ try {
             'texturepacks/WeatherFx.pack',
             'textures/weather/fogcircle_tex.png',
             'textures/weather/fogwhite_tex.png',
+            'lua/shared/ISBaseObject.lua', 'lua/shared/TimedActions/ISBaseTimedAction.lua',
+            'lua/client/TimedActions/ISTimedActionQueue.lua', 'lua/client/TimedActions/WalkToTimedAction.lua',
             ...['StepForward_Off', 'Pause_Off', 'Pause_On', 'Play_Off', 'Play_On', 'FFwd1_Off', 'FFwd1_On', 'FFwd2_Off', 'FFwd2_On', 'Wait_Off', 'Wait_On'].map((name) => `ui/speedControls/${name}.png`),
             ...['StashUtil', 'BrandenburgStashDesc', 'EkronStashDesc', 'IrvingtonStashDesc', 'LouisvilleStashDesc', 'MarchRidgeStashDesc', 'MulStashDesc', 'RiversideStashDesc', 'RosewoodStashDesc', 'WorldStashDesc', 'WpStashDesc'].map((name) => `lua/shared/StashDescriptions/${name}.lua`),
         ];
@@ -768,6 +770,12 @@ try {
         evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded && evidence.contentLoaded
             && evidence.initializationErrors.length === 0
             && (interactive || (evidence.inputPressed && evidence.normalMovement && evidence.inputReleased));
+        evidence.playerNavigationQualified = evidence.result.navigation?.pass === true
+            && evidence.result.navigation.moved === true && evidence.result.navigation.animated === true
+            && evidence.result.navigation.actionSucceeded === true && evidence.result.navigation.actionQueueEmpty === true
+            && evidence.result.navigation.pathCleared === true && evidence.result.navigation.final?.state === 'idle'
+            && evidence.result.navigation.final.inputX === 0 && evidence.result.navigation.final.inputY === 0;
+        evidence.pass = evidence.pass && (interactive || evidence.playerNavigationQualified);
         evidence.fullGamePlayable = false;
     }
 

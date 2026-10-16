@@ -102,6 +102,10 @@ The runner serves explicit prepared routes first, then exposes additional instal
 
 A separate fresh CheerpJ filesystem qualification uses `user.dir=/app` and the unchanged original `ZomboidFileSystem.init()` to map 47,437 real installed paths. An original 622,382-byte script read matches its installed SHA-256, and all 47,416 byte-served files retain their hashes after closure. This does not change the public walking bootstrap's `/files/work` prepared-content lifecycle or qualify full Lua initialization.
 
+## Original action navigation
+
+The existing public play verification now additionally runs the installed original `ISWalkToTimedAction` through `ISTimedActionQueue` after keyboard release. `PlayerNavigationQualification` loads only four required installed Lua files and advances the normal session. A passing result requires original movement/animation, Succeeded, target arrival, empty actions, cleared path and idle with zero input. The session delivers the original selected pathfinding backend's results after the world/action update. Interactive mode does not queue this verification action.
+
 ## Native indoor lighting qualification
 
 After preparing the play SDK profile, set `PZ_JDK`, `PZ_BROWSER` and `PZ_GAME_DIR` and run `node browser-jvm/verify-lighting.mjs`. It builds only authored transport, loads the actual lighting DLL for bounded data calculations, and compares the same original JNI declarations in a fresh browser. General scenes match 896 cells and 43,904 packed integers; incremental and publication protocols check retained geometry, one-publication delay and consumed dirty bits. Input hashes and resource cleanup are required. The production backend accounts for all 50 JNI names and explicitly rejects unqualified features. [Native provenance and exact limits](lighting-provenance.md) distinguish this service qualification from original game initialization and rendering.

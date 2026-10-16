@@ -1,5 +1,13 @@
 # Incremental original-bytecode compatibility
 
+## Original player navigation in the connected session
+
+The public play source build now restores the original selected pathfinding backend's `updateMain()` delivery after the world/action update and before finishing animation. Without this outer-loop service, an original queued walk action remained Working while its path result waited undelivered. The original Java/native backend selection is preserved; the passing browser check uses the Java backend.
+
+The existing public verifier loads four installed Lua dependencies, queues the genuine `ISWalkToTimedAction` through `ISTimedActionQueue` and advances only normal session steps. The player moves from `(153.29889,158.3412)` to exactly `(151.5,156.5)`, animates, reports Succeeded and returns idle with an empty action queue, cleared path and zero input. There are 107 navigation frames plus three cleanup frames and 132 session frames overall. Nine chunks, 576 ground floors, 5,092 items, 241 vehicle scripts and 423 loot rooms remain loaded; all 5,874 monitored asset hashes and the original JAR match, initialization errors and denied requests are empty, and cleanup passes. The helper does not write movement coordinates, states or path nodes.
+
+A separate private original-request check also routes around an actual wall with eight nodes and seven collision-free segments, exercises original high-level/low-level A* and preserves the original seven pathfinding classes apart from documented version headers. This does not qualify vehicle visibility graphs, the native pathfinding backend, world streaming or arbitrary navigation across the map. The automatic action check is explicit noninteractive verification; interactive controls are unchanged.
+
 ## Native indoor lighting service
 
 `browser-jvm/verify-lighting.mjs` compares actual `Lighting64.dll` calculations against the production browser service through unchanged original `LightingJNI` native declarations. All 43,904 packed integers across 896 general-scene cells match exactly; general, incremental and publication protocols additionally match 976, 1,040 and 18 output lines. These cover arbitrary opaque edges, gaps, mazes, multiple static lights, chunk seams, retained unchanged chunks, changed geometry, seen history, publication delay and consuming dirty bits. Original inputs retain their hashes and owned processes/browser/server close.

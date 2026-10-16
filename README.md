@@ -107,6 +107,8 @@ A separate original-renderer qualification now loads all 219 genuine depth image
 
 The original renderer's occlusion lookup also matches its native reference across 738 integers using real Clipper2 polygon intersections in the browser. The public session initializes that original lookup before rendering. Qualified closed-path, zero-offset intersection and difference contracts are enabled; other native polygon operations, complete lighting and complete cell rendering remain separate work.
 
+The public verification command also queues the installed original Lua walk action after releasing keyboard input. Original pathfinding, movement and animation carry the player to the loaded target, then the original action clears its queue/path and returns idle. The fresh integrated check completes 132 session frames and preserves all 5,874 monitored asset hashes. Interactive sessions keep the existing WASD controls; this automatic navigation check runs only in verification mode.
+
 The original region worker belongs to the dedicated browser-JVM context lifetime because its original reset busy-waits without yielding. Closing the owned browser releases that runtime; same-JVM engine reset/reuse is not supported. Installed native saves are never mounted.
 
 Prepared assets and generated archives are private local outputs. Keep snapshots and manifests from the same preparation generation together, and do not rebuild a profile's output while another browser is serving that same directory.

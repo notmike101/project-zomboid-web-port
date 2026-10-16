@@ -81,6 +81,14 @@ public final class BrowserPlaySession implements AutoCloseable {
         stage = "original-world-update";
         progress.accept(stage);
         IsoWorld.instance.update();
+        // Original IngameState.UpdateStuff delivers worker results after world/actions and time.
+        stage = "original-pathfinding-results";
+        progress.accept(stage);
+        if (zombie.pathfind.nativeCode.PathfindNative.useNativeCode) {
+            zombie.pathfind.nativeCode.PathfindNative.instance.updateMain();
+        } else {
+            zombie.pathfind.PolygonalMap2.instance.updateMain();
+        }
         stage = "original-finish-animation";
         progress.accept(stage);
         IsoWorld.instance.FinishAnimation();
