@@ -1,1 +1,3 @@
 port.runtime.MissingFieldMetadata
+port.runtime.ReflectionExposureMetadata
+port.runtime.GenericReflectionMetadata

@@ -11,3 +11,6 @@ port.runtime.WatchServicePlugin
 port.runtime.SteamWorkshopImportPlugin
 port.runtime.NativeCapabilitiesPlugin
 port.runtime.BrowserKeyboardPlugin
+port.runtime.ClassNamePlugin
+port.runtime.GenericMetadataPlugin
+port.runtime.ThreadGroupPlugin

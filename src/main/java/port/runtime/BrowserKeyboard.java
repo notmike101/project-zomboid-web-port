@@ -68,10 +68,11 @@ public final class BrowserKeyboard {
                 // US-keyboard scan can report them released only while no ambiguous
                 // physical key is held; international input fails explicitly.
                 if (key === 161 || key === 162) {
-                    for (const pressed of codes) {
-                        if (!pressed || pressed === 'Unidentified' || pressed.startsWith('Intl')) return -1;
-                    }
-                    return 0;
+                    var ambiguous = false;
+                    codes.forEach(function(pressed) {
+                        if (!pressed || pressed === 'Unidentified' || pressed.startsWith('Intl')) ambiguous = true;
+                    });
+                    return ambiguous ? -1 : 0;
                 }
                 return 0; // Undefined entries in GLFW's key interval have no physical key.
             }

@@ -86,6 +86,18 @@ const probes = {
     exit: {mainClass: 'probe.WorkerExitProbe', category: 'browser-process', browserOnly: true, workerProcess: true,
         cases: 1, comparisons: 2, symbols: []},
     'native-capabilities': {mainClass: 'probe.NativeCapabilitiesProbe', category: 'browser-native-capabilities', fixture: 'engine', browserOnly: true, webgl: true, resources: true, nativeCapabilities: true, cases: 1, comparisons: 2, symbols: []},
+    generics: {mainClass: 'probe.GenericProbe', category: 'runtime-compatibility', generics: true, cases: 8, comparisons: 16, classes: [], symbols: []},
+    'anonymous-class': {mainClass: 'probe.AnonymousClassProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16, classes: [], symbols: []},
+    'package-name': {mainClass: 'probe.PackageNameProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16, classes: [], symbols: []},
+    'module-token': {mainClass: 'probe.ModuleDescriptorProbe', category: 'runtime-compatibility', cases: 1, comparisons: 2, classes: [], symbols: []},
+    'thread-groups': {mainClass: 'probe.ThreadGroupProbe', category: 'runtime-compatibility', threadGroups: true, cases: 4, comparisons: 8, classes: [], symbols: []},
+    'audio-capability': {mainClass: 'probe.AudioCapabilityProbe', category: 'browser-audio-capability', fixture: 'engine', browserOnly: true, resources: true, nativeCapabilities: true, cases: 1, comparisons: 2, symbols: []},
+    management: {mainClass: 'probe.ManagementProbe', category: 'browser-management', fixture: 'engine', browserOnly: true, resources: true, cases: 1, comparisons: 2, symbols: []},
+    'serialization-boundary': {mainClass: 'probe.SerializationBoundaryProbe', category: 'browser-serialization-capability', fixture: 'engine', browserOnly: true, resources: true, cases: 2, comparisons: 4, symbols: []},
+    'subprocess': {mainClass: 'probe.ProcessBoundaryProbe', category: 'browser-subprocess', fixture: 'engine', browserOnly: true, resources: true, cases: 1, comparisons: 2, symbols: []},
+    'reflection-exposure': {generics: true, reflectionExposure: true, assets: true, standardLibrary: true, nativeCapabilities: true, mainClass: 'probe.ReflectionExposureProbe', category: 'browser-reflection-exposure', fixture: 'engine', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 3, comparisons: 6, symbols: ['GameVersion::getMajor']},
+    'standard-environment': {assets: true, standardLibrary: true, nativeCapabilities: true, mainClass: 'probe.StandardEnvironmentProbe', category: 'browser-assets', fixture: 'engine', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 2, comparisons: 4, symbols: []},
+    'lua-manager-init': {threadGroups: true, generics: true, nativeCapabilities: true, mainClass: 'probe.LuaManagerInitBoundaryProbe', compileOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, symbols: ['LuaManager::init']},
     'game-keyboard': {mainClass: 'probe.GameKeyboardProbe', category: 'browser-game-keyboard', fixture: 'keyboard', browserOnly: true, keyboard: true, gameInput: true, nativeCapabilities: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 8, comparisons: 16, symbols: ['GameKeyboard::update']},
     keyboard: {mainClass: 'probe.KeyboardProbe', category: 'browser-keyboard', browserOnly: true, keyboard: true, cases: 8, comparisons: 16, symbols: []},
     'filesystem-runtime': {assets: true, nativeCapabilities: true, mainClass: 'probe.FilesystemRuntimeProbe', category: 'browser-core', browserOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, workerProcess: true, nativeLibraries: true, regex: true, watchService: true, cases: 2, comparisons: 6, symbols: ['ZomboidFileSystem::init']},
@@ -172,7 +184,7 @@ try {
     evidence.jdkVersion = (await run('jdk-version', java, ['-version'])).trim();
     const boot = (await readdir(join(paths['maven-home'], 'boot'))).filter(name => /^plexus-classworlds-.*\.jar$/.test(name));
     if (boot.length !== 1) throw new Error('Expected one Maven classworlds boot JAR');
-    const mavenArgs = ['-Xss16m', '-Dport.browserKeyboard=' + !!probe.keyboard, '-Dport.nativeCapabilities=' + !!probe.nativeCapabilities, '-Dport.watchService=' + !!probe.watchService, '-Dport.webgl=' + !!probe.webgl, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dport.regex=' + !!probe.regex, '-Dport.workerProcess=' + !!probe.workerProcess, '-Dport.nativeLibraries=' + !!probe.nativeLibraries, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
+    const mavenArgs = ['-Xss16m', '-Dport.threadGroups=' + !!probe.threadGroups, '-Dport.generics=' + !!probe.generics, '-Dport.reflectionExposure=' + !!probe.reflectionExposure, '-Dport.browserKeyboard=' + !!probe.keyboard, '-Dport.nativeCapabilities=' + !!probe.nativeCapabilities, '-Dport.watchService=' + !!probe.watchService, '-Dport.webgl=' + !!probe.webgl, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dport.regex=' + !!probe.regex, '-Dport.workerProcess=' + !!probe.workerProcess, '-Dport.nativeLibraries=' + !!probe.nativeLibraries, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
         '-Dclassworlds.conf=' + join(paths['maven-home'], 'bin', 'm2.conf'),
         '-cp', join(paths['maven-home'], 'boot', boot[0]), 'org.codehaus.plexus.classworlds.launcher.Launcher',
         '-Dprobe.mainClass=' + probe.mainClass, '-Dprobe.output=' + output];
@@ -213,7 +225,9 @@ try {
     evidence.rule = baseline.rule;
     await writeFile(join(outputDir, 'baseline.json'), JSON.stringify(baseline, null, 2) + '\n');
     } else {
-        evidence.rule = probe.category === 'browser-graphics' ? 'framebuffer-readback-and-WebGL-errors' : probe.category === 'browser-process' ? 'owned-worker-exit' : probe.category === 'browser-core' ? 'original-engine-initialization' : 'direct-memory-contract';
+        evidence.rule = probe.category === 'browser-graphics' ? 'framebuffer-readback-and-WebGL-errors'
+            : probe.category === 'browser-process' ? 'owned-worker-exit'
+            : probe.category === 'browser-memory' ? 'direct-memory-contract' : probe.category + '-contract';
         evidence.jvmBaselineExecuted = false;
         evidence.measurement = 'Browser-only ' + probe.category + ' assertions; no native JVM baseline or timing benchmark';
     }
@@ -237,12 +251,24 @@ try {
         ['/exit-worker.js', ['src/main/webapp/exit-worker.js', 'text/javascript']],
         ['/save-host.js', ['src/main/webapp/save-host.js', 'text/javascript']],
         ['/resource-host.js', [join(outputDir, 'resource-host.js'), 'text/javascript']],
+        ['/generic-host.js', [join(outputDir, 'generic-host.js'), 'text/javascript']],
         ['/baseline.json', [join(outputDir, 'baseline.json'), 'application/json']],
         ['/wasm/probe.wasm', [join(outputDir, 'wasm/probe.wasm'), 'application/wasm']],
         ['/wasm/classes.wasm-runtime.js', [join(outputDir, 'wasm/classes.wasm-runtime.js'), 'text/javascript']],
         ['/favicon.ico', [null, 'image/x-icon']]
     ]);
-    const assets = probe.assets ? await loadAssets(paths['media-root']) : {manifest: [], files: new Map()};
+    let genericMetadata = {};
+    if (probe.generics) {
+        const names = ['zombie.core.GameVersion', 'java.lang.Object', 'probe.GenericProbe', 'probe.GenericProbe$Base',
+            'probe.GenericProbe$Concrete', 'probe.GenericProbe$Variable', 'probe.GenericProbe$Throws', 'probe.GenericProbe$Plain'];
+        await run('generic-metadata', java, ['tools/GenericMetadataTool.java', paths['game-jar'],
+            join(outputDir, 'classes'), join(outputDir, 'generic-metadata.json'), ...names]);
+        genericMetadata = JSON.parse(await readFile(join(outputDir, 'generic-metadata.json'), 'utf8'));
+        if (!Object.values(genericMetadata).every(value => typeof value === 'string')) throw new Error('Invalid generic metadata');
+        evidence.genericMetadataKeys = Object.keys(genericMetadata).length;
+    }
+    await writeFile(join(outputDir, 'generic-host.js'), 'globalThis.portGenericMetadata = ' + JSON.stringify(genericMetadata) + ';\n');
+    const assets = probe.assets ? await loadAssets(paths['media-root'], probe.standardLibrary) : {manifest: [], files: new Map()};
     if (probe.assets) evidence.assets = assets.manifest;
     server = createServer(async (request, response) => {
         if (request.url === '/asset-manifest.json') {
@@ -272,6 +298,7 @@ try {
         if (!route) { response.writeHead(404); response.end(); return; }
         try {
             let body = route[0] ? await readFile(route[0]) : Buffer.alloc(0);
+            if (probe.generics && request.url === '/') body = Buffer.from(body.toString('utf8').replace('<script src="/wasm/', '<script src="/generic-host.js"></script>\n<script src="/wasm/'));
             if (probe.resources && request.url === '/') body = Buffer.from(body.toString('utf8').replace('<script src="/wasm/', '<script src="/resource-host.js"></script>\n<script src="/wasm/'));
             response.writeHead(200, {'Content-Type': route[1], 'Cache-Control': 'no-store'});
             response.end(body);
@@ -356,7 +383,7 @@ try {
         if ((await page.request.post('http://127.0.0.1:' + server.address().port + '/asset-manifest.json')).status() !== 405) {
             throw new Error('Asset manifest accepted a write request');
         }
-        const after = await loadAssets(paths['media-root']);
+        const after = await loadAssets(paths['media-root'], probe.standardLibrary);
         if (JSON.stringify(after.manifest) !== JSON.stringify(assets.manifest)) throw new Error('Installed asset changed during probe');
         evidence.assetBoundaryChecks = {exactJavaBytes: true, rejectedUnknownPaths: 3, rejectedWrite: true, installedInputsUnchanged: true};
     }

@@ -61,7 +61,7 @@ Run all verified components from the repository root:
         '--maven-home', $env:PZ_MAVEN_HOME,
         '--browser', $env:PZ_BROWSER
     )
-    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream', 'deque', 'fma', 'field-handles', 'resources', 'future', 'executors', 'time-units', 'digest', 'locks', 'regex', 'rectangles', 'channels', 'libraries', 'lazy-value', 'joml') {
+    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream', 'deque', 'fma', 'field-handles', 'resources', 'future', 'executors', 'time-units', 'digest', 'locks', 'regex', 'rectangles', 'channels', 'libraries', 'watch', 'format-exception', 'package-name', 'module-token', 'anonymous-class', 'generics', 'thread-groups', 'lazy-value', 'joml') {
         node compare.mjs --probe $probe @probeArgs
         if ($LASTEXITCODE -ne 0) { throw "Probe failed: $probe" }
     }
@@ -139,3 +139,5 @@ Use `--probe filesystem-runtime` for the original selected-file index. The allow
 `season-runtime` remains a failing diagnostic: its original SandboxOptions path requires additional installed media and game Lua environment initialization.
 
 The `game-keyboard` entry uses the same browser-only invocation as `keyboard` and verifies the original game input cache and transition lifecycle. It remains an input integration rather than a running player simulation.
+
+The `standard-environment` entry additionally mounts the exact installation-root `stdlib.lua` and lets original J2SEPlatform.newEnvironment load it. Use the same `--media-root` argument; its parent directory supplies only that explicitly allowlisted file. `reflection-exposure` uses the same invocation to expose original GameVersion through the original Java-to-Lua bridge, with actual reflective constructor/method calls and numeric conversion. `lua-manager-init --compile-only` remains a diagnostic for the much larger full game Lua environment.

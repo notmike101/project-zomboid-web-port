@@ -13,7 +13,8 @@ public final class NativeCapabilitiesPlugin implements TeaVMPlugin {
         if (!Boolean.getBoolean("port.nativeCapabilities")) return;
         host.add((cls, context) -> {
             String name = cls.getName();
-            if (!name.startsWith("org.lwjgl.") && !name.startsWith("imgui.")) return;
+            if (!name.startsWith("org.lwjgl.") && !name.startsWith("imgui.")
+                    && !name.equals("fmod.javafmodJNI")) return;
             for (var method : cls.getMethods()) {
                 // Real bridges clear NATIVE before supplying their implementations.
                 if (!method.getModifiers().contains(ElementModifier.NATIVE)) continue;

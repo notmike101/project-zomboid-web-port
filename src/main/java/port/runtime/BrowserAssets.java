@@ -13,7 +13,7 @@ import org.teavm.runtime.fs.VirtualFileAccessor;
 import org.teavm.runtime.fs.VirtualFileSystem;
 import org.teavm.runtime.fs.VirtualFileSystemProvider;
 
-/** Immutable, preloaded installed-media mount; other paths retain the previous in-memory filesystem. */
+/** Immutable preloaded media and exact root stdlib.lua mount; other paths retain the previous memory filesystem. */
 public final class BrowserAssets implements VirtualFileSystem {
     private final VirtualFileSystem previous;
     private final Map<String, Entry> entries = new HashMap<>();
@@ -74,7 +74,9 @@ public final class BrowserAssets implements VirtualFileSystem {
         }
         return "/" + String.join("/", parts);
     }
-    private static boolean mounted(String path) { return path.equals("/media") || path.startsWith("/media/"); }
+    private static boolean mounted(String path) {
+        return path.equals("/stdlib.lua") || path.equals("/media") || path.startsWith("/media/");
+    }
     private String child(String parent, String name) { return normalize(parent + "/" + name); }
 
     private final class Node implements VirtualFile {
@@ -93,6 +95,7 @@ public final class BrowserAssets implements VirtualFileSystem {
                 String[] existing = delegate().listFiles();
                 if (existing != null) children.addAll(Arrays.asList(existing));
                 children.add("media");
+                if (entries.containsKey("/stdlib.lua")) children.add("stdlib.lua");
             } else {
                 for (String candidate : entries.keySet()) {
                     if (candidate.startsWith(path + "/")) {
@@ -167,9 +170,15 @@ public final class BrowserAssets implements VirtualFileSystem {
     @JSBody(script = """
             if (!(self.portAssetFiles instanceof Map) || !Array.isArray(self.portAssetManifest)) throw new Error('Asset host missing');
             const seen = new Set();
-            for (const entry of self.portAssetManifest) {
-                if (typeof entry.path !== 'string' || !entry.path.startsWith('/media/') || entry.path.includes('\\\\')
-                    || entry.path.includes('\\0') || entry.path.split('/').slice(1).some(p => !p || p === '.' || p === '..')
+            for (var i = 0; i < self.portAssetManifest.length; i++) {
+                var entry = self.portAssetManifest[i];
+                var parts = entry.path && entry.path.split('/');
+                var invalidPart = false;
+                if (parts) for (var p = 1; p < parts.length; p++) {
+                    if (!parts[p] || parts[p] === '.' || parts[p] === '..') invalidPart = true;
+                }
+                if (typeof entry.path !== 'string' || !(entry.path.startsWith('/media/') || entry.path === '/stdlib.lua') || entry.path.includes('\\\\')
+                    || entry.path.includes('\\0') || invalidPart
                     || seen.has(entry.path) || !Number.isInteger(entry.size) || entry.size < 0 || entry.size > 16777216
                     || !Number.isSafeInteger(entry.mtime) || entry.mtime < 0 || !/^[0-9a-f]{64}$/.test(entry.sha256)) throw new Error('Invalid asset manifest');
                 const bytes = self.portAssetFiles.get(entry.path);

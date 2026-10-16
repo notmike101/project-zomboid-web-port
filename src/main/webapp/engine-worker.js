@@ -14,12 +14,13 @@ self.onmessage = async event => {
         started = true;
         self.portGraphicsCanvas = event.data.canvas;
         importScripts('/resource-host.js');
+        importScripts('/generic-host.js');
         const assetResponse = await fetch('/asset-manifest.json');
         if (!assetResponse.ok) throw new Error('Asset manifest HTTP ' + assetResponse.status);
         self.portAssetManifest = await assetResponse.json();
         self.portAssetFiles = new Map();
         for (const entry of self.portAssetManifest) {
-            if (typeof entry.path !== 'string' || !entry.path.startsWith('/media/')
+            if (typeof entry.path !== 'string' || !(entry.path.startsWith('/media/') || entry.path === '/stdlib.lua')
                     || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 1024 * 1024
                     || !/^[0-9a-f]{64}$/.test(entry.sha256) || self.portAssetFiles.has(entry.path)) {
                 throw new Error('Invalid asset manifest entry');
