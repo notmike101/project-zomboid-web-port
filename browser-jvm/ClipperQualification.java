@@ -8,6 +8,7 @@ import zombie.vehicles.Clipper;
 /** Synthetic JNI polygon ABI qualification; no game entry point or world state. */
 public final class ClipperQualification {
     static Clipper clipper;
+    static int operation;
     static ByteOrder inputTagOverride;
     static ByteOrder outputTagOverride;
 
@@ -63,7 +64,7 @@ public final class ClipperQualification {
         int clipPosition = clip.position();
         clipper.addPath(first.length / 2, subject, false, true);
         clipper.addPath(second.length / 2, clip, true, true);
-        int count = clipper.generatePolygons(Clipper.ctIntersection, 0, Clipper.jtSquare);
+        int count = clipper.generatePolygons(operation, 0, Clipper.jtSquare);
         StringJoiner polygons = new StringJoiner(",", "[", "]");
         for (int index = 0; index < count; index++) {
             ByteBuffer output = ByteBuffer.allocateDirect(65536);
@@ -121,7 +122,7 @@ public final class ClipperQualification {
                 + "\",\"inputTag\":\"" + subject.order()
                 + "\",\"inputPositionsBefore\":[" + subjectPosition + "," + clipPosition
                 + "],\"inputPositionsAfter\":[" + subject.position() + "," + clip.position()
-                + "],\"count\":" + count + ",\"polygons\":" + polygons + "}");
+                + "],\"operation\":" + operation + ",\"count\":" + count + ",\"polygons\":" + polygons + "}");
     }
     public static void main(String[] args) {
         if (args.length > 0 && args[0].equals("native")) {
@@ -130,6 +131,15 @@ public final class ClipperQualification {
         clipper = new Clipper();
         AdapterChecks.run();
         System.out.println("CLIPPER_ADAPTER_CHECKS_PASS");
+        for (int type : new int[] { Clipper.ctIntersection, Clipper.ctDifference }) {
+            operation = type;
+            runCases();
+        }
+    }
+
+    private static void runCases() {
+        inputTagOverride = null;
+        outputTagOverride = null;
         float[] square = rect(0, 0, 2, 2);
         test("rect-disjoint", square, rect(3, 0, 2, 2), ByteOrder.BIG_ENDIAN, -1, 0);
         test("rect-overlap", square, rect(1, 1, 2, 2), ByteOrder.BIG_ENDIAN, -1, 0);

@@ -102,12 +102,13 @@ public final class ClipperSupport {
 
     public static int generate(Object owner, int operation, double offset, int join) {
         State state = state(owner);
-        // shortcut: only zero-offset intersection is native-qualified; extend after native comparisons.
-        if (operation != 1 || offset != 0 || join != 0) {
-            throw new UnsupportedOperationException("Only native-qualified zero-offset intersection is enabled");
+        // shortcut: only zero-offset intersection/difference are native-qualified; extend after native comparisons.
+        if ((operation != 1 && operation != 3) || offset != 0 || join != 0) {
+            throw new UnsupportedOperationException("Only native-qualified zero-offset intersection and difference are enabled");
         }
         PolyTree64 tree = new PolyTree64();
-        if (!state.engine.execute(ClipType.Intersection, FillRule.Positive, tree)) {
+        ClipType type = operation == 1 ? ClipType.Intersection : ClipType.Difference;
+        if (!state.engine.execute(type, FillRule.Positive, tree)) {
             throw new IllegalStateException("Clipper2 execution failed");
         }
         state.polygons.clear();

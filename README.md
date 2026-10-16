@@ -105,7 +105,7 @@ The complete survival game, zombie population simulation, full Bullet dynamics, 
 
 A separate original-renderer qualification now loads all 219 genuine depth images, creates all eight original scene shader programs and renders 35 genuine non-floor map objects with an observed 33,932-pixel contribution. Immediate release of owned direct buffers resolves the former depth-loading JNI exhaustion; native buffer usage returns to its starting value. The public walking session continues to present floors and the body while continuous original scene presentation is integrated.
 
-The original renderer's occlusion lookup also matches its native reference across 738 integers using real Clipper2 polygon intersections in the browser. The public session initializes that original lookup before rendering. Only the qualified closed-path, zero-offset intersection contract is enabled; other native polygon operations, complete lighting and complete cell rendering remain separate work.
+The original renderer's occlusion lookup also matches its native reference across 738 integers using real Clipper2 polygon intersections in the browser. The public session initializes that original lookup before rendering. Qualified closed-path, zero-offset intersection and difference contracts are enabled; other native polygon operations, complete lighting and complete cell rendering remain separate work.
 
 The original region worker belongs to the dedicated browser-JVM context lifetime because its original reset busy-waits without yielding. Closing the owned browser releases that runtime; same-JVM engine reset/reuse is not supported. Installed native saves are never mounted.
 
@@ -131,7 +131,7 @@ The shader qualification uses the `PZ_BROWSER` executable set above. It checks a
 
 The native-memory qualification also uses `PZ_JDK` and requires the prepared play profile's `sprite-view.jar`. It checks immediate native storage release for owned byte/float/integer buffers, rejects foreign and repeated frees, and verifies the prepared archive is unchanged. The graphics host explicitly relies on the qualified Java 17 runtime's `sun.misc.Unsafe.invokeCleaner` support; unavailable support fails initialization.
 
-The Clipper qualification uses `PZ_JDK`, `PZ_BROWSER`, `PZ_GAME_JAR`, the prepared play archive and the pinned local Clipper2 JAR. It runs bounded polygon calculations through the matching installation-root `PZClipper64.dll`, then compares the same 46 cases in a fresh browser using the production adapter. It checks source hashes and releases owned resources without starting the installed game or server. Open paths, offsets and other polygon operations remain unsupported.
+The Clipper qualification uses `PZ_JDK`, `PZ_BROWSER`, `PZ_GAME_JAR`, the prepared play archive and the pinned local Clipper2 JAR. It runs bounded polygon calculations through the matching installation-root `PZClipper64.dll`, then compares the same 92 cases in a fresh browser using the production adapter: 46 each for intersection and difference. It checks source hashes and releases owned resources without starting the installed game or server. Open paths, offsets and other polygon operations remain unsupported.
 
 Lint runs ESLint with **--max-warnings 0**, using the actual @notmike101/eslint-config-js and @notmike101/eslint-config-jsdoc configurations. Authored Node, browser and inline HTML scripts are included. Package provenance is recorded in [vendor/eslint-configs/README.md](vendor/eslint-configs/README.md).
 
