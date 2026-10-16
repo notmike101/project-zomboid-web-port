@@ -64,6 +64,10 @@ public final class BrowserWorldBootstrap implements AutoCloseable {
         zombie.core.skinnedmodel.population.HairStyles.init();
         zombie.core.skinnedmodel.population.BeardStyles.init();
         zombie.core.skinnedmodel.population.PopTemplateManager.instance.init();
+        // Its original initializer registers the condition factories required while parsing groups.
+        Class.forName("zombie.characters.action.ActionContext");
+        if (zombie.characters.action.IActionCondition.s_factoryMap.size() != 12)
+            throw new AssertionError("Original action-condition factories incomplete");
         var group = zombie.characters.action.ActionGroup.getActionGroup("player");
         if (group == null || group.getInitialState() == null || !"idle".equals(group.getInitialState().getName()))
             throw new AssertionError("Original player action group incomplete");
@@ -78,6 +82,11 @@ public final class BrowserWorldBootstrap implements AutoCloseable {
             IsoPlayer player = loader == null ? new IsoPlayer(cell) : new IsoPlayer(cell, null, x, y, z);
             if (player.getActionContext().getGroup() != group || !"idle".equals(player.getActionContext().getCurrentStateName()))
                 throw new AssertionError("Original player action context incomplete");
+            var fishing = group.getInitialState().transitions.stream()
+                    .filter(transition -> "fishing".equals(transition.getTransitionTo())).findFirst()
+                    .orElseThrow(() -> new AssertionError("Installed fishing transition absent"));
+            if (fishing.passes(player.getActionContext(), group.getInitialState()))
+                throw new AssertionError("Original fishing transition passed without EventFishing");
             return new BrowserWorldBootstrap(cell, player);
         } catch (Throwable failure) {
             zombie.iso.WorldReuserThread.instance.stop();
