@@ -1,6 +1,7 @@
 package probe;
 
 import java.nio.ByteOrder;
+import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import org.teavm.interop.Address;
@@ -21,13 +22,14 @@ public final class MemoryProbe {
         if (BrowserMemory.liveAllocations() != 0) throw new AssertionError("Expected no pre-existing allocations");
         checks = 0;
         String[] names = {"float-allocation", "int-allocation", "real-address", "identity-ownership",
-                "invalid-free", "invalid-size", "zero-capacity", "position-limit"};
+                "invalid-free", "invalid-size", "zero-capacity", "position-limit", "byte-fill-address"};
         StringBuilder json = new StringBuilder("{\"category\":\"browser-memory\",\"cases\":[");
         for (int i = 0; i < names.length; i++) {
             int before = checks;
             FloatBuffer floats = null;
             FloatBuffer second = null;
             IntBuffer ints = null;
+            ByteBuffer bytes = null;
             try {
                 switch (i) {
                     case 0:
@@ -100,7 +102,7 @@ public final class MemoryProbe {
                         check(floats.capacity() == 0 && floats.limit() == 0 && floats.position() == 0);
                         check(ints.capacity() == 0 && ints.limit() == 0 && ints.position() == 0);
                         break;
-                    default:
+                    case 7:
                         floats = MemoryUtil.memAllocFloat(4);
                         floats.put(new float[]{1, 2, 3, 4});
                         floats.position(0);
@@ -111,11 +113,25 @@ public final class MemoryProbe {
                         check(floats.get(1) == 2 && floats.get(2) == 3);
                         floats.position(3);
                         check(MemoryUtil.memAddress(floats) == start + 12);
+                        break;
+                    default:
+                        bytes = MemoryUtil.memAlloc(6);
+                        check(bytes.isDirect() && bytes.order() == ByteOrder.nativeOrder());
+                        long byteBase = MemoryUtil.memAddress(bytes);
+                        bytes.put(0, (byte) 7).put(5, (byte) 8).position(1).limit(5);
+                        MemoryUtil.memSet(bytes, 0x1ab);
+                        check(bytes.position() == 1 && bytes.limit() == 5);
+                        for (int index = 1; index < 5; index++) check((bytes.get(index) & 255) == 0xab);
+                        ByteBuffer whole = bytes.duplicate().clear();
+                        check(whole.get(0) == 7 && whole.get(5) == 8);
+                        check(MemoryUtil.memAddress(bytes) == byteBase + 1
+                                && (Address.fromInt((int) byteBase + 1).getByte() & 255) == 0xab);
                 }
             } finally {
                 MemoryUtil.memFree(floats);
                 MemoryUtil.memFree(second);
                 MemoryUtil.memFree(ints);
+                MemoryUtil.memFree(bytes);
             }
             check(BrowserMemory.liveAllocations() == 0);
             if (i != 0) json.append(',');

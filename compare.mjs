@@ -74,7 +74,7 @@ const probes = {
     regex: {mainClass: 'probe.RegexProbe', category: 'runtime-compatibility', regex: true, cases: 16, comparisons: 32,
         classes: [], symbols: []},
     memory: {mainClass: 'probe.MemoryProbe', category: 'browser-memory', browserOnly: true, memory: true,
-        cases: 8, comparisons: 50, symbols: []},
+        cases: 9, comparisons: 59, symbols: []},
     joml: {mainClass: 'probe.JomlProbe', category: 'vendor-compatibility', joml: true, cases: 8, comparisons: 128,
         classes: [], symbols: [], vendorSymbols: ['org.joml.Matrix4f::setOrtho', 'org.joml.MemUtil$MemUtilNIO::put']},
     'shader-parameter': {mainClass: 'probe.ShaderParameterBoundaryProbe', compileOnly: true, webgl: true, memory: true,
@@ -110,12 +110,15 @@ const probes = {
     core: {mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, symbols: ['Core::<clinit>']}
 };
 probes['reflection-manifest'] = {...probes['reflection-exposure'], reflectionExposure: false, reflectionManifest: 'game-version'};
+probes['reflection-vectors'] = {...probes['reflection-manifest'], mainClass: 'probe.ReflectionVectorDirectionProbe', reflectionManifest: 'vectors', cases: 5, comparisons: 10};
 probes['game-lua-exposure'] = {...probes['lua-manager-init'], reflectionManifest: 'all'};
 probes['game-lua-exposure-fast'] = {...probes['game-lua-exposure'], fastAnalysis: true};
 probes['season-bootstrap'] = {...probes['standard-environment'], mainClass: 'probe.SeasonBootstrapProbe', category: 'browser-core', threadGroups: true, assetProfile: 'sandbox', cases: 5, comparisons: 26};
 probes['menu-png'] = {...probes['standard-environment'], mainClass: 'probe.MenuPngProbe', category: 'browser-assets', assetProfile: 'menu-image', cases: 3, comparisons: 8};
 probes['menu-png'].inflater = true;
+probes['image-texture'] = {...probes['menu-png'], mainClass: 'probe.ImageTextureProbe', category: 'browser-core', cases: 2, comparisons: 8};
 probes.inflater = {mainClass: 'probe.InflaterProbe', category: 'runtime-compatibility', inflater: true, cases: 8, comparisons: 16, classes: [], symbols: []};
+probes['output-channel'] = {mainClass: 'probe.FileOutputChannelProbe', category: 'runtime-compatibility', outputChannels: true, cases: 8, comparisons: 16, classes: [], symbols: []};
 probes['game-boot'] = {...probes['lua-manager-init'], mainClass: 'zombie.gameStates.MainScreenState', keyboard: true, symbols: ['MainScreenState::main']};
 if (!Object.hasOwn(probes, probeName)) throw new Error('Unknown probe: ' + probeName);
 const probe = probes[probeName];
@@ -191,14 +194,31 @@ try {
     if (evidence.executionRequested && !probe.browserOnly) evidence.jvmVersion = (await run('jvm-version', paths.java, ['-version'])).trim();
     evidence.jdkVersion = (await run('jdk-version', java, ['-version'])).trim();
     let reflectionManifestPath;
+    let reflectionGenericNames = [];
     if (probe.reflectionManifest) {
         const inventoryPath = join(outputDir, 'exposure-inventory.json');
         await run('exposure-inventory', java, ['tools/ExposureManifestTool.java', paths['game-jar'], inventoryPath]);
         const inventory = JSON.parse(await readFile(inventoryPath, 'utf8'));
         if (inventory.jarSha256 !== evidence.jarSha256Before) throw new Error('Reflection inventory original JAR hash differs');
-        const selected = probe.reflectionManifest === 'game-version' ? ['java.lang.Object', 'zombie.core.GameVersion']
+        let selected = probe.reflectionManifest === 'game-version' ? ['java.lang.Object', 'zombie.core.GameVersion']
             : Object.keys(inventory.classes).sort();
-        const lines = selected.map(name => 'C\t' + name);
+        const nameOnly = probe.reflectionManifest === 'vectors' ? ['java.lang.String', 'java.lang.CloneNotSupportedException'] : [];
+        if (probe.reflectionManifest === 'vectors') {
+            const hierarchy = new Set();
+            const visit = name => {
+                if (!name || hierarchy.has(name)) return;
+                const cls = inventory.classes[name];
+                if (!cls) throw new Error('Missing vector exposure hierarchy metadata: ' + name);
+                hierarchy.add(name);
+                visit(cls.superclass);
+                for (const parent of cls.interfaces) visit(parent);
+            };
+            for (const root of ['zombie.core.GameVersion', 'zombie.iso.Vector2', 'zombie.iso.IsoDirections']) visit(root);
+            selected = [...hierarchy].sort();
+        }
+        reflectionGenericNames = [...new Set([...selected, ...nameOnly])];
+        const lines = reflectionGenericNames.map(name => 'C\t' + name);
+        for (const name of nameOnly) if (!selected.includes(name)) lines.push('J\t' + name);
         for (const name of selected) {
             const cls = inventory.classes[name];
             if (!cls || !Array.isArray(cls.methods) || !Array.isArray(cls.fields)) throw new Error('Incomplete reflection inventory: ' + name);
@@ -216,7 +236,7 @@ try {
         reflectionManifestPath = resolve(outputDir, 'reflection-manifest.tsv');
         await writeFile(reflectionManifestPath, lines.join('\n') + '\n');
         evidence.reflectionManifest = {path: reflectionManifestPath, sha256: await sha256(reflectionManifestPath),
-            scope: probe.reflectionManifest, classes: selected.length, records: lines.length,
+            scope: probe.reflectionManifest, classes: reflectionGenericNames.length, nameOnlyClasses: nameOnly, records: lines.length,
             inventoryStats: inventory.stats, originalJdkPublicApiOnly: true};
     }
     const boot = (await readdir(join(paths['maven-home'], 'boot'))).filter(name => /^plexus-classworlds-.*\.jar$/.test(name));
@@ -228,6 +248,7 @@ try {
     if (reflectionManifestPath) mavenArgs.unshift('-Dport.reflectionManifest=' + reflectionManifestPath);
     if (probe.fastAnalysis) mavenArgs.unshift('-Dteavm.fastGlobalAnalysis=true');
     mavenArgs.unshift('-Dport.inflater=' + !!probe.inflater);
+    mavenArgs.unshift('-Dport.outputChannels=' + !!probe.outputChannels);
     evidence.fastGlobalAnalysis = !!probe.fastAnalysis;
     evidence.mavenVersion = (await run('maven-version', java, [...mavenArgs, '--version'])).trim();
     await run('compile-adapter', java, [...mavenArgs, '-B', '-Dmaven.repo.local=' + resolve('.m2'),
@@ -300,10 +321,12 @@ try {
     ]);
     let genericMetadata = {};
     if (probe.generics) {
-        const names = ['zombie.core.GameVersion', 'java.lang.Object', 'probe.GenericProbe', 'probe.GenericProbe$Base',
-            'probe.GenericProbe$Concrete', 'probe.GenericProbe$Variable', 'probe.GenericProbe$Throws', 'probe.GenericProbe$Plain'];
+        const names = [...new Set([...reflectionGenericNames, 'zombie.core.GameVersion', 'java.lang.Object', 'probe.GenericProbe', 'probe.GenericProbe$Base',
+            'probe.GenericProbe$Concrete', 'probe.GenericProbe$Variable', 'probe.GenericProbe$Throws', 'probe.GenericProbe$Plain'])];
+        const namesPath = join(outputDir, 'generic-names.txt');
+        await writeFile(namesPath, names.join('\n') + '\n');
         await run('generic-metadata', java, ['tools/GenericMetadataTool.java', paths['game-jar'],
-            join(outputDir, 'classes'), join(outputDir, 'generic-metadata.json'), ...names]);
+            join(outputDir, 'classes'), join(outputDir, 'generic-metadata.json'), '@' + namesPath]);
         genericMetadata = JSON.parse(await readFile(join(outputDir, 'generic-metadata.json'), 'utf8'));
         if (!Object.values(genericMetadata).every(value => typeof value === 'string')) throw new Error('Invalid generic metadata');
         evidence.genericMetadataKeys = Object.keys(genericMetadata).length;
@@ -407,23 +430,26 @@ try {
     }
     await writeFile(join(outputDir, 'browser.json'), JSON.stringify(evidence.browser, null, 2) + '\n');
     if (!evidence.browser.pass) throw new Error('Browser execution failed; see ' + join(outputDir, 'browser.json'));
-    if (probeName === 'menu-png') {
-        const reference = await page.evaluate(async () => {
+    if (probeName === 'menu-png' || probeName === 'image-texture') {
+        const reference = await page.evaluate(async padded => {
             const response = await fetch('/asset?path=' + encodeURIComponent('/media/ui/avatarBackgroundWhite.png'));
             if (!response.ok) throw new Error('Menu PNG reference fetch failed');
             const image = await createImageBitmap(new Blob([await response.arrayBuffer()], {type: 'image/png'}),
                 {premultiplyAlpha: 'none', colorSpaceConversion: 'none'});
             try {
-                const canvas = new OffscreenCanvas(image.width, image.height);
+                const width = padded ? 128 : image.width;
+                const height = padded ? 128 : image.height;
+                const canvas = new OffscreenCanvas(width, height);
                 const context = canvas.getContext('2d');
                 context.drawImage(image, 0, 0);
                 let hash = 1;
-                for (const value of context.getImageData(0, 0, image.width, image.height).data)
+                for (const value of context.getImageData(0, 0, width, height).data)
                     hash = (Math.imul(31, hash) + (value > 127 ? value - 256 : value)) | 0;
-                return {width: image.width, height: image.height, pixelHash: hash};
+                return {width: image.width, height: image.height, ...(padded ? {widthHw: width, heightHw: height} : {}), pixelHash: hash};
             } finally { image.close(); }
-        });
-        const decoded = evidence.browser.actual.cases.find(item => item.id === 'original-png-decoder').outputs;
+        }, probeName === 'image-texture');
+        const decoded = evidence.browser.actual.cases.find(item => item.id ===
+            (probeName === 'image-texture' ? 'original-image-texture-upload' : 'original-png-decoder')).outputs;
         if (Object.entries(reference).some(([name, value]) => decoded[name]?.value !== value))
             throw new Error('Original PNG decoder differs from independent browser decoding');
         evidence.independentPngDecode = reference;

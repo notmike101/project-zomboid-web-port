@@ -1,6 +1,7 @@
 package port.runtime;
 
 import java.nio.Buffer;
+import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import org.teavm.interop.Address;
@@ -35,6 +36,14 @@ public final class BrowserMemoryPlugin implements TeaVMPlugin {
                     // Wasm's allocation page is 64 KiB; desktop allocator/Unsafe state is unused.
                     body.setField("org.lwjgl.system.MemoryUtil", "PAGE_SIZE", body.constant(65536));
                     body.exit();
+                } else if (name.equals("memAlloc") && method.getDescriptor().equals(new MethodDescriptor("memAlloc", int.class, ByteBuffer.class))) {
+                    body.invoke(BrowserMemory.class, "memAlloc", ByteBuffer.class, body.var(1, int.class)).returnValue();
+                } else if (name.equals("memSet") && method.getDescriptor().equals(new MethodDescriptor("memSet", ByteBuffer.class, int.class, void.class))) {
+                    body.invoke(BrowserMemory.class, "memSet", body.var(1, ByteBuffer.class), body.var(2, int.class));
+                    body.exit();
+                } else if (name.equals("memFree") && method.getDescriptor().equals(new MethodDescriptor("memFree", ByteBuffer.class, void.class))) {
+                    body.invoke(BrowserMemory.class, "memFree", body.var(1, ByteBuffer.class));
+                    body.exit();
                 } else if ((name.equals("memAllocFloat") || name.equals("memAllocInt")) && signature.length == 2 && signature[0].equals(ValueType.INTEGER)) {
                     body.invoke(BrowserMemory.class, name, name.equals("memAllocFloat") ? FloatBuffer.class : IntBuffer.class, body.var(1, int.class)).returnValue();
                 } else if (name.equals("memFree") && signature.length == 2 &&
@@ -43,7 +52,7 @@ public final class BrowserMemoryPlugin implements TeaVMPlugin {
                     body.invoke(BrowserMemory.class, "memFree", body.var(1, type));
                     body.exit();
                 } else if (name.equals("memAddress") && signature.length == 2 &&
-                        (signature[0].equals(ValueType.object("java.nio.Buffer")) || signature[0].equals(ValueType.object("java.nio.FloatBuffer")) || signature[0].equals(ValueType.object("java.nio.IntBuffer")))) {
+                        (signature[0].equals(ValueType.object("java.nio.Buffer")) || signature[0].equals(ValueType.object("java.nio.ByteBuffer")) || signature[0].equals(ValueType.object("java.nio.FloatBuffer")) || signature[0].equals(ValueType.object("java.nio.IntBuffer")))) {
                     body.invoke(BrowserMemory.class, "memAddress", long.class, body.var(1, Buffer.class)).returnValue();
                 } else {
                     body.construct(UnsupportedOperationException.class,

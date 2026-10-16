@@ -14,6 +14,21 @@ import org.teavm.interop.Address;
 public final class BrowserMemory {
     private static final IdentityHashMap<Buffer, ByteBuffer> OWNERS = new IdentityHashMap<>();
 
+    public static ByteBuffer memAlloc(int bytes) {
+        if (bytes < 0) throw new IllegalArgumentException("Negative direct-buffer capacity");
+        ByteBuffer owner = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
+        OWNERS.put(owner, owner);
+        return owner;
+    }
+
+    /** LWJGL's buffer overload fills remaining bytes and preserves buffer state. */
+    public static void memSet(ByteBuffer buffer, int value) {
+        Objects.requireNonNull(buffer);
+        if (!buffer.isDirect()) throw new IllegalArgumentException("Expected a direct buffer");
+        if (buffer.isReadOnly()) throw new java.nio.ReadOnlyBufferException();
+        for (int i = buffer.position(); i < buffer.limit(); i++) buffer.put(i, (byte) value);
+    }
+
     public static FloatBuffer memAllocFloat(int count) {
         ByteBuffer owner = allocate(count);
         FloatBuffer view = owner.asFloatBuffer();
@@ -37,6 +52,7 @@ public final class BrowserMemory {
 
     public static void memFree(FloatBuffer buffer) { free(buffer); }
     public static void memFree(IntBuffer buffer) { free(buffer); }
+    public static void memFree(ByteBuffer buffer) { free(buffer); }
 
     private static void free(Buffer buffer) {
         if (buffer == null) return;
@@ -47,7 +63,8 @@ public final class BrowserMemory {
 
     public static long memAddress(Buffer buffer) {
         owner(Objects.requireNonNull(buffer));
-        return Integer.toUnsignedLong(baseAddress(buffer).add(buffer.position() * 4).toInt());
+        int elementSize = buffer instanceof ByteBuffer ? 1 : 4;
+        return Integer.toUnsignedLong(baseAddress(buffer).add(buffer.position() * elementSize).toInt());
     }
 
     private static native Address baseAddress(Buffer buffer);

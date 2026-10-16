@@ -24,13 +24,13 @@ addEventListener('unhandledrejection', event => window.probeErrors.push(String(e
         await module.exports.main([]);
         if (lines.length !== 1 || pending) throw new Error('Expected one memory result');
         const result = JSON.parse(lines[0]);
-        if (!result.pass || result.cases.length !== 8 || result.checks !== 50 || result.allocationsRemaining !== 0) throw new Error('Memory assertions failed');
+        if (!result.pass || result.cases.length !== 9 || result.checks !== 59 || result.allocationsRemaining !== 0) throw new Error('Memory assertions failed');
         const memory = linearMemory;
         if (!memory || !memory.buffer.byteLength) throw new Error('Expected actual Wasm linear memory');
         window.probeResult = {pass: true, cases: result.cases.length, comparisons: result.checks, matched: result.checks,
             linearMemory: true, memoryBytes: memory.buffer.byteLength, allocationsRemaining: result.allocationsRemaining,
             actual: result, errors: window.probeErrors};
-        document.getElementById('status').textContent = 'PASS: 50 direct-memory assertions';
+        document.getElementById('status').textContent = 'PASS: 59 direct-memory assertions';
     } catch (error) {
         window.probeResult = {pass: false, stdout: lines, pending, errors: [...window.probeErrors, String(error.stack || error)]};
         document.getElementById('status').textContent = 'FAIL';

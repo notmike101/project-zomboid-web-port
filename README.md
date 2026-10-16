@@ -61,7 +61,7 @@ Run all verified components from the repository root:
         '--maven-home', $env:PZ_MAVEN_HOME,
         '--browser', $env:PZ_BROWSER
     )
-    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream', 'deque', 'fma', 'field-handles', 'resources', 'future', 'executors', 'time-units', 'digest', 'locks', 'regex', 'rectangles', 'channels', 'libraries', 'watch', 'format-exception', 'package-name', 'module-token', 'anonymous-class', 'generics', 'thread-groups', 'lazy-value', 'joml') {
+    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream', 'deque', 'fma', 'field-handles', 'resources', 'future', 'executors', 'time-units', 'digest', 'locks', 'regex', 'rectangles', 'channels', 'libraries', 'watch', 'format-exception', 'package-name', 'module-token', 'anonymous-class', 'generics', 'thread-groups', 'inflater', 'output-channel', 'lazy-value', 'joml') {
         node compare.mjs --probe $probe @probeArgs
         if ($LASTEXITCODE -ne 0) { throw "Probe failed: $probe" }
     }
@@ -144,6 +144,9 @@ The `standard-environment` entry additionally mounts the exact installation-root
 
 The `reflection-manifest` entry independently passes the same original GameVersion exposure using a generated, parse-only retention manifest instead of the old class-specific whitelist. Missing original members fail compilation; missing standard-library public APIs are listed explicitly. `game-lua-exposure --compile-only` expands that inventory to the full exposure hierarchy. Its first full compile exhausted the compiler's 8 GB heap after validating 29,027 methods and 23,892 fields; it has not executed. `game-lua-exposure-fast --compile-only` separately investigates TeaVM's supported conservative analysis mode. Neither diagnostic is a full Lua initialization success.
 
-`menu-png` is currently a failing browser diagnostic for an actual installed character-menu PNG. It preserves original PNGDecoder and uses real texture/FBO transfers; its initial run exposed an Inflater contract mismatch before upload. It is not a rendered game menu. Existing interactive graphics checks still pass. `game-boot --compile-only` separately inspects the original launcher entry without executing it or supplying full reflection retention.
+`menu-png` now passes three cases/eight outputs for an actual installed character-menu PNG. It preserves original PNGDecoder, independently matches browser-decoded RGBA pixels, and checks a real texture upload/FBO readback byte for byte. A standard-library Inflater repair resolves the initial decoding failure. It is not a rendered game menu. Existing interactive graphics checks still pass. `game-boot --compile-only` separately inspects the original launcher entry without executing it or supplying full reflection retention.
 
 The separate fast-analysis full-exposure compile also exhausted the same 8 GB heap. Compiler-side separation of reflection discovery metadata from callable bodies is under investigation; removing private metadata would alter the original exposer's discovery and is not an acceptable workaround.
+
+
+`image-texture` now executes original ImageData and TextureID loading/upload with the same menu PNG profile. It verifies the original render-context callback and image disposal, and independently matches every 128-by-128 padded GPU pixel against browser decoding. This remains a texture integration, not a rendered game menu. The direct-memory check now includes owned byte allocation, range filling and real byte addresses (nine cases/59 assertions).
