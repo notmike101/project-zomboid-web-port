@@ -53,6 +53,15 @@ public final class CharacterRenderer implements AutoCloseable {
 
     /** Submits actual current skin transforms and the original GPU mesh without a per-frame readback. */
     public void draw(Model model,AnimationPlayer player) {
+        draw(model, player, false);
+    }
+
+    /** Draws over the original floor frame, with feet anchored at its player-centered world camera. */
+    public void drawInWorld(Model model, AnimationPlayer player) {
+        draw(model, player, true);
+    }
+
+    private void draw(Model model, AnimationPlayer player, boolean worldFrame) {
         checkOpen();
         if(model==null||!model.isReady()||model.mesh==null||!model.mesh.isReady()||model.mesh.vb==null)
             throw new AssertionError("Original GPU model is not ready");
@@ -77,10 +86,26 @@ public final class CharacterRenderer implements AutoCloseable {
         if(!Float.isFinite(span)||span<=0)throw new AssertionError("Invalid original animated bone bounds: "+modelTransforms+" x="+minX+".."+maxX+" y="+minY+".."+maxY);
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER,0);
         GL11.glViewport(0,0,width,height);GL11.glDisable(GL11.GL_BLEND);GL11.glDisable(GL11.GL_CULL_FACE);
-        GL11.glEnable(GL11.GL_DEPTH_TEST);GL11.glClearColor(0,0,0,1);GL11.glClear(GL11.GL_COLOR_BUFFER_BIT|GL11.GL_DEPTH_BUFFER_BIT);
+        GL11.glEnable(GL11.GL_DEPTH_TEST);
+        if (worldFrame) {
+            GL11.glClear(GL11.GL_DEPTH_BUFFER_BIT);
+        } else {
+            GL11.glClearColor(0,0,0,1);
+            GL11.glClear(GL11.GL_COLOR_BUFFER_BIT|GL11.GL_DEPTH_BUFFER_BIT);
+        }
         shader.Start();
         try {
-            shader.getShaderProgram().setValue("ModelViewProjection",projection.identity().ortho(centerX-span,centerX+span,centerY-span,centerY+span,-100,100));
+            if (worldFrame) {
+                float pixelsPerUnit = 32f * zombie.core.Core.tileScale;
+                if (pixelsPerUnit <= 0) throw new AssertionError("Invalid original tile scale");
+                float halfWidth = width / (2f * pixelsPerUnit);
+                float halfHeight = height / (2f * pixelsPerUnit);
+                projection.identity().ortho(centerX-halfWidth, centerX+halfWidth,
+                        minY-halfHeight, minY+halfHeight, -100, 100);
+            } else {
+                projection.identity().ortho(centerX-span,centerX+span,centerY-span,centerY+span,-100,100);
+            }
+            shader.getShaderProgram().setValue("ModelViewProjection", projection);
             shader.setMatrixPalette(palette);shader.setTexture(texture,"Texture",0);shader.setAlpha(1);shader.setTint(1,1,1);shader.setAmbient(1);shader.setHueShift(0);shader.setTargetDepth(.5f);shader.setDepthBias(0);shader.setScale(1);
             mesh.Draw(shader);
         }finally{shader.End();}
