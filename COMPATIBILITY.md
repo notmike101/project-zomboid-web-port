@@ -1,5 +1,11 @@
 # Incremental original-bytecode compatibility
 
+## Native indoor lighting service
+
+`browser-jvm/verify-lighting.mjs` compares actual `Lighting64.dll` calculations against the production browser service through unchanged original `LightingJNI` native declarations. All 43,904 packed integers across 896 general-scene cells match exactly; general, incremental and publication protocols additionally match 976, 1,040 and 18 output lines. These cover arbitrary opaque edges, gaps, mazes, multiple static lights, chunk seams, retained unchanged chunks, changed geometry, seen history, publication delay and consuming dirty bits. Original inputs retain their hashes and owned processes/browser/server close.
+
+The service implements the native platform algorithm for one fixed player and complete flat indoor chunks, with at most five static lamps. All 50 original JNI names are accounted for: 23 implemented methods and 27 explicit unsupported handlers. Outdoor/ambient behavior, vertical geometry, scrolling, moving-player history, rooms, doors/windows/transmission, temporary/room/torch lights and unqualified frame settings remain unsupported. Staged inputs are validated before publication; there is no fabricated white-light result or initialization flag. See `browser-jvm/lighting-provenance.md` for native control-flow provenance, admitted values and the separate Java17 module-loading boundary. This comparison does not establish original `LightingJNI.update`, original cell rendering or whole-game playability.
+
 ## Complete media filesystem discovery in the browser
 
 The original `ZomboidFileSystem.instance.init()` now passes in a separate fresh CheerpJ 4.3 / Java 17 browser context with `user.dir=/app`. A lazy HTTP handler exposes the installed media tree through read-only `/app/media` access, including generated immediate-child `index.list` responses and actual byte ranges. It mapped 47,437 original active paths, including 1,004 script paths and 2,680 Lua paths. Original `getMediaFile("scripts/generated/items/weapon.txt")` resolved and read 622,382 bytes with SHA-256 matching the installed source. The 278-second qualification includes final source-hash verification.

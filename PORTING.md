@@ -1,5 +1,9 @@
 # Toward a playable original-bytecode port
 
+## Original native lighting service
+
+The production indoor lighting backend now has a reproducible original-DLL/browser gate: 896 cells and 43,904 exact packed integer comparisons, with separate incremental retained-chunk and publication/dirty-bit protocols. Keep its native float32 propagation, LOS, traversal order and original packed ABI. Unsupported world features reject explicitly before publication; see `browser-jvm/lighting-provenance.md`. This is a qualified native service, not a completed original `LightingJNI.update` or cell-rendering lifecycle. Integrate genuine Java17 library loading and normal original caller inputs next, expanding the native oracle whenever those inputs exceed the admitted indoor closure.
+
 ## Full installed media discovery
 
 The lazy media service removes the prepared-file whitelist as a filesystem discovery limit. In a separate fresh browser JVM with `user.dir=/app`, original `ZomboidFileSystem.init()` discovers 47,437 active paths through the real installed tree. Original script access returns matching bytes; 47,416 byte-served source files and the installed JAR retain their hashes after the run. Directory metadata is generated in server memory, and canonical-path containment prevents traversal or external-junction reads.

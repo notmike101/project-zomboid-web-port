@@ -126,6 +126,7 @@ node browser-jvm/verify-glsl-compat.mjs
 node browser-jvm/verify-native-memory.mjs
 node browser-jvm/verify-clipper-callbacks.mjs
 node browser-jvm/verify-clipper.mjs
+node browser-jvm/verify-lighting.mjs
 ~~~
 
 The shader qualification uses the `PZ_BROWSER` executable set above. Nine cases check actual WebGL2 compilation and exact pixels with Chromium's SwiftShader backend, including overload selection, integer arithmetic, legacy color varyings, uniform-dependent globals across composed units and legacy texture sampling with an original sampler named `texture`. A separate source check now compiles and links twelve original scene shader pairs, including both cutaway shaders. These checks do not establish physical-GPU or complete GLSL conformance.
@@ -137,6 +138,8 @@ The native-memory qualification also uses `PZ_JDK` and requires the prepared pla
 The Clipper qualification uses `PZ_JDK`, `PZ_BROWSER`, `PZ_GAME_JAR`, the prepared play archive and the pinned local Clipper2 JAR. It runs bounded polygon calculations through the matching installation-root `PZClipper64.dll`, then compares the same 134 cases in a fresh browser using the production adapter: 46 each for intersection and difference, plus 42 primitive cases covering native AABB/polygon insertion, accumulated clip rectangles and the original Java bevel method. It checks source hashes and releases owned resources without starting the installed game or server. Open paths, offsets and other polygon operations remain unsupported.
 
 Lint runs ESLint with **--max-warnings 0**, using the actual @notmike101/eslint-config-js and @notmike101/eslint-config-jsdoc configurations. Authored Node, browser and inline HTML scripts are included. Package provenance is recorded in [vendor/eslint-configs/README.md](vendor/eslint-configs/README.md).
+
+The lighting qualification additionally requires `PZ_GAME_DIR` pointing to the installation and a prepared play profile. It compares the actual installed lighting DLL with a browser implementation of its native service: 896 indoor cells and 43,904 packed integers, plus incremental geometry and publication/dirty-state checks. The implementation preserves native float32 propagation, line of sight and corner-light calculations for that scope. Outdoors, vertical geometry, moving-player history, room lights and other unsupported inputs fail explicitly. This service is separately qualified; normal original lighting startup and complete cell rendering are still being integrated. See [lighting provenance and limits](browser-jvm/lighting-provenance.md).
 
 The earlier main was merged with milestone/m1 and preserved as an orphan snapshot at [backup/main-before-original-bytecode-port-20261016](https://github.com/notmike101/project-zomboid-web-port/tree/backup/main-before-original-bytecode-port-20261016). Main now contains the original-bytecode port; the older milestone and port-branch histories remain reachable.
 
