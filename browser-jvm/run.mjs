@@ -9,17 +9,17 @@ import { chromium } from 'playwright-core';
 
 const source = fileURLToPath(new URL('./', import.meta.url));
 const repository = path.resolve(source, '..');
-const names = new Set(['game-jar', 'media-root', 'jdk', 'browser', 'profile']);
+const names = new Set(['game-jar', 'media-root', 'jdk', 'browser', 'profile', 'interactive']);
 const options = {};
 
 for (let i = 2; i < process.argv.length; i += 2) {
     const name = process.argv[i]?.replace(/^--/, '');
 
     if (!names.has(name) || !process.argv[i].startsWith('--') || !process.argv[i + 1] || options[name]) {
-        throw new Error('Usage: node browser-jvm/run.mjs --game-jar PATH --media-root PATH --jdk JDK25_DIRECTORY --browser CHROMIUM_EXECUTABLE');
+        throw new Error('Usage: node browser-jvm/run.mjs --game-jar PATH --media-root PATH --jdk JDK25_DIRECTORY --browser CHROMIUM_EXECUTABLE [--profile play] [--interactive true|false]');
     }
 
-    options[name] = name === 'profile' ? process.argv[i + 1] : path.resolve(process.argv[i + 1]);
+    options[name] = ['profile', 'interactive'].includes(name) ? process.argv[i + 1] : path.resolve(process.argv[i + 1]);
 }
 
 if (!['game-jar', 'media-root', 'jdk', 'browser'].every((name) => options[name])) {
@@ -28,14 +28,25 @@ if (!['game-jar', 'media-root', 'jdk', 'browser'].every((name) => options[name])
 
 const profile = options.profile || 'graphics';
 
-if (!['graphics', 'lua', 'input', 'sprite', 'world', 'character-shader', 'animation', 'food'].includes(profile)) {
-    throw new Error('Profile must be graphics, lua, input, sprite, world, character-shader, animation or food');
+if (!['graphics', 'lua', 'input', 'sprite', 'world', 'character-shader', 'animation', 'food', 'play'].includes(profile)) {
+    throw new Error('Profile must be graphics, lua, input, sprite, world, character-shader, animation, food or play');
 }
 
+if (options.interactive && !['true', 'false'].includes(options.interactive)) {
+    throw new Error('--interactive must be true or false');
+}
+
+const interactive = options.interactive === 'true';
+
+if (interactive && profile !== 'play') {
+    throw new Error('--interactive true is available only for the play profile');
+}
+
+const animationProfile = ['animation', 'play'].includes(profile);
 const output = path.join(repository, 'target', 'browser-jvm', profile);
-const runtimeProfile = ['lua', 'sprite', 'world', 'character-shader', 'animation', 'food'].includes(profile);
-const graphicsProfile = ['sprite', 'character-shader', 'animation'].includes(profile);
-const worldSdkProfile = ['world', 'animation', 'food'].includes(profile);
+const runtimeProfile = ['lua', 'sprite', 'world', 'character-shader', 'animation', 'food', 'play'].includes(profile);
+const graphicsProfile = ['sprite', 'character-shader', 'animation', 'play'].includes(profile);
+const worldSdkProfile = ['world', 'animation', 'food', 'play'].includes(profile);
 const animationInputs = [
     'models_X/skinned/MaleBody.x', 'models_X/skinned/FemaleBody.x', 'models_X/skinned/Male_Skeleton.X', 'models_X/skinned/Female_Skeleton.X',
     'anims_X/Bob/Bob_Idle.X', 'anims_X/Bob/Bob_Idle_HeavyBreathing.X',
@@ -103,7 +114,7 @@ if (!contained(actualRepository, actualTarget) || actualTarget === actualReposit
     throw new Error('Generated output must remain inside the workspace target directory; escaping junctions are rejected');
 }
 
-await boundedReadOnly([...Object.entries(options).filter(([name]) => name !== 'profile').map(([,value]) => value), png, executable('java'), executable('javac')], async (prerequisite) => {
+await boundedReadOnly([...Object.entries(options).filter(([name]) => !['profile', 'interactive'].includes(name)).map(([,value]) => value), png, executable('java'), executable('javac')], async (prerequisite) => {
     if (contained(output, prerequisite) || contained(actualOutput, await canonical(prerequisite))) {
         throw new Error(`Prerequisite is inside generated output: ${prerequisite}`);
     }
@@ -290,7 +301,7 @@ try {
         command(executable('javac'), ['--release', '17', '-cp', gameJar, '-d', worldClasses, ...['CheerpJWorld.java', 'host/port/host/BrowserWorldBootstrap.java', 'host/port/host/PoolListSupport.java', 'host/port/host/BrowserKeyboard.java'].map((name) => path.join(source, name))]);
         command(executable('javac'), ['-d', tools, ...['PrepareInput.java', 'PrepareWorld.java', 'PrepareWorldAssets.java'].map((name) => path.join(source, name))]);
         command(executable('java'), ['-cp', tools, 'PrepareWorldAssets', options['media-root'], path.join(output, 'player-assets.jar'), path.join(output, 'player-assets-manifest.json')]);
-        command(executable('java'), ['-cp', tools, 'PrepareInput', path.join(output, profile === 'animation' ? 'sprite-view.jar' : 'runtime-view.jar'), path.join(output, 'input-view.jar')]);
+        command(executable('java'), ['-cp', tools, 'PrepareInput', path.join(output, animationProfile ? 'sprite-view.jar' : 'runtime-view.jar'), path.join(output, 'input-view.jar')]);
         command(executable('java'), ['-cp', tools, 'PrepareWorld', path.join(output, 'input-view.jar'), path.join(output, 'world-view.jar'), path.join(output, 'world-sdk-manifest.json')]);
         command(executable('jar'), ['--create', '--file', path.join(output, 'world-entry.jar'), '-C', worldClasses, '.']);
         const worldManifest = JSON.parse(await readFile(path.join(output, 'player-assets-manifest.json'), 'utf8'));
@@ -308,7 +319,7 @@ try {
         });
     }
 
-    if (profile === 'animation') {
+    if (animationProfile) {
         const animationClasses = path.join(output, 'animation-classes');
         const data = path.join(output, 'animation-data');
 
@@ -344,6 +355,42 @@ try {
         });
     }
 
+    if (profile === 'play') {
+        const playClasses = path.join(output, 'play-classes');
+        const geometry = path.join(output, 'geometry-data');
+        const tiles = path.join(output, 'tile-data');
+
+        await mkdir(playClasses, { recursive: true });
+        await mkdir(geometry, { recursive: true });
+        command(executable('javac'), ['-d', tools, path.join(source, 'PrepareGeometryAssets.java'), path.join(source, 'PrepareTilePack.java')]);
+        await boundedReadOnly(['Tiles1x.pack', 'Tiles1x.floor.pack'], async (name) => {
+            const file = path.join(options['media-root'], 'texturepacks', name);
+
+            assetHashes.push({ name: `media/texturepacks/${name}`, file, sha256Before: await hash(file) });
+        });
+        command(executable('java'), ['-cp', tools, 'PrepareGeometryAssets', path.dirname(gameJar), geometry]);
+        command(executable('java'), ['-cp', tools, 'PrepareTilePack', path.join(options['media-root'], 'texturepacks/Tiles1x.pack'), path.join(options['media-root'], 'texturepacks/Tiles1x.floor.pack'), path.join(geometry, 'sprite-names.txt'), tiles]);
+        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', playClasses, ...['BrowserInteractivePlay.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserPlaySession.java', 'host/port/host/BrowserGeometry.java', 'host/port/host/BrowserTileTextures.java', 'host/port/host/CharacterRenderer.java', 'host/port/host/FloorMapRenderer.java'].map((name) => path.join(source, name))]);
+        command(executable('jar'), ['--create', '--file', path.join(output, 'play-entry.jar'), '-C', playClasses, '.']);
+        const geometryRows = (await readFile(path.join(geometry, 'geometry-assets.tsv'), 'utf8')).trim().split(/\r?\n/u);
+
+        await boundedReadOnly(geometryRows, async (row) => {
+            const [name, size, sha256] = row.split('\t');
+            const file = path.resolve(path.dirname(gameJar), name);
+
+            if (!contained(path.dirname(gameJar), file) || !/^media\//u.test(name) || !/^\d+$/u.test(size) || !/^[a-f0-9]{64}$/u.test(sha256) || await hash(file) !== sha256) {
+                throw new Error(`Invalid or changed geometry manifest input: ${name}`);
+            }
+
+            assetHashes.push({ name, file, sha256Before: sha256 });
+        });
+        evidence.geometryAssets = { files: geometryRows.length, archiveSha256: await hash(path.join(geometry, 'geometry-assets.jar')) };
+        evidence.tilePreparation = JSON.parse(await readFile(path.join(tiles, 'manifest.json'), 'utf8'));
+        await writeFile(path.join(output, 'play.html'), (await readFile(path.join(source, 'play.html'), 'utf8')).replace('const interactive = false;', `const interactive = ${interactive};`));
+        evidence.interactive = interactive;
+        evidence.fullGamePlayable = false;
+    }
+
     if (profile === 'food') {
         const foodClasses = path.join(output, 'food-classes');
 
@@ -365,7 +412,7 @@ try {
     evidence.adaptedVendorClasses = manifest.adaptedVendorClasses;
     evidence.gameMethodBodiesUnchanged = manifest.gameMethodBodiesUnchanged;
 
-    const entryPages = { graphics: path.join(source, 'index.html'), lua: path.join(source, 'lua.html'), input: path.join(source, 'input.html'), sprite: path.join(source, 'sprite.html'), world: path.join(source, 'world.html'), animation: path.join(source, 'animation.html'), food: path.join(output, 'food.html'), 'character-shader': path.join(output, 'character-shader.html') };
+    const entryPages = { graphics: path.join(source, 'index.html'), lua: path.join(source, 'lua.html'), input: path.join(source, 'input.html'), sprite: path.join(source, 'sprite.html'), world: path.join(source, 'world.html'), animation: path.join(source, 'animation.html'), play: path.join(output, 'play.html'), food: path.join(output, 'food.html'), 'character-shader': path.join(output, 'character-shader.html') };
     const entryPage = entryPages[profile];
     const routes = new Map([
         ['/', { file: entryPage, type: 'text/html; charset=utf-8' }],
@@ -398,7 +445,7 @@ try {
         routes.set('/sprite-webgl.js', { file: path.join(source, 'sprite-webgl.js'), type: 'text/javascript' });
         routes.set('/sprite-view.jar', { file: path.join(output, 'sprite-view.jar'), type: 'application/java-archive' });
 
-        if (profile !== 'animation') {
+        if (!animationProfile) {
             for (const name of (profile === 'character-shader' ? ['basicEffect.vert', 'basicEffect.frag', 'util/math.h', 'util/math.glsl', 'util/hueShift.h', 'util/hueShift.glsl'].map((name) => `shaders/${name}`) : ['ui/avatarBackgroundWhite.png', 'shaders/default.vert', 'shaders/default.frag'])) {
                 routes.set(`/media/${name}`, { file: path.join(options['media-root'], name), type: name.endsWith('.png') ? 'image/png' : 'text/plain' });
             }
@@ -419,7 +466,7 @@ try {
         evidence.originalGameAlgorithmsPreserved = true;
     }
 
-    if (profile === 'animation') {
+    if (animationProfile) {
         for (const name of ['animation-entry.jar', 'animation-view.jar', 'animation-sdk-view.jar', 'path-view.jar', 'atomic-view.jar', 'animation-assets.jar']) {
             routes.set(`/${name}`, { file: path.join(output, name), type: 'application/java-archive' });
         }
@@ -427,6 +474,34 @@ try {
         for (const name of ['prepared.properties', ...animationInputs.map((name) => `${path.basename(name)}.ais`)]) {
             routes.set(`/${name}`, { file: path.join(output, 'animation-data', name), type: 'application/octet-stream' });
         }
+    }
+
+    if (profile === 'play') {
+        routes.set('/browser-physics.js', { file: path.join(source, 'browser-physics.js'), type: 'text/javascript' });
+        routes.set('/play-entry.jar', { file: path.join(output, 'play-entry.jar'), type: 'application/java-archive' });
+        routes.set('/geometry-assets.jar', { file: path.join(output, 'geometry-data/geometry-assets.jar'), type: 'application/java-archive' });
+
+        for (const name of ['Challenge1Tiles.pack', 'Tiles1x.floor.pack']) {
+            routes.set(`/media/texturepacks/${name}`, { file: path.join(output, 'tile-data', name), type: 'application/octet-stream' });
+        }
+
+        const playAssets = [
+            'scripts/generated/items/weapon.txt',
+            'clothing/clothing.xml',
+            'texturepacks/WeatherFx.pack',
+            'textures/weather/fogcircle_tex.png',
+            'textures/weather/fogwhite_tex.png',
+            ...['StepForward_Off', 'Pause_Off', 'Pause_On', 'Play_Off', 'Play_On', 'FFwd1_Off', 'FFwd1_On', 'FFwd2_Off', 'FFwd2_On', 'Wait_Off', 'Wait_On'].map((name) => `ui/speedControls/${name}.png`),
+            ...['StashUtil', 'BrandenburgStashDesc', 'EkronStashDesc', 'IrvingtonStashDesc', 'LouisvilleStashDesc', 'MarchRidgeStashDesc', 'MulStashDesc', 'RiversideStashDesc', 'RosewoodStashDesc', 'WorldStashDesc', 'WpStashDesc'].map((name) => `lua/shared/StashDescriptions/${name}.lua`),
+        ];
+
+        await boundedReadOnly(playAssets, async (name) => {
+            const file = path.join(options['media-root'], name);
+            const type = { '.png': 'image/png', '.pack': 'application/octet-stream' }[path.extname(name)] || 'text/plain';
+
+            assetHashes.push({ name: `media/${name}`, file, sha256Before: await hash(file) });
+            routes.set(`/media/${name}`, { file, type });
+        });
     }
 
     if (profile === 'food') {
@@ -525,7 +600,7 @@ try {
     const origin = `http://127.0.0.1:${server.address().port}`;
 
     evidence.origin = origin;
-    browser = await chromium.launch({ executablePath: options.browser, headless: true });
+    browser = await chromium.launch({ executablePath: options.browser, headless: !interactive });
     const context = await browser.newContext({ serviceWorkers: 'block' });
 
     await context.route('**/*', async (route) => {
@@ -548,7 +623,13 @@ try {
     });
     const page = await context.newPage();
 
-    page.on('console', (message) => logs.push(`${message.type()}: ${message.text()}`));
+    page.on('console', (message) => {
+        logs.push(`${message.type()}: ${message.text()}`);
+
+        if (interactive && logs.length > 1_000) {
+            logs.shift();
+        }
+    });
     page.on('pageerror', (error) => logs.push(`PAGEERROR: ${error.stack}`));
     await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 60_000 });
 
@@ -572,7 +653,34 @@ try {
         }
     }
 
-    await page.waitForFunction(() => globalThis.probeResult, undefined, { timeout: 180_000 });
+    if (profile === 'play' && !interactive) {
+        await page.waitForFunction(() => globalThis.sessionReady || globalThis.probeResult, undefined, { timeout: 180_000 });
+
+        await page.waitForFunction(() => globalThis.playSnapshot?.frames > 0 || globalThis.probeResult, undefined, { timeout: 60_000 });
+
+        if (!(await page.evaluate(() => Boolean(globalThis.probeResult)))) {
+            evidence.beforeInput = await page.evaluate(() => globalThis.playSnapshot);
+            await page.locator('#graphics-canvas').focus();
+            await page.keyboard.down('w');
+            await page.waitForFunction(() => globalThis.playSnapshot?.inputY < 0 || globalThis.probeResult, undefined, { timeout: 60_000 });
+            evidence.pressedInput = await page.evaluate(() => globalThis.playSnapshot);
+
+            await page.waitForFunction((first) => globalThis.playSnapshot?.frames >= first + 10 || globalThis.probeResult, evidence.pressedInput.frames, { timeout: 60_000 });
+            evidence.heldInput = await page.evaluate(() => globalThis.playSnapshot);
+            await page.keyboard.up('w');
+
+            await page.waitForFunction((first) => globalThis.probeResult || (globalThis.playSnapshot?.frames >= first + 4
+                && globalThis.zeroInputFrames >= 4), evidence.heldInput.frames, { timeout: 60_000 });
+            evidence.releasedInput = await page.evaluate(() => globalThis.playSnapshot);
+            evidence.zeroInputFrames = await page.evaluate(() => globalThis.zeroInputFrames);
+
+            if (!(await page.evaluate(() => Boolean(globalThis.probeResult)))) {
+                await page.locator('#stop').click();
+            }
+        }
+    }
+
+    await page.waitForFunction(() => globalThis.probeResult, undefined, { timeout: interactive ? 0 : 180_000 });
     evidence.result = await page.evaluate(() => globalThis.probeResult);
 
     if (runtimeProfile) {
@@ -581,13 +689,26 @@ try {
 
     evidence.pass = evidence.result.pass === true && denied.length === 0;
 
-    if (profile === 'animation' && evidence.pass) {
+    if (profile === 'play') {
+        evidence.frameCompleted = Number.isInteger(evidence.result.frames) && evidence.result.frames > 0;
+        evidence.inputPressed = evidence.pressedInput?.inputX === 0 && evidence.pressedInput?.inputY < 0;
+        evidence.normalMovement = evidence.heldInput?.frames >= evidence.pressedInput?.frames + 10
+            && Number.isFinite(evidence.heldInput?.x) && Number.isFinite(evidence.heldInput?.y)
+            && (evidence.heldInput.x !== evidence.pressedInput.x || evidence.heldInput.y !== evidence.pressedInput.y);
+        evidence.inputReleased = evidence.releasedInput?.inputX === 0 && evidence.releasedInput?.inputY === 0
+            && evidence.releasedInput.frames >= evidence.heldInput?.frames + 4 && evidence.zeroInputFrames >= 4;
+        evidence.pass = evidence.pass && evidence.frameCompleted && (interactive || (evidence.inputPressed && evidence.normalMovement && evidence.inputReleased));
+        evidence.fullGamePlayable = false;
+    }
+
+    if (animationProfile && evidence.pass) {
         const screenshot = path.join(output, 'character-frame.png');
 
         await page.locator('#graphics-canvas').screenshot({ path: screenshot });
         evidence.characterScreenshot = screenshot;
     }
 } catch (error) {
+    evidence.pass = false;
     evidence.error = String(error.stack || error);
 } finally {
     const cleanupErrors = [];
@@ -656,6 +777,11 @@ try {
 
     if (assetHashes.length) {
         evidence.assets = assetHashes;
+    }
+
+    if (profile === 'play') {
+        evidence.walkingSliceQualified = evidence.pass && evidence.inputPressed === true
+            && evidence.normalMovement === true && evidence.inputReleased === true;
     }
 
     await writeFile(path.join(output, 'build.json'), `${JSON.stringify(build, null, 2)}\n`);
