@@ -396,3 +396,13 @@ CheerpJ world profile PASS: real IsoCell/IsoPlayer, 953 installed files / 806347
 
 Original character shader browser PASS: actual basicEffect composed stages compile/link/validate, UVScale(1,1), two matrix-palette GPU elements including non-diagonal transpose and NIO state. Real color/depth FBO completeness gates the bounded ARB capability. Separate library-unit compile failures are preserved; same-stage source composition is an explicit desktop-to-WebGL linker adaptation. Original shader operations are preserved; no actual character drawing claim. Full Lua + sprite regression remains5/14 and identical framebuffer hash.
 
+
+## Character and map integration checkpoint
+
+The CheerpJ path has now completed original client `ModelManager.create()` in an owned browser, including a real 1024-by-1024 color/depth framebuffer, the installed animation-mesh script definitions, asynchronous model loading and original animation directory discovery. The real male model reports READY with 35 bones, the female model reports READY, and original idle/walk/run assets are discovered. A separate original AnimationPlayer qualification advances idle with zero deferred movement and walk with nonzero deferred movement. This is not yet a connected player update or visible character frame.
+
+The bounded Challenge1 geometry experiment loads all seven installed tile-definition files (61,227 sprites), parses four genuine lot headers and completes original IsoMetaGrid creation for cell bounds 0..1. Original WorldStreamer creation and chunk-request submission return. Chunk activation, usable squares, collision and player walking remain unqualified.
+
+These private experiments use explicitly documented compatibility copies: class-version header lowering and existing Pool/LazyValue/ZomboidFileSystem SDK call adaptations. Installed game inputs remain unchanged; the loaded private copies are not byte-for-byte identical. The user explicitly allowed these existing adaptations on 2026-10-16. Do not describe these experiments as unchanged-class execution. No new gameplay algorithm is substituted.
+
+Public browser profiles now write into `target/browser-jvm/<profile>/`, preventing one profile rebuild from changing another profile's active archive range responses. The graphics profile passed after this isolation change. The OPFS host gate also passed all five scenarios, including intentional mismatch, corruption, truncation and quota failure detection. Animation/client runner integration is still in progress; private inspection results do not establish a public one-command playable build.
