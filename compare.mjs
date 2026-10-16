@@ -42,9 +42,29 @@ const probes = {
         classes: [], symbols: []},
     'file-stream': {mainClass: 'probe.FileStreamProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16,
         classes: [], symbols: []},
-    graphics: {mainClass: 'probe.GraphicsProbe', category: 'browser-graphics', browserOnly: true, webgl: true,
-        cases: 4, comparisons: 34, symbols: ['Color::scale']},
-    'core-webgl': {mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, webgl: true, symbols: ['Core::<clinit>']},
+    deque: {mainClass: 'probe.DequeProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16,
+        classes: [], symbols: []},
+    fma: {mainClass: 'probe.FmaProbe', category: 'runtime-compatibility', cases: 128, comparisons: 128,
+        classes: [], symbols: []},
+    'field-handles': {mainClass: 'probe.FieldHandleProbe', category: 'runtime-compatibility', fieldHandles: true,
+        cases: 8, comparisons: 16, classes: [], symbols: []},
+    'lazy-value': {mainClass: 'probe.LazyValueProbe', fieldHandles: true, cases: 8, comparisons: 16,
+        classes: ['zombie.util.LazyValue'], symbols: ['LazyValue::get', 'LazyValue::<init>']},
+    resources: {mainClass: 'probe.ResourceProbe', category: 'runtime-compatibility', resources: true,
+        cases: 8, comparisons: 16, classes: [], symbols: []},
+    future: {mainClass: 'probe.FutureProbe', category: 'runtime-compatibility', cases: 16, comparisons: 32,
+        classes: [], symbols: []},
+    executors: {mainClass: 'probe.ExecutorProbe', category: 'runtime-compatibility', cases: 8, comparisons: 16,
+        classes: [], symbols: []},
+    memory: {mainClass: 'probe.MemoryProbe', category: 'browser-memory', browserOnly: true, memory: true,
+        cases: 8, comparisons: 50, symbols: []},
+    joml: {mainClass: 'probe.JomlProbe', category: 'vendor-compatibility', joml: true, cases: 8, comparisons: 128,
+        classes: [], symbols: [], vendorSymbols: ['org.joml.Matrix4f::setOrtho', 'org.joml.MemUtil$MemUtilNIO::put']},
+    'shader-parameter': {mainClass: 'probe.ShaderParameterBoundaryProbe', compileOnly: true, webgl: true, memory: true,
+        symbols: ['ShaderParameter::<init>']},
+    graphics: {mainClass: 'probe.GraphicsProbe', category: 'browser-graphics', browserOnly: true, webgl: true, memory: true,
+        cases: 4, comparisons: 50, symbols: ['Color::scale']},
+    'core-webgl': {mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, webgl: true, memory: true, joml: true, fieldHandles: true, resources: true, symbols: ['Core::<clinit>']},
     season: {mainClass: 'probe.SeasonBoundaryProbe', compileOnly: true, symbols: ['ErosionSeason::<init>']},
     core: {mainClass: 'probe.CoreBoundaryProbe', compileOnly: true, symbols: ['Core::<clinit>']}
 };
@@ -76,7 +96,7 @@ async function run(label, executable, args) {
         env: {...process.env, JAVA_HOME: paths.jdk}});
     await writeFile(join(outputDir, label + '.log'), (result.stdout || '') + (result.stderr || ''));
     if (result.error || result.status !== 0) throw new Error(label + ' failed: ' + (result.error?.message || result.status) + '; see ' + join(outputDir, label + '.log'));
-    return (result.stdout || '') + (result.stderr || '');
+    return ['baseline', 'resource-index'].includes(label) ? (result.stdout || '') : (result.stdout || '') + (result.stderr || '');
 }
 
 // Decode only the standard WASM name section. This is metadata, not a VM.
@@ -122,7 +142,7 @@ try {
     evidence.jdkVersion = (await run('jdk-version', java, ['-version'])).trim();
     const boot = (await readdir(join(paths['maven-home'], 'boot'))).filter(name => /^plexus-classworlds-.*\.jar$/.test(name));
     if (boot.length !== 1) throw new Error('Expected one Maven classworlds boot JAR');
-    const mavenArgs = ['-Dport.webgl=' + !!probe.webgl, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
+    const mavenArgs = ['-Dport.webgl=' + !!probe.webgl, '-Dport.browserMemory=' + !!probe.memory, '-Dport.joml=' + !!probe.joml, '-Dport.fieldHandles=' + !!probe.fieldHandles, '-Dport.resources=' + !!probe.resources, '-Dmaven.home=' + paths['maven-home'], '-Dmaven.multiModuleProjectDirectory=' + resolve('.'),
         '-Dclassworlds.conf=' + join(paths['maven-home'], 'bin', 'm2.conf'),
         '-cp', join(paths['maven-home'], 'boot', boot[0]), 'org.codehaus.plexus.classworlds.launcher.Launcher',
         '-Dprobe.mainClass=' + probe.mainClass, '-Dprobe.output=' + output];
@@ -136,6 +156,12 @@ try {
     evidence.wasmBytes = wasm.length;
     evidence.wasmSha256 = createHash('sha256').update(wasm).digest('hex');
     evidence.originalSymbols = functionNames(wasm).filter(name => name.startsWith('zombie.'));
+    if (probe.vendorSymbols) {
+        evidence.vendorSymbols = functionNames(wasm).filter(name => name.startsWith('org.joml.'));
+        if (!probe.vendorSymbols.every(symbol => evidence.vendorSymbols.some(name => name.includes(symbol)))) {
+            throw new Error('Expected original vendor method symbols absent from WASM');
+        }
+    }
     if (!probe.symbols.every(symbol => evidence.originalSymbols.some(name => name.includes(symbol)))) {
         throw new Error('Expected original method symbols absent from WASM name section');
     }
@@ -157,23 +183,42 @@ try {
     evidence.rule = baseline.rule;
     await writeFile(join(outputDir, 'baseline.json'), JSON.stringify(baseline, null, 2) + '\n');
     } else {
-        evidence.rule = 'framebuffer-readback-and-WebGL-errors';
+        evidence.rule = probeName === 'graphics' ? 'framebuffer-readback-and-WebGL-errors' : 'direct-memory-contract';
         evidence.jvmBaselineExecuted = false;
-        evidence.measurement = 'Browser-only framebuffer and error-state assertions, followed by real input controls; no JVM graphics baseline or timing benchmark';
+        evidence.measurement = probeName === 'graphics' ? 'Browser-only graphics assertions and real input controls; no JVM graphics baseline or timing benchmark' : 'Browser-only direct-memory assertions; no JVM native-memory baseline or timing benchmark';
+    }
+    let resourceNames;
+    const resourceToolArgs = ['-cp', join(outputDir, 'classes'), 'port.tool.ResourceTool', paths['game-jar']];
+    if (probe.resources) {
+        const encodedNames = await run('resource-index', java, resourceToolArgs);
+        resourceNames = new Set(encodedNames.trim().split(/\r?\n/).filter(Boolean).map(name => Buffer.from(name, 'base64').toString('utf8')));
+        await writeFile(join(outputDir, 'resource-host.js'), 'window.portResources = new Set(' + JSON.stringify([...resourceNames]) + ');\n');
+        evidence.classpathResourceCount = resourceNames.size;
     }
     const routes = new Map([
-        ['/', [probe.browserOnly ? 'src/main/webapp/graphics.html' : 'src/main/webapp/index.html', 'text/html; charset=utf-8']],
+        ['/', [probe.browserOnly ? 'src/main/webapp/' + probeName + '.html' : 'src/main/webapp/index.html', 'text/html; charset=utf-8']],
         ['/save-host.js', ['src/main/webapp/save-host.js', 'text/javascript']],
+        ['/resource-host.js', [join(outputDir, 'resource-host.js'), 'text/javascript']],
         ['/baseline.json', [join(outputDir, 'baseline.json'), 'application/json']],
         ['/wasm/probe.wasm', [join(outputDir, 'wasm/probe.wasm'), 'application/wasm']],
         ['/wasm/classes.wasm-runtime.js', [join(outputDir, 'wasm/classes.wasm-runtime.js'), 'text/javascript']],
         ['/favicon.ico', [null, 'image/x-icon']]
     ]);
     server = createServer(async (request, response) => {
+        if (resourceNames && request.url.startsWith('/classpath?')) {
+            const name = new URL(request.url, 'http://127.0.0.1').searchParams.get('name');
+            if (request.method !== 'GET' || !resourceNames.has(name)) { response.writeHead(404); response.end(); return; }
+            const result = spawnSync(java, [...resourceToolArgs, name], {timeout: 30000, maxBuffer: 64 * 1024 * 1024, windowsHide: true});
+            if (result.error || result.status !== 0) { response.writeHead(500); response.end('Archive read failed'); return; }
+            response.writeHead(200, {'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store'});
+            response.end(result.stdout);
+            return;
+        }
         const route = routes.get(request.url);
         if (!route) { response.writeHead(404); response.end(); return; }
         try {
-            const body = route[0] ? await readFile(route[0]) : Buffer.alloc(0);
+            let body = route[0] ? await readFile(route[0]) : Buffer.alloc(0);
+            if (probe.resources && request.url === '/') body = Buffer.from(body.toString('utf8').replace('<script src="/wasm/', '<script src="/resource-host.js"></script>\n<script src="/wasm/'));
             response.writeHead(200, {'Content-Type': route[1], 'Cache-Control': 'no-store'});
             response.end(body);
         } catch (error) { response.writeHead(500); response.end(String(error)); }
@@ -190,7 +235,7 @@ try {
     page.on('requestfailed', request => browserErrors.push(request.url() + ': ' + request.failure()?.errorText));
     await page.goto('http://127.0.0.1:' + server.address().port + '/', {waitUntil: 'load', timeout: 30000});
     await page.waitForFunction(() => window.probeResult !== undefined, null, {timeout: 30000});
-    if (probe.browserOnly && await page.evaluate(() => window.probeResult.pass)) {
+    if (probeName === 'graphics' && await page.evaluate(() => window.probeResult.pass)) {
         await page.locator('#red').fill('127');
         await page.locator('#green').fill('64');
         await page.locator('#blue').fill('255');
@@ -205,8 +250,14 @@ try {
     evidence.visibleStatus = await page.locator('#status').innerText();
     evidence.browserErrors = browserErrors;
     evidence.browserPageLoads = pageLoads;
-    if (probe.browserOnly && (!evidence.browser.webgl2 || evidence.browser.errors.length || !evidence.interactiveFramebuffer)) {
+    if (probeName === 'graphics' && (!evidence.browser.webgl2 || evidence.browser.errors.length || !evidence.interactiveFramebuffer)) {
         throw new Error('Expected real WebGL2 and verified browser input');
+    }
+    if (probeName === 'graphics' && !evidence.browser.actual.cases.every(result => result.originalParameter && result.shaderDraw)) {
+        throw new Error('Expected original ShaderParameter dispatch and real shader drawing');
+    }
+    if (probeName === 'memory' && (!evidence.browser.linearMemory || evidence.browser.allocationsRemaining !== 0)) {
+        throw new Error('Expected real linear-memory checks and no retained allocations');
     }
     if (probeName === 'colors' && !evidence.browser.directExport) throw new Error('Expected direct JavaScript color export execution');
     if (probeName === 'browser-save' && (pageLoads !== 8 || evidence.browser.hostStorage?.pageLoads !== 8 || evidence.browser.hostStorage?.writes !== 8 || evidence.browser.hostStorage?.readbacks !== 8)) {

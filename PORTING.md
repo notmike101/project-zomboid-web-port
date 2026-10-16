@@ -40,7 +40,7 @@ That count includes missing classes, which can conceal further method and native
 
 | Gate | Evidence | State |
 |---|---|---|
-| Original pure and stateful calculations | Six JVM/browser comparison probes | Selected closures pass |
+| Original pure and stateful calculations | Seven JVM/browser comparison probes | Selected closures pass |
 | JavaScript calling original code | Direct exported climate-color and snapshot calls | Selected calls pass |
 | Browser record storage | Real OPFS, exact readback, eight page/module loads | One record integration passes |
 | Shared engine initialization | `Core.debug` compile-only entry | Fails on missing Java-library and native integration dependencies |
@@ -57,7 +57,7 @@ Reduce and classify the shared Core initializer's compiler graph before writing 
 Select one missing API family, define its observable contract, and test a real implementation independently.
 Then rerun Core compilation and preserve the next exact failure, rather than adding unrelated helpers indefinitely.
 
-Use the existing six probes and storage failure checks as regression gates.
+Use the existing original-game probes and storage failure checks as regression gates.
 Require an original-code call path, actual browser execution, and explicit limitations for every new runtime claim.
 The first playable milestone must include original state transitions driven by real browser input and rendered through a verified backend.
 It must not substitute newly written gameplay rules to simulate progress.
@@ -82,7 +82,7 @@ Keep original game input, generated modules, machine-specific handoffs, and raw 
 
 ## Supported runtime adaptation
 
-The first six standard-library probes now pass in both Java 25 and Chromium.
+Twelve standard-library probes now pass in both Java 25 and Chromium.
 Reader transfer, path conveniences, linkage errors, legacy String construction, a cooperative FIFO queue, and file-stream construction/lifecycle have real implementations.
 They retain validation and error behavior. They add no gameplay replacements.
 
@@ -94,6 +94,10 @@ That integration must stay separate from claims of a running original world or p
 
 
 The first bounded WebGL backend now runs and responds to browser input. It verifies original Color values and actual framebuffer/error state.
-The larger opt-in Core diagnostic remains blocked (131 references, 24 declarations), so graphics interaction is not a playable milestone.
+The larger opt-in Core diagnostic remains blocked (38 references, 12 declarations), so graphics interaction is not a playable milestone.
 The next native boundary is managed/direct buffer allocation, typed uniform uploads, image decoding, and other retained graphics calls.
 TeaVM WasmGC has actual linear-memory direct buffers; their ownership and release behavior must be preserved before replacing native allocation APIs.
+
+The graphics path now passes original ShaderParameter vector-four dispatch into a real compiled shader, in addition to original Color arithmetic.
+Real Wasm direct allocations/addresses, original LazyValue field-handle behavior, archive resource reads, and cooperative asset-task execution primitives have browser evidence.
+These pieces still do not form the original input/world/render loop. The remaining Core frontier includes geometry, file channels/watch types, locks, digest checks, native loading/exit, package metadata, and functional regex replacement.

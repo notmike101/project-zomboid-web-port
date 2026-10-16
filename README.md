@@ -18,13 +18,14 @@ It contains no original game classes, assets, downloaded toolchains, or generate
 | `erosion` | Seeded layer construction, sampling, reset, and reconstruction |
 | `colors` | Connected original climate-color interpolation, aliasing, copying, scaling, and serialization |
 | `browser-save` | Original climate state restored from browser OPFS across eight page/module loads |
+| `lazy-value` | Original field-handle memoization, null results, retry, identity, and reentrant witness |
 
-The six probes compare 64 cases and 424 raw output bit patterns with the JVM.
+The seven original-game probes compare 72 cases and 440 raw output bit patterns with the JVM.
 These counts are behavioral checks, not a percentage of game coverage.
 The browser-save probe adds real browser filesystem persistence without replacing gameplay calculations or the original record format.
 
 The runtime compatibility extension uses TeaVM's supported plugin interface and class-library substitutions.
-`reader`, `paths`, `linkage`, `legacy-string`, `queue`, and `file-stream` independently compare standard Java API behavior against Java 25.
+Twelve runtime probes compare standard Java API behavior against Java 25, including paths, streams, queues, fused arithmetic, field handles, classpath resource reads, futures, and fixed executors.
 These checks are separate from original-game coverage. Path operations use the browser's virtual path provider; they do not provide OPFS-backed Java files.
 The queue supports TeaVM's cooperative single-agent execution, without cross-worker object sharing.
 
@@ -58,7 +59,7 @@ Run all verified components from the repository root:
         '--maven-home', $env:PZ_MAVEN_HOME,
         '--browser', $env:PZ_BROWSER
     )
-    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream') {
+    foreach ($probe in 'angles', 'weather', 'airfront', 'erosion', 'colors', 'browser-save', 'reader', 'paths', 'linkage', 'legacy-string', 'queue', 'file-stream', 'deque', 'fma', 'field-handles', 'resources', 'future', 'executors', 'lazy-value', 'joml') {
         node compare.mjs --probe $probe @probeArgs
         if ($LASTEXITCODE -ne 0) { throw "Probe failed: $probe" }
     }
@@ -102,7 +103,7 @@ All work on this checkout belongs to the isolated orphan branch `work/original-b
 ## Browser graphics integration
 
 The opt-in `graphics` probe runs original `Color` bytecode through real WebGL2 calls behind selected LWJGL APIs.
-It verifies four rendered cases, exact WebGL clear-state float bits, framebuffer readback, and consumed error state.
+It verifies four shader-rendered cases driven by original ShaderParameter objects, exact clear/uniform float bits, framebuffer readback, and consumed error state.
 The runner also changes real browser sliders and verifies their rendered output.
 This is an interactive graphics integration, not a playable Project Zomboid world.
 
@@ -114,3 +115,8 @@ This entry never starts a desktop JVM baseline. Original arithmetic already has 
 The compiler activates the third-party graphics plugin only for this probe and `core-webgl`.
 `core-webgl --compile-only` diagnoses the larger engine with that backend enabled and currently still fails.
 Unsupported graphics APIs retain their original implementations; they have not been supplied with successful stubs.
+
+The `memory` entry uses the same browser-only command with `--probe memory` to verify real direct allocations, raw Wasm addresses, and release ownership.
+`joml` separately compares the shipped NIO matrix provider with the JVM, without adding to game coverage.
+The `resources` host exposes only entries in the configured local archive through loopback HTTP. It never extracts or executes an archived class or DLL.
+All executor workers cooperate within one browser agent; they do not supply parallel Java threads.

@@ -67,6 +67,11 @@ addEventListener('unhandledrejection', event => window.probeErrors.push(String(e
             actual = {rule: 'exact-raw-bits', cases: baseline.cases.map((_, i) => JSON.parse(module.exports.colorCase(i)))};
         } else {
             await module.exports.main([]);
+            // Main can suspend in a cooperative fiber while HTTP or worker tasks finish.
+            const outputDeadline = performance.now() + 15000;
+            while (!lines.length && !window.probeErrors.length && performance.now() < outputDeadline) {
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
             if (lines.length !== 1 || pending) throw new Error('Expected one complete JSON output line');
             actual = JSON.parse(lines[0]);
         }
@@ -100,7 +105,7 @@ addEventListener('unhandledrejection', event => window.probeErrors.push(String(e
         details.textContent = JSON.stringify(window.probeResult, null, 2);
     } catch (error) {
         window.probeErrors.push(String(error.stack || error));
-        window.probeResult = {pass: false, errors: window.probeErrors};
+        window.probeResult = {pass: false, stdout: lines, pending, errors: window.probeErrors};
         status.textContent = 'FAIL';
         details.textContent = JSON.stringify(window.probeResult, null, 2);
     }

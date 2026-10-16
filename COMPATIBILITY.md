@@ -3,8 +3,8 @@
 ## Current answer
 
 Useful isolated Java gameplay logic can run unchanged in browser WASM.
-We have verified seven gameplay classes and two supporting nested types across six probes.
-The current total is **64 cases and 424 exact output comparisons**, with zero mismatches or browser errors.
+We have verified eight gameplay classes and two supporting nested types across seven JVM/browser probes.
+The current total is **72 cases and 440 exact output comparisons**, with zero mismatches or browser errors.
 Two larger compile-only diagnostics fail. They are not included in the passing totals.
 
 This is not a percentage of the game. Class counts do not measure playable coverage or integration cost.
@@ -28,7 +28,8 @@ No world, character simulation, game script, or native subsystem has run in the 
 | Seeded erosion distributions | `Noise2D.addLayer`, `layeredNoise`, `reset`, and original layer objects | 16 samples across 4 configurations | 16 | PASS |
 | Connected climate colors | Original color objects, interpolation, output aliasing, copy isolation, scaling, and 32-byte serialization | 8 | 128 | PASS |
 | Browser storage bridge | Original climate-front records saved to OPFS and continued after fresh page/module loads | 8 | 112 | PASS |
-| **Total** | Six standalone probe modules | **64** | **424** | **PASS** |
+| Original memoization | LazyValue constructor/get, identity/null caching, retry, and reentrant exchange witness | 8 | 16 | PASS |
+| **Total** | Seven standalone probe modules | **72** | **440** | **PASS** |
 
 The weather suite combines state transitions and noise. The other suites remain separate.
 These modules contain newly authored adapters and compiler runtime support. They contain no replacement gameplay algorithms.
@@ -147,7 +148,7 @@ No claim here says that an entire subsystem is impossible to port.
 
 ## Versions, identities, and measurements
 
-All six behavioral comparison commands returned exit code zero using TeaVM 0.16.0 and its `WEBASSEMBLY_GC` backend.
+All seven original-game behavioral comparison commands returned exit code zero using TeaVM 0.16.0 and its `WEBASSEMBLY_GC` backend.
 The two compile-only boundary commands returned nonzero without starting a baseline or browser.
 They used the bundled Zulu 25.0.1+8 baseline and the local Temurin JDK 25.0.1+8 compiler.
 Actual headless Chromium 153.0.8010.12 executed each module with WasmGC support.
@@ -243,7 +244,7 @@ See [PORTING.md](PORTING.md) for the current runtime strategy and remaining play
 
 The supported TeaVM plugin adds missing standard Java methods without changing game classes.
 The class-library substitution mechanism supplies missing error and queue types.
-Six independent JVM/Chromium probes currently pass 67 cases and 134 exact output checks:
+Twelve independent JVM/Chromium runtime probes currently pass 243 cases and 358 output checks:
 
 | Probe | Cases | Checks | Exercised contract |
 |---|---:|---:|---|
@@ -261,16 +262,16 @@ Serialization and automatic VM generation of the new error types remain unverifi
 
 The browser tests exposed existing TeaVM defects in relative path normalization and null cause reassignment.
 The extension corrects those exercised contracts instead of removing the failing cases. It also repairs TeaVM PrintStream lifecycle handling: healthy streams now close, and inspecting a closed healthy stream no longer creates an error. Browser Java file writes in this probe use the isolated in-memory virtual filesystem, not native disk or durable OPFS.
-The latest Core and seasonal compile-only runs each report 133 missing references across 24 declarations, including a newly exposed functional regex replacement overload.
+A prior Core/season checkpoint reported 133 missing references across 24 declarations. The current opt-in frontier is recorded below.
 This is a build frontier, not a completion estimate. Native memory, rendering, image decoding, and runtime services remain unresolved.
 
 
 ## Real graphics host integration
 
-The opt-in `graphics` probe passes four cases and 34 browser assertions:
-16 raw float clear-state checks against original Color fields, 16 framebuffer byte checks at unambiguous values, and two real WebGL error-state checks.
+The opt-in `graphics` probe passes four cases and 50 browser assertions:
+16 raw float clear-state checks and 16 uniform-state checks against original Color fields, 16 framebuffer byte checks at unambiguous values, and two real WebGL error-state checks.
 The browser runner then changes RGB and brightness sliders and verifies the resulting pixel `[95,48,191,191]`.
-The rendered values come from original Color construction/clamping/scaling through the original GL11 wrappers.
+The rendered values come from original Color construction/clamping/scaling, original ShaderParameter construction/name normalization/PushUniform dispatch, and actual compiled shader drawing through the LWJGL host backend.
 A supported TeaVM plugin connects selected third-party GL/GL11C entry points to an actual WebGL2 context.
 The plugin activates only when the compiler JVM receives `port.webgl=true`.
 
@@ -280,6 +281,33 @@ Fixed pixel cases avoid ambiguous midpoints; arbitrary interactive values enforc
 This distinction does not change any original-game JVM raw-bit comparison rule.
 Context loss marks the interaction failed and disables the controls.
 
-The `core-webgl` diagnostic still fails, with 131 missing references across the same 24 declarations.
+The latest `core-webgl` diagnostic still fails, with 38 missing references across 12 declarations. The expanded graph newly exposes MessageDigest.
 Fixing the first graphics-loader path does not eliminate other image, memory, UI, concurrency, and native dependencies.
 No original world, player, collision, animation, or gameplay loop is running.
+
+Additional runtime comparison probes:
+
+| Probe | Cases | Checks | Exercised contract |
+|---|---:|---:|---|
+| `deque` | 8 | 16 | Both ends, occurrence removal, nulls, retained iterators, bulk validation, spliterator |
+| `fma` | 128 | 128 | Exact fused binary32 rounding, overflow/underflow/cancellation/signed zero; only NaNs use declared canonical bits |
+| `field-handles` | 8 | 16 | Caller-owned private lookup, volatile reference reads, identity exchange witnesses, nulls, lookup errors |
+| `resources` | 8 | 16 | Actual archive bytes through HTTP, enumeration, missing/null/invalid names |
+| `future` | 16 | 32 | Real task results/failures, cancellation/interruption, timed waits, completion hooks, Java 25 state queries |
+| `executors` | 8 | 16 | Real cooperative workers, pool width, submission, draining/rejected/immediate shutdown, bulk timeouts, interrupted close |
+
+Field-handle metadata is explicitly limited to original LazyValue.value and the two probe targets.
+The compiler captures the actual lookup caller; reference exchanges execute without yielding within one agent.
+Unsupported primitive, package/protected/nest/module modes fail explicitly. No shared-worker memory model is claimed.
+Original LazyValue's reentrant test publishes an inner value, rejects the outer replacement, and returns the original exchange witness exactly like the JVM.
+
+FMA uses an exact BigInteger implementation before a single ties-to-even rounding. Its per-frame cost has not been benchmarked.
+The resource host reads the configured archive with the JDK ZIP API and serves only indexed entries; no archive entry is extracted or executed.
+Futures/executors use TeaVM's actual cooperative threads, with real waiting, interruption, timeouts, cancellation, and shutdown.
+Review caught and corrected extreme-negative-timeout overflow and retained exited-worker objects before the passing executor rerun.
+
+The separate `joml` vendor probe passes 8 cases and 128 raw float checks, selecting the library's shipped NIO provider instead of unavailable Unsafe.
+The browser-only `memory` probe passes 8 cases and 50 assertions, including actual Wasm address reads/writes and zero retained owners after release.
+The bounded MemoryUtil backend supports owned float/int allocations, addresses, and typed release. Other operations throw UnsupportedOperationException; unsupported desktop allocator fields are not initialized and must not be used.
+This explicit native capability boundary reduces build reachability without claiming those native operations were ported.
+Shader matrix uploads honor position/limit and implement actual three/four-dimensional transposition. The vector-four original parameter path and direct matrix-four tests ran; the other dispatch branches only compile.

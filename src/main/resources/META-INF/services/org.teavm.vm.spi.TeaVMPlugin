@@ -1,2 +1,6 @@
 port.runtime.StandardLibraryPlugin
 port.runtime.BrowserGraphicsPlugin
+port.runtime.BrowserMemoryPlugin
+port.runtime.BrowserJomlPlugin
+port.runtime.FieldHandlePlugin
+port.runtime.ResourcePlugin

@@ -9,7 +9,7 @@ canvas{width:256px;height:256px;border:1px solid #80909d;display:block;margin:1r
 label{display:block;margin:.75rem 0} input{width:220px;vertical-align:middle} pre{white-space:pre-wrap}
 </style>
 <h1>Original Color through WebGL2</h1>
-<p>The original game Color object clamps and scales these colors. Its unchanged bytecode drives real browser graphics.</p>
+<p>Original Color and ShaderParameter objects clamp, scale, and upload these colors. Their unchanged bytecode supplies a shader uniform that draws a full-screen triangle.</p>
 <p id="status" role="status">RUNNING</p>
 <canvas id="graphics-canvas" width="96" height="96" aria-label="Original Color rendered through WebGL2"></canvas>
 <fieldset disabled id="controls"><legend>Change the original Color object</legend>
@@ -47,8 +47,8 @@ addEventListener('unhandledrejection', event => window.probeErrors.push(String(e
         if (!result.pass || result.cases.length !== 4 || result.invalidEnum !== 1280 || result.consumedError !== 0) throw new Error('Graphics assertions failed');
         const webgl2 = document.getElementById('graphics-canvas').getContext('webgl2') instanceof WebGL2RenderingContext;
         if (!webgl2) throw new Error('Expected actual WebGL2 context');
-        window.probeResult = {pass: result.pass, cases: result.cases.length, actual: result, comparisons: 34, matched: 34, webgl2, errors: window.probeErrors};
-        status.textContent = 'PASS: 16 exact color-state bits, 16 framebuffer channels, and real WebGL error state';
+        window.probeResult = {pass: result.pass, cases: result.cases.length, actual: result, comparisons: 50, matched: 50, webgl2, errors: window.probeErrors};
+        status.textContent = 'PASS: original Color through compiled shaders, exact uniform bits, framebuffer pixels, and GL error state';
         details.textContent = JSON.stringify(result, null, 2);
         const controls = document.getElementById('controls'); controls.disabled = false;
         controls.addEventListener('input', () => {

@@ -7,6 +7,7 @@ import java.io.OutputStream;
 import java.io.Writer;
 import java.nio.file.Path;
 import org.teavm.model.AccessLevel;
+import org.teavm.model.ElementModifier;
 import org.teavm.model.MethodDescriptor;
 import org.teavm.model.MethodHolder;
 import org.teavm.model.ValueType;
@@ -33,6 +34,8 @@ public final class StandardLibraryPlugin implements TeaVMPlugin {
             }
             MethodDescriptor descriptor;
             switch (cls.getName()) {
+                case "java.lang.Math": descriptor = new MethodDescriptor("fma", ValueType.FLOAT, ValueType.FLOAT, ValueType.FLOAT, ValueType.FLOAT); break;
+                case "java.lang.Thread": descriptor = new MethodDescriptor("onSpinWait", ValueType.VOID); break;
                 case "java.lang.String": descriptor = new MethodDescriptor("<init>", ValueType.arrayOf(ValueType.BYTE), ValueType.INTEGER, ValueType.INTEGER, ValueType.INTEGER, ValueType.VOID); break;
                 case "java.io.PrintStream": descriptor = new MethodDescriptor("<init>", ValueType.object("java.io.File"), ValueType.VOID); break;
                 case "java.io.Reader": descriptor = new MethodDescriptor("transferTo", ValueType.object("java.io.Writer"), ValueType.LONG); break;
@@ -43,9 +46,16 @@ public final class StandardLibraryPlugin implements TeaVMPlugin {
             if (cls.getMethod(descriptor) != null) throw new IllegalStateException(descriptor + " already exists. Reassess the compatibility extension.");
             MethodHolder method = new MethodHolder(descriptor);
             method.setLevel(AccessLevel.PUBLIC);
+            if (cls.getName().equals("java.lang.Math") || cls.getName().equals("java.lang.Thread")) method.getModifiers().add(ElementModifier.STATIC);
             cls.addMethod(method);
             ProgramEmitter body = ProgramEmitter.create(method, context.getHierarchy());
             switch (cls.getName()) {
+                case "java.lang.Math": body.invoke(FmaSupport.class, "fma", float.class, body.var(1, float.class), body.var(2, float.class), body.var(3, float.class)).returnValue(); break;
+                case "java.lang.Thread":
+                    // A cooperative scheduler needs a scheduling hint instead of a CPU spin instruction.
+                    body.invoke(Thread.class, "yield");
+                    body.exit();
+                    break;
                 case "java.lang.String":
                     body.var(0, String.class).invokeSpecial("<init>", body.invoke(LegacyStringSupport.class, "fromBytes", String.class,
                             body.var(1, byte[].class), body.var(2, int.class), body.var(3, int.class), body.var(4, int.class)));
