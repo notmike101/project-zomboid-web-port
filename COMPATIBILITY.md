@@ -390,3 +390,6 @@ Bounded ARB VBO backend PASS 2 cases / 8 outputs using actual GPU storage/readba
 
 Combined CheerpJ full-Lua + original SpriteRenderer PASS in one JVM: original full exposure and post-init Lua calls precede the original sprite frame; 5 render cases / 14 outputs, all 128x128 RGBA bytes, hash -1846735105 matching TeaVM. Selected vendor graphics adaptation leaves all 5095 zombie classes identical to its input runtime view. Installed shader/JAR/PNG/bootstrap asset hashes remain unchanged. Original static ring resources are browser-context lifetime; no full renderer destruction claim.
 
+
+CheerpJ world profile PASS: real IsoCell/IsoPlayer, 953 installed files / 806347 bytes, 92 action states / idle, original position (.5,.5,0), DOM W through original GameKeyboard and player ECS input vector (0,-1.95), release (0,0), actual worker stop before result. One precisely recorded Pool.alloc Java21 SDK call is retargeted in the private copy; game method bytes are explicitly marked changed, algorithms preserved. All selected installed input hashes verified after run. No walking or playable world claim.
+

@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Original player input qualification</title>
+<p id="status" role="status">Loading original browser world</p>
+<canvas id="game" width="128" height="128" tabindex="0" aria-label="Original player keyboard input"></canvas>
+<p>This qualification reads original player input. It does not move or render the player.</p>
+<script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script>
+<script type="module">
+import {keyboardNatives} from './keyboard.js';
+const canvas=document.getElementById('game'),keyboard=keyboardNatives(canvas);canvas.focus();
+window.stageResults=[];
+try {
+ await cheerpjInit({version:17,status:'none',javaProperties:['user.dir=/files/work'],natives:{...keyboard.natives,
+  async Java_probe_CheerpJWorld_report(lib,json){const result=JSON.parse(json);window.stageResults.push(result);document.getElementById('status').textContent=json;if(result.phase)window.inputPhase=result.phase;if('pass'in result)window.probeResult=result;}
+ }});
+ const exit=await cheerpjRunMain('probe.CheerpJWorld','/app/world-entry.jar:/app/float-bridge.jar:/app/memory-bridge.jar:/app/world-view.jar');
+ if(!window.probeResult)throw new Error('World main exited without result: '+exit);
+}catch(error){window.probeResult={pass:false,error:String(error.stack||error)};}finally{keyboard.dispose();}
+</script></html>
