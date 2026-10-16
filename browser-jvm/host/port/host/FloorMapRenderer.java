@@ -1,6 +1,7 @@
 package port.host;
 
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL20;
 import org.lwjgl.opengl.GL30;
 import zombie.characters.IsoPlayer;
 import zombie.core.Core;
@@ -38,6 +39,11 @@ public final class FloorMapRenderer {
             GL11.glDisable(GL11.GL_CULL_FACE);
             GL11.glEnable(GL11.GL_BLEND);
             GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
+            // Original skinned mesh submissions change the GL bindings and disable bone attributes.
+            // Reestablish the original sprite pass's five vertex arrays and invalidate its binding caches.
+            for (int attribute = 0; attribute < 5; attribute++) GL20.glEnableVertexAttribArray(attribute);
+            SpriteRenderer.ringBuffer.restoreVbos = true;
+            SpriteRenderer.ringBuffer.restoreBoundTextures = true;
             if (clear) {
                 GL11.glClearColor(0, 0, 0, 1);
                 GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT);
