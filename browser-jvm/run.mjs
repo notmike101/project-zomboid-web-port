@@ -21,7 +21,7 @@ for (let i = 2; i < process.argv.length; i += 2) {
 if (!['game-jar','media-root','jdk','browser'].every(name => options[name]))
   throw new Error('Required: --game-jar PATH --media-root PATH --jdk JDK25_DIRECTORY --browser CHROMIUM_EXECUTABLE');
 const profile = options.profile || 'graphics';
-if (!['graphics','lua','input'].includes(profile)) throw new Error('Profile must be graphics, lua or input');
+if (!['graphics','lua','input','sprite'].includes(profile)) throw new Error('Profile must be graphics, lua, input or sprite');
 
 const classes = path.join(output, 'classes');
 const tools = path.join(output, 'tools');
@@ -85,14 +85,15 @@ try {
     if (!(await stat(file)).isFile()) throw new Error('Expected file: ' + file);
   evidence.originalJarSha256Before = await hash(gameJar);
   evidence.pngSha256Before = await hash(png);
-  if (profile === 'lua') for (const name of ['stdlib.lua','media/lua/shared/defines.lua','media/lua/shared/Sandbox/Apocalypse.lua']) {
+  if (profile === 'lua' || profile === 'sprite') for (const name of ['stdlib.lua','media/lua/shared/defines.lua','media/lua/shared/Sandbox/Apocalypse.lua']) {
     const file=path.join(options['media-root'],'..',name);
     assetHashes.push({name,file,sha256Before:await hash(file)});
   }
+  if (profile === 'sprite') for(const name of ['shaders/default.vert','shaders/default.frag']) {const file=path.join(options['media-root'],name);assetHashes.push({name,file,sha256Before:await hash(file)});}
   command(executable('javac'), ['--release', '17', '-classpath', gameJar, '-d', classes, path.join(source, 'CheerpJGL.java')]);
   command(executable('javac'), ['-d', tools, path.join(source, 'PrepareBrowserJvm.java')]);
   command(executable('java'), ['-cp', tools, 'PrepareBrowserJvm', gameJar, output, classes]);
-  if (profile === 'lua') {
+  if (profile === 'lua' || profile === 'sprite') {
     const hostClasses = path.join(output, 'host-classes');
     await mkdir(hostClasses, {recursive:true});
     command(executable('javac'), ['--release','17','-d',hostClasses,
@@ -117,6 +118,12 @@ try {
     command(executable('java'), ['-cp',tools,'PrepareInput',path.join(output,'view.jar'),path.join(output,'input-view.jar')]);
     command(executable('jar'), ['--create','--file',path.join(output,'input-entry.jar'),'-C',classes,'probe/CheerpJInput.class','-C',classes,'port/host/BrowserKeyboard.class']);
   }
+  if (profile === 'sprite') {
+    const spriteClasses=path.join(output,'sprite-classes'); await mkdir(spriteClasses,{recursive:true});
+    command(executable('javac'),['--release','17','-cp',[gameJar,classes].join(path.delimiter),'-d',spriteClasses,...['CheerpJSprite.java','host/port/host/SpriteGraphics.java','host/port/host/SpriteBuffers.java'].map(name=>path.join(source,name))]);
+    command(executable('javac'),['-d',tools,path.join(source,'PrepareSpriteGraphics.java')]);
+    command(executable('java'),['-cp',tools,'PrepareSpriteGraphics',path.join(output,'runtime-view.jar'),output,spriteClasses]);
+  }
   evidence.viewJarSha256 = await hash(path.join(output, 'view.jar'));
   const manifest = JSON.parse(await readFile(path.join(output, 'class-manifest.json'), 'utf8'));
   evidence.classes = manifest.classes;
@@ -125,12 +132,12 @@ try {
   evidence.gameMethodBodiesUnchanged = manifest.gameMethodBodiesUnchanged;
 
   const routes = new Map([
-    ['/', {file: path.join(source, profile === 'lua' ? 'lua.html' : profile === 'input' ? 'input.html' : 'index.html'), type: 'text/html; charset=utf-8'}],
+    ['/', {file: path.join(source, profile === 'lua' ? 'lua.html' : profile === 'sprite' ? 'sprite.html' : profile === 'input' ? 'input.html' : 'index.html'), type: 'text/html; charset=utf-8'}],
     ['/index.html', {file: path.join(source, 'index.html'), type: 'text/html; charset=utf-8'}],
     ['/view.jar', {file: path.join(output, 'view.jar'), type: 'application/java-archive'}],
     ['/menu.png', {file: png, type: 'image/png'}],
   ]);
-  if (profile === 'lua') {
+  if (profile === 'lua' || profile === 'sprite') {
     for (const name of ['full-entry.jar','float-bridge.jar','memory-bridge.jar','runtime-view.jar'])
       routes.set('/'+name,{file:path.join(output,name),type:'application/java-archive'});
     for (const name of ['stdlib.lua','media/lua/shared/defines.lua','media/lua/shared/Sandbox/Apocalypse.lua'])
@@ -141,8 +148,14 @@ try {
     routes.set('/keyboard.js',{file:path.join(source,'keyboard.js'),type:'text/javascript'});
     for(const name of ['input-view.jar','input-entry.jar']) routes.set('/'+name,{file:path.join(output,name),type:'application/java-archive'});
   }
+  if (profile === 'sprite') {
+    routes.set('/sprite-webgl.js',{file:path.join(source,'sprite-webgl.js'),type:'text/javascript'});
+    routes.set('/sprite-view.jar',{file:path.join(output,'sprite-view.jar'),type:'application/java-archive'});
+    for(const name of ['ui/avatarBackgroundWhite.png','shaders/default.vert','shaders/default.frag']) routes.set('/media/'+name,{file:path.join(options['media-root'],name),type:name.endsWith('.png')?'image/png':'text/plain'});
+    evidence.spriteAdaptations=JSON.parse(await readFile(path.join(output,'sprite-graphics-manifest.json'),'utf8'));
+  }
   evidence.profile=profile;
-  if (profile === 'lua') evidence.runtimeAdaptations=JSON.parse(await readFile(path.join(output,'float-bridge-summary.json'),'utf8'));
+  if (profile === 'lua' || profile === 'sprite') evidence.runtimeAdaptations=JSON.parse(await readFile(path.join(output,'float-bridge-summary.json'),'utf8'));
   server = createServer(async (request, response) => {
     try {
       if (!['GET', 'HEAD'].includes(request.method)) {response.writeHead(405).end(); return;}
@@ -205,7 +218,7 @@ try {
   }
   await page.waitForFunction(() => window.probeResult, undefined, {timeout: 180000});
   evidence.result = await page.evaluate(() => window.probeResult);
-  if (profile === 'lua') evidence.stages=await page.evaluate(() => window.stageResults);
+  if (profile === 'lua' || profile === 'sprite') evidence.stages=await page.evaluate(() => window.stageResults);
   evidence.pass = evidence.result.pass === true && denied.length === 0;
 } catch (error) {
   evidence.error = String(error.stack || error);
@@ -236,5 +249,7 @@ try {
   console.log(JSON.stringify({...evidence, requests: requests.length, logs: logs.length, resultFile: path.join(output, 'result.json')}, null, 2));
   if (!evidence.pass) process.exitCode = 1;
 }
+
+
 
 

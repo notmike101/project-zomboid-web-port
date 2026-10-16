@@ -20,7 +20,8 @@ public final class CheerpJFull {
   public static final byte hostFinalByte=-128;
   public static native void report(String json);
   static String quote(String value){return "\""+value.replace("\\","\\\\").replace("\"","\\\"").replace("\r","\\r").replace("\n","\\n").replace("\t","\\t")+"\"";}
-  public static void main(String[] args){
+  public static void main(String[] args){ initialize(args); }
+  public static boolean initialize(String[] args){
     String stage="generated-float-getters";var completed=new ArrayList<String>();
     try{
       var hostField=CheerpJFull.class.getField("hostFloat");
@@ -90,7 +91,10 @@ public final class CheerpJFull {
       Object[] actual=LuaManager.thread.pcall(LuaCompiler.loadstring(source,"full-original-exposure",LuaManager.env),new Object[0]);
       if(actual.length!=2||!Boolean.TRUE.equals(actual[0])||!Double.valueOf(609).equals(actual[1]))throw new AssertionError(Arrays.toString(actual));
       completed.add("full-exposed-lua");report("{\"pass\":true,\"stage\":\"full-exposed-lua\",\"completed\":"+quote(completed.toString())+"}");
+      return true;
     }catch(Throwable failure){var text=new StringWriter();failure.printStackTrace(new PrintWriter(text));
-      report("{\"pass\":false,\"stage\":"+quote(stage)+",\"completed\":"+quote(completed.toString())+",\"error\":"+quote(text.toString())+"}");}
+      report("{\"pass\":false,\"stage\":"+quote(stage)+",\"completed\":"+quote(completed.toString())+",\"error\":"+quote(text.toString())+"}");return false;}
   }
 }
+
+

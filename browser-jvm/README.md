@@ -47,3 +47,6 @@ Official API references: [native libraries](https://cheerpj.com/docs/guides/impl
 
 Use --profile input to qualify the real DOM keyboard boundary. It runs original vendor key-code translation, tests W press/release and canvas focus loss through actual browser keyboard events, and rejects writes/network uploads under the same route policy. The two vendor Keyboard query bodies route to the owned canvas; other keyboard methods are unchanged. This does not yet qualify original player input interpretation or movement. Existing generated entries and links are checked before writes; a nested junction escape was rejected while preserving prior evidence.
 
+
+Use --profile sprite for a combined run of full original Lua initialization and the original sprite renderer in one browser JVM. It checks the real Texture.render queue, frame handoff, indexed submission and every RGBA byte of a 128x128 frame; the framebuffer hash matches the TeaVM route. Selected vendor graphics classes use actual WebGL2 operations and owned CPU mappings. Original ring resources (256 buffers, two shaders and one program) live until the owned browser context closes; the probe deletes its owned texture. Desktop GL version flags and function pointers remain false/zero. This remains a renderer qualification, not world playability.
+

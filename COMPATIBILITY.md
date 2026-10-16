@@ -387,3 +387,6 @@ CheerpJ Lua profile: full original LuaManager.init PASS, with original Core meta
 
 Bounded ARB VBO backend PASS 2 cases / 8 outputs using actual GPU storage/readback, owned CPU mappings, full/range uploads and error/cleanup checks. Explicit port.webglVbo gate selects original ARB renderer factory only after qualification; desktop GL version flags remain false. Unsupported typed/array/native-address overloads and persistent/explicit-flush mappings are not claimed. Original SpriteRenderer PASS 5 cases / 14 outputs, including state handoff and all 128x128 framebuffer pixels. Fixture deletes its owned GL texture directly; original TextureID.destroy and static ring lifetime are not qualified. Engine stdout accepts exactly one result JSON plus bounded original log lines.
 
+
+Combined CheerpJ full-Lua + original SpriteRenderer PASS in one JVM: original full exposure and post-init Lua calls precede the original sprite frame; 5 render cases / 14 outputs, all 128x128 RGBA bytes, hash -1846735105 matching TeaVM. Selected vendor graphics adaptation leaves all 5095 zombie classes identical to its input runtime view. Installed shader/JAR/PNG/bootstrap asset hashes remain unchanged. Original static ring resources are browser-context lifetime; no full renderer destruction claim.
+
