@@ -134,6 +134,22 @@ function validateManifest(manifest) {
         }
     }
 
+    if (startup.tileDepth !== undefined) {
+        if (!record(startup.tileDepth) || !Array.isArray(startup.tileDepth.images) || startup.tileDepth.images.length === 0) {
+            throw new TypeError('Invalid content tile depth sources');
+        }
+
+        reference(startup.tileDepth.assignments);
+
+        for (const path of startup.tileDepth.images) {
+            reference(path);
+        }
+
+        if (startup.tileDepth.seams !== undefined) {
+            reference(startup.tileDepth.seams);
+        }
+    }
+
     if (startup.audio !== undefined) {
         if (!record(startup.audio)) {
             throw new TypeError('Invalid content startup audio');

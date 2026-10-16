@@ -4,6 +4,22 @@ import { parseX, createSkin, sampleSkin, MAX_X_BYTES } from './models.js';
 const canvasCameras = new WeakMap();
 // Direct WebGPU presentation for the M1 proof: one production backend, no WebGL fallback.
 
+// Native IsoDepthHelper coefficients; all world consumers share this ground-camera frame.
+const WORLD_DEPTH_XY = 0.001_443_354_2;
+const WORLD_DEPTH_Z = 0.002_886_708_4;
+
+/**
+ * Native world depth with the common WebGPU camera translation.
+ * Camera elevation is deliberately absent from the supported ground-centered view.
+ *
+ * @param {{x:number,y:number,z:number}} position - World position, including elevation.
+ * @param {{x:number,y:number}} camera - Isometric ground camera.
+ * @returns {number} Depth before WebGPU clipping, with smaller values nearer the camera.
+ */
+function worldDepth(position, camera) {
+    return 0.5 - WORLD_DEPTH_XY * ((position.x - camera.x) + (position.y - camera.y)) - WORLD_DEPTH_Z * position.z;
+}
+
 const WORLD_MIN = 0;
 const WORLD_SPAN = 10;
 const WORLD_MAX = WORLD_MIN + WORLD_SPAN;
@@ -185,6 +201,10 @@ struct CharacterVertex {
     let colour = textureSample(body, bodySampler, in.uv);
     if (colour.a < 0.05) { discard; }
     return vec4<f32>(colour.rgb * in.light, colour.a);
+}
+@fragment fn characterMask(in: CharacterVertex) -> @location(0) vec4<f32> {
+    if (textureSample(body, bodySampler, in.uv).a < 0.5) { discard; }
+    return vec4<f32>(1.0);
 }`;
 
 /**
@@ -470,7 +490,7 @@ async function readModel(file) {
  * @param {{onWorldOpaque?: (view: WorldRenderView) => void, onWorldBuilding?: (view: WorldRenderView) => void}} [options] - Synchronous hooks before and after moving-character draws, only after prepared source tiles; exceptions propagate to the caller.
  * @returns {Promise<RendererHandle>} Ready renderer handle.
  */
-export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBuilding } = {}) {
+async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBuilding } = {}) {
     if (onWorldOpaque !== undefined && typeof onWorldOpaque !== 'function') {
         throw new TypeError('onWorldOpaque must be a function.');
     }
@@ -528,7 +548,26 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
     const characterProjection = new Float32Array(16);
     const objectMatrix = new Float32Array(16);
     let camera = { x: 5, y: 5 };
-    const worldView = { device, format, projection, camera, tilePixels: 0, width: 0, height: 0 };
+    const worldView = {
+        device, format, projection, camera, tilePixels: 0, width: 0, height: 0,
+        /**
+         * Add the actual animated actor silhouette to the source behind-player exclusion mask.
+         *
+         * @param {GPURenderPassEncoder} pass - Original contour mask pass.
+         * @returns {void} Encodes actual actor triangles, never a proxy shape.
+         */
+        renderPlayerMask(pass) {
+            if (!character) {
+                return;
+            }
+
+            pass.setPipeline(character.maskPipeline);
+            pass.setBindGroup(0, character.bindGroup);
+            pass.setVertexBuffer(0, character.vertices);
+            pass.setIndexBuffer(character.indices, 'uint32');
+            pass.drawIndexed(character.skin.indices.length);
+        },
+    };
     const renderView = Object.freeze({
         camera: Object.freeze({
             /**
@@ -590,9 +629,10 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
     /**
      * Create isolated candidate roots and IDs without changing the committed VM's UI.
      *
+     * @param {{storage?:Storage}} [options] - Origin-local persistent Core option storage.
      * @returns {object} Candidate UI owned by this renderer.
      */
-    function newGameUI() {
+    function newGameUI(options = {}) {
         if (stopped || destroyed) {
             throw new Error('Renderer is no longer active.');
         }
@@ -600,6 +640,7 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
         const ui = createGameUI({
             document: canvas.ownerDocument,
             focusTarget: canvas,
+            storage: options.storage,
             /**
              * Unregister the disposed session and withdraw it if currently presented.
              */
@@ -1239,19 +1280,21 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
                     { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 ],
             });
+            const vertex = {
+                module, entryPoint: 'characterVertex', buffers: [{
+                    arrayStride: 64, attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                        { shaderLocation: 1, offset: 12, format: 'float32x3' },
+                        { shaderLocation: 2, offset: 24, format: 'float32x2' },
+                        { shaderLocation: 3, offset: 32, format: 'float32x4' },
+                        { shaderLocation: 4, offset: 48, format: 'float32x4' },
+                    ],
+                }],
+            };
+            const characterLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
             const pipeline = await device.createRenderPipelineAsync({
-                label: 'textured-four-weight-character', layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-                vertex: {
-                    module, entryPoint: 'characterVertex', buffers: [{
-                        arrayStride: 64, attributes: [
-                            { shaderLocation: 0, offset: 0, format: 'float32x3' },
-                            { shaderLocation: 1, offset: 12, format: 'float32x3' },
-                            { shaderLocation: 2, offset: 24, format: 'float32x2' },
-                            { shaderLocation: 3, offset: 32, format: 'float32x4' },
-                            { shaderLocation: 4, offset: 48, format: 'float32x4' },
-                        ],
-                    }],
-                },
+                label: 'textured-four-weight-character', layout: characterLayout,
+                vertex,
                 fragment: {
                     module, entryPoint: 'characterFragment', targets: [{
                         format, blend: {
@@ -1262,6 +1305,12 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
                 },
                 primitive: { topology: 'triangle-list', cullMode: 'none' },
                 depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less-equal' },
+            });
+            const maskPipeline = await device.createRenderPipelineAsync({
+                label: 'original outline player exclusion', layout: characterLayout, vertex,
+                fragment: { module, entryPoint: 'characterMask', targets: [{ format: 'rgba8unorm' }] },
+                primitive: { topology: 'triangle-list', cullMode: 'none' },
+                depthStencil: { format: 'depth32float', depthWriteEnabled: false, depthCompare: 'always' },
             });
 
             /**
@@ -1315,7 +1364,7 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
 
             releaseCharacter(character);
             character = {
-                resources, skin, idleClip, walkClip, ticksPerSecond, pipeline, vertices, indices, palette, transform, bindGroup, metadata,
+                resources, skin, idleClip, walkClip, ticksPerSecond, pipeline, maskPipeline, vertices, indices, palette, transform, bindGroup, metadata,
                 facing: 0, previous: null, seconds: 0, previousTick: null, previousClock: null, animation: 'idle',
             };
             canvasCameras.set(canvas, camera);
@@ -1413,12 +1462,12 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
 
         if (following) {
             canvasCameras.set(canvas, camera);
-            projection.set([tilePixels / canvas.width, -tilePixels / (2 * canvas.height), -0.002, 0,
-                -tilePixels / canvas.width, -tilePixels / (2 * canvas.height), -0.002, 0,
-                0, 3 * tilePixels / canvas.height, -0.002, 0,
+            projection.set([tilePixels / canvas.width, -tilePixels / (2 * canvas.height), -WORLD_DEPTH_XY, 0,
+                -tilePixels / canvas.width, -tilePixels / (2 * canvas.height), -WORLD_DEPTH_XY, 0,
+                0, 3 * tilePixels / canvas.height, -WORLD_DEPTH_Z, 0,
                 (-camera.x + camera.y) * tilePixels / canvas.width,
                 (camera.x + camera.y) * tilePixels / (2 * canvas.height),
-                0.5 + (camera.x + camera.y) * 0.002, 1]);
+                0.5 + (camera.x + camera.y) * WORLD_DEPTH_XY, 1]);
         } else {
             canvasCameras.delete(canvas);
         }
@@ -1473,6 +1522,9 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
             worldView.tilePixels = tilePixels;
             worldView.width = canvas.width;
             worldView.height = canvas.height;
+            worldView.worldItems = snapshot.worldItems ?? [];
+            worldView.worldHighlights = snapshot.worldHighlights ?? [];
+            worldView.characterZ = renderView.characterZ;
 
             const worldRendered = worldLayer?.render(worldPass, worldView) === true;
 
@@ -1489,6 +1541,7 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
             }
 
             worldPass.end();
+            worldLayer?.renderOutlines?.(encoder, colourView, worldView);
 
             // Source FBO renderInternal calls DoBuilding(true) after world actors, before UI.
             if (worldRendered && onWorldBuilding) {
@@ -1502,6 +1555,7 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
             if (commands.length) {
                 const uiPass = encoder.beginRenderPass({
                     colorAttachments: [{ view: colourView, loadOp: 'load', storeOp: 'store' }],
+                    depthStencilAttachment: uiRenderer.stencilAttachment(canvas.width, canvas.height),
                 });
 
                 uiRenderer.render(uiPass, commands, canvas.width, canvas.height, drawScale);
@@ -1649,7 +1703,7 @@ export async function createRenderer(canvas, onError, { onWorldOpaque, onWorldBu
  * @param {number} clientY - Pointer y in viewport pixels.
  * @returns {{x: number, y: number}} Unbounded iso ground coordinates when camera follows; otherwise clamped [0,10].
  */
-export function worldFromCanvas(canvas, clientX, clientY) {
+function worldFromCanvas(canvas, clientX, clientY) {
     const { left, top, width, height, scaleX, scaleY } = canvasContentBox(canvas);
     const plane = fitBox(width, height);
     const ndcX = ((clientX - left) / (width * scaleX)) * 2 - 1;
@@ -1671,4 +1725,4 @@ export function worldFromCanvas(canvas, clientX, clientY) {
 }
 
 // The byte gate is exported for focused header tests only; the public surface stays the handle.
-export { canvasContentBox, parsePngHeader };
+export { canvasContentBox, createRenderer, parsePngHeader, WORLD_DEPTH_XY, WORLD_DEPTH_Z, worldDepth, worldFromCanvas };

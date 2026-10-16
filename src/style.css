@@ -14,7 +14,7 @@ body { height: 100dvh; }
 #pause-menu { width: min(90vw, 28rem); max-height: 90dvh; overflow: auto; padding: 1.25rem; border: 1px solid #666; background: #171717f2; color: #eee; }
 #pause-menu::backdrop { background: #0008; }
 h1 { font-size: 1.2rem; margin: 0 0 1rem; }
-button, input { font: inherit; min-height: 44px; }
+button, input, select { font: inherit; min-height: 44px; }
 button { background: #303030; color: #eee; border: 1px solid #707070; padding: .5rem .75rem; cursor: pointer; }
 button:hover { background: #454545; }
 button:disabled { opacity: .5; cursor: default; }
@@ -22,6 +22,7 @@ button:disabled { opacity: .5; cursor: default; }
 fieldset { border: 1px solid #555; margin: 1rem 0; }
 label { display: block; margin: .6rem 0; }
 input[type="number"] { width: 7rem; }
+select { width: 100%; background: #303030; color: #eee; border: 1px solid #707070; padding: .5rem; }
 input[type="checkbox"] { min-height: auto; width: 1.2rem; height: 1.2rem; }
 input[type="file"] { width: 100%; }
 :focus-visible { outline: 2px solid #eee; outline-offset: 2px; }

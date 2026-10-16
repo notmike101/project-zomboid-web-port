@@ -2,6 +2,7 @@
 const SMALL = 'Small';
 // Identifiers never alias elements in a replacement UI session.
 let nextUIElementID = 1;
+let nextUITransitionID = 1;
 
 /**
  * Normalized, straight-alpha UI tint.
@@ -31,22 +32,37 @@ let nextUIElementID = 1;
 /**
  * Explicit port rendering and scheduler settings.
  *
- * @typedef {{moodleSize:number,fontSizeReal:number,lockFPS:number,gray:UIColor,goodHighlight:UIColor,badHighlight:UIColor}} UISettings
+ * @typedef {{moodleSize:number,fontSizeReal:number,inventoryFont?:'Small'|'Medium'|'Large',cycleContainerKey?:'control'|'shift'|'control+shift'|'command'|'command+shift',doContainerOutline?:boolean,objectHighlight?:UIColor,worldItemHighlight?:UIColor,lockFPS:number,gray:UIColor,goodHighlight:UIColor,badHighlight:UIColor}} UISettings
  */
 /**
  * Lua lifecycle and input hooks; nil input uses the element flag and explicit false declines.
  *
- * @typedef {{update?:()=>void,prerender?:()=>void,render?:()=>void,input?:(name:string,...args:number[])=>unknown}} UICallbacks
+ * @typedef {{attached?:(enabled:boolean)=>void,retainRoots?:(ids:number[])=>void,update?:()=>void,prerender?:()=>void,render?:()=>void,input?:(name:string,...args:number[])=>unknown}} UICallbacks
  */
 /**
  * Session-local semantic element and its layout/input state.
  *
- * @typedef {{id:number,owner:string,x:number,y:number,width:number,height:number,scrollHeight:number,scrollX:number,scrollY:number,visible:boolean,enabled:boolean,removed:boolean,parent:number|null,children:number[],callbacks:UICallbacks,anchorLeft:boolean,anchorRight:boolean,anchorTop:boolean,anchorBottom:boolean,wantKeyEvents:boolean,consumeMouseEvents:boolean,wantExtraMouseEvents:boolean,forceCursorVisible:boolean,alwaysOnTop:boolean,stencil:UIRect|null,stencilSuspended?:boolean}} UIElement
+ * @typedef {{id:number,owner:string,uiName:string,x:number,y:number,width:number,height:number,scrollHeight:number,scrollX:number,scrollY:number,scrollChildren?:boolean,scrollWithParent?:boolean,maxDrawHeight?:number,capture?:boolean,visible:boolean,enabled:boolean,removed:boolean,parent:number|null,children:number[],callbacks:UICallbacks,anchorLeft:boolean,anchorRight:boolean,anchorTop:boolean,anchorBottom:boolean,wantKeyEvents:boolean,consumeMouseEvents:boolean,wantExtraMouseEvents:boolean,forceCursorVisible:boolean,alwaysOnTop:boolean}} UIElement
+ */
+/**
+ * Original UITransition's owner-scoped float32 presentation state.
+ *
+ * @typedef {{owner:string,duration:number,elapsed:number,frac:number,fadeOut:boolean,ignoreUpdateTime:boolean,updateTimeMs:number}} UITransitionState
  */
 /**
  * One clipped, tinted textured or solid quad for immediate GPU submission.
  *
- * @typedef {{element:number,owner:string,texture:UITexture|null|undefined,x:number,y:number,width:number,height:number,uv:UIRect,color:UIColor,clip:UIRect}} UICommand
+ * @typedef {{type?:undefined,element:number,owner:string,texture:UITexture|null|undefined,x:number,y:number,width:number,height:number,uv:UIRect,color:UIColor,clip:UIRect}} UIQuad
+ */
+/**
+ * Ordered global native stencil operations; rectangles are integer absolute logical pixels.
+ *
+ * @typedef {{type:'stencil',operation:'set'|'repaint',x:number,y:number,width:number,height:number}|{type:'stencil',operation:'clear'|'suspend'|'resume'}} UIStencil
+ */
+/**
+ * Quads retain their geometry while native GPU stencil operations mask the ordered draws.
+ *
+ * @typedef {UIQuad|UIStencil} UICommand
  */
 
 /**
@@ -62,6 +78,16 @@ function finite(value, name) {
     }
 
     return value;
+}
+
+/**
+ * Match Java Double.intValue/renderi conversion for an already finite coordinate.
+ *
+ * @param {number} value - Finite source coordinate or dimension.
+ * @returns {number} Saturated int32, without JavaScript's negative zero.
+ */
+function nativeInteger(value) {
+    return Math.max(-2_147_483_648, Math.min(2_147_483_647, Math.trunc(value))) + 0;
 }
 
 /**
@@ -325,17 +351,44 @@ function parseBitmapFont(text) {
 }
 
 /**
+ * Initialize a native fade, retaining its cached fraction until the next update.
+ *
+ * @param {UITransitionState} value - Owned source transition.
+ * @param {number} duration - Requested float32 duration in milliseconds.
+ * @param {boolean} fadeOut - Original direction flag.
+ */
+function initTransition(value, duration, fadeOut) {
+    if (typeof fadeOut !== 'boolean') {
+        throw new TypeError('UI transition direction must be boolean');
+    }
+
+    value.duration = Math.max(Math.fround(finite(duration, 'UI transition duration')), 1);
+    value.elapsed = value.frac >= 1
+        ? 0
+        : Math.fround(
+                (value.fadeOut !== fadeOut ? Math.fround(1 - value.frac) : value.frac) * value.duration,
+            );
+    value.fadeOut = fadeOut;
+}
+
+/**
  * Own one isolated Lua UI session. Resource ownership transfers only after initialize succeeds.
  * Commands are reused each render; consumers must submit them before the next render.
  *
- * @param {{viewport?:()=>{width:number,height:number},mouse?:()=>{x:number,y:number},document?:Document,focusTarget?:HTMLElement,onDispose?:()=>void}} [options] - Canvas bounds/input, semantic DOM host and ownership release.
+ * @param {{viewport?:()=>{width:number,height:number},mouse?:()=>{x:number,y:number},now?:()=>number,document?:Document,focusTarget?:HTMLElement,storage?:Storage,onDispose?:()=>void}} [options] - Canvas bounds/input, UI-frame wall clock, semantic DOM host, origin-local Core options and ownership release.
  * @returns {object} Semantic tree, native bindings, input, draw collection and disposal.
  */
 function createGameUI(options = {}) {
     const elements = new Map();
+    /** @type {Map<number,UITransitionState>} */
+    const transitions = new Map();
+    let transitionTimeMs = 0;
+    let transitionElapsedMs = 0;
     const roots = [];
     const commands = [];
     const playerUI = { playerInventory: [null, null], playerInventoryTooltip: [null, null] };
+    const worldHighlights = new Map();
+    const worldHighlightOwners = new WeakMap();
     let textures = new Map();
     let indexedTextures = new Set();
     let fonts = new Map();
@@ -384,20 +437,97 @@ function createGameUI(options = {}) {
     }
 
     /**
-     * Resolve absolute coordinates through the parent and scroll chain.
+     * Advance the shared transition clock once per actual UI render or explicit original UpdateAll call.
+     */
+    function updateTransitions() {
+        const now = Math.trunc(finite((options.now ?? Date.now)(), 'UI transition clock'));
+
+        transitionElapsedMs = now - transitionTimeMs;
+        transitionTimeMs = now;
+    }
+
+    /**
+     * Dispatch the original transition methods against session-owned state.
+     *
+     * @param {number} id - Native transition identity.
+     * @param {string} name - Original method name.
+     * @param {...(number|boolean)} args - Method-specific duration, direction or elapsed value.
+     * @returns {number|undefined} Native query result or void mutation.
+     */
+    function transition(id, name, ...args) {
+        const value = transitions.get(id);
+
+        if (!value) {
+            throw new Error('UI transition is not owned by this session');
+        }
+
+        switch (name) {
+            case 'init': initTransition(value, args[0], args[1]);
+
+                return;
+            case 'update':
+                if (!value.ignoreUpdateTime && value.updateTimeMs !== 0
+                    && value.updateTimeMs + Math.trunc(value.duration) < transitionTimeMs) {
+                    value.elapsed = value.duration;
+                }
+
+                value.updateTimeMs = transitionTimeMs;
+                value.frac = Math.fround(value.elapsed / value.duration);
+                value.elapsed = Math.min(Math.fround(value.elapsed + Math.fround(transitionElapsedMs)), value.duration);
+
+                return;
+            case 'fraction': return value.fadeOut ? Math.fround(1 - value.frac) : value.frac;
+            case 'setFadeIn':
+                if (typeof args[0] !== 'boolean') {
+                    throw new TypeError('UI transition fade-in flag must be boolean');
+                }
+
+                if (args[0] && value.fadeOut) {
+                    initTransition(value, 100, false);
+                } else if (!args[0] && !value.fadeOut) {
+                    initTransition(value, 200, true);
+                }
+
+                return;
+            case 'reset': value.elapsed = 0;
+
+                return;
+            case 'getElapsed': return value.elapsed;
+            case 'setElapsed': value.elapsed = Math.fround(finite(args[0], 'UI transition elapsed'));
+
+                return;
+            case 'setIgnoreUpdateTime':
+                if (typeof args[0] !== 'boolean') {
+                    throw new TypeError('UI transition ignore-update-time flag must be boolean');
+                }
+
+                value.ignoreUpdateTime = args[0];
+
+                return;
+            default: throw new Error(`Unsupported UITransition:${name}`);
+        }
+    }
+
+    /**
+     * Resolve native integer absolute coordinates through the gated parent scroll chain.
      *
      * @param {UIElement} e - Element whose origin is needed.
      * @returns {{x:number,y:number}} Absolute origin in logical canvas pixels.
      */
     function position(e) {
+        const x = nativeInteger(e.x);
+        const y = nativeInteger(e.y);
+
         if (!e.parent) {
-            return { x: e.x, y: e.y };
+            return { x, y };
         }
 
         const parent = elements.get(e.parent);
         const p = position(parent);
 
-        return { x: p.x + parent.scrollX + e.x, y: p.y + parent.scrollY + e.y };
+        const scroll = parent.scrollChildren === true && e.scrollWithParent !== false;
+
+        return { x: p.x + (scroll ? nativeInteger(parent.scrollX) : 0) + x, y: p.y + (scroll ? nativeInteger(parent.scrollY) : 0) + y };
     }
 
     /**
@@ -411,23 +541,44 @@ function createGameUI(options = {}) {
     }
 
     /**
-     * Intersect the canvas bounds with every active ancestor stencil.
+     * Match native isReallyVisible: visible ancestors and actual child/root membership.
+     *
+     * @param {UIElement|undefined} e - Element whose attachment chain is queried.
+     * @returns {boolean} Whether the visible chain reaches a UIManager root.
+     */
+    function reallyVisible(e) {
+        if (!e || !e.visible) {
+            return false;
+        }
+
+        if (!e.parent) {
+            return roots.includes(e.id);
+        }
+
+        const parent = elements.get(e.parent);
+
+        return !!parent && parent.children.includes(e.id) && reallyVisible(parent);
+    }
+
+    /**
+     * Resolve canvas bounds, optionally intersecting native ancestor input-height limits.
      *
      * @param {UIElement} e - Element whose clipping bounds are needed.
+     * @param {boolean} [forInput=false] - Apply native maximum-height input bounds, not draw scissoring.
      * @returns {UIRect} Absolute clipping rectangle.
      */
-    function clip(e) {
+    function clip(e, forInput = false) {
         const v = view();
         let result = { x: 0, y: 0, width: v.width, height: v.height };
 
-        if (e.parent) {
-            result = clip(elements.get(e.parent));
+        if (forInput && e.parent) {
+            result = clip(elements.get(e.parent), forInput);
         }
 
-        if (e.stencil && !e.stencilSuspended) {
+        if (forInput && e.maxDrawHeight !== undefined && e.maxDrawHeight >= 0) {
             const p = position(e);
 
-            result = intersection(result, { x: p.x + e.stencil.x, y: p.y + e.stencil.y, width: e.stencil.width, height: e.stencil.height });
+            result = intersection(result, { x: p.x, y: p.y, width: e.width, height: Math.min(e.height, e.maxDrawHeight) });
         }
 
         return result;
@@ -443,21 +594,71 @@ function createGameUI(options = {}) {
     }
 
     /**
-     * Invoke a lifecycle phase on the currently active tree.
+     * Test visible native bounds before stack occlusion.
+     *
+     * @param {UIElement} e - Registry element.
+     * @param {number} x - Absolute pointer X.
+     * @param {number} y - Absolute pointer Y.
+     * @returns {boolean} Whether the point lies in the visible bounds.
+     */
+    function containsPoint(e, x, y) {
+        const p = position(e);
+        const c = clip(e, true);
+        const height = e.maxDrawHeight === undefined || e.maxDrawHeight === -1 ? nativeInteger(e.height) : Math.min(nativeInteger(e.height), e.maxDrawHeight);
+
+        return !!(active(e) && x >= p.x && y >= p.y && x < p.x + e.width && y < p.y + height && x >= c.x && y >= c.y && x < c.x + c.width && y < c.y + c.height);
+    }
+
+    /**
+     * Match UIElement.isPointOver: front roots, consuming siblings, then parent.
+     *
+     * @param {UIElement} e - Registry element.
+     * @param {number} x - Absolute pointer X.
+     * @param {number} y - Absolute pointer Y.
+     * @returns {boolean} Whether this element owns the point in the live stack.
+     */
+    function pointOver(e, x, y) {
+        if (!containsPoint(e, x, y)) {
+            return false;
+        }
+
+        const parent = e.parent ? element(e.parent) : null;
+        const siblings = parent ? parent.children : ordered();
+        const index = siblings.indexOf(e.id);
+
+        for (let i = siblings.length - 1; i > index; i -= 1) {
+            const sibling = element(siblings[i]);
+
+            if ((!parent || sibling.consumeMouseEvents) && containsPoint(sibling, x, y)) {
+                return false;
+            }
+        }
+
+        return !parent || pointOver(parent, x, y);
+    }
+
+    /**
+     * Invoke updates or the original nested prerender/children/render sequence.
      *
      * @param {number} id - Session-local element identifier.
-     * @param {'update'|'prerender'|'render'} phase - Lifecycle callback to invoke.
+     * @param {'update'|'draw'} phase - Lifecycle phase to invoke.
      */
     function visit(id, phase) {
         const e = elements.get(id);
 
-        if (!active(e)) {
+        if (!e || e.removed || !e.enabled || (phase === 'draw' && !active(e))) {
             return;
         }
 
-        e.callbacks[phase]?.();
+        const parent = e.parent ? elements.get(e.parent) : null;
 
-        if (!active(e)) {
+        if (phase === 'draw' && parent?.maxDrawHeight !== undefined && parent.maxDrawHeight !== -1 && parent.maxDrawHeight <= e.y) {
+            return;
+        }
+
+        e.callbacks[phase === 'draw' ? 'prerender' : 'update']?.();
+
+        if (e.removed || !e.enabled || (phase === 'draw' && !active(e))) {
             return;
         }
 
@@ -465,6 +666,10 @@ function createGameUI(options = {}) {
             if (elements.get(child)?.parent === id) {
                 visit(child, phase);
             }
+        }
+
+        if (phase === 'draw' && active(e)) {
+            e.callbacks.render?.();
         }
     }
 
@@ -546,9 +751,9 @@ function createGameUI(options = {}) {
         const p = position(e);
 
         quad(e, texture,
-            Math.trunc(p.x + e.scrollX + finite(x, 'draw X')) - p.x - e.scrollX,
-            Math.trunc(p.y + e.scrollY + finite(y, 'draw Y')) - p.y - e.scrollY,
-            Math.trunc(finite(width, 'draw width')), Math.trunc(finite(height, 'draw height')), ...color);
+            nativeInteger(p.x + e.scrollX + finite(x, 'draw X')) - p.x - e.scrollX,
+            nativeInteger(p.y + e.scrollY + finite(y, 'draw Y')) - p.y - e.scrollY,
+            nativeInteger(finite(width, 'draw width')), nativeInteger(finite(height, 'draw height')), ...color);
     }
 
     /**
@@ -569,13 +774,14 @@ function createGameUI(options = {}) {
     }
 
     /**
-     * Resolve an actual, attached-or-new UIElement for the calling player UI owner.
+     * Resolve a live owned UIElement, allowing reusable detached tooltip references.
      *
      * @param {number|null|undefined} id - Actual native identifier, or Lua nil.
      * @param {string} owner - Calling package identifier.
+     * @param {boolean} [allowDetached=false] - Tooltip registration does not imply UIManager attachment.
      * @returns {UIElement|null} Authenticated registry reference without copying.
      */
-    function playerElement(id, owner) {
+    function playerElement(id, owner, allowDetached = false) {
         if (id === null || id === undefined) {
             return null;
         }
@@ -591,7 +797,7 @@ function createGameUI(options = {}) {
         }
 
         for (let parent = e; parent; parent = parent.parent ? element(parent.parent) : null) {
-            if (parent.removed) {
+            if (parent.removed && !allowDetached) {
                 throw new Error('Player UI element is removed');
             }
         }
@@ -616,7 +822,11 @@ function createGameUI(options = {}) {
         }
 
         for (const id of e.children) {
-            clearPlayerElement(element(id));
+            const child = elements.get(id);
+
+            if (child) {
+                clearPlayerElement(child);
+            }
         }
     }
 
@@ -659,7 +869,7 @@ function createGameUI(options = {}) {
      * @param {number} id - Session-local target identifier.
      * @param {string} name - Native method name.
      * @param {...(number|string|boolean|UITexture|null|undefined)} args - Method-specific coordinates, flags, text, font selector or texture.
-     * @returns {number|boolean|undefined} Getter result; mutating and drawing methods return undefined.
+     * @returns {number|string|null|boolean|undefined} Getter result; mutating and drawing methods return undefined.
      */
     function method(id, name, ...args) {
         const e = element(id);
@@ -690,31 +900,66 @@ function createGameUI(options = {}) {
         }
 
         switch (name) {
+            case 'getUIName': return e.uiName || (typeof args[0] === 'string' ? args[0] : `UI: ${e.id}`);
+            case 'setUIName': {
+                if (args[0] !== null && args[0] !== undefined && typeof args[0] !== 'string') {
+                    throw new TypeError('UI name must be a string or null');
+                }
+
+                e.uiName = args[0] ?? '';
+
+                return;
+            }
+            case 'setCapture': e.capture = Boolean(args[0]);
+
+                return;
+            case 'isCapture': return e.capture === true;
+            case 'getScrollChildren': return e.scrollChildren === true;
+            case 'getScrollWithParent': return e.scrollWithParent !== false;
+            case 'setScrollChildren': e.scrollChildren = Boolean(args[0]);
+
+                return;
+            case 'setScrollWithParent': e.scrollWithParent = Boolean(args[0]);
+
+                return;
+            case 'getMaxDrawHeight': return e.maxDrawHeight ?? -1;
+            case 'setMaxDrawHeight': e.maxDrawHeight = Math.trunc(finite(args[0], 'maximum draw height'));
+
+                return;
+            case 'clearMaxDrawHeight': e.maxDrawHeight = -1;
+
+                return;
             case 'getAbsoluteX': return position(e).x;
             case 'getAbsoluteY': return position(e).y;
-            case 'getIsVisible': case 'isVisible': return active(e);
+            case 'getIsVisible': case 'isVisible': return e.visible;
+            case 'isReallyVisible': return reallyVisible(e);
             case 'isEnabled': return e.enabled;
             case 'isMouseOver': {
                 const m = options.mouse?.() ?? mouse;
 
                 return method(id, 'isPointOver', m.x, m.y);
             }
-            case 'isPointOver': {
+            case 'isPointOver': return pointOver(e, args[0], args[1]);
+            case 'setStencilRect': case 'repaintStencilRect': {
                 const p = position(e);
-                const c = clip(e);
 
-                return !!(active(e) && e.enabled && args[0] >= p.x && args[1] >= p.y && args[0] < p.x + e.width && args[1] < p.y + e.height && args[0] >= c.x && args[1] >= c.y && args[0] < c.x + c.width && args[1] < c.y + c.height);
+                commands.push({
+                    type: 'stencil', operation: name === 'setStencilRect' ? 'set' : 'repaint',
+                    x: nativeInteger(p.x + finite(args[0], 'clip x')),
+                    y: nativeInteger(p.y + finite(args[1], 'clip y')),
+                    width: nativeInteger(finite(args[2], 'clip width')),
+                    height: nativeInteger(finite(args[3], 'clip height')),
+                });
+
+                return;
             }
-            case 'setStencilRect': e.stencil = { x: finite(args[0], 'clip x'), y: finite(args[1], 'clip y'), width: finite(args[2], 'clip width'), height: finite(args[3], 'clip height') };
+            case 'clearStencilRect': commands.push({ type: 'stencil', operation: 'clear' });
 
                 return;
-            case 'clearStencilRect': e.stencil = null;
+            case 'suspendStencil': commands.push({ type: 'stencil', operation: 'suspend' });
 
                 return;
-            case 'suspendStencil': e.stencilSuspended = true;
-
-                return;
-            case 'resumeStencil': e.stencilSuspended = false;
+            case 'resumeStencil': commands.push({ type: 'stencil', operation: 'resume' });
 
                 return;
             case 'AddChild': {
@@ -743,6 +988,8 @@ function createGameUI(options = {}) {
                 child.parent = id;
                 child.removed = false;
                 e.children.push(child.id);
+                // Only UI roots pin wrappers; their private Lua ownership graph retains children.
+                child.callbacks.attached?.(false);
 
                 return;
             }
@@ -754,6 +1001,7 @@ function createGameUI(options = {}) {
                     e.children.splice(e.children.indexOf(child.id), 1);
                     child.parent = null;
                     child.removed = true;
+                    child.callbacks.attached?.(false);
                 }
 
                 return;
@@ -1129,40 +1377,113 @@ function createGameUI(options = {}) {
             clearSourceMenu();
         }
 
-        for (const [id, e] of elements) {
-            if (e.owner === owner) {
-                clearPlayerElement(e);
-
-                if (e.parent && elements.has(e.parent)) {
-                    method(e.parent, 'RemoveChild', id);
-                }
-
-                for (const childID of [...e.children]) {
-                    const child = element(childID);
-                    const absolute = position(child);
-
-                    method(id, 'RemoveChild', childID);
-                    child.x = absolute.x;
-                    child.y = absolute.y;
-
-                    if (child.owner !== owner) {
-                        child.removed = false;
-                        roots.push(childID);
-                    }
-                }
-
-                const index = roots.indexOf(id);
-
-                if (index !== -1) {
-                    roots.splice(index, 1);
-                }
-
-                elements.delete(id);
+        for (const [id, value] of transitions) {
+            if (value.owner === owner) {
+                transitions.delete(id);
             }
         }
 
+        const staged = [];
+
+        /**
+         * Preserve foreign descendants before detaching any owned ancestor's Lua graph.
+         *
+         * @param {UIElement} e - Next element in an owned native subtree.
+         */
+        function stage(e) {
+            const children = e.children.map((childID) => {
+                const child = element(childID);
+
+                if (child.owner === owner) {
+                    stage(child);
+                }
+
+                return { child, absolute: position(child) };
+            });
+
+            staged.push({ e, children });
+        }
+
+        for (const e of elements.values()) {
+            if (e.owner === owner && elements.get(e.parent)?.owner !== owner) {
+                stage(e);
+            }
+        }
+
+        /* A detached forest may be retained from any descendant. Pin all foreign survivors
+           in one Lua entry before cutting any edge that may be their last strong reference. */
+        const foreignIDs = [];
+        let retainRoots;
+
+        for (const { children } of staged) {
+            for (const { child } of children) {
+                if (child.owner !== owner) {
+                    foreignIDs.push(child.id);
+                    retainRoots ??= child.callbacks.retainRoots;
+                }
+            }
+        }
+
+        retainRoots?.(foreignIDs);
+
+        for (const { e, children } of staged) {
+            const id = e.id;
+
+            if (e.owner !== owner) {
+                continue;
+            }
+
+            clearPlayerElement(e);
+
+            for (const { child, absolute } of children) {
+                if (!elements.has(child.id)) {
+                    continue;
+                }
+
+                if (elements.has(id) && child.parent === id) {
+                    if (child.owner === owner) {
+                        method(id, 'RemoveChild', child.id);
+                    } else {
+                        // One callback transfers the Lua parent edge directly into a root pin.
+                        e.children.splice(e.children.indexOf(child.id), 1);
+                        child.parent = null;
+                    }
+                }
+
+                if (!elements.has(child.id) || child.parent !== null) {
+                    continue;
+                }
+
+                child.x = absolute.x;
+                child.y = absolute.y;
+
+                if (child.owner !== owner) {
+                    child.removed = false;
+
+                    if (!roots.includes(child.id)) {
+                        roots.push(child.id);
+                    }
+
+                    child.callbacks.attached?.(true);
+                }
+            }
+
+            if (elements.has(id) && e.parent && elements.has(e.parent)) {
+                method(e.parent, 'RemoveChild', id);
+            }
+
+            const index = roots.indexOf(id);
+
+            if (index !== -1) {
+                roots.splice(index, 1);
+            }
+
+            e.callbacks.attached?.(false);
+            elements.delete(id);
+        }
+
         for (let i = commands.length - 1; i >= 0; i--) {
-            if (commands[i].owner === owner) {
+            if (commands[i].type !== 'stencil' && commands[i].owner === owner) {
                 commands.splice(i, 1);
             }
         }
@@ -1176,17 +1497,88 @@ function createGameUI(options = {}) {
          * @param {string} operation - Supported binding operation.
          * @param {string} owner - Calling package identifier.
          * @param {...(number|string|boolean|UITexture|UIColor|UICallbacks|null|undefined)} args - Operation-specific input validated by the selected binding.
-         * @returns {number|boolean|string|UITexture|UIColor|UISettings|{width:number,height:number}|{x:number,y:number}|null|undefined} Binding query result, or undefined for mutations.
+         * @returns {number|number[]|boolean|string|UITexture|UIColor|UISettings|{width:number,height:number}|{x:number,y:number}|null|undefined} Binding query result, or undefined for mutations.
          */
         call(operation, owner, ...args) {
             ready();
             switch (operation) {
+                case 'transitionNew': {
+                    const id = nextUITransitionID++;
+
+                    transitions.set(id, { owner, duration: 100, elapsed: 0, frac: 0, fadeOut: false, ignoreUpdateTime: false, updateTimeMs: 0 });
+
+                    return id;
+                }
+                case 'transitionRelease':
+                    transitions.delete(args[0]);
+
+                    return;
+                case 'transitionUpdateAll': return updateTransitions();
+                case 'transition': return transition(...args);
+                case 'getUI': return ordered();
                 case 'new': {
                     const id = nextUIElementID++;
 
-                    elements.set(id, { id, owner, x: 0, y: 0, width: 0, height: 0, scrollHeight: 0, scrollX: 0, scrollY: 0, visible: true, enabled: true, removed: false, parent: null, children: [], callbacks: args[0] ?? {}, anchorLeft: true, anchorTop: true, anchorRight: false, anchorBottom: false, alwaysOnTop: false, wantKeyEvents: false, consumeMouseEvents: false, wantExtraMouseEvents: false, forceCursorVisible: false, stencil: null });
+                    elements.set(id, { id, owner, uiName: '', x: 0, y: 0, width: 0, height: 0, scrollHeight: 0, scrollX: 0, scrollY: 0, visible: true, enabled: true, removed: false, parent: null, children: [], callbacks: args[0] ?? {}, anchorLeft: true, anchorTop: true, anchorRight: false, anchorBottom: false, alwaysOnTop: false, wantKeyEvents: false, consumeMouseEvents: false, wantExtraMouseEvents: false, forceCursorVisible: false });
 
                     return id;
+                }
+                case 'release': {
+                    // Lua wrapper finalization, not RemoveUI: detached widgets may still be reused.
+                    const id = args[0];
+                    const e = elements.get(id);
+
+                    if (!e) {
+                        return;
+                    }
+
+                    clearPlayerElement(e);
+                    e.removed = true;
+                    const siblings = e.parent ? elements.get(e.parent)?.children : roots;
+                    const index = siblings?.indexOf(id) ?? -1;
+
+                    if (index !== -1) {
+                        siblings.splice(index, 1);
+                    }
+
+                    for (const childID of e.children) {
+                        const child = elements.get(childID);
+
+                        if (child) {
+                            child.parent = null;
+                            child.removed = true;
+                        }
+                    }
+
+                    elements.delete(id);
+
+                    for (let i = commands.length - 1; i >= 0; i--) {
+                        if (commands[i].type !== 'stencil' && commands[i].element === id) {
+                            commands.splice(i, 1);
+                        }
+                    }
+
+                    return;
+                }
+                case 'isMouseOverInventory': {
+                    if (args.length !== 0) {
+                        throw new TypeError('Inventory mouse-over query requires zero arguments');
+                    }
+
+                    const [tooltip, lootTooltip] = playerUI.playerInventoryTooltip;
+
+                    if ((tooltip && reallyVisible(tooltip) && method(tooltip.id, 'isMouseOver')) || (lootTooltip && reallyVisible(lootTooltip) && method(lootTooltip.id, 'isMouseOver'))) {
+                        return true;
+                    }
+
+                    const [inventory, loot] = playerUI.playerInventory;
+
+                    if (!inventory || !loot) {
+                        return false;
+                    }
+
+                    return (method(inventory.id, 'getMaxDrawHeight') === -1 && method(inventory.id, 'isMouseOver'))
+                        || (method(loot.id, 'getMaxDrawHeight') === -1 && method(loot.id, 'isMouseOver'));
                 }
                 case 'playerInventory':
                 case 'playerInventoryTooltip': {
@@ -1198,8 +1590,10 @@ function createGameUI(options = {}) {
                         throw new RangeError('Only player viewport zero is supported');
                     }
 
-                    const first = playerElement(args[1], owner);
-                    const second = playerElement(args[2], owner);
+                    // Original updateTooltip registers its retained pointer after RemoveElement and setVisible(false).
+                    const allowDetached = operation === 'playerInventoryTooltip';
+                    const first = playerElement(args[1], owner, allowDetached);
+                    const second = playerElement(args[2], owner, allowDetached);
                     const pair = playerUI[operation];
 
                     if (pair.some((e) => e && e.owner !== owner)) {
@@ -1224,6 +1618,7 @@ function createGameUI(options = {}) {
                     }
 
                     e.removed = false;
+                    e.callbacks.attached?.(true);
 
                     return;
                 }
@@ -1238,6 +1633,7 @@ function createGameUI(options = {}) {
                     }
 
                     e.removed = true;
+                    e.callbacks.attached?.(false);
 
                     return;
                 }
@@ -1250,23 +1646,80 @@ function createGameUI(options = {}) {
 
                     return texture ?? null;
                 }
-                case 'measureX': return layout(getFont(args[0]), args[1]).width;
-                case 'measureY': return layout(getFont(args[0]), args[1]).height;
-                case 'fontHeight': return getFont(args[0]).lineHeight;
-                case 'fontSize': return getFont(args[0]).size;
-                case 'text': case 'itemName': if (!Object.hasOwn(translations, args[0])) {
-                    throw new Error(`Unsupported translation key: ${args[0]}`);
-                }
-
-                    if (args.length > 2) {
-                        throw new Error('Unsupported translation substitution beyond verified %1');
+                case 'measureX':
+                    // Original TextManager returns zero for null text before resolving even a null font.
+                    if (args[1] === null || args[1] === undefined) {
+                        return 0;
                     }
 
-                    return args.length === 2 ? translations[args[0]].replaceAll('%1', () => String(args[1])) : translations[args[0]];
-                case 'textOrNull': return translations[args[0]] ?? null;
+                    return layout(getFont(args[0]), args[1]).width;
+                case 'measureY':
+                    // Unlike width, original height returns zero when either the enum or text is null.
+                    if (args[0] === null || args[0] === undefined || args[1] === null || args[1] === undefined) {
+                        return 0;
+                    }
+
+                    return layout(getFont(args[0]), args[1]).height;
+                case 'fontHeight': return getFont(args[0]).lineHeight;
+                case 'fontSize': return getFont(args[0]).size;
+                case 'text': case 'itemName': case 'textOrNull': {
+                    if (!Object.hasOwn(translations, args[0])) {
+                        if (operation === 'textOrNull') {
+                            return null;
+                        }
+
+                        throw new Error(`Unsupported translation key: ${args[0]}`);
+                    }
+
+                    // Translator.getTextInternal converts breaks before formatting; item-name lookup does not.
+                    const format = operation === 'itemName'
+                        ? translations[args[0]]
+                        : translations[args[0]].replaceAll('<br>', '\n').replaceAll('<BR>', '\n');
+                    let missing = false;
+                    // Translator.formatFixer maps %% and %1..%9 to Java's single-pass formatter.
+                    const text = format.replaceAll(/%%|%([1-9])/gu, (token, index) => {
+                        if (token === '%%') {
+                            return '%';
+                        }
+
+                        if (Number(index) >= args.length) {
+                            missing = true;
+
+                            return token;
+                        }
+
+                        return args[Number(index)] === null || args[Number(index)] === undefined ? '' : String(args[Number(index)]);
+                    });
+
+                    return missing ? format : text;
+                }
                 case 'viewport': return { ...view() };
                 case 'mouse': return { ...(options.mouse?.() ?? mouse) };
                 case 'settings': return structuredClone(settings);
+                case 'setCoreOption': {
+                    const [name, value] = args;
+
+                    if (name === 'doContainerOutline' && typeof value === 'boolean') {
+                        settings.doContainerOutline = value;
+                    } else if (name === 'objectHighlight') {
+                        settings.objectHighlight = rgba(value);
+                    } else {
+                        throw new TypeError(`Unsupported or invalid Core option ${name}`);
+                    }
+
+                    return undefined;
+                }
+                case 'saveOptions':
+                    if (!options.storage || typeof options.storage.setItem !== 'function') {
+                        throw new Error('Core options require origin-local storage');
+                    }
+
+                    options.storage.setItem('pz-web-core-options', JSON.stringify({
+                        doContainerOutline: settings.doContainerOutline, objectHighlight: settings.objectHighlight,
+                        worldItemHighlight: settings.worldItemHighlight,
+                    }));
+
+                    return undefined;
                 case 'gray': if (args.length) {
                     settings.gray = rgba(args[0]);
                 }
@@ -1280,6 +1733,61 @@ function createGameUI(options = {}) {
     return Object.freeze({
         bindings,
         sourceMenuMirror,
+        /**
+         * Publish source-owned world presentation without changing native item ownership.
+         *
+         * @param {'item'|'door'} kind - Stable native object namespace.
+         * @param {number|string} id - Exact identity within that namespace.
+         * @param {object} state - Current source highlight, outline and tint state.
+         * @param {symbol} [owner] - Lua session identity for teardown without clearing foreign presentation.
+         */
+        setWorldHighlight(kind, id, state, owner) {
+            live();
+
+            if (!['item', 'door'].includes(kind) || (kind === 'item' ? !Number.isSafeInteger(id) || id <= 0 : typeof id !== 'string' || !id)
+                || !state || ['enabled', 'blink'].some((key) => typeof state[key] !== 'boolean')
+                || ['outline', 'outlineAttached'].some((key) => state[key] !== undefined && typeof state[key] !== 'boolean')) {
+                throw new TypeError('Invalid source world highlight');
+            }
+
+            const record = Object.freeze({
+                kind, id, enabled: state.enabled, blink: state.blink,
+                outline: state.outline ?? false, outlineAttached: state.outlineAttached ?? false,
+                color: Object.freeze(rgba(state.color ?? { r: 1, g: 1, b: 1, a: 1 })),
+                outlineColor: Object.freeze(rgba(state.outlineColor ?? { r: 1, g: 1, b: 1, a: 1 })),
+            });
+
+            worldHighlights.set(`${kind}:${id}`, record);
+            worldHighlightOwners.set(record, owner);
+        },
+        /**
+         * Withdraw only the current records published by one Lua session.
+         *
+         * @param {symbol} owner - Exact publishing session identity.
+         */
+        clearWorldHighlights(owner) {
+            live();
+
+            if (typeof owner !== 'symbol') {
+                throw new TypeError('World highlight session identity required');
+            }
+
+            for (const [key, record] of worldHighlights) {
+                if (worldHighlightOwners.get(record) === owner) {
+                    worldHighlights.delete(key);
+                }
+            }
+        },
+        /**
+         * Read immutable source world highlight records for the current renderer.
+         *
+         * @returns {object[]} Frozen current stable-identity presentation state.
+         */
+        worldHighlights() {
+            live();
+
+            return Object.freeze([...worldHighlights.values()]);
+        },
         /**
          * Mirror a genuine Lua submenu's native visibility without selecting or showing it.
          *
@@ -1402,7 +1910,29 @@ function createGameUI(options = {}) {
                 throw new Error('Explicit port moodle/font size and scheduler FPS required');
             }
 
-            const validated = { ...config, gray: rgba(config.gray), goodHighlight: rgba(config.goodHighlight), badHighlight: rgba(config.badHighlight) };
+            const storedOptions = options.storage?.getItem('pz-web-core-options');
+            const coreOptions = storedOptions === null || storedOptions === undefined ? {} : JSON.parse(storedOptions);
+
+            if (!coreOptions || typeof coreOptions !== 'object' || Array.isArray(coreOptions)) {
+                throw new TypeError('Invalid stored Core options');
+            }
+
+            const doContainerOutline = Object.hasOwn(coreOptions, 'doContainerOutline')
+                ? coreOptions.doContainerOutline
+                : config.doContainerOutline ?? true;
+
+            if (typeof doContainerOutline !== 'boolean') {
+                throw new TypeError('Container outline option must be boolean');
+            }
+
+            // Core constructor defaults; these are client options, not actor-save state.
+            const objectHighlight = rgba(Object.hasOwn(coreOptions, 'objectHighlight')
+                ? coreOptions.objectHighlight
+                : config.objectHighlight ?? { r: 0.98, g: 0.56, b: 0.11, a: 1 });
+            const worldItemHighlight = rgba(Object.hasOwn(coreOptions, 'worldItemHighlight')
+                ? coreOptions.worldItemHighlight
+                : config.worldItemHighlight ?? { r: 0.5, g: 1, b: 1, a: 1 });
+            const validated = { ...config, doContainerOutline, objectHighlight, worldItemHighlight, gray: rgba(config.gray), goodHighlight: rgba(config.goodHighlight), badHighlight: rgba(config.badHighlight) };
             const indexed = new Set(resources.indexedTextures ?? []);
 
             for (const t of new Set(textures.values())) {
@@ -1497,14 +2027,26 @@ function createGameUI(options = {}) {
             }
 
             const outsideName = name === 'onMouseWheel' || name === 'onMouseDoubleClick' ? null : `${name}Outside`;
+            let capturedPaths;
+
+            for (const e of elements.values()) {
+                if (e.capture && active(e) && e.enabled) {
+                    capturedPaths ??= new Set();
+
+                    for (let parent = e; parent; parent = parent.parent ? elements.get(parent.parent) : undefined) {
+                        capturedPaths.add(parent.id);
+                    }
+                }
+            }
 
             /**
              * Notify visible descendants even though an outside callback cannot consume input.
              *
              * @param {number} id - Subtree outside the pointer.
+             * @param {boolean} [descendants=true] - Also notify the outside subtree.
              */
-            function outside(id) {
-                const e = element(id);
+            function outside(id, descendants = true) {
+                const e = elements.get(id);
 
                 if (!active(e) || !outsideName) {
                     return;
@@ -1515,8 +2057,10 @@ function createGameUI(options = {}) {
 
                 e.callbacks.input?.(outsideName, ...values);
 
-                for (const child of [...e.children].reverse()) {
-                    outside(child);
+                if (descendants) {
+                    for (const child of [...e.children].reverse()) {
+                        outside(child);
+                    }
                 }
             }
 
@@ -1527,22 +2071,53 @@ function createGameUI(options = {}) {
              * @returns {boolean} Whether this subtree consumed the mouse event.
              */
             function hit(id) {
-                const e = element(id);
+                const e = elements.get(id);
 
-                if (!active(e)) {
+                if (!active(e) || !e.enabled) {
                     return false;
                 }
 
-                if (!method(id, 'isPointOver', x, y)) {
+                const over = containsPoint(e, x, y);
+
+                if (!over && !capturedPaths?.has(id)) {
                     outside(id);
 
                     return false;
                 }
 
+                if (name === 'onMouseDown' && (over || e.capture)) {
+                    const p = position(e);
+
+                    e.callbacks.input?.('onFocus', x - p.x - e.scrollX, y - p.y - e.scrollY);
+                }
+
+                if (!active(e) || !e.enabled) {
+                    return false;
+                }
+
+                const release = name === 'onMouseUp' || name === 'onRightMouseUp';
+                let childConsumed = false;
+
                 for (const child of [...e.children].reverse()) {
-                    if (hit(child)) {
-                        return true;
+                    if (childConsumed) {
+                        outside(child);
+                    } else if (hit(child)) {
+                        if (!release) {
+                            return true;
+                        }
+
+                        childConsumed = true;
                     }
+                }
+
+                if (childConsumed) {
+                    outside(id, false);
+
+                    return true;
+                }
+
+                if (!active(e) || !e.enabled || (!over && !e.capture)) {
+                    return false;
                 }
 
                 if ((name === 'onMouseWheel' || name === 'onMouseDoubleClick') && !e.wantExtraMouseEvents) {
@@ -1564,7 +2139,9 @@ function createGameUI(options = {}) {
                         break;
                     }
 
-                    if (!method(id, 'isPointOver', x, y)) {
+                    const e = elements.get(id);
+
+                    if (active(e) && !containsPoint(e, x, y)) {
                         outside(id);
                     }
                 } else {
@@ -1595,7 +2172,7 @@ function createGameUI(options = {}) {
              * @returns {boolean} Whether this subtree consumed the key event.
              */
             function send(id) {
-                const e = element(id);
+                const e = elements.get(id);
 
                 if (!active(e) || !e.enabled) {
                     return false;
@@ -1607,7 +2184,7 @@ function createGameUI(options = {}) {
                     }
                 }
 
-                return Boolean(e.wantKeyEvents && e.callbacks.input?.(name, key));
+                return Boolean(active(e) && e.enabled && e.wantKeyEvents && e.callbacks.input?.(name, key));
             }
 
             return ordered().reverse().some(send);
@@ -1635,26 +2212,23 @@ function createGameUI(options = {}) {
             }
         },
         /**
-         * Collect prerender and render quads, dropping subsequently inactive elements.
+         * Collect ordered native stencil operations and quads, dropping subsequently inactive quads.
          *
          * @returns {UICommand[]} Reused command array, valid until the next render.
          */
         render() {
             live();
+            updateTransitions();
             commands.length = 0;
 
             for (const id of ordered()) {
                 if (roots.includes(id)) {
-                    visit(id, 'prerender');
-
-                    if (roots.includes(id)) {
-                        visit(id, 'render');
-                    }
+                    visit(id, 'draw');
                 }
             }
 
             for (let i = commands.length - 1; i >= 0; i--) {
-                if (!active(elements.get(commands[i].element))) {
+                if (commands[i].type !== 'stencil' && !active(elements.get(commands[i].element))) {
                     commands.splice(i, 1);
                 }
             }
@@ -1674,6 +2248,8 @@ function createGameUI(options = {}) {
             playerUI.playerInventoryTooltip.fill(null);
             disposed = true;
             elements.clear();
+            worldHighlights.clear();
+            transitions.clear();
             roots.length = 0;
             commands.length = 0;
 
@@ -1720,7 +2296,36 @@ async function createUIRenderer(device, format, sampler) {
     }
 
     const layout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} }] });
-    const pipeline = device.createRenderPipeline({ label: 'original-game-ui', layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), vertex: { module, entryPoint: 'vertex', buffers: [{ arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }, { shaderLocation: 1, offset: 8, format: 'float32x2' }, { shaderLocation: 2, offset: 16, format: 'float32x4' }] }] }, fragment: { module, entryPoint: 'fragment', targets: [{ format, blend: { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' } } }] }, primitive: { topology: 'triangle-list' } });
+    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+    const vertex = { module, entryPoint: 'vertex', buffers: [{ arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }, { shaderLocation: 1, offset: 8, format: 'float32x2' }, { shaderLocation: 2, offset: 16, format: 'float32x4' }] }] };
+    const blend = { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' } };
+
+    /**
+     * Share geometry and bindings between color draws and colorless stencil writes.
+     *
+     * @param {'always'|'equal'} compare - Stencil comparison.
+     * @param {'keep'|'increment-clamp'|'replace'|'zero'} passOp - Operation on passing fragments.
+     * @param {boolean} color - Whether this pipeline writes color.
+     * @returns {GPURenderPipeline} UI pipeline variant.
+     */
+    function pipeline(compare, passOp, color) {
+        const stencil = { compare, passOp, failOp: 'keep', depthFailOp: 'keep' };
+
+        return device.createRenderPipeline({
+            label: `original-game-ui-${compare}-${passOp}-${color ? 'color' : 'mask'}`,
+            layout: pipelineLayout,
+            vertex,
+            fragment: { module, entryPoint: 'fragment', targets: [{ format, blend, writeMask: color ? globalThis.GPUColorWrite.ALL : 0 }] },
+            primitive: { topology: 'triangle-list' },
+            depthStencil: { format: 'depth24plus-stencil8', depthWriteEnabled: false, depthCompare: 'always', stencilFront: stencil, stencilBack: stencil, stencilReadMask: 0xFF, stencilWriteMask: color ? 0 : 0xFF },
+        });
+    }
+
+    const unmasked = pipeline('always', 'keep', true);
+    const masked = pipeline('equal', 'keep', true);
+    const increment = pipeline('equal', 'increment-clamp', false);
+    const replace = pipeline('always', 'replace', false);
+    const zero = pipeline('always', 'zero', false);
     const white = device.createTexture({ label: 'ui-solid', size: [1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING });
 
     device.queue.writeTexture({ texture: white }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, [1, 1]);
@@ -1728,6 +2333,34 @@ async function createUIRenderer(device, format, sampler) {
     let capacity = 0;
     let buffer = null;
     let data = null;
+    let stencilTexture = null;
+    let stencilWidth = 0;
+    let stencilHeight = 0;
+    let attachment = null;
+
+    /**
+     * Write one interleaved vertex without allocating per-quad arrays.
+     *
+     * @param {number} offset - Float offset in reusable storage.
+     * @param {number} x - Clip-space x.
+     * @param {number} y - Clip-space y.
+     * @param {number} u - Texture u.
+     * @param {number} v - Texture v.
+     * @param {number} r - Red multiplier.
+     * @param {number} g - Green multiplier.
+     * @param {number} b - Blue multiplier.
+     * @param {number} a - Alpha multiplier.
+     */
+    function writeVertex(offset, x, y, u, v, r, g, b, a) {
+        data[offset] = x;
+        data[offset + 1] = y;
+        data[offset + 2] = u;
+        data[offset + 3] = v;
+        data[offset + 4] = r;
+        data[offset + 5] = g;
+        data[offset + 6] = b;
+        data[offset + 7] = a;
+    }
 
     /**
      * Reuse a texture's sampler bind group across UI submissions.
@@ -1748,10 +2381,39 @@ async function createUIRenderer(device, format, sampler) {
 
     return Object.freeze({
         /**
-         * Submit collected quads into the existing render pass.
+         * Reuse a UI-only stencil target at the framebuffer's physical dimensions.
+         * Depth is unused/read-only, so depth load/store operations must be omitted.
          *
-         * @param {GPURenderPassEncoder} pass - World render pass to append to.
-         * @param {UICommand[]} commands - Quads collected from the current UI frame.
+         * @param {number} width - Framebuffer width in physical pixels.
+         * @param {number} height - Framebuffer height in physical pixels.
+         * @returns {{view:GPUTextureView,depthReadOnly:true,stencilReadOnly:false,stencilLoadOp:'clear',stencilClearValue:number,stencilStoreOp:'discard'}} Attachment clearing stencil each UI frame.
+         */
+        stencilAttachment(width, height) {
+            if (!stencilTexture || width !== stencilWidth || height !== stencilHeight) {
+                const next = device.createTexture({ label: 'original-game-ui-stencil', size: [width, height], format: 'depth24plus-stencil8', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+                let view;
+
+                try {
+                    view = next.createView();
+                } catch (error) {
+                    next.destroy();
+                    throw error;
+                }
+
+                stencilTexture?.destroy();
+                stencilTexture = next;
+                stencilWidth = width;
+                stencilHeight = height;
+                attachment = { view, depthReadOnly: true, stencilReadOnly: false, stencilLoadOp: 'clear', stencilClearValue: 0, stencilStoreOp: 'discard' };
+            }
+
+            return attachment;
+        },
+        /**
+         * Submit ordered quads and global stencil operations into the UI render pass.
+         *
+         * @param {GPURenderPassEncoder} pass - Pass using stencilAttachment(width, height).
+         * @param {UICommand[]} commands - Ordered commands collected from the current UI frame.
          * @param {number} width - Render target width in physical pixels.
          * @param {number} height - Render target height in physical pixels.
          * @param {number} scale - Physical pixels per logical UI pixel.
@@ -1762,62 +2424,154 @@ async function createUIRenderer(device, format, sampler) {
             }
 
             if (commands.length > capacity) {
-                capacity = Math.max(commands.length, capacity * 2, 64);
+                const nextCapacity = Math.max(commands.length, capacity * 2, 64);
+                const nextData = new Float32Array(nextCapacity * 6 * 8);
+                const nextBuffer = device.createBuffer({ label: 'ui-dynamic-vertices', size: nextCapacity * 6 * 32, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+
                 buffer?.destroy();
-                buffer = device.createBuffer({ label: 'ui-dynamic-vertices', size: capacity * 6 * 32, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-                data = new Float32Array(capacity * 6 * 8);
+                buffer = nextBuffer;
+                data = nextData;
+                capacity = nextCapacity;
             }
 
+            // UIElement.stencilLevel is global, not an element-owned clipping stack.
+            let level = 0;
+            let enabled = false;
+            let equal = false;
             let offset = 0;
 
-            for (const c of commands) {
-                const x0 = c.x * scale / width * 2 - 1;
-                const x1 = (c.x + c.width) * scale / width * 2 - 1;
-                const y0 = 1 - c.y * scale / height * 2;
-                const y1 = 1 - (c.y + c.height) * scale / height * 2;
-                const u0 = c.uv.x;
-                const u1 = u0 + c.uv.width;
-                const v0 = c.uv.y;
-                const v1 = v0 + c.uv.height;
-
-                for (const v of [[x0, y0, u0, v0], [x1, y0, u1, v0], [x0, y1, u0, v1], [x0, y1, u0, v1], [x1, y0, u1, v0], [x1, y1, u1, v1]]) {
-                    data.set(v, offset);
-                    data.set([c.color.r, c.color.g, c.color.b, c.color.a], offset + 4);
-                    offset += 8;
-                }
-            }
-
-            device.queue.writeBuffer(buffer, 0, data, 0, offset);
-            pass.setPipeline(pipeline);
             pass.setVertexBuffer(0, buffer);
 
-            for (const [i, c] of commands.entries()) {
-                const x = Math.max(0, Math.floor(c.clip.x * scale));
-                const y = Math.max(0, Math.floor(c.clip.y * scale));
-                const right = Math.min(width, Math.ceil((c.clip.x + c.clip.width) * scale));
-                const bottom = Math.min(height, Math.ceil((c.clip.y + c.clip.height) * scale));
+            for (const c of commands) {
+                const isStencil = c.type === 'stencil';
+                let drawPipeline;
+                const reference = Math.min(level, 255);
+                let fullscreen = false;
+                let texture = white;
+                let rectX = 0;
+                let rectY = 0;
+                let rectWidth = 0;
+                let rectHeight = 0;
 
-                if (right <= x || bottom <= y) {
-                    continue;
+                if (isStencil) {
+                    switch (c.operation) {
+                        case 'set':
+                            enabled = true;
+                            equal = true;
+                            drawPipeline = increment;
+                            level++;
+                            break;
+                        case 'clear':
+                            level = Math.max(0, level - 1);
+                            equal = level > 0;
+
+                            if (level > 0) {
+                                continue;
+                            }
+
+                            enabled = false;
+                            drawPipeline = zero;
+                            fullscreen = true;
+                            break;
+                        case 'repaint':
+                            if (level === 0) {
+                                continue;
+                            }
+
+                            equal = true;
+
+                            // glStencilFunc changes while suspended, but disabled tests do not write.
+                            if (!enabled) {
+                                continue;
+                            }
+
+                            drawPipeline = replace;
+                            break;
+                        case 'suspend':
+                            enabled = false;
+                            continue;
+                        case 'resume':
+                            enabled = true;
+                            continue;
+                        default:
+                            throw new Error('Unknown UI stencil operation');
+                    }
+
+                    if (c.operation === 'set' || c.operation === 'repaint') {
+                        rectX = c.x;
+                        rectY = c.y;
+                        rectWidth = c.width;
+                        rectHeight = c.height;
+                    }
+
+                    // Neither native mask painting nor glClear inherits the last quad's scissor.
+                    pass.setScissorRect(0, 0, width, height);
+                } else {
+                    const x = Math.max(0, Math.floor(c.clip.x * scale));
+                    const y = Math.max(0, Math.floor(c.clip.y * scale));
+                    const right = Math.min(width, Math.ceil((c.clip.x + c.clip.width) * scale));
+                    const bottom = Math.min(height, Math.ceil((c.clip.y + c.clip.height) * scale));
+
+                    if (right <= x || bottom <= y) {
+                        continue;
+                    }
+
+                    if (c.texture && !c.texture.texture) {
+                        throw new Error('UI texture has not been uploaded to this GPU device');
+                    }
+
+                    texture = c.texture?.texture ?? white;
+                    drawPipeline = enabled && equal ? masked : unmasked;
+                    rectX = c.x;
+                    rectY = c.y;
+                    rectWidth = c.width;
+                    rectHeight = c.height;
+                    pass.setScissorRect(x, y, right - x, bottom - y);
                 }
 
-                if (c.texture && !c.texture.texture) {
-                    throw new Error('UI texture has not been uploaded to this GPU device');
-                }
+                const x0 = fullscreen ? -1 : rectX * scale / width * 2 - 1;
+                const x1 = fullscreen ? 1 : (rectX + rectWidth) * scale / width * 2 - 1;
+                const y0 = fullscreen ? 1 : 1 - rectY * scale / height * 2;
+                const y1 = fullscreen ? -1 : 1 - (rectY + rectHeight) * scale / height * 2;
+                const u0 = isStencil ? 0 : c.uv.x;
+                const u1 = isStencil ? 1 : u0 + c.uv.width;
+                const v0 = isStencil ? 0 : c.uv.y;
+                const v1 = isStencil ? 1 : v0 + c.uv.height;
+                const r = isStencil ? 1 : c.color.r;
+                const g = isStencil ? 1 : c.color.g;
+                const b = isStencil ? 1 : c.color.b;
+                const a = isStencil ? 1 : c.color.a;
 
-                pass.setScissorRect(x, y, right - x, bottom - y);
-                pass.setBindGroup(0, group(c.texture?.texture ?? white));
-                pass.draw(6, 1, i * 6);
+                writeVertex(offset, x0, y0, u0, v0, r, g, b, a);
+                writeVertex(offset + 8, x1, y0, u1, v0, r, g, b, a);
+                writeVertex(offset + 16, x0, y1, u0, v1, r, g, b, a);
+                writeVertex(offset + 24, x0, y1, u0, v1, r, g, b, a);
+                writeVertex(offset + 32, x1, y0, u1, v0, r, g, b, a);
+                writeVertex(offset + 40, x1, y1, u1, v1, r, g, b, a);
+                pass.setPipeline(drawPipeline);
+                pass.setStencilReference(reference);
+                pass.setBindGroup(0, group(texture));
+                pass.draw(6, 1, offset / 8);
+                offset += 48;
+            }
+
+            // Encoding draws does not execute them: this upload precedes the owner's queue.submit.
+            if (offset) {
+                device.queue.writeBuffer(buffer, 0, data, 0, offset);
             }
 
             pass.setScissorRect(0, 0, width, height);
         },
         /**
-         * Destroy shared vertex storage and the solid-fill texture.
+         * Destroy shared vertex storage, the solid-fill texture, and the UI-only stencil target.
          */
         destroy() {
             buffer?.destroy();
             buffer = null;
+            data = null;
+            stencilTexture?.destroy();
+            stencilTexture = null;
+            attachment = null;
             white.destroy();
         },
     });

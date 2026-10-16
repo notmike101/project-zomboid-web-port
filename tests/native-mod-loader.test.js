@@ -42,6 +42,8 @@ function directory(entries, version = '42.21.0') {
 
 test('common plus newest compatible code tree without mod.info and root-only packages execute selected Lua', async () => {
     const content = directory({
+        'stdlib.lua': 'error("generic native sessions must not autoload the root bootstrap")',
+        'mods/Overlay/common/stdlib.lua': 'error("mod root files are not Lua autoload paths")',
         'mods/Overlay/common/mod.info': 'id=Overlay\nname=Overlay\nmodversion=2.0.0\nversionMin=42.0',
         'mods/Overlay/common/media/lua/client/main.lua': 'error("common must be overridden")',
         'mods/Overlay/42.13/mod.info': 'id=Overlay\nname=Overlay\nmodversion=2.0.0',
@@ -481,6 +483,30 @@ test('bootstrap require closure merges identical records without fetching or ins
     assert.deepEqual(await engineSources(descriptors, content, sources), sources);
     await assert.rejects(() => engineSources(descriptors, content, [startup, { ...startup, source: 'return 8' }]), /changed|conflict/u);
     await assert.rejects(() => engineSources(descriptors, content, [startup, { ...startup, path: 'media/lua/client/Startup.lua' }]), /ambiguous/ui);
+});
+
+test('root stdlib is explicit-only startup input with ordinary closure and duplicate protections', async () => {
+    const content = directory({
+        'stdlib.lua': 'error("root bootstrap must not be fetched implicitly")',
+        'media/lua/shared/Leaf.lua': 'return 7',
+    });
+    const startup = { path: 'stdlib.lua', source: 'require "Leaf"', execute: true };
+
+    assert.deepEqual(await engineSources([], content), []);
+    const sources = await engineSources([], content, [startup, { ...startup }]);
+
+    assert.deepEqual(sources, [
+        { path: 'stdlib.lua', source: 'require "Leaf"', execute: true },
+        { path: 'media/lua/shared/Leaf.lua', source: 'return 7', execute: false },
+    ]);
+    await assert.rejects(engineSources([], content, [startup, { ...startup, source: 'return 8' }]), /source changed/u);
+    await assert.rejects(engineSources([], content, [startup, { ...startup, path: 'media/lua/shared/stdlib.lua' }]), /Ambiguous.*stdlib/u);
+    await assert.rejects(engineSources([{ sources: [{ path: 'media/lua/client/stdlib.lua', source: '' }] }], content, [startup]), /Ambiguous.*stdlib/u);
+
+    for (const path of ['Stdlib.lua', 'other.lua', './stdlib.lua', '../stdlib.lua', 'stdlib.lua/extra.lua', 'mods/A/stdlib.lua', 'media/lua/shared/../stdlib.lua', 'media\\lua\\shared\\stdlib.lua']) {
+        // eslint-disable-next-line no-await-in-loop -- Check every disallowed source boundary independently.
+        await assert.rejects(engineSources([], content, [{ ...startup, path }]), /Engine startup sources/u);
+    }
 });
 
 test('literal closure follows native case-insensitive exact paths without inventing suffix aliases', async () => {

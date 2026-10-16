@@ -1,11 +1,606 @@
-/** @file Native-backed original world-context logic; original Lua widgets and callbacks stay resident. */
-export const WORLD_CONTEXT_PRELUDE = String.raw`
+/** @file Native-backed original world context and inventory-page entry points; original widgets stay resident. */
+
+/**
+ * Original IsoPlayer.updateUseKey state, advanced once per accepted native update.
+ * The source arms below .5 seconds and attempts only on release or at/above .5.
+ *
+ * @returns {object} Session-local input lifetime.
+ */
+function createContextKeyInput() {
+    let pressed = false;
+    let seconds = 0;
+    /**
+     * Clear the armed context press and its elapsed time.
+     *
+     * @returns {void} Clears the armed context press.
+     */
+    const cancel = () => {
+        pressed = false;
+        seconds = 0;
+    };
+
+    return {
+        cancel,
+        /**
+         * Advance the armed context press using an accepted native frame.
+         *
+         * @param {number} elapsed - Accepted native frame duration.
+         * @param {boolean} down - Whether Interact is held.
+         * @param {boolean} allowed - Whether gameplay owns this sample.
+         * @param {function(number,number): boolean} attempt - Source context attempt.
+         * @returns {boolean} Whether the source attempt succeeded.
+         */
+        update(elapsed, down, allowed, attempt) {
+            if (!Number.isFinite(elapsed) || elapsed < 0) {
+                throw new RangeError('Context input requires an accepted nonnegative native frame');
+            }
+
+            seconds = Math.fround(seconds + Math.fround(elapsed));
+
+            if (down && seconds < 0.5) {
+                pressed = true;
+
+                return false;
+            }
+
+            if (!allowed) {
+                pressed = false;
+            }
+
+            if (pressed && attempt(Math.floor(Math.fround(seconds * 1_000)), seconds)) {
+                cancel();
+
+                return true;
+            }
+
+            if (!down) {
+                cancel();
+            }
+
+            return false;
+        },
+    };
+}
+
+/**
+ * IsoPlayer.doContext's float quadrant ordering, including reverse cardinal scan.
+ *
+ * @param {string} facing - Source getForwardIsoDirection.
+ * @param {number} px - Actor position.
+ * @param {number} py - Actor position.
+ * @returns {object} Ordered front, corner and behind directions.
+ */
+function sourceContextDirections(facing, px, py) {
+    const opposite = { N: 'S', W: 'E', S: 'N', E: 'W' };
+
+    if (opposite[facing]) {
+        return { front: [facing], behind: [opposite[facing]], corner: null };
+    }
+
+    if (!['NW', 'NE', 'SE', 'SW'].includes(facing)) {
+        throw new TypeError('Unsupported source context direction');
+    }
+
+    let x = Math.fround(Math.fround(px) - Math.floor(Math.fround(px)));
+    let y = Math.fround(Math.fround(py) - Math.floor(Math.fround(py)));
+
+    if (facing === 'NE' || facing === 'SE') {
+        x = Math.fround(1 - x);
+    }
+
+    if (facing === 'SE' || facing === 'SW') {
+        y = Math.fround(1 - y);
+    }
+
+    const vertical = facing === 'NW' || facing === 'NE' ? 'N' : 'S';
+    const horizontal = facing === 'NW' || facing === 'SW' ? 'W' : 'E';
+    const front = y < x ? [vertical, horizontal] : [horizontal, vertical];
+
+    return { front, behind: front.map((direction) => opposite[direction]), corner: facing };
+}
+
+/**
+ * Strict original priority comparison: first per side and front wins equal ties.
+ *
+ * @param {object[]} candidates - Source insertion order.
+ * @returns {object|null} Selected action or genuinely empty list.
+ */
+function pickSourceContextAction(candidates) {
+    let front = null;
+    let behind = null;
+
+    for (const candidate of candidates) {
+        if (!Number.isInteger(candidate.priority) || candidate.priority < 0) {
+            throw new TypeError('Source contextual action priority is unavailable');
+        }
+
+        if (candidate.behind) {
+            if (!behind || candidate.priority > behind.priority) {
+                behind = candidate;
+            }
+        } else if (!front || candidate.priority > front.priority) {
+            front = candidate;
+        }
+    }
+
+    return !front || (behind && behind.priority > front.priority) ? behind : front;
+}
+
+/**
+ * Encode source square coordinates as a scene lookup key.
+ *
+ * @param {number} x - Square coordinate.
+ * @param {number} y - Square coordinate.
+ * @param {number} z - Square level.
+ * @returns {string} Source square identity.
+ */
+const key = (x, y, z) => `${x},${y},${z}`;
+
+/**
+ * Read surviving objects from a source square, if present.
+ *
+ * @param {object|undefined} square - Source square, if present.
+ * @returns {object[]} Surviving source objects.
+ */
+const objects = (square) => square ? square.contextObjects : [];
+
+/**
+ * Check surviving square objects for a source property.
+ *
+ * @param {object|undefined} square - Source square, if present.
+ * @param {string} flag - Source property name.
+ * @returns {boolean} Whether any object has the property.
+ */
+const has = (square, flag) => objects(square).some((object) => object.properties.has(flag));
+
+/**
+ * Select against complete surviving source placements and live native doors.
+ * Unrepresented state is an explicit unresolved candidate, never an empty tile.
+ *
+ * @param {object} engine - Owning native scene.
+ * @param {object[]} squares - Full source map projection (including blank squares).
+ * @returns {function(number,boolean,boolean): object} Source contextual selection.
+ */
+function createSourceContextSelector(engine, squares) {
+    const scene = new Map(squares.map((square) => [key(square.x, square.y, square.z), square]));
+
+    for (const square of squares) {
+        if (!Array.isArray(square.contextObjects)) {
+            throw new TypeError('Source context requires a complete post-constructor object census');
+        }
+    }
+
+    const hutchBases = new Set();
+
+    for (const square of squares) {
+        if (square.contextObjects.some((object) => /^location_farm_accesories_01_(?:42|45|47|58|61|63)$/u.test(object.sprite))) {
+            // MOHutch moves the object to this base rather than retaining the triggering tile.
+            hutchBases.add(key(square.x - 1, square.y, square.z));
+        }
+    }
+
+    const offsets = { N: [0, -1], NW: [-1, -1], W: [-1, 0], SW: [-1, 1], S: [0, 1], SE: [1, 1], E: [1, 0], NE: [1, -1] };
+    const opposite = { N: 'S', W: 'E', S: 'N', E: 'W' };
+
+    return (seconds, shift, grappling) => {
+        const actor = engine.snapshot();
+        const x = Math.floor(actor.x);
+        const y = Math.floor(actor.y);
+        const z = 0;
+        const current = scene.get(key(x, y, z));
+        const facing = engine.sourceActions.playerDirection();
+        /**
+         * Look up a neighboring source square relative to the actor.
+         *
+         * @param {string} direction - Source direction.
+         * @returns {object|undefined} Adjacent source square.
+         */
+        const adjacent = (direction) => {
+            const [dx, dy] = offsets[direction];
+
+            return scene.get(key(x + dx, y + dy, z));
+        };
+
+        if (!current || !adjacent(facing)) {
+            return { blocked: true };
+        }
+
+        for (const square of [current, ...Object.keys(offsets).map(adjacent)].filter(Boolean)) {
+            const live = engine.getSquare(square.x, square.y, square.z);
+
+            if (!live || live.vehicleObstructed !== false) {
+                throw new Error('Source context vehicle/square population is not represented');
+            }
+        }
+
+        const directions = sourceContextDirections(facing, actor.x, actor.y);
+        const liveDoors = new Map(engine.doors().map((door) => [door.id, door]));
+        const candidates = [];
+
+        /**
+         * Append a contextual candidate with its original enum priority.
+         *
+         * @param {string} action - Source contextual action.
+         * @param {string} direction - Selected direction.
+         * @param {object|null} object - Surviving source object.
+         * @param {boolean} [behind=false] - Whether the candidate is behind.
+         * @param {string|null} [unresolved=null] - Unrepresented native state.
+         * @returns {void} Appends the source-priority candidate.
+         */
+        const add = (action, direction, object, behind = false, unresolved = null) => {
+            // ContextualAction.Action priorities from the original enum constructor.
+            const priority = ['OpenHutch', 'OpenButcherHook', 'AnimalInteraction', 'RestOnFurniture'].includes(action) ? 90 : 100;
+
+            candidates.push({ action, direction, doorId: object?.doorId, sprite: object?.sprite, priority, behind, unresolved });
+        };
+
+        /**
+         * Resolve a source door to its supported live native state.
+         *
+         * @param {object} object - Source door object.
+         * @returns {object} Live native door state.
+         */
+        const doorState = (object) => {
+            const door = liveDoors.get(object.doorId);
+
+            if (!door) {
+                throw new Error('Source context door identity disappeared');
+            }
+
+            /*
+                Double-door movement changes object membership/order; the existing native scene
+                exposes coordinates but not its full relocated object-list ordering.
+            */
+            if (door.doubleDoor) {
+                throw new Error('Source context requires relocated double-door object membership');
+            }
+
+            return door;
+        };
+
+        /**
+         * Resolve the boundary edge occupied by a live door.
+         *
+         * @param {object} object - Source door object.
+         * @param {boolean} closed - Whether to use the closed edge.
+         * @returns {string} Source edge direction.
+         */
+        const edge = (object, closed) => {
+            const door = doorState(object);
+
+            if (!door.open || closed || door.garageDoor) {
+                return door.north ? 'N' : 'W';
+            }
+
+            if (door.attachedE) {
+                return 'E';
+            }
+
+            if (door.attachedS) {
+                return 'S';
+            }
+
+            return door.north ? 'W' : 'N';
+        };
+
+        /**
+         * Find the first open special door on a requested edge.
+         *
+         * @param {object|undefined} square - Source square.
+         * @param {string} direction - Source edge direction.
+         * @returns {object|undefined} First matching open door.
+         */
+        const openDoor = (square, direction) => objects(square).find((object) =>
+            object.kind === 'door' && object.special && doorState(object).open && edge(object, false) === direction);
+        /**
+         * Find the first special door with the requested orientation.
+         *
+         * @param {object|undefined} square - Source square.
+         * @param {boolean} north - Source door orientation.
+         * @returns {object|undefined} First matching special door.
+         */
+        const edgeDoor = (square, north) => objects(square).find((object) =>
+            object.kind === 'door' && object.special && doorState(object).north === north);
+        /**
+         * Find the last door, window or frame on a requested boundary.
+         *
+         * @param {object|undefined} square - Source square.
+         * @param {string} direction - Source edge direction.
+         * @param {boolean} closed - Whether to use the closed door edge.
+         * @returns {object|undefined} Last matching boundary object.
+         */
+        const getter = (square, direction, closed) => objects(square).findLast((object) =>
+            object.kind === 'door'
+                ? edge(object, closed) === direction
+                : ['window', 'frame'].includes(object.kind) && (object.north ? 'N' : 'W') === direction);
+        /**
+         * Select the boundary object using the original directional lookup order.
+         *
+         * @param {string} direction - Source direction.
+         * @returns {object|null|undefined} Selected source boundary object.
+         */
+        const lookup = (direction) => {
+            const next = adjacent(direction);
+            const first = openDoor(current, direction);
+
+            if (first) {
+                return first;
+            }
+
+            if (direction === 'N' || direction === 'W') {
+                const found = getter(current, direction, true) ?? edgeDoor(current, direction === 'N');
+
+                if (found) {
+                    return found;
+                }
+
+                return next && !engine.isBlockedTo(current, next) ? openDoor(next, opposite[direction]) : null;
+            }
+
+            if (!next) {
+                return null;
+            }
+
+            const closed = engine.isBlockedTo(current, next);
+
+            return getter(next, opposite[direction], closed) ?? edgeDoor(next, direction === 'S');
+        };
+
+        /**
+         * Classify a boundary object into its contextual action.
+         *
+         * @param {string} direction - Source direction.
+         * @param {object} object - Selected source boundary object.
+         * @param {boolean} behind - Whether selection is behind the actor.
+         * @returns {void} Adds the represented action or explicit unresolved candidate.
+         */
+        const handleObject = (direction, object, behind) => {
+            if (object.kind !== 'door') {
+                const square = objects(current).includes(object) ? current : adjacent(direction);
+
+                if (object.kind === 'window' && has(square, 'makeWindowInvincible')) {
+                    return;
+                }
+
+                add(object.kind === 'window' ? 'ToggleWindow' : 'ClimbThroughWindow', direction, object, behind,
+                    `native ${object.kind} state/curtain/climb eligibility and resident source identity are not represented`);
+
+                return;
+            }
+
+            const door = doorState(object);
+
+            if (shift && engine.sourceActions.doorCurtainState(door.id).has) {
+                add('ToggleCurtain', direction, object, behind, 'door sheet-facing/movement-tick context state is unavailable');
+            } else if (seconds >= 0.5 && door.hoppable) {
+                add(grappling ? 'ThrowGrappledOverFence' : 'ClimbOverFence', direction, object, behind,
+                    'native contextual vault/grapple state is unavailable');
+            } else {
+                add('ToggleDoor', direction, object, behind);
+            }
+        };
+
+        /**
+         * Select furniture or map-object candidates outside boundary lookup.
+         *
+         * @param {string} direction - Source direction.
+         * @returns {boolean} Whether ordinary selection found a candidate.
+         */
+        const ordinary = (direction) => {
+            const next = adjacent(direction);
+
+            if (!next) {
+                return false;
+            }
+
+            /*
+                Map-object/entity callbacks can replace these actual placements; their typed
+                membership is not supplied by the native scene. Preserve that uncertainty.
+            */
+            const unknown = [...objects(next), ...objects(current)].find((object) => object.componentCandidate
+                || object.sprite === 'crafted_04_120' || /^location_farm_accesories_01_(?:4[1-9]|50|5[7-9]|6[0-6])$/u.test(object.sprite));
+
+            if (unknown || hutchBases.has(key(next.x, next.y, next.z)) || hutchBases.has(key(current.x, current.y, current.z))) {
+                let action = 'OpenHutch';
+
+                if (unknown?.componentCandidate) {
+                    action = 'UnclassifiedMapObject';
+                } else if (unknown?.sprite === 'crafted_04_120') {
+                    action = 'OpenButcherHook';
+                }
+
+                add(action, direction, unknown, false, 'source map-object/entity replacement membership is unavailable');
+
+                return true;
+            }
+
+            if (!shift && !grappling) {
+                const bed = objects(next).find((object) => object.properties.has('bed'))
+                    ?? objects(current).find((object) => object.properties.has('bed'));
+
+                if (bed) {
+                    add('RestOnFurniture', direction, bed, false, 'native furniture object identity and SleepInBed contextual action are unavailable');
+
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        for (const direction of directions.front) {
+            if (!adjacent(direction)) {
+                continue;
+            }
+
+            if (!grappling && has(current, `climbSheet${direction}`)) {
+                add('ClimbSheetRope', direction, null, false, 'native vertical sheet-rope eligibility is unavailable');
+
+                continue;
+            }
+
+            const object = lookup(direction);
+
+            if (object) {
+                handleObject(direction, object, false);
+
+                continue;
+            }
+
+            if (ordinary(direction)) {
+                continue;
+            }
+
+            const next = adjacent(direction);
+
+            if (shift && !grappling) {
+                const curtainDoor = [...objects(current), ...objects(next)].find((entry) =>
+                    entry.kind === 'door' && engine.sourceActions.doorCurtainState(entry.doorId).has);
+
+                if (curtainDoor) {
+                    add('ToggleCurtain', direction, curtainDoor, false, 'door sheet-facing/movement-tick context state is unavailable');
+
+                    continue;
+                }
+            }
+
+            const boundary = direction === 'N' || direction === 'W' ? current : next;
+            const suffix = direction === 'N' || direction === 'S' ? 'N' : 'W';
+
+            if (has(boundary, `Hoppable${suffix}`)) {
+                add(grappling ? 'ThrowGrappledOverFence' : 'ClimbOverFence', direction, null, false,
+                    'native contextual fence safety/object identity is unavailable');
+            } else if (!grappling && !has(boundary, 'CantClimb') && has(boundary, `collide${suffix}`)
+                && objects(boundary).some((entry) => entry.tileType === 'wall')) {
+                add('ClimbOverWall', direction, null, false, 'native roof/eave and wall-climb eligibility are unavailable');
+            }
+        }
+
+        if (!candidates.length && directions.corner) {
+            ordinary(directions.corner);
+        }
+
+        for (const direction of directions.behind) {
+            const object = lookup(direction);
+
+            if (object) {
+                handleObject(direction, object, true);
+            }
+        }
+
+        return pickSourceContextAction(candidates) ?? { empty: true };
+    };
+}
+
+const WORLD_CONTEXT_PRELUDE = String.raw`
 local contextOptions={contextMenuFont='Medium',singleContextMenu=false,timedActionGameSpeedReset=true,displayCursor=true,inventoryContainerSize=1}
 local debugState={enabled=false,showContextMenuReportOptions=true}
 local corpseObjects={}
 local dragObjects={}
+local dragOwners={}
 local function worldContext(name, ...) return hostCall('sourceContext',name,...) end
+do
+    local function highlightPlayer(index)
+        assert(index==player:getPlayerNum(),'unsupported native highlight player')
+        hostCall('state')
+    end
+    local function highlightObject(value)
+        -- Resident identity outlives native removal; clearing its presentation must still work.
+        local label=nativeTypes[value]
+        if label=='IsoDoor' and doorObjects[value.__doorId]==value then
+            return value.__doorId
+        end
+        local id=itemIds[value]
+        assert(label=='IsoWorldInventoryObject' and id and worldItems[id]==value,'expected native highlighted world object')
+        return id
+    end
+    -- Door and world-item highlights share the existing presentation authority, never native lock/key state.
+    local originalDoor=door
+    door=function(id)
+        local value=originalDoor(id)
+        if rawget(value,'setHighlighted')==nil then
+            function value:setHighlighted(index,enabled,blink)
+                highlightPlayer(index)
+                assert(self==value,'expected native highlighted door')
+                local identity=highlightObject(self)
+                assert(rawType(enabled)=='boolean' and (blink==nil or rawType(blink)=='boolean'),'invalid original world highlight')
+                actorState.worldHighlights=actorState.worldHighlights or {}
+                actorState.worldHighlights[identity]={enabled=enabled,blink=blink==true}
+                hostCall('sourceHighlight','door',value.__doorId,actorState.worldHighlights[identity])
+            end
+            function value:isHighlighted(index)
+                highlightPlayer(index)
+                assert(self==value,'expected native highlighted door')
+                local identity=highlightObject(self)
+                local state=actorState.worldHighlights and actorState.worldHighlights[identity]
+                return state and state.enabled or false
+            end
+        end
+        return value
+    end
+    local tracked={}
+    local doors=collection(function() return tracked end)
+    function doors:add(value)
+        assert(self==doors,'expected native key-highlight list')
+        highlightObject(value)
+        tracked[#tracked+1]=value
+        return true
+    end
+    function doors:clear()
+        assert(self==doors,'expected native key-highlight list')
+        tracked={}
+    end
+    local selection={key=nil,doors=doors}
+    actorState.keyHighlightDoor={[0]=selection}
+    Key={highlightDoor=actorState.keyHighlightDoor}
+    function Key.setHighlightDoors(index,entry)
+        highlightPlayer(index)
+        -- Key.setHighlightDoors routes every proven non-Key through the same tracked-clear branch as nil.
+        if entry~=nil then
+            local id=itemIds[entry]
+            assert(id and rawEqual(itemCache[id],entry),'expected native inventory item for key highlight')
+            local row=assert(hostCall('item',id),'native highlight selection disappeared')
+            local definition=assert(hostCall('itemDefinition',row.fullType),'native highlight definition unavailable')
+            local kind=(definition.type or 'normal'):lower():gsub('^base:','')
+            if kind~='normal' and kind~='item' and kind~='clothing' and kind~='container' then
+                rawError(fault('unsupported native key-door highlighting for non-nil inventory selection'),2)
+            end
+        end
+        for _,value in ipairs(tracked) do
+            highlightObject(value)
+            value:setHighlighted(index,false,false)
+        end
+        doors:clear()
+        selection.key=nil
+    end
+end
 function core:getZoom(index) assert(index==player:getPlayerNum());return worldContext('getZoom',index) end
+function core:getOptionInventoryFont()
+    local font=ui('settings').inventoryFont
+    assert(font=='Small' or font=='Medium' or font=='Large','explicit inventory font setting required')
+    return font
+end
+function core:getOptionCycleContainerKey()
+    local key=ui('settings').cycleContainerKey
+    assert(key=='control' or key=='shift' or key=='control+shift' or key=='command' or key=='command+shift','explicit inventory cycle key setting required')
+    return key
+end
+function player:getJoypadBind() return worldContext('joypadBind') end
+function getJoypadData(index)
+    assert(index==player:getPlayerNum(),'unsupported native joypad player')
+    -- Original keyboard mode removes its player entry; assigned controllers need their real registry lifecycle.
+    assert(player:getJoypadBind()==-1,'unsupported native assigned joypad data')
+    return nil
+end
+IsoDirections={}
+for _,name in ipairs({'N','NW','W','SW','S','SE','E','NE'}) do
+    local value=nativeObject('IsoDirections')
+    function value:name() return name end
+    IsoDirections[name]=value
+end
+function player:getDir()
+    return assert(IsoDirections[qa('playerDirection')],'unsupported native player direction')
+end
 function core:getOptionContextMenuFont() return contextOptions.contextMenuFont end
 function core:getOptionSingleContextMenu(index) assert(index==0);return contextOptions.singleContextMenu end
 function core:getOptionInventoryContainerSize() return contextOptions.inventoryContainerSize end
@@ -14,6 +609,7 @@ function core:getOptionTimedActionGameSpeedReset() return contextOptions.timedAc
 function core:isDisplayCursor() return contextOptions.displayCursor end
 function core:setDisplayCursor(value) assert(rawType(value)=='boolean');contextOptions.displayCursor=value end
 function getGameSpeed() if worldContext('paused') then return 0 end;return timing('getState').multiplier end
+function isGamePaused() return worldContext('paused') end
 local speeds=nativeObject('SpeedControls')
 function speeds:getCurrentGameSpeed() return getGameSpeed() end
 function speeds:SetCurrentGameSpeed(speed) assert(speed>0);timing('set','multiplier',speed) end
@@ -21,19 +617,120 @@ function UIManager.getSpeedControls() return speeds end
 function UIManager.getMillisSinceLastRender() return timing('getState').elapsedSeconds*1000 end
 local sourceKeys={}
 KeybindId={}
-for name,id in pairs({TOGGLE_INVENTORY='Toggle Inventory',TOGGLE_MODE='Toggle mode',RUN='Run',INTERACT='Interact',ROTATE_BUILDING='Rotate building'}) do
+for name,id in pairs({TOGGLE_INVENTORY='Toggle Inventory',TOGGLE_MODE='Toggle mode',RUN='Run',INTERACT='Interact',GRAB_CORPSE='GrabCorpse',ROTATE_BUILDING='Rotate building',PAN_CAMERA='PanCamera',MELEE='Melee'}) do
     local value=nativeObject('KeybindId')
+    function value:getId() return id end
     KeybindId[name]=value
     sourceKeys[value]=id
 end
-function core:isKey(binding,key)
-    local name=sourceKeys[binding] or (binding=='Interact' and binding)
-    assert(name,'unsupported source key identity')
-    assert(rawType(key)=='number' and key%1==0,'expected native key code')
+local function sourceKeyBinding(name)
     local value=worldContext('keyBinding',name)
-    -- An unregistered source binding is KEYBINDING_EMPTY: primary and alternate are both zero.
-    if value==nil then return key==0 end
-    rawError(fault('unsupported registered original key-binding modifiers'),2)
+    if value==nil then return nil end
+    assert(rawType(value)=='table','expected source key binding record')
+    for _,field in ipairs({'keyValue','altKey'}) do
+        local code=value[field]
+        assert(rawType(code)=='number' and code%1==0 and code>=0 and code<10000,'unsupported non-keyboard source binding')
+    end
+    for _,field in ipairs({'shift','ctrl','alt'}) do assert(rawType(value[field])=='boolean','expected source key modifier') end
+    return value
+end
+local function validSourceBinding(name,value)
+    if value==nil or (value.keyValue==0 and value.altKey==0) then return false end
+    local shift=worldContext('isSourceKeyDown',42) or worldContext('isSourceKeyDown',54)
+    local ctrl=worldContext('isSourceKeyDown',29) or worldContext('isSourceKeyDown',157)
+    local alt=worldContext('isSourceKeyDown',56) or worldContext('isSourceKeyDown',184)
+    local primary=value.keyValue
+    if primary==42 or primary==54 then return shift end
+    if primary==29 or primary==157 then return ctrl end
+    if primary==56 or primary==184 then return alt end
+    if (value.shift and not shift) or (value.ctrl and not ctrl) or (value.alt and not alt) then return false end
+    for otherName,other in pairs(worldContext('keyBindings')) do
+        if otherName~=name and other and other.keyValue==primary
+            and (other.shift~=value.shift or other.ctrl~=value.ctrl or other.alt~=value.alt)
+            and not (value.shift==shift and value.ctrl==ctrl and value.alt==alt)
+            and other.shift==shift and other.ctrl==ctrl and other.alt==alt then return false end
+    end
+    return true
+end
+local function sourceBindingKeyDown(name)
+    local value=sourceKeyBinding(name)
+    if not validSourceBinding(name,value) then return 0 end
+    if value.keyValue~=0 and worldContext('isSourceKeyDown',value.keyValue) then return value.keyValue end
+    if value.altKey~=0 and worldContext('isSourceKeyDown',value.altKey) then return value.altKey end
+    return 0
+end
+function core:isKey(binding,key)
+    local name=sourceKeys[binding] or (rawType(binding)=='string' and binding)
+    assert(name,'unsupported source key identity')
+    assert(rawType(key)=='number' and key%1==0 and key>=0 and key<10000,'expected native keyboard code')
+    local value=sourceKeyBinding(name)
+    return validSourceBinding(name,value) and (key==value.keyValue or key==value.altKey)
+end
+Keyboard=setmetatable({}, {__index=function(_,name)
+    if name=='getKeyName' then return function(code) return worldContext('keyName',code) end end
+    local code=worldContext('keyboardKey',name)
+    assert(code~=nil,'unsupported native Keyboard.'..tostring(name))
+    return code
+end})
+function isKeyDown(binding)
+    local name=sourceKeys[binding] or (rawType(binding)=='string' and binding)
+    if name then
+        return sourceBindingKeyDown(name)~=0
+    end
+    assert(rawType(binding)=='number' and binding%1==0 and binding>=0 and binding<10000,'expected native keyboard code')
+    return binding~=0 and worldContext('isSourceKeyDown',binding)
+end
+function isShiftKeyDown() return worldContext('isSourceKeyDown',42) or worldContext('isSourceKeyDown',54) end
+function isCtrlKeyDown() return worldContext('isSourceKeyDown',29) or worldContext('isSourceKeyDown',157) end
+function isAltKeyDown() return worldContext('isSourceKeyDown',56) or worldContext('isSourceKeyDown',184) end
+function isMetaKeyDown() return worldContext('isSourceKeyDown',219) or worldContext('isSourceKeyDown',220) end
+function isMouseButtonDown(index)
+    assert(rawType(index)=='number' and index%1==0 and index>=0 and index<8,'expected native mouse button index 0..7')
+    local down=worldContext('isMouseButtonDown',index)
+    assert(rawType(down)=='boolean','expected native physical mouse button state')
+    return down
+end
+function UIManager.isMouseOverInventory()
+    local over=ui('isMouseOverInventory')
+    assert(rawType(over)=='boolean','expected actual inventory mouse-over state')
+    return over
+end
+function __pz_actor_input_update()
+    assert(player:getJoypadBind()==-1,'unsupported native actor input controller')
+    assert(player:getVehicle()==nil,'unsupported native actor input vehicle')
+    local aimKey=sourceBindingKeyDown('Aim')
+    local aim=aimKey~=0
+    if aim and (aimKey==29 or aimKey==157) then aim=not UIManager.isMouseOverInventory() end
+    qa('refreshActorInput',player:getPlayerNum(),aim,isKeyDown('Run'),isKeyDown('Sprint'))
+end
+function __pz_context_key_state()
+    assert(player:getJoypadBind()==-1,'unsupported native context controller')
+    return {down=sourceBindingKeyDown('Interact')~=0,cancelled=player:isAsleep(),
+        grappleThrowOutWindow=actorState.variables.GrappleThrowOutWindow==true}
+end
+function __pz_context_key_attempt(milliseconds,seconds)
+    -- These actor producers are not admitted by the native world; never clear
+    -- an actual current timed action while preserving the source retrigger.
+    local actions=player:getCharacterActions()
+    if not actions:isEmpty() then player:setTimedActionToRetrigger(actions:get(0)) end
+    if player:isSitting() then
+        __pz_dispatch('OnContextKey',player,milliseconds)
+        return true
+    end
+    assert(player:getVehicle()==nil,'unsupported native context vehicle')
+    local selected=worldContext('contextSelection',seconds,isShiftKeyDown(),player:isGrappling())
+    assert(rawType(selected)=='table','source context classification unavailable')
+    if selected.blocked then return false end
+    if selected.empty then
+        __pz_dispatch('OnContextKey',player,milliseconds)
+        return false
+    end
+    assert(not selected.unresolved,'unsupported native context '..tostring(selected.action)..': '..tostring(selected.unresolved))
+    assert(selected.action=='ToggleDoor' and rawType(selected.doorId)=='string','unsupported native contextual action')
+    -- Contextual ToggleDoor is direct, unlike the menu's Lua timed action.
+    -- Native BLOCKED is still a performed contextual attempt, not an empty fallback.
+    qa('contextToggleDoor',selected.doorId)
+    return true
 end
 function textManager:getFontFromEnum(font)
     local value=nativeObject('AngelCodeFont')
@@ -119,7 +816,27 @@ actorState.idleState=nativeObject('IdleState');actorState.walkState=nativeObject
 function player:setVariable(key,value) actorState.variables[key]=value end
 function player:isGrappling() return actorState.grappleTarget~=nil end
 function player:isSitOnGround() return self:isSitting() end
-function cell:setDrag(value,index) assert(index==0);dragObjects[index]=value end
+function cell:setDrag(value,index)
+    assert(value==nil or (rawType(value)=='table' and not nativeTypes[value]),'expected original Lua drag table')
+    assert(rawType(index)=='number' and index%1==0,'expected native drag player index')
+    local owner=context()
+    hostCall('state')
+    __pz_dispatch('SetDragItem',value,index)
+    if index<0 or index>=4 then return end
+    assert(index==player:getPlayerNum(),'unsupported native drag player')
+    local previous=dragObjects[index]
+    if previous==value then return end
+    if previous then
+        local deactivate=rawget(previous,'deactivate')
+        if rawType(deactivate)=='function' then
+            -- Native pcallvoid records the original callback failure without cancelling this replacement.
+            pcall(guarded,dragOwners[index],deactivate,previous)
+        end
+    end
+    dragObjects[index]=value
+    dragOwners[index]=value and owner or nil
+    if value then rawset(value,'player',index) end
+end
 function cell:getDrag(index) assert(index==0);hostCall('state');return dragObjects[index] end
 function cell:isValidSquare(x,y,z) return worldContext('isValidSquare',x,y,z) end
 local pickedTile,pickedTileLocal
@@ -233,8 +950,22 @@ function cell:getGridSquare(x,y,z)
             if index<count then return door(qa('doorId',qa('squareDoorGet',coords.x,coords.y,coords.z,index))) end
             return ground:get(index-count)
         end)
+    -- This native query proves the CURRENT admitted world, not absence from original maps or dynamic saves.
+    local staticMoving=indexedCollection(function()
+        local count=qa('squareStaticMovingObjectCount',coords.x,coords.y,coords.z)
+        assert(count==0,'unsupported native static-moving object representation')
+        return count
+    end)
     function square:getWorldObjects() return ground end
     function square:getObjects() return objects end
+    function square:getStaticMovingObjects() return staticMoving end
+    function square:getVehicleContainer()
+        local row=assert(hostCall('square',coords.x,coords.y,coords.z),'native source square unavailable')
+        -- Original searches nearby chunks for an intersecting BaseVehicle, not a synthesized item container.
+        -- The admitted world has no vehicle producer/store; contrary or unknown metadata must not become nil.
+        assert(row.vehicleObstructed==false,'unsupported native intersecting vehicle representation')
+        return nil
+    end
     function square:transmitRemoveItemFromSquare(value)
         assert(eventScope and eventScope.event==5 and itemIds[value],'world removal requires a source item perform')
         -- The original transmit precedes real local removal; it does not mutate ownership.
@@ -606,6 +1337,129 @@ local function mirror(menu)
     sourceMenuRoot=menu
     hostCall('sourceMenuMirror',tree(menu,{}),select,close)
 end
+do
+    -- Fresh client registration metadata only. No global-object import, producer, spatial lookup or persistence is modeled.
+    local systems,byName={},{}
+    CGlobalObjects=nativeObject('CGlobalObjects')
+    function CGlobalObjects.getSystemCount()
+        hostCall('sourceOwnerAlive')
+        return #systems
+    end
+    function CGlobalObjects.getSystemByIndex(index)
+        hostCall('sourceOwnerAlive')
+        assert(rawType(index)=='number' and index%1==0,'expected native global-system index')
+        return systems[index+1]
+    end
+    function CGlobalObjects.getSystemByName(name)
+        hostCall('sourceOwnerAlive')
+        return byName[name]
+    end
+    function CGlobalObjects.registerSystem(name)
+        hostCall('sourceOwnerAlive')
+        if name~='campfire' then
+            rawError(fault('unsupported native client global-object system: '..tostring(name)),2)
+        end
+        if byName[name] then return byName[name] end
+        local system=nativeObject('CGlobalObjectSystem')
+        local data,objects={},{}
+        local function owned(self)
+            assert(rawEqual(self,system),'expected resident client global-object system')
+            hostCall('sourceOwnerAlive')
+        end
+        function system:getName() owned(self);return name end
+        function system:getModData() owned(self);return data end
+        function system:getObjectCount() owned(self);return #objects end
+        systems[#systems+1],byName[name]=system,system
+        return system
+    end
+end
+local initializedClientSystems=false
+function __pz_client_systems()
+    if initializedClientSystems then return end
+    local campfire=modules['camping/ccampfiresystem']
+    if campfire then
+        assert(campfire.engineSource,'client-system bootstrap requires original engine source')
+        require 'Camping/CCampfireSystem'
+        __pz_dispatch('OnCGlobalObjectSystemInit')
+    end
+    local entityUI=modules['entity/isentityui']
+    if entityUI then
+        assert(entityUI.engineSource,'entity UI bootstrap requires original engine source')
+        require 'luautils'
+        string.trim=luautils.trim
+        string.split=luautils.split
+        require 'Entity/ISEntityUI'
+        -- Read original window preferences while failure still discards the uncommitted candidate.
+        ISEntityUI.EnsurePlayers()
+    end
+    initializedClientSystems=true
+end
+
+local function inventoryPageObjects()
+    require 'ISUI/ISInventoryPage'
+    require 'ISUI/PlayerData/ISPlayerDataObject'
+    -- The genuine post-save callback accesses these classes even when no world menu was opened.
+    require 'BuildingObjects/ISMoveableCursor'
+    require 'RadioCom/ISRadioWindow'
+    require 'ISUI/PlayerData/ISPlayerData'
+    if ISLayoutManager.layouts==nil then ISLayoutManager.ReadIni() end
+    local data=getPlayerData(0)
+    if not data then
+        data=ISPlayerDataObject:new(0)
+        ISPlayerData[1]=data
+    end
+    if not data.playerInventory then
+        data.playerInventory=ISInventoryPage:new(0,0,320,250,inventory,true,1.34)
+        data.lootInventory=ISInventoryPage:new(0,0,320,250,ISInventoryPage.GetFloorContainer(0),false,1.34)
+        data.playerInventory.player=0
+        data.lootInventory.player=0
+    end
+    if not data.contextMenu then
+        require 'ISUI/ISContextMenu'
+        local menu=ISContextMenu:new(0,0,1,1,1.5)
+        menu:initialise();menu:instantiate();menu:addToUIManager();menu:setVisible(false)
+        data.contextMenu=menu
+    end
+    return data
+end
+local initializedInventoryPage
+function __pz_inventory_pages()
+    if initializedInventoryPage and getPlayerInventory(0)==initializedInventoryPage then return end
+    -- This visual phase follows genuine startup; do not register its OnGameStart hook in the headless factory.
+    require 'ISUI/ISUIHandler'
+    require 'ISUI/ISToolTipInv'
+    local data=inventoryPageObjects()
+    require 'ISUI/ISResizeableButton'
+    require 'ISUI/ISScrollBar'
+    require 'Entity/ISEntityUI'
+    require 'Entity/ISUI/BuildRecipe/ISBuildPanel'
+    require 'Entity/ISUI/CraftRecipe/ISHandCraftPanel'
+    local bind=player:getJoypadBind()
+    assert(bind==-1,'unsupported inventory joypad controller')
+    local pages={data.playerInventory,data.lootInventory}
+    -- Original construction publishes player only after its children, and loot immediately before its children.
+    -- Keep the headless identities, but never expose the other uninstantiated page to original controls.
+    data.playerInventory,data.lootInventory=nil,nil
+    data:placeInventoryScreens(0,getNumActivePlayers(),true)
+    for index,page in ipairs(pages) do
+        if index==2 then data.lootInventory=page end
+        local suffix=tostring(index)
+        page:setX(data['x'..suffix]);page:setY(data['y'..suffix])
+        page:setWidth(data['w'..suffix]);page:setHeight(data['h'..suffix])
+        page:initialise()
+        page:setUIName(index==1 and 'inventory0' or 'loot0')
+        page:addToUIManager()
+        page:setController(bind)
+        page:setInfo(getText(index==1 and 'UI_InventoryInfo' or 'UI_LootInfo'))
+        page.isCollapsed=true
+        page:setMaxDrawHeight(15)
+        if index==1 then data.playerInventory=page end
+    end
+    UIManager.setPlayerInventory(0,data.playerInventory.javaObject,data.lootInventory.javaObject)
+    ISLayoutManager.RegisterWindow('inventory0',ISInventoryPage,data.playerInventory)
+    ISLayoutManager.RegisterWindow('loot0',ISInventoryPage,data.lootInventory)
+    initializedInventoryPage=data.playerInventory
+end
 function __pz_world_context(request)
     assert(request.playerIndex==0 and request.z==0,'unsupported source context viewport/elevation')
     sourceMenuRoot=nil
@@ -624,31 +1478,7 @@ function __pz_world_context(request)
     require 'ISUI/ISToolTip'
     require 'ISUI/ISToolTipInv'
     require 'ISUI/ISInventoryItem'
-    require 'ISUI/ISInventoryPage'
-    require 'ISUI/PlayerData/ISPlayerDataObject'
-    require 'ISUI/PlayerData/ISPlayerData'
-    require 'BuildingObjects/ISMoveableCursor'
-    require 'RadioCom/ISRadioWindow'
-    string.trim=luautils.trim
-    string.split=luautils.split
-    if ISLayoutManager.layouts==nil then ISLayoutManager.ReadIni() end
-    local data=getPlayerData(0)
-    if not data then
-        data=ISPlayerDataObject:new(0)
-        ISPlayerData[1]=data
-    end
-    if not data.playerInventory then
-        local floor=ISInventoryPage.GetFloorContainer(0)
-        data.playerInventory=ISInventoryPage:new(0,0,320,250,inventory,true,1.5)
-        data.lootInventory=ISInventoryPage:new(0,0,320,250,floor,false,1.5)
-        data.playerInventory.player=player:getPlayerNum()
-        data.lootInventory.player=player:getPlayerNum()
-    end
-    if not data.contextMenu then
-        local menu=ISContextMenu:new(0,0,1,1,1.5)
-        menu:initialise();menu:instantiate();menu:addToUIManager()
-        data.contextMenu=menu
-    end
+    inventoryPageObjects()
     require 'ISUI/ISScrollingListBox'
     require 'ISUI/ISTradingUI'
     require 'ISUI/ISWorldObjectContextMenu'
@@ -665,3 +1495,5 @@ function __pz_world_context(request)
     return menu~=nil
 end
 `;
+
+export { createContextKeyInput, createSourceContextSelector, pickSourceContextAction, sourceContextDirections, WORLD_CONTEXT_PRELUDE };

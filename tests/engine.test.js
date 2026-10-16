@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
-import { createEngine } from '../src/engine.js';
+import { createEngine, WORLD_CLOCK_DEFAULT_STATE, normalizeWorldClockState } from '../src/engine.js';
 import { parseItemDefinitions } from '../src/item-definitions.js';
 import { assertDoorRefused, completeActions, completeQueueRequest, importPickupSquares } from './queue-test-helpers.js';
 
@@ -87,6 +87,146 @@ function runUntilIdle(subject, limit = 2_000) {
     return subject.snapshot();
 }
 
+test('world clock owns source f32 order, strict seven crossing and single midnight rollover', async () => {
+    const subject = await engine();
+    const source = subject.sourceActions;
+    const f = Math.fround;
+
+    assert.deepEqual(subject.worldClockState(), WORLD_CLOCK_DEFAULT_STATE);
+    assert.equal(source.worldClockGet('worldAgeHours'), 2);
+    subject.frameStep(STEP);
+    const delta = f(f(f(f(1 / 90) / 60) * f(0.8)) / 2);
+
+    assert.equal(source.worldClockGet('timeOfDay'), f(9 + delta));
+    subject.importWorldClockState({ ...WORLD_CLOCK_DEFAULT_STATE, timeOfDay: 7 });
+    subject.step(0);
+    assert.equal(source.worldClockGet('nightsSurvived'), 1);
+    subject.importWorldClockState({ ...WORLD_CLOCK_DEFAULT_STATE, timeOfDay: f(7 - delta) });
+    subject.step(0);
+    assert.equal(source.worldClockGet('timeOfDay'), 7);
+    assert.equal(source.worldClockGet('nightsSurvived'), 0);
+    subject.importWorldClockState({ ...WORLD_CLOCK_DEFAULT_STATE, year: 1_500, month: 1, day: 27, timeOfDay: 24 });
+    subject.step(0);
+    assert.equal(source.worldClockGet('day'), 28, 'default GregorianCalendar uses Julian leap years before cutover');
+    assert.equal(source.worldClockDaysInMonth(1_500, 1), 29);
+    assert.equal(source.worldClockDaysInMonth(1_700, 1), 28);
+    subject.importWorldClockState({ ...WORLD_CLOCK_DEFAULT_STATE, month: 11, day: 30, timeOfDay: 72 });
+    subject.step(0);
+    assert.equal(source.worldClockGet('timeOfDay'), f(f(72 + delta) - 24));
+    assert.equal(source.worldClockGet('year'), 1_994);
+    assert.equal(source.worldClockGet('month'), 0);
+    assert.equal(source.worldClockGet('day'), 0);
+});
+
+test('world clock imports atomically and setters preserve source direct assignment', async () => {
+    const subject = await engine();
+    const source = subject.sourceActions;
+    const direct = {
+        ...WORLD_CLOCK_DEFAULT_STATE, year: -1, month: 37, day: -5, nightsSurvived: -7,
+        timeOfDay: -1.25, lastTimeOfDay: 25.125, minutesPerDay: -90,
+    };
+
+    subject.importWorldClockState(direct);
+    assert.deepEqual(subject.worldClockState(), direct);
+    assert.equal(source.worldClockGet('hour'), -2);
+    assert.equal(source.worldClockGet('minutes'), -15);
+    source.worldClockSet('timeOfDay', 9.123_456_789);
+    assert.equal(source.worldClockGet('timeOfDay'), Math.fround(9.123_456_789));
+    const before = subject.worldClockState();
+
+    for (const patch of [{ version: 2 }, { day: 0.5 }, { year: 2 ** 31 }, { minutesPerDay: Infinity },
+        { timeOfDay: 3.5e38 }, { lastTimeOfDay: '9' }]) {
+        assert.throws(() => subject.importWorldClockState({ ...before, ...patch }));
+        assert.deepEqual(subject.worldClockState(), before);
+    }
+
+    assert.throws(() => source.worldClockSet('hour', 1));
+    assert.equal(source.worldClockCheckHours(-1, 7), 7);
+    assert.equal(source.worldClockCheckHours(8, 7), 7);
+    const canonical = normalizeWorldClockState(before);
+
+    canonical.day = 99;
+    assert.deepEqual(subject.worldClockState(), before);
+    source.worldClockSet('timeOfDay', 25);
+    const raw = subject.worldClockState();
+    const actor = subject.snapshot();
+    const timing = subject.sourceTiming.getState();
+
+    assert.throws(() => subject.frameStep(STEP));
+    assert.deepEqual(subject.worldClockState(), raw, 'reached malformed month refuses without normalizing');
+    assert.deepEqual(subject.snapshot(), actor);
+    assert.deepEqual(subject.sourceTiming.getState(), timing);
+    source.worldClockSet('minutesPerDay', 0);
+    assert.throws(() => subject.frameStep(STEP));
+    assert.equal(source.worldClockGet('timeOfDay'), 25, 'nonfinite source delta refuses atomically');
+    subject.loadState(subject.saveState());
+    assert.deepEqual(subject.worldClockState(), WORLD_CLOCK_DEFAULT_STATE);
+});
+
+test('native climate preserves exact continuation, absence and malformed restore rollback', async () => {
+    const subject = await engine();
+    const restored = await engine();
+    const absent = subject.saveClimateState();
+
+    assert.equal(subject.isClimateInitialized(), false);
+    restored.loadClimateState(absent);
+    assert.equal(restored.isClimateInitialized(), false);
+
+    for (const timeZone of ['', '\0', 'x'.repeat(129), null, 'Not/AZone']) {
+        assert.throws(() => subject.initializeClimate(0x12_34_56_78, timeZone));
+        assert.equal(subject.isClimateInitialized(), false, 'invalid zone admission cannot partially initialize the producer');
+    }
+
+    subject.initializeClimate(0x12_34_56_78, 'America/Chicago');
+    assert.equal(subject.isClimateInitialized(), true);
+    assert.throws(() => subject.initializeClimate(7), /refused|range/iu);
+    const utc = await engine();
+
+    utc.initializeClimate(0x12_34_56_78, 'UTC');
+    assert.notDeepEqual(utc.saveClimateState(), subject.saveClimateState(),
+        'identical entropy does not erase the actual source local calendar zone');
+    utc.loadClimateState(subject.saveClimateState());
+    assert.deepEqual(utc.saveClimateState(), subject.saveClimateState(), 'restore retains saved zone instead of current host zone');
+
+    for (let frame = 0; frame < 150; frame++) {
+        subject.frameStep(1);
+    }
+
+    const clock = subject.worldClockState();
+    const climate = subject.saveClimateState();
+
+    restored.importWorldClockState(clock);
+    restored.loadClimateState(climate);
+    assert.deepEqual(restored.saveClimateState(), climate);
+
+    for (const malformed of [climate.subarray(0, 3), new Uint8Array(climate.length), Uint8Array.of(...climate, 0)]) {
+        assert.throws(() => restored.loadClimateState(malformed));
+        assert.deepEqual(restored.saveClimateState(), climate);
+        assert.deepEqual(restored.worldClockState(), clock);
+    }
+
+    restored.sourceActions.worldClockSet('month', 37);
+    const invalidClock = restored.worldClockState();
+    const actor = restored.snapshot();
+    const timing = restored.sourceTiming.getState();
+
+    assert.throws(() => restored.frameStep(1));
+    assert.deepEqual(restored.worldClockState(), invalidClock, 'producer rejection rolls back the preceding source clock advance');
+    assert.deepEqual(restored.sourceTiming.getState(), timing);
+    assert.deepEqual(restored.snapshot(), actor);
+    assert.deepEqual(restored.saveClimateState(), climate);
+    restored.importWorldClockState(clock);
+
+    for (let frame = 0; frame < 300; frame++) {
+        subject.frameStep(1);
+        restored.frameStep(1);
+    }
+
+    assert.deepEqual(restored.saveClimateState(), subject.saveClimateState());
+    restored.loadClimateState(absent);
+    assert.equal(restored.isClimateInitialized(), false);
+});
+
 test('zero explicit step advances one logic frame and raw RAF elapsed preserves source FPS', async () => {
     const subject = await engine();
 
@@ -98,6 +238,70 @@ test('zero explicit step advances one logic frame and raw RAF elapsed preserves 
     assert.equal(subject.sourceTiming.getState().fpsMultiplier, 5);
     assert.equal(subject.sourceTiming.getState().elapsedSeconds, 0.5);
     assert.throws(() => subject.frameStep(-1));
+});
+
+test('native actor input nullifies only live aim and refreshes held input without cancelling work', async () => {
+    const subject = await engine();
+    const input = subject.sourceActions;
+    const initial = {
+        forceAim: false, charging: false, rawAiming: false, aiming: false,
+        cachedAiming: false, cachedCharging: false, aimDown: false,
+    };
+
+    assert.deepEqual(input.actorInputState(0), initial);
+    assert.equal(input.setIsAiming(0, true), undefined);
+    assert.equal(input.actorIsAiming(0), true, 'the real raw setter reaches the effective getter');
+    assert.equal(input.setForceAim(0, true), undefined);
+    input.refreshActorInput(0, true, false, false);
+    const held = input.actorInputState(0);
+
+    assert.ok(held.forceAim && held.charging && held.rawAiming && held.aiming && held.aimDown);
+    subject.actions.requestWalk({ x: 6, y: 5, z: 0 });
+    const queue = subject.actions.getState();
+    const movement = subject.saveState();
+
+    assert.equal(input.nullifyAiming(0), undefined);
+    assert.deepEqual(input.actorInputState(0), {
+        ...held, forceAim: false, charging: false, rawAiming: false, aiming: false,
+    });
+    assert.deepEqual(subject.actions.getState(), queue);
+    assert.deepEqual(subject.saveState(), movement);
+    input.refreshActorInput(0, true, false, false);
+    assert.equal(input.actorIsAiming(0), true, 'held physical input reasserts on the next refresh');
+    assert.equal(input.actorInputState(0).charging, true);
+    input.nullifyAiming(0);
+    input.nullifyAiming(0);
+    assert.equal(input.actorIsAiming(0), false);
+    assert.equal(input.toggleForceAim(0), true);
+    assert.equal(input.toggleForceAim(0), false);
+    input.setForceAim(0, true);
+    input.refreshActorInput(0, false, true, false);
+    assert.equal(input.actorInputState(0).forceAim, false, 'run clears force aim after the cached input sample');
+    assert.equal(input.actorIsAiming(0), true);
+    input.refreshActorInput(0, false, false, false);
+    assert.equal(input.actorIsAiming(0), false);
+
+    input.setIsAiming(0, true);
+    const before = input.actorInputState(0);
+
+    for (const invalid of [
+        () => input.nullifyAiming(1), () => input.actorIsAiming(1),
+        () => input.setIsAiming(0, 1), () => input.setForceAim(0, 'true'),
+        () => input.refreshActorInput(0, true, 0, false),
+        () => input.refreshActorInput(0, true, false, false, false),
+        () => input.toggleForceAim(-1),
+        () => subject.loadState({ ...movement, values: movement.values.with(2, -1) }),
+    ]) {
+        assert.throws(invalid);
+        assert.deepEqual(input.actorInputState(0), before, 'refusal leaves every input field unchanged');
+    }
+
+    subject.loadState(movement);
+    assert.deepEqual(input.actorInputState(0), initial, 'nonserialized input reconstructs on successful actor restore');
+    input.setForceAim(0, true);
+    input.refreshActorInput(0, true, false, false);
+    subject.reset();
+    assert.deepEqual(input.actorInputState(0), initial);
 });
 test('initial state matches the integration contract', async () => {
     const snapshot = (await engine()).snapshot();
@@ -501,9 +705,10 @@ function encode(value) {
  * Exposes only the original ABI from the real module, not a simulated engine.
  *
  * @param {Uint8Array} bytes - Real compiled module bytes.
+ * @param {string[]} [omit] - When supplied, retain all exports except these optional names.
  * @returns {Uint8Array} Module exposing only the original engine ABI.
  */
-function legacyModule(bytes) {
+function legacyModule(bytes, omit) {
     const keep = new Set(['api_version', 'reset', 'set_speed', 'move_to', 'walk',
         'cancel', 'step', 'position_x', 'position_y', 'speed', 'action', 'tick']);
     const output = [...bytes.subarray(0, 8)];
@@ -552,7 +757,7 @@ function legacyModule(bytes) {
                 // Export index.
                 unsigned();
 
-                if (keep.has(name)) {
+                if (omit ? !omit.includes(name) : keep.has(name)) {
                     entries.push(bytes.subarray(entry, offset));
                 }
             }
@@ -599,6 +804,18 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.sourceTiming.setTrait('base:dextrous', true),
         () => subject.sourceTiming.getGameMode(),
         () => subject.sourceTiming.setGameMode('Sandbox'),
+        () => subject.worldClockState(),
+        () => subject.importWorldClockState(WORLD_CLOCK_DEFAULT_STATE),
+        () => subject.sourceActions.worldClockSet('timeOfDay', 9),
+        () => subject.sourceActions.worldClockDaysInMonth(1_993, 6),
+        () => subject.sourceActions.worldClockCheckHours(1, 2),
+        () => subject.sourceActions.actorInputState(0),
+        () => subject.sourceActions.actorIsAiming(0),
+        () => subject.sourceActions.nullifyAiming(0),
+        () => subject.sourceActions.setIsAiming(0, true),
+        () => subject.sourceActions.setForceAim(0, true),
+        () => subject.sourceActions.toggleForceAim(0),
+        () => subject.sourceActions.refreshActorInput(0, true, false, false),
         () => subject.saveQueueState(),
         () => subject.loadQueueState(new Uint8Array([1])),
         () => subject.worldImportCell(0, 0, cellBytes()),
@@ -609,12 +826,16 @@ test('original ABI1 modules still move while optional methods clearly refuse sup
         () => subject.worldReset(),
         () => subject.registerItemDefinition(shoe(), { owner: 'base' }),
         () => subject.itemDefinitions(),
+        () => subject.getItemDefinition('Base.Shoe'),
         () => subject.beginItemDefinitionRegistration('base'),
         () => subject.commitItemDefinitionRegistration('base'),
         () => subject.rollbackItemDefinitionRegistration('base'),
         () => subject.freezeItemDefinitions(),
         () => subject.items(),
         () => subject.getItem(1),
+        () => subject.sourceActions.itemMatchesFloorPlacement(1, 1, 5, 5, 0),
+        () => subject.sourceActions.removeAttachedItem(1),
+        () => subject.sourceActions.squareDistanceToProper(0, 0, 0, 1, 1, 0),
         () => subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [], wornOrder: undefined }),
         () => subject.inventoryState(),
         () => subject.wornItem('base:shoes'),
@@ -905,6 +1126,549 @@ function shoe(fullType = 'Base.Shoe', extra = {}) {
     };
 }
 
+test('native world visuals absorb absolute placement once and persist rotations through supported drops', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Fixture.WorldItem', { bodyLocation: null }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.WorldItem', x: 5.25, y: 5.75 }).id;
+    const initial = subject.worldItemVisuals()[0];
+
+    assert.equal(initial.x + initial.xoff, 5.25);
+    assert.equal(initial.y + initial.yoff, 5.75);
+    assert.equal(initial.worldScale, 1);
+    assert.ok(Number.isInteger(initial.worldZRotation) && initial.worldZRotation >= 0 && initial.worldZRotation < 360);
+    assert.ok(Object.isFrozen(initial));
+    const graph = subject.exportInventoryGraph();
+
+    Object.assign(graph.items[0].worldVisual, { worldXRotation: 12, worldYRotation: 34, worldZRotation: 56, worldScale: 0.75 });
+    subject.importInventoryGraph(graph);
+    assert.deepEqual(subject.exportInventoryGraph(), graph);
+    const before = subject.exportInventoryGraph();
+
+    for (const patch of [{ worldScale: Infinity }, { worldZRotation: 3.5e38 }, { xoff: 0.5 }, { extra: 1 }]) {
+        const bad = structuredClone(before);
+
+        Object.assign(bad.items[0].worldVisual, patch);
+        assert.throws(() => subject.importInventoryGraph(bad));
+        assert.deepEqual(subject.exportInventoryGraph(), before, 'invalid visual import publishes nothing');
+    }
+
+    const held = structuredClone(before);
+
+    held.items[0].ownerContainerId = subject.playerInventoryId();
+    held.items[0].worldPosition = null;
+    subject.importInventoryGraph(held);
+    assert.deepEqual(subject.worldItemVisuals(), [], 'native ownership, not retained visual fields, controls visibility');
+    subject.command({ type: 'drop', id, x: 6.125, y: 5.5 });
+    const dropped = subject.worldItemVisuals()[0];
+
+    assert.equal(dropped.id, id);
+    assert.equal(dropped.x + dropped.xoff, 6.125);
+    assert.equal(dropped.y + dropped.yoff, 5.5);
+    assert.deepEqual([dropped.worldXRotation, dropped.worldYRotation, dropped.worldZRotation, dropped.worldScale], [0, 0, 56, 0.75]);
+    const restored = await engine();
+
+    restored.registerItemDefinition(shoe('Fixture.WorldItem', { bodyLocation: null }), { owner: 'fixture' });
+    restored.importInventoryGraph(subject.exportInventoryGraph());
+    assert.deepEqual(restored.worldItemVisuals(), subject.worldItemVisuals());
+});
+
+test('old port inventory graphs preserve fractional placement without inventing historical orientation', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Fixture.LegacyWorldItem', { bodyLocation: null }), { owner: 'fixture' });
+    subject.command({ type: 'spawnItem', fullType: 'Fixture.LegacyWorldItem', x: 5.000_000_000_000_001, y: 5.75 });
+    const graph = subject.exportInventoryGraph();
+
+    delete graph.items[0].worldVisual;
+    subject.importInventoryGraph(graph);
+    const visual = subject.worldItemVisuals()[0];
+
+    assert.equal(visual.x + visual.xoff, graph.items[0].worldPosition.x);
+    assert.equal(visual.y + visual.yoff, graph.items[0].worldPosition.y);
+    assert.deepEqual([visual.worldXRotation, visual.worldYRotation, visual.worldZRotation, visual.worldScale], [0, 0, -1, 1]);
+});
+
+test('native first-use ItemVisual selection persists without repeated RNG draws or transaction leakage', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Fixture.VisualChoice', { bodyLocation: null, clothingItem: 'FixtureVisual' }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.VisualChoice', x: 5.25, y: 5.75 }).id;
+    const rules = { baseTextureCount: 2, textureChoiceCount: 1, allowRandomTint: false, allowRandomHue: false };
+
+    assert.equal(subject.worldItemVisuals()[0].visual, undefined, 'no fabricated visual before source metadata is ready');
+    subject.beginItemDefinitionRegistration('fixture');
+    const before = subject.saveDoorState();
+
+    assert.throws(() => subject.initializeItemVisual(id, rules));
+    assert.deepEqual(subject.saveDoorState(), before);
+    assert.equal(subject.worldItemVisuals()[0].visual, undefined);
+    subject.rollbackItemDefinitionRegistration('fixture');
+    const visual = subject.initializeItemVisual(id, rules);
+
+    assert.ok([0, 1].includes(visual.baseTexture));
+    assert.equal(visual.textureChoice, 0);
+    assert.equal(visual.hue, 0);
+    assert.deepEqual(visual.tint, [1, 1, 1, 1], 'white is the nonrandom source getTint result, not a missing-state fallback');
+    const initializedRng = subject.saveDoorState();
+
+    assert.deepEqual(subject.initializeItemVisual(id, rules), visual);
+    assert.deepEqual(subject.worldItemVisuals()[0].visual, visual);
+    assert.deepEqual(subject.saveDoorState(), initializedRng);
+    const graph = subject.exportInventoryGraph();
+    const restored = await engine();
+
+    restored.registerItemDefinition(subject.itemDefinitions()[0], { owner: 'fixture' });
+    restored.importInventoryGraph(graph);
+    const restoredRng = restored.saveDoorState();
+
+    assert.deepEqual(restored.initializeItemVisual(id, rules), visual);
+    assert.deepEqual(restored.saveDoorState(), restoredRng, 'saved actual choices never get reconstructed randomly');
+
+    for (const patch of [{ baseTexture: -2 }, { baseTexture: 2 }, { textureChoice: 1.5 }, { tint: [1, 1, 1] }, { hue: Infinity }]) {
+        const invalid = structuredClone(graph);
+
+        Object.assign(invalid.items[0].visual, patch);
+        assert.throws(() => restored.importInventoryGraph(invalid));
+        assert.deepEqual(restored.exportInventoryGraph(), graph);
+    }
+
+    const carried = structuredClone(graph);
+
+    carried.items[0].ownerContainerId = restored.playerInventoryId();
+    carried.items[0].worldPosition = null;
+    restored.importInventoryGraph(carried);
+    restored.command({ type: 'drop', id, x: 6.25, y: 5.5 });
+    assert.deepEqual(restored.worldItemVisuals()[0].visual, visual, 'supported native drop preserves actual texture/tint selection');
+});
+
+test('native tooltip state retains source clothing defenses and restored visual state', async () => {
+    const subject = await engine();
+    const [definition] = parseItemDefinitions(`module TooltipFixture { item Gloves {
+        Type = Clothing, BodyLocation = Hands, ScratchDefense = 30,
+        Insulation = 0.25, WindResistance = 0.3, FatigueChange = 25,
+    } }`, 'synthetic-tooltip-contract');
+
+    subject.registerItemDefinition(shoe(definition.fullType, { ...definition }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: definition.fullType, x: 5, y: 5, condition: 1 }).id;
+
+    /**
+     * Read the current native tooltip state for the fixture item.
+     *
+     * @returns {object} Current item tooltip state.
+     */
+    const read = () => subject.sourceActions.itemTooltipState(id);
+
+    assert.equal(read().clothing.scratchDefense, 30, 'positive condition does not scale defense');
+    assert.equal(read().clothing.biteDefense, 0);
+    assert.equal(read().clothing.waterResistance, 0);
+    assert.equal(read().clothing.cosmetic, false);
+    assert.equal(read().clothing.holeCount, 0);
+    assert.equal(read().visionModifier, 1);
+    assert.equal(read().fatigueChange, 0.25, 'factory divides authored percentage by 100');
+    assert.equal(read().remoteControlId, -1);
+    assert.equal(read().maxCapacity, -1);
+    assert.equal(read().attributes, null);
+    assert.equal(read().fluidContainer, null);
+    assert.equal(read().durability, null);
+    subject.sourceActions.itemSetWetness(id, 37.5);
+    const graph = subject.exportInventoryGraph();
+    const restoredState = graph.items[0].tooltipState;
+
+    restoredState.bloodLevel = 12.5;
+    restoredState.dirtyness = 22.5;
+    restoredState.holes[0] = 255;
+    restoredState.holes[17] = 1;
+    subject.importInventoryGraph(graph);
+    assert.equal(read().clothing.bloodLevel, 12.5);
+    assert.equal(read().clothing.dirtyness, 22.5);
+    assert.equal(read().clothing.holeCount, 2);
+    assert.equal(read().clothing.wetness, 37.5);
+    assert.deepEqual(subject.exportInventoryGraph(), graph);
+    const bad = structuredClone(graph);
+
+    bad.items[0].tooltipState.holes[1] = 256;
+    assert.throws(() => subject.importInventoryGraph(bad));
+    assert.deepEqual(subject.exportInventoryGraph(), graph, 'invalid visual restore publishes nothing');
+    subject.command({ type: 'setCondition', id, condition: 0 });
+    assert.equal(read().clothing.scratchDefense, 0);
+    assert.equal(read().clothing.insulation, 0.25, 'insulation is not condition gated');
+    assert.throws(() => subject.sourceActions.itemTooltipState(0));
+    assert.throws(() => subject.sourceActions.itemTooltipState(0xFF_FF_FF_FF));
+    const before = subject.itemDefinitions();
+
+    assert.throws(() => subject.registerItemDefinition({
+        ...before[0], insulation: Infinity,
+    }, { owner: 'fixture', override: true }));
+    assert.deepEqual(subject.itemDefinitions(), before, 'invalid stat refusal precedes registration');
+});
+
+test('known poison uses intact source tags before concrete Food and refuses live class reinterpretation', async () => {
+    const subject = await engine();
+    const definitions = parseItemDefinitions(`module PoisonFixture {
+        item Untagged { ItemType = base:clothing, }
+        item Visible { ItemType = Normal, Tags = ShowPoison, }
+        item Hidden { ItemType = Container, Tags = ShowPoison;NoDetect, }
+        item Namespaced { ItemType = Normal, Tags = mod:ShowPoison;mod:NoDetect, }
+        item Food { ItemType = Normal, }
+    }`, { path: 'poison-fixture.txt' });
+    const ids = definitions.map((definition) => {
+        subject.registerItemDefinition(shoe(definition.fullType, {
+            ...definition, bodyLocation: null, sourceCategory: 'Food',
+        }), { owner: 'fixture' });
+
+        return subject.command({ type: 'spawnItem', fullType: definition.fullType, x: 5, y: 5 }).id;
+    });
+    const query = subject.sourceActions.playerIsKnownPoison;
+
+    assert.deepEqual(ids.map(query), [false, true, false, false, false]);
+    const before = subject.itemDefinitions();
+    const graph = subject.exportInventoryGraph();
+
+    assert.throws(() => subject.registerItemDefinition({
+        ...before[0], type: 'Food', weight: 9,
+    }, { owner: 'fixture', override: true }), /unsupported/i);
+    assert.deepEqual(subject.itemDefinitions(), before, 'class refusal must precede all numeric or metadata mutation');
+    assert.deepEqual(subject.exportInventoryGraph(), graph);
+    assert.equal(subject.sourceActions.itemIsFood(ids[0]), false);
+    subject.registerItemDefinition({ ...before[0], tags: ['BASE:ShowPoison'] }, { owner: 'fixture', override: true });
+    assert.equal(query(ids[0]), true, 'same-class definition tag changes remain live');
+    subject.beginItemDefinitionRegistration('fixture');
+    subject.registerItemDefinition({ ...subject.getItemDefinition(before[0].fullType), tags: ['NoDetect', 'ShowPoison'] },
+        { owner: 'fixture', override: true });
+    assert.equal(query(ids[0]), false);
+    subject.rollbackItemDefinitionRegistration('fixture');
+    assert.equal(query(ids[0]), true);
+    const restored = await engine();
+
+    for (const definition of subject.itemDefinitions()) {
+        restored.registerItemDefinition(definition, { owner: definition.owner });
+    }
+
+    restored.importInventoryGraph(graph);
+    assert.deepEqual(ids.map(restored.sourceActions.playerIsKnownPoison), [true, true, false, false, false]);
+
+    for (const id of [0, -1, 1.5, '1', null, undefined, {}, 0xFF_FF_FF_FF]) {
+        assert.throws(() => query(id));
+    }
+});
+
+test('literature class stays independent of names and categories and refuses live reclassification atomically', async () => {
+    const subject = await engine();
+    const definitions = parseItemDefinitions(`module LiteratureFixture {
+        item Literature { Type = Normal, DisplayCategory = Literature, Tags = Literature, }
+        item Clothing { ItemType = BASE:CLOTHING, }
+        item Bag { ItemType = base:container, }
+        item Book { ItemType = BASE:LITERATURE, }
+    }`, { path: 'literature-fixture.txt' });
+
+    for (const definition of definitions) {
+        subject.registerItemDefinition(shoe(definition.fullType, {
+            ...definition, bodyLocation: null, sourceCategory: 'Literature',
+        }), { owner: 'fixture' });
+    }
+
+    const ids = definitions.slice(0, 3).map(({ fullType }) => subject.command({ type: 'spawnItem', fullType, x: 5, y: 5 }).id);
+    const query = subject.sourceActions.itemIsLiterature;
+
+    assert.deepEqual(ids.map(query), [false, false, false]);
+    assert.throws(() => subject.command({ type: 'spawnItem', fullType: definitions[3].fullType, x: 5, y: 5 }), /unsupported/i,
+        'the class predicate must not admit the unported Literature subtype');
+    const before = subject.itemDefinitions();
+    const graph = subject.exportInventoryGraph();
+
+    assert.throws(() => subject.registerItemDefinition({
+        ...before[0], type: 'base:literature', weight: 9,
+    }, { owner: 'fixture', override: true }), /unsupported/i);
+    assert.deepEqual(subject.itemDefinitions(), before, 'class refusal precedes numeric and metadata mutation');
+    assert.deepEqual(subject.exportInventoryGraph(), graph);
+    subject.beginItemDefinitionRegistration('fixture');
+    assert.throws(() => subject.registerItemDefinition({
+        ...before[1], type: 'Literature', weight: 9,
+    }, { owner: 'fixture', override: true }), /unsupported/i);
+    subject.rollbackItemDefinitionRegistration('fixture');
+    assert.deepEqual(subject.itemDefinitions(), before);
+    const restored = await engine();
+
+    for (const definition of before) {
+        restored.registerItemDefinition(definition, { owner: definition.owner });
+    }
+
+    restored.importInventoryGraph(graph);
+    assert.deepEqual(ids.map(restored.sourceActions.itemIsLiterature), [false, false, false]);
+    const refused = structuredClone(graph);
+
+    refused.items[0].fullType = definitions[3].fullType;
+    refused.items[0].definitionOrdinal = 3;
+    assert.throws(() => restored.importInventoryGraph(refused), /unsupported/i,
+        'restoring a graph cannot bypass the Literature admission refusal');
+    assert.deepEqual(restored.exportInventoryGraph(), graph);
+    subject.registerItemDefinition({
+        ...before[0], displayCategory: 'Books', sourceCategory: 'Books',
+    }, { owner: 'fixture', override: true });
+    assert.equal(query(ids[0]), false, 'same-class live metadata cannot rewrite concrete identity');
+    subject.registerItemDefinition({
+        ...before[3], type: 'Normal', unsupportedSubtype: false,
+    }, { owner: 'fixture', override: true });
+    const formerlyLiterature = subject.command({ type: 'spawnItem', fullType: definitions[3].fullType, x: 5, y: 5 }).id;
+
+    assert.equal(query(formerlyLiterature), false, 'an unused definition may change factory class before instantiation');
+
+    for (const id of [0, -1, 1.5, '1', null, undefined, {}, 0xFF_FF_FF_FF]) {
+        assert.throws(() => query(id));
+    }
+});
+
+test('media progress uses native non-media authority and refuses unresolved Normal media and live reinterpretation', async () => {
+    const subject = await engine();
+    const definitions = parseItemDefinitions(`module MediaFixture {
+        item Ordinary { ItemType = base:normal, DisplayCategory = Retail-VHS, }
+        item Clothing { ItemType = base:clothing, }
+        item Bag { ItemType = base:container, }
+        item Disc { ItemType = base:normal, MediaCategory = CDs, }
+        item Retail { ItemType = base:normal, MediaCategory = Retail-VHS, }
+        item Home { ItemType = base:normal, MediaCategory = Home-VHS, }
+    }`, { path: 'media-progress-fixture.txt' });
+    const ids = definitions.map((definition) => {
+        subject.registerItemDefinition(shoe(definition.fullType, { ...definition, bodyLocation: null }), { owner: 'fixture' });
+
+        return subject.command({ type: 'spawnItem', fullType: definition.fullType, x: 5, y: 5 }).id;
+    });
+    const queries = [subject.sourceActions.itemHasBeenSeen, subject.sourceActions.itemHasBeenHeard];
+
+    for (const query of queries) {
+        assert.deepEqual(ids.slice(0, 3).map((id) => query(id, 0)), [false, false, false]);
+
+        for (const id of ids.slice(3)) {
+            assert.throws(() => query(id, 0), /unsupported/i, 'script category is not proof of a recorded index or player progress');
+        }
+
+        for (const player of [1, 0xFF_FF_FF_FF, -1, 0.5, '0', null, undefined, {}]) {
+            assert.throws(() => query(ids[0], player));
+        }
+
+        for (const id of [0, -1, 1.5, '1', null, undefined, {}, 0xFF_FF_FF_FF]) {
+            assert.throws(() => query(id, 0));
+        }
+    }
+
+    const before = subject.itemDefinitions();
+    const graph = subject.exportInventoryGraph();
+
+    for (const [index, rawFields] of [[0, [{ name: 'MediaCategory', value: 'CDs' }]], [3, []]]) {
+        assert.throws(() => subject.registerItemDefinition({
+            ...before[index], rawFields, weight: 9,
+        }, { owner: 'fixture', override: true }), /unsupported/i);
+        assert.deepEqual(subject.itemDefinitions(), before, 'media authority refusal precedes numeric and metadata mutation');
+        assert.deepEqual(subject.exportInventoryGraph(), graph);
+    }
+
+    const restored = await engine();
+
+    for (const definition of before) {
+        restored.registerItemDefinition(definition, { owner: definition.owner });
+    }
+
+    restored.importInventoryGraph(graph);
+    assert.equal(restored.sourceActions.itemHasBeenSeen(ids[0], 0), false);
+    assert.throws(() => restored.sourceActions.itemHasBeenHeard(ids[3], 0), /unsupported/i);
+});
+
+test('map-read predicate uses concrete MapItem class, permits null and refuses unresolved map history', async () => {
+    const subject = await engine();
+    const definitions = parseItemDefinitions(`module MapFixture {
+        item Map { ItemType = base:normal, Map = LouisvilleMap1, DisplayCategory = Cartography, }
+        item Clothing { ItemType = base:clothing, }
+        item Bag { ItemType = base:container, }
+        item Actual { ItemType = BASE:MAP, Map = LouisvilleMap1, }
+    }`, { path: 'map-read-fixture.txt' });
+
+    for (const definition of definitions) {
+        subject.registerItemDefinition(shoe(definition.fullType, { ...definition, bodyLocation: null }), { owner: 'fixture' });
+    }
+
+    const ids = definitions.slice(0, 3).map(({ fullType }) => subject.command({ type: 'spawnItem', fullType, x: 5, y: 5 }).id);
+    const query = subject.sourceActions.playerHasReadMap;
+
+    assert.deepEqual(ids.map((id) => query(id, 0)), [false, false, false]);
+    assert.equal(query(null, 0), false);
+    assert.equal(query(undefined, 0), false);
+    assert.throws(() => subject.command({ type: 'spawnItem', fullType: definitions[3].fullType, x: 5, y: 5 }), /unsupported/i);
+    const before = subject.itemDefinitions();
+    const graph = subject.exportInventoryGraph();
+
+    assert.throws(() => subject.registerItemDefinition({ ...before[0], type: 'Map', weight: 9 },
+        { owner: 'fixture', override: true }), /unsupported/i);
+    assert.deepEqual(subject.itemDefinitions(), before, 'class refusal precedes numeric and metadata mutation');
+    assert.deepEqual(subject.exportInventoryGraph(), graph);
+    const restored = await engine();
+
+    for (const definition of before) {
+        restored.registerItemDefinition(definition, { owner: definition.owner });
+    }
+
+    restored.importInventoryGraph(graph);
+    assert.deepEqual(ids.map((id) => restored.sourceActions.playerHasReadMap(id, 0)), [false, false, false]);
+
+    for (const player of [1, -1, 0.5, '0', null, undefined, {}]) {
+        assert.throws(() => query(ids[0], player));
+    }
+
+    for (const id of [0, -1, 1.5, '1', {}, 0xFF_FF_FF_FF]) {
+        assert.throws(() => query(id, 0));
+    }
+});
+
+test('no-recipes proves only absent item modData and refuses unresolved producers or persisted modData', async () => {
+    const subject = await engine();
+    const definitions = parseItemDefinitions(`module NoRecipesFixture {
+        item Ordinary { ItemType = base:normal, LearnedRecipes = Anything, }
+        item Marker { ItemType = base:normal, itemNoRecipes = Original Name, }
+        item Callback { ItemType = base:normal, OnCreate = Fixture.Create, }
+        item Config { ItemType = base:normal, ItemConfig = FixtureConfig, }
+    }`, { path: 'no-recipes-fixture.txt' });
+
+    definitions.push({ fullType: 'NoRecipesFixture.Default', type: 'Normal', defaultModData: { itemNoRecipes: 'Original Name' } });
+    const ids = definitions.map((definition) => {
+        subject.registerItemDefinition(shoe(definition.fullType, { ...definition, bodyLocation: null }), { owner: 'fixture' });
+
+        return subject.command({ type: 'spawnItem', fullType: definition.fullType, x: 5, y: 5 }).id;
+    });
+    const query = subject.sourceActions.itemIsNoRecipes;
+
+    assert.equal(query(ids[0], 0), false, 'recipe metadata is unrelated to the per-item marker');
+
+    for (const id of ids) {
+        assert.equal(query(id, null), false, 'source null player precedes item modData lookup');
+    }
+
+    for (const id of ids.slice(1)) {
+        assert.throws(() => query(id, 0), /unsupported/i);
+    }
+
+    const before = subject.itemDefinitions();
+    const graph = subject.exportInventoryGraph();
+
+    for (const [index, rawFields] of [[0, [{ name: 'itemNoRecipes', value: 'Original Name' }]], [1, []]]) {
+        assert.throws(() => subject.registerItemDefinition({
+            ...before[index], rawFields, weight: 9,
+        }, { owner: 'fixture', override: true }), /unsupported/i);
+        assert.deepEqual(subject.itemDefinitions(), before);
+        assert.deepEqual(subject.exportInventoryGraph(), graph);
+    }
+
+    const restored = await engine();
+
+    for (const definition of before) {
+        restored.registerItemDefinition(definition, { owner: definition.owner });
+    }
+
+    restored.importInventoryGraph(graph);
+    assert.equal(restored.sourceActions.itemIsNoRecipes(ids[0], 0), false, 'current graph saves preserve proven absence');
+    assert.throws(() => restored.sourceActions.itemIsNoRecipes(ids[1], 0), /unsupported/i);
+
+    for (const key of ['modData', 'defaultModData', 'itemNoRecipes']) {
+        const rejected = structuredClone(graph);
+
+        rejected.items[0][key] = key === 'itemNoRecipes' ? 'Original Name' : { itemNoRecipes: 'Original Name' };
+        assert.throws(() => restored.importInventoryGraph(rejected), /unsupported.*moddata/i);
+        assert.deepEqual(restored.exportInventoryGraph(), graph, 'unknown persisted modData cannot be silently discarded');
+    }
+
+    for (const player of [1, -1, 0.5, '0', {}]) {
+        assert.throws(() => query(ids[0], player));
+    }
+
+    for (const id of [0, -1, 1.5, '1', null, undefined, {}, 0xFF_FF_FF_FF]) {
+        assert.throws(() => query(id, null));
+    }
+});
+
+test('favourite recipe input native adapter validates identity only and accepts no preference proof', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('RecipeFixture.Input', { bodyLocation: null }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'RecipeFixture.Input', x: 5, y: 5 }).id;
+    const check = subject.sourceActions.itemFavouriteRecipeInputIdentity;
+
+    assert.equal(check(id, 0), undefined, 'identity admission is not a predicate result');
+    assert.equal(check(id, 0, false), undefined, 'an arbitrary extra value cannot supply a false preference proof');
+
+    for (const player of [1, -1, 0.5, '0', null, undefined, {}]) {
+        assert.throws(() => check(id, player));
+    }
+
+    for (const invalid of [0, -1, 1.5, '1', null, undefined, {}, 0xFF_FF_FF_FF]) {
+        assert.throws(() => check(invalid, 0));
+    }
+});
+
+test('DrainableComboItem class uses factory identity without admitting drainable behavior or live reclassification', async () => {
+    const subject = await engine();
+    const definitions = parseItemDefinitions(`module DrainableFixture {
+        item DrainableComboItem { ItemType = Normal, DisplayCategory = DrainableComboItem, UseDelta = 0.1, }
+        item Clothing { ItemType = BASE:CLOTHING, }
+        item Bag { ItemType = base:container, }
+        item Actual { ItemType = BASE:DRAINABLE, UseDelta = 0.1, }
+    }`, { path: 'drainable-class-fixture.txt' });
+
+    for (const definition of definitions) {
+        subject.registerItemDefinition(shoe(definition.fullType, { ...definition, bodyLocation: null }), { owner: 'fixture' });
+    }
+
+    const ids = definitions.slice(0, 3).map(({ fullType }) => subject.command({ type: 'spawnItem', fullType, x: 5, y: 5 }).id);
+    const query = subject.sourceActions.itemIsDrainableComboItem;
+
+    assert.deepEqual(ids.map(query), [false, false, false]);
+    assert.throws(() => subject.command({ type: 'spawnItem', fullType: definitions[3].fullType, x: 5, y: 5 }), /unsupported/i);
+    const before = subject.itemDefinitions();
+    const graph = subject.exportInventoryGraph();
+
+    assert.throws(() => subject.registerItemDefinition({ ...before[0], type: 'base:drainable', weight: 9 },
+        { owner: 'fixture', override: true }), /unsupported/i);
+    assert.deepEqual(subject.itemDefinitions(), before, 'concrete class refusal precedes numeric and metadata mutation');
+    assert.deepEqual(subject.exportInventoryGraph(), graph);
+    const rejected = structuredClone(graph);
+
+    rejected.items[0].fullType = definitions[3].fullType;
+    rejected.items[0].definitionOrdinal = 3;
+    assert.throws(() => subject.importInventoryGraph(rejected), /unsupported/i);
+    assert.deepEqual(subject.exportInventoryGraph(), graph, 'class recognition does not enable drainable imports');
+    subject.registerItemDefinition({ ...before[0], displayCategory: 'Water' }, { owner: 'fixture', override: true });
+    assert.equal(query(ids[0]), false);
+
+    for (const id of [0, -1, 1.5, '1', null, undefined, {}, 0xFF_FF_FF_FF]) {
+        assert.throws(() => query(id));
+    }
+});
+
+test('private immediate attachment removal leaves unattached floor and inventory items unchanged', async () => {
+    const subject = await engine();
+
+    subject.registerItemDefinition(shoe('Fixture.Attachment', { bodyLocation: null }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.Attachment', x: 5, y: 5 }).id;
+    const remove = subject.sourceActions.removeAttachedItem;
+    const floor = subject.exportInventoryGraph();
+
+    assert.equal(Object.hasOwn(subject, 'removeAttachedItem'), false);
+    assert.equal(remove(id), false);
+    assert.equal(remove(id), false);
+    assert.deepEqual(subject.exportInventoryGraph(), floor);
+    subject.command({ type: 'pickup', id });
+    completeActions(subject);
+    const inventory = subject.exportInventoryGraph();
+
+    assert.equal(remove(id), false);
+    assert.deepEqual(subject.exportInventoryGraph(), inventory);
+
+    for (const invalid of [0, -1, 1.5, 0x1_00_00_00_00, '1', null, undefined]) {
+        assert.throws(() => remove(invalid));
+    }
+
+    assert.throws(() => remove(0xFF_FF_FF_FF), /outside the accepted range/u);
+    assert.deepEqual(subject.exportInventoryGraph(), inventory);
+});
+
 test('native direct item reads and square collections retain live ownership and full uint32 identity', async () => {
     const subject = await engine();
 
@@ -918,6 +1682,50 @@ test('native direct item reads and square collections retain live ownership and 
     subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: records, wornOrder: undefined });
     const id = records[0].id;
     const read = subject.getItem(id);
+    const matches = subject.sourceActions.itemMatchesFloorPlacement;
+    const owner = read.ownerContainerId;
+    const placementBefore = subject.exportInventoryGraph();
+    const actorBefore = subject.saveState();
+
+    assert.equal(Object.hasOwn(subject, 'itemMatchesFloorPlacement'), false, 'placement query stays private');
+    assert.equal(matches(id, owner, -1.5, 5.5, 0), true);
+    assert.equal(matches(spawned, owner, -1.5, 5.5, 0), false, 'missing valid identity is not a stale live item');
+    assert.equal(matches(id, 0xFF_FF_FF_FF, -1.5, 5.5, 0), false, 'missing expected owner is not a sentinel');
+
+    for (const coords of [[-1.5 + Number.EPSILON, 5.5, 0], [-1.5, 5.5 + 1e-12, 0], [-1.5, 5.5, 1e-12],
+        [Number.MAX_VALUE, 5.5, 0]]) {
+        assert.equal(matches(id, owner, ...coords), false, 'comparison preserves exact finite f64 coordinates');
+    }
+
+    for (const index of [0, 1]) {
+        for (const invalid of [0, -1, 0x1_00_00_00_00]) {
+            const args = [id, owner, -1.5, 5.5, 0];
+
+            args[index] = invalid;
+            assert.throws(() => matches(...args), RangeError);
+        }
+
+        for (const invalid of [1.5, Number.NaN, Infinity, -Infinity, '1', null, undefined]) {
+            const args = [id, owner, -1.5, 5.5, 0];
+
+            args[index] = invalid;
+            assert.throws(() => matches(...args), TypeError);
+        }
+    }
+
+    for (const index of [2, 3, 4]) {
+        for (const invalid of [Number.NaN, Infinity, -Infinity, '0', null, undefined]) {
+            const args = [id, owner, -1.5, 5.5, 0];
+
+            args[index] = invalid;
+            assert.throws(() => matches(...args), TypeError);
+        }
+    }
+
+    assert.throws(() => matches(id, owner, -1.5, 5.5), TypeError);
+    assert.throws(() => matches(id, owner, -1.5, 5.5, 0, 0), TypeError);
+    assert.deepEqual(subject.exportInventoryGraph(), placementBefore, 'successful, false and rejected queries do not mutate inventory');
+    assert.deepEqual(subject.saveState(), actorBefore);
 
     assert.equal(subject.getItem(spawned), null);
     assert.deepEqual(read, records[0]);
@@ -938,21 +1746,36 @@ test('native direct item reads and square collections retain live ownership and 
         assert.throws(() => subject.getItem(invalid), TypeError);
     }
 
+    const shifted = { ...records[0], worldPosition: { x: -1.5 + Number.EPSILON, y: 5.5, z: 0 } };
+
+    subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [shifted], wornOrder: undefined });
+    assert.equal(matches(id, owner, -1.5, 5.5, 0), false, 'same-owner coordinate changes invalidate the captured stamp');
+    assert.equal(matches(id, owner, shifted.worldPosition.x, 5.5, 0), true, 'current f64 stamp is exposed without f32 narrowing');
+
     subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [{ ...records[0], ownerContainerId: 1, worldPosition: null }], wornOrder: undefined });
+    assert.equal(matches(id, owner, -1.5, 5.5, 0), false, 'actor-owned nonworld item invalidates the captured stamp');
+    assert.equal(matches(id, 1, 0, 0, 0), false, 'matching actor ownership cannot pass as floor placement');
     subject.command({ type: 'drop', id, x: 6.5, y: 5.5 });
     assert.equal(subject.sourceActions.worldItemCount(-2, 5, 0), 0);
     assert.equal(subject.sourceActions.worldItemGet(6, 5, 0, 0), id);
     assert.equal(subject.getItem(id).worldPosition.x, 6.5);
+    const dropped = subject.getItem(id);
+
+    assert.notEqual(dropped.ownerContainerId, owner);
+    assert.equal(matches(id, owner, 6.5, 5.5, 0), false, 'current coordinates cannot hide an owner change');
+    assert.equal(matches(id, dropped.ownerContainerId, 6.5, 5.5, 0), true);
     subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [{ ...records[0], ownerContainerId: 1, worldPosition: null }], wornOrder: undefined });
     assert.equal(subject.sourceActions.worldItemCount(6, 5, 0), 0);
     assert.equal(subject.getItem(id).ownerContainerId, 1);
     subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: [], wornOrder: undefined });
     assert.equal(subject.getItem(id), null);
+    assert.equal(matches(id, owner, -1.5, 5.5, 0), false, 'deleted live item cannot retain a captured placement');
     subject.importInventoryGraph({ ...subject.exportInventoryGraph(), items: records, wornOrder: undefined });
     assert.notEqual(subject.getItem(id).worldPosition, null);
     subject.reset();
     assert.equal(subject.getItem(id), null);
     assert.equal(subject.sourceActions.worldItemCount(-2, 5, 0), 0);
+    assert.equal(matches(id, owner, -1.5, 5.5, 0), false);
 });
 
 test('native item pickup refuses source weight51 without treating maxWeight8 as capacity', async () => {
@@ -1200,24 +2023,88 @@ test('native item weight restore and definition rollback refuse malformed overfl
 
 test('definition transactions restore first-touched numeric rows, owners and source metadata', async () => {
     const subject = await engine();
-    const original = subject.registerItemDefinition(shoe(), { owner: 'base' });
+    const original = subject.registerItemDefinition(shoe('Base.Shoe', {
+        type: 'Clothing', sourceCategory: 'Clothing', category: 'clothing',
+        insulation: 0.25, scratchDefense: 30, visionModifier: 0.75, fatigueChange: 25,
+        tags: ['base:showcondition'], rawFields: [{ name: 'Tooltip', value: 'Tooltip_OriginalShoe' }],
+    }), { owner: 'base' });
 
     original.source.model = 'tampered';
+    const detached = subject.getItemDefinition('Base.Shoe');
+
+    detached.source.model = 'tampered';
+    assert.equal(subject.getItemDefinition('Base.Shoe').source.model, 'Boots_Ground');
+    assert.equal(subject.getItemDefinition('Unknown.Shoe'), null);
+    assert.throws(() => subject.getItemDefinition(''), TypeError);
+    const existing = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5, condition: 3 }).id;
+
     subject.beginItemDefinitionRegistration('mod');
     assert.throws(() => subject.beginItemDefinitionRegistration('mod'), /transaction|registration/u);
     assert.throws(() => subject.registerItemDefinition(shoe(), { owner: 'other', override: true }));
-    subject.registerItemDefinition(shoe('Base.Shoe', { conditionMax: 6 }), { owner: 'mod', override: true });
-    subject.registerItemDefinition(shoe('Base.Shoe', { conditionMax: 8 }), { owner: 'mod', override: true });
+    subject.registerItemDefinition(shoe('Base.Shoe', {
+        type: 'Clothing', conditionMax: 6, weight: 1.1, insulation: 0.5,
+        scratchDefense: 90, visionModifier: 0.5, fatigueChange: 50,
+        source: { file: 'mod.txt', model: 'Mod_Ground' },
+        rawFields: [{ name: 'Tooltip', value: 'Tooltip_OverrideShoe' }],
+    }), { owner: 'mod', override: true });
+    assert.equal(subject.getItemDefinition('Base.Shoe').conditionMax, 6);
+    assert.equal(subject.getItemDefinition('Base.Shoe').weight, Math.fround(1.1));
+    assert.equal(subject.getItemDefinition('Base.Shoe').owner, 'mod');
+    assert.equal(subject.getItemDefinition('Base.Shoe').scratchDefense, 90);
+    assert.equal(subject.sourceActions.itemTooltipState(existing).visionModifier, 0.5);
+    assert.equal(subject.sourceActions.itemTooltipState(existing).tooltip, 'Tooltip_OverrideShoe');
+    subject.registerItemDefinition(shoe('Base.Shoe', {
+        type: 'Clothing', conditionMax: 8, insulation: 0.875, scratchDefense: 80,
+        visionModifier: 0.25, fatigueChange: 75,
+        source: { file: 'second.txt', model: 'Second_Ground' },
+        rawFields: [{ name: 'Tooltip', value: 'Tooltip_SecondShoe' }],
+    }), { owner: 'mod', override: true });
+    assert.equal(subject.getItemDefinition('Base.Shoe').conditionMax, 8);
     subject.registerItemDefinition(shoe('Mod.Shoe'), { owner: 'mod' });
+    assert.equal(subject.getItemDefinition('Mod.Shoe').owner, 'mod');
     assert.throws(() => subject.freezeItemDefinitions());
     assert.throws(() => subject.commitItemDefinitionRegistration('other'));
+    assert.throws(() => subject.rollbackItemDefinitionRegistration('other'));
+    assert.equal(subject.getItemDefinition('Base.Shoe').owner, 'mod');
+    assert.equal(subject.getItemDefinition('Base.Shoe').scratchDefense, 80);
     subject.rollbackItemDefinitionRegistration('mod');
-    assert.deepEqual(subject.itemDefinitions(), [{ ...shoe(), owner: 'base' }]);
+    const restored = subject.getItemDefinition('Base.Shoe');
+
+    assert.equal(subject.itemDefinitions().length, 1);
+    assert.equal(restored.fullType, 'Base.Shoe');
+    assert.equal(restored.owner, 'base');
+    assert.equal(restored.conditionMax, 30);
+    assert.equal(restored.weight, 1);
+    assert.equal(restored.insulation, 0.25);
+    assert.equal(restored.scratchDefense, 30);
+    assert.equal(restored.visionModifier, 0.75);
+    assert.deepEqual(restored.source, { file: 'clothing.txt', model: 'Boots_Ground' });
+    assert.deepEqual(restored.rawFields, [{ name: 'Tooltip', value: 'Tooltip_OriginalShoe' }]);
+    assert.deepEqual(restored.tags, ['base:showcondition']);
+    const fresh = subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 5, y: 5 }).id;
+
+    assert.equal(subject.getItem(fresh).condition, 30);
+    assert.equal(subject.getItem(fresh).weight, 1);
+
+    for (const id of [existing, fresh]) {
+        const tooltip = subject.sourceActions.itemTooltipState(id);
+
+        assert.equal(tooltip.clothing.insulation, 0.25);
+        assert.equal(tooltip.clothing.scratchDefense, 30);
+        assert.equal(tooltip.visionModifier, 0.75);
+        assert.equal(tooltip.fatigueChange, 0.25);
+        assert.equal(tooltip.showCondition, true);
+        assert.equal(tooltip.tooltip, 'Tooltip_OriginalShoe');
+    }
+
+    assert.equal(subject.getItemDefinition('Mod.Shoe'), null);
+    assert.throws(() => subject.command({ type: 'spawnItem', fullType: 'Mod.Shoe', x: 5, y: 5 }));
     assert.throws(() => subject.registerItemDefinition(shoe(), { owner: 'base' }));
     subject.beginItemDefinitionRegistration('mod');
     subject.registerItemDefinition(shoe('Mod.Shoe'), { owner: 'mod' });
     subject.commitItemDefinitionRegistration('mod');
     assert.deepEqual(subject.itemDefinitions().map((row) => row.fullType), ['Base.Shoe', 'Mod.Shoe']);
+    assert.equal(subject.getItemDefinition('Mod.Shoe').owner, 'mod');
     subject.freezeItemDefinitions();
     assert.throws(() => subject.registerItemDefinition(shoe('Late.Shoe'), { owner: 'late' }));
     assert.throws(() => subject.beginItemDefinitionRegistration('late'));
@@ -1994,6 +2881,54 @@ function doorSpawn(subject, x, y) {
     subject.loadState({ version: 2, values: [x, y, 1.5, x, y, 0, 0, 0, 0, 1, 100, 1] });
 }
 
+test('native stationary collection counts require loaded squares and exclude doors, floor items and the actor', async () => {
+    const subject = await engine();
+
+    subject.worldImportCell(0, 0, cellBytes());
+    assert.throws(() => subject.sourceActions.squareStaticMovingObjectCount(10, 10, 0), RangeError,
+        'navigation alone does not create an authoritative source square');
+    subject.importDoors([nativeDoor()], { squares: doorSquares() });
+    subject.registerItemDefinition(shoe(), { owner: 'base' });
+    subject.command({ type: 'spawnItem', fullType: 'Base.Shoe', x: 10.5, y: 10.5 });
+    const actor = subject.saveState();
+
+    actor.values[0] = 10.5;
+    actor.values[1] = 10.5;
+    actor.values[3] = 10.5;
+    actor.values[4] = 10.5;
+    subject.loadState(actor);
+    const before = {
+        actor: subject.saveState(), doors: subject.saveDoorState(),
+        inventory: subject.exportInventoryGraph(), queue: subject.saveQueueState(),
+    };
+
+    assert.equal(subject.sourceActions.squareDoorCount(10, 10, 0), 1);
+    assert.equal(subject.sourceActions.worldItemCount(10, 10, 0), 1);
+    assert.equal(subject.sourceActions.squareStaticMovingObjectCount(10, 10, 0), 0);
+    assert.equal(subject.sourceActions.squareStaticMovingObjectCount(11, 10, 0), 0);
+
+    for (const coords of [[6, 10, 0], [10, 10, 1], [0x7F_FF_FF_FF, 10, 0],
+        [10, 10, 0x80_00_00_00]]) {
+        assert.throws(() => subject.sourceActions.squareStaticMovingObjectCount(...coords), RangeError);
+    }
+
+    for (const coords of [[10.5, 10, 0], [10, Number.NaN, 0]]) {
+        assert.throws(() => subject.sourceActions.squareStaticMovingObjectCount(...coords), TypeError);
+    }
+
+    assert.throws(() => subject.importInventoryGraph({
+        ...before.inventory, containers: before.inventory.containers.map((row) => ({ ...row, kind: 'corpse' })),
+    }), /container kind/u, 'unsupported corpse roots cannot be admitted as stationary objects');
+    assert.deepEqual(subject.saveState(), before.actor);
+    assert.deepEqual(subject.saveDoorState(), before.doors);
+    assert.deepEqual(subject.exportInventoryGraph(), before.inventory);
+    assert.deepEqual(subject.saveQueueState(), before.queue);
+
+    subject.importDoors([], { squares: [] });
+    assert.throws(() => subject.sourceActions.squareStaticMovingObjectCount(10, 10, 0), RangeError,
+        'removing source-square metadata cannot leave a cached empty census');
+});
+
 test('native blocked-square relations distinguish source window properties and directional stairs', async () => {
     const subject = await engine();
     const from = { x: 10, y: 10, z: 0 };
@@ -2069,13 +3004,13 @@ test('native source-square standability keeps floor and adjacent-edge precedence
     assert.equal(subject.getSquare(100, 100, 0), null, 'unloaded metadata is not invented');
     const before = subject.getSquare(8, 8, 0);
 
-    assert.deepEqual(before, {
-        x: 8, y: 8, z: 0, roomId: -1, outside: true, solid: false, solidTrans: false,
-        tree: false, vehicleObstructed: false, solidFloor: true, canStand: true,
-    });
-    before.solidFloor = false;
+    assert.equal(before.canStand, true);
+    assert.equal(before.solidFloor, true);
+    assert.equal(before.haveRoof, false, 'no loaded square above supplies a roof');
+    const detached = subject.getSquare(8, 8, 0);
+
+    detached.solidFloor = false;
     assert.equal(subject.getSquare(8, 8, 0).solidFloor, true, 'query results do not alias scratch or source');
-    before.solidFloor = true;
 
     for (const coordinates of [[0.5, 0, 0], [0, 2 ** 31, 0], [0, 0, 2 ** 31], [0, 0, -(2 ** 31) - 1]]) {
         assert.throws(() => subject.getSquare(...coordinates), /integer|inside/u);
@@ -2153,15 +3088,14 @@ test('native source-square standability keeps floor and adjacent-edge precedence
     const sourceDoor = nativeDoor({ squareFlags: [34, 8, 4, 32], standEdges: [0, 0, 2, 0] });
 
     subject.importDoors([sourceDoor], { squares: doorSquares({ '10:10': { solidFloor: false } }) });
-    assert.deepEqual(subject.getSquare(10, 10, 0), {
-        x: 10, y: 10, z: 0, roomId: -1, outside: true, solid: true, solidTrans: false,
-        tree: false, vehicleObstructed: false, solidFloor: true, canStand: false,
-    }, 'initial closed source solid wins over its floor');
+    assert.equal(subject.getSquare(10, 10, 0).solid, true);
+    assert.equal(subject.getSquare(10, 10, 0).solidFloor, true);
+    assert.equal(subject.getSquare(10, 10, 0).canStand, false, 'initial closed source solid wins over its floor');
     completeQueueRequest(subject, subject.toggleDoor(door.id));
-    assert.deepEqual(subject.getSquare(10, 10, 0), {
-        x: 10, y: 10, z: 0, roomId: -1, outside: true, solid: false, solidTrans: false,
-        tree: false, vehicleObstructed: false, solidFloor: true, canStand: true,
-    }, 'toggle changes source query facts without self-obstructing on its old solid flag');
+    assert.equal(subject.getSquare(10, 10, 0).solid, false);
+    assert.equal(subject.getSquare(10, 10, 0).solidFloor, true);
+    assert.equal(subject.getSquare(10, 10, 0).canStand, true,
+        'toggle changes source query facts without self-obstructing on its old solid flag');
     const sourceSave = subject.saveDoorState();
 
     completeQueueRequest(subject, subject.toggleDoor(door.id));
@@ -2198,37 +3132,68 @@ test('direct WASM square staging rejects reserved flags, edges and scratch words
         }
     };
 
+    /**
+     * Read the live square without retaining mutable native scratch memory.
+     *
+     * @returns {number[]} Detached query values.
+     */
+    const readSquare = () => {
+        assert.equal(api.square_read(8, 8, 0), 0);
+        const view = new DataView(api.memory.buffer, api.scratch_ptr());
+
+        return Array.from({ length: 6 }, (_, index) => view.getFloat64(index * 8, true));
+    };
+
     assert.equal(api.door_import_begin(1, 4, 0), 0);
     writeWords(square);
     assert.equal(api.door_square_stage(), 0);
     assert.equal(api.door_import_commit(), 0);
-    assert.equal(api.square_read(8, 8, 0), 0);
-    assert.deepEqual(Array.from({ length: 6 }, (_, index) =>
-        new DataView(api.memory.buffer, api.scratch_ptr()).getFloat64(index * 8, true)), [8, 8, 0, 7, 33, 1]);
+    assert.equal(readSquare()[3], 7, 'staging imports the source room');
+    assert.equal(readSquare()[5], 1, 'source floor permits standing');
     assert.equal(api.square_read(8, 8, 100), -2);
 
     for (const [index, value] of [
         [4, 64], [8, 1], [8, 8], [8, 2.5], [8, Number.NaN],
-        [9, 1], [9, 8], [9, 2.5], [9, Number.NaN], [11, 1],
+        [9, 1], [9, 8], [9, 2.5], [9, Number.NaN],
+        [11, 1], [11, 2], [11, 3], [11, 4], [11, 5], [11, 0.5], [11, Number.NaN],
     ]) {
         const invalid = [...square];
+        const before = readSquare();
 
         invalid[index] = value;
         assert.equal(api.door_import_begin(1, 4, 0), 0);
         writeWords(invalid);
         assert.equal(api.door_square_stage(), -4);
         api.door_import_abort();
-        assert.equal(api.square_read(8, 8, 0), 0);
-        assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr() + 40, true), 1);
+        assert.deepEqual(readSquare(), before, 'rejected legacy staging preserves all live square facts');
     }
 
     for (const spriteFacts of [1, 128, 16_384, 2_097_152, 268_435_456, 2.5, Number.NaN]) {
+        const before = readSquare();
+
         assert.equal(api.door_import_begin(1, 4, 0), 0);
         writeWords([1, 10, 10, 0, 1, -1, -1, -1, 0, 0, 0, spriteFacts]);
         assert.equal(api.door_import_stage(), -4);
         api.door_import_abort();
-        assert.equal(api.square_read(8, 8, 0), 0);
-        assert.equal(new DataView(api.memory.buffer).getFloat64(api.scratch_ptr() + 40, true), 1);
+        assert.deepEqual(readSquare(), before, 'rejected sprite staging preserves all live square facts');
+    }
+
+    for (const [version, blocker, expectedRoofFlags] of [
+        [0, 0, 0], [1, 0, 64], [1, 1, 192], [1, 2, 192], [1, 3, 192], [1, 4, 0],
+    ]) {
+        assert.equal(api.door_import_begin(1, 4, 0), 0);
+
+        if (version === 1) {
+            assert.equal(api.door_import_rain_blockers_version(1), 0);
+        }
+
+        writeWords([...square.slice(0, 2), 1, ...square.slice(3, 11), blocker]);
+        assert.equal(api.door_square_stage(), 0);
+        writeWords(square);
+        assert.equal(api.door_square_stage(), 0);
+        assert.equal(api.door_import_commit(), 0);
+        assert.equal(readSquare()[4] & 192, expectedRoofFlags,
+            `roof authority below blocker ${blocker} on wire version ${version}`);
     }
 });
 
@@ -3387,6 +4352,40 @@ test('source bag fields are case insensitive and Capacity observes Weight at its
     assert.deepEqual(subject.itemDefinitions(), original);
 });
 
+test('private proper square distance uses native f32 centers and ignores elevation', async () => {
+    const subject = await engine();
+    const distance = subject.sourceActions.squareDistanceToProper;
+    const squares = [
+        { x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 0 },
+        { x: 3, y: 4, z: 0 }, { x: 3, y: 4, z: 1 },
+        { x: 6, y: 25_000, z: 0 },
+    ].map((coords) => ({
+        ...coords, roomId: -1, outside: true, solid: false, solidTrans: false,
+        tree: false, vehicleObstructed: false, solidFloor: true, independentWalls: 0,
+    }));
+
+    subject.importDoors([], { squares });
+    const before = subject.saveDoorState();
+
+    assert.equal(Object.hasOwn(subject, 'squareDistanceToProper'), false);
+    assert.equal(distance(0, 0, 0, 0, 0, 0), 0);
+    assert.equal(distance(0, 0, 0, 1, 1, 0), 1.414_213_538_169_860_8);
+    assert.equal(distance(0, 0, 0, 3, 4, 0), 5);
+    assert.equal(distance(0, 0, 0, 3, 4, 1), 5);
+    assert.equal(distance(3, 4, 1, 0, 0, 0), 5);
+    assert.equal(distance(0, 0, 0, 6, 25_000, 0), 25_000,
+        'IsoUtils squares and adds in f64 after f32 deltas, not an all-f32 length');
+    assert.throws(() => distance(0, 0, 0, 9, 9, 0), /outside the accepted range/u);
+    assert.throws(() => distance(9, 9, 0, 0, 0, 0), /outside the accepted range/u);
+
+    for (const invalid of [0.5, Number.NaN, Infinity, 0x80_00_00_00, '0', null, undefined]) {
+        assert.throws(() => distance(invalid, 0, 0, 0, 0, 0));
+        assert.throws(() => distance(0, 0, 0, 0, 0, invalid));
+    }
+
+    assert.deepEqual(subject.saveDoorState(), before);
+});
+
 test('native authored floor metadata drives original window, staircase and apparent-elevation queries', async () => {
     const subject = await engine();
 
@@ -3671,4 +4670,406 @@ test('item and container roots retain the original ground-bag distinction', asyn
     assert.equal(subject.sourceActions.itemOutermostContainer(item), 1);
     assert.equal(subject.sourceActions.containerOutermost(interior), 1);
     assert.equal(subject.sourceActions.containerActorOwner(interior), 1);
+});
+
+test('native inventory presentation distinguishes typed tags and owns mutable category lifetime', async () => {
+    const subject = await engine();
+    const source = subject.sourceActions;
+    const beforeEmpty = subject.exportInventoryGraph();
+
+    assert.equal(source.containerDrawDirty(1), true);
+    source.containerSetDrawDirty(1, false);
+    assert.equal(source.containerDrawDirty(1), false);
+    assert.deepEqual(subject.exportInventoryGraph(), beforeEmpty, 'empty UI queries do not allocate containers');
+    subject.registerItemDefinition(shoe('Fixture.Tagged', {
+        type: 'Container', bodyLocation: null, tags: ['base:keyring'], fakeEquipped: false,
+        hidden: true, displayCategory: 'Supplies',
+    }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.Tagged', x: 5, y: 5 }).id;
+    const second = subject.command({ type: 'spawnItem', fullType: 'Fixture.Tagged', x: 5, y: 5 }).id;
+
+    assert.equal(source.itemIsHidden(id), true);
+    assert.equal(source.itemIsFood(id), false);
+    assert.equal(source.itemIsKeyRingType(id), false);
+    assert.equal(source.itemHasKeyRingTag(id), true, 'tag is independent of fake-equipped weight policy');
+    assert.equal(source.itemDisplayCategory(id), 'Supplies');
+    source.itemSetDisplayCategory(id, 'Custom');
+    assert.equal(source.itemDisplayCategory(id), 'Custom');
+    assert.equal(source.itemDisplayCategory(second), 'Supplies', 'instance mutation cannot rewrite its definition or sibling');
+    subject.beginItemDefinitionRegistration('override');
+    subject.registerItemDefinition(shoe('Fixture.Tagged', {
+        type: 'Container', bodyLocation: null, hidden: false, displayCategory: 'Replacement',
+    }), { owner: 'override', override: true });
+    assert.equal(source.itemIsHidden(id), false);
+    assert.equal(source.itemDisplayCategory(id), 'Custom');
+    subject.rollbackItemDefinitionRegistration('override');
+    assert.equal(source.itemIsHidden(id), true);
+    assert.equal(source.itemHasKeyRingTag(id), true);
+    assert.equal(source.itemDisplayCategory(id), 'Custom');
+    source.itemSetDisplayCategory(id, null);
+    assert.equal(source.itemDisplayCategory(id), null);
+    subject.importInventoryGraph(subject.exportInventoryGraph());
+    assert.equal(source.itemDisplayCategory(id), 'Supplies', 'original nonserialized category is reinitialized by item factory');
+    assert.equal(source.containerDrawDirty(1), true, 'original container construction starts dirty');
+    const floor = subject.getItem(id).ownerContainerId;
+
+    source.containerSetDrawDirty(floor, false);
+    source.containerSetDrawDirty(1, false);
+    subject.command({ type: 'pickup', id });
+    completeActions(subject);
+    assert.equal(source.containerDrawDirty(floor), true);
+    assert.equal(source.containerDrawDirty(1), true);
+    source.containerSetDrawDirty(floor, false);
+    source.containerSetDrawDirty(1, false);
+    subject.command({ type: 'drop', id, x: 5, y: 5 });
+    assert.equal(source.containerDrawDirty(floor), true);
+    assert.equal(source.containerDrawDirty(1), true);
+
+    for (const name of ['itemIsHidden', 'itemIsFood', 'itemIsKeyRingType', 'itemHasKeyRingTag', 'itemDisplayCategory', 'itemUnwantedKey']) {
+        assert.throws(() => source[name](0xFF_FF_FF_FF), /outside the accepted range/u);
+    }
+
+    assert.throws(() => source.containerDrawDirty(0xFF_FF_FF_FF), /outside the accepted range/u);
+    assert.throws(() => source.containerSetDrawDirty(1, 1), /boolean/u);
+    assert.throws(() => source.itemSetDisplayCategory(id, 3), /string|name/u);
+});
+
+test('native player direction follows original f32 eight-way conversion without mutating actor state', async () => {
+    const subject = await engine();
+    const source = subject.sourceActions;
+
+    for (const [x, y, expected] of [[0, -1, 'N'], [-1, -1, 'NW'], [-1, 0, 'W'], [-1, 1, 'SW'],
+        [0, 1, 'S'], [1, 1, 'SE'], [1, 0, 'E'], [1, -1, 'NE']]) {
+        const actor = subject.snapshot();
+
+        source.face(actor.x + x, actor.y + y);
+        const before = subject.saveState();
+
+        assert.equal(source.playerDirection(), expected);
+        assert.deepEqual(subject.saveState(), before);
+    }
+});
+
+test('unwanted key derivation preserves exact player modData identity and refuses unavailable facilities', async () => {
+    const subject = await engine();
+    const source = subject.sourceActions;
+
+    subject.registerItemDefinition(shoe('Fixture.MixedCase', { bodyLocation: null }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.MixedCase', x: 5, y: 5 }).id;
+
+    assert.equal(source.itemUnwantedKey(id), 'itemUnwanted:Fixture.MixedCase');
+    source.itemSetDisplayCategory(id, '');
+    assert.equal(source.itemDisplayCategory(id), '');
+    source.itemSetDisplayCategory(id, undefined);
+    assert.equal(source.itemDisplayCategory(id), null);
+    subject.registerItemDefinition(shoe('Fixture.Media', {
+        bodyLocation: null, rawFields: [{ name: 'MediaCategory', value: 'VHS' }],
+    }), { owner: 'fixture' });
+    const media = subject.command({ type: 'spawnItem', fullType: 'Fixture.Media', x: 5, y: 5 }).id;
+
+    assert.throws(() => source.itemUnwantedKey(media), /unsupported original facility/u);
+});
+
+test('original item leaf state keeps broken independent of condition and restores source load defaults', async () => {
+    const subject = await engine();
+    const source = subject.sourceActions;
+
+    subject.registerItemDefinition(shoe('Fixture.Leaf', { type: 'Normal', bodyLocation: null }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.Leaf', x: 5, y: 5 }).id;
+
+    assert.equal(source.itemIsBroken(id), false);
+    assert.equal(source.itemHeat(id), 1);
+    source.itemSetBroken(id, true);
+    assert.equal(subject.getItem(id).condition, 30);
+    assert.equal(source.itemIsBroken(id), true);
+    source.itemSetHeat(id, 5);
+    assert.equal(source.itemHeat(id), 3);
+    source.itemSetHeat(id, -1);
+    assert.equal(source.itemHeat(id), 0);
+    source.itemSetHeat(id, 1.234);
+    assert.equal(source.itemHeat(id), Math.fround(1.234));
+    assert.throws(() => source.itemSetHeat(id, Number.NaN));
+    assert.throws(() => source.itemSetBroken(id, 1));
+    source.itemUpdateAge(id);
+    subject.importInventoryGraph(subject.exportInventoryGraph());
+    assert.equal(source.itemHeat(id), 1, 'original InventoryItem does not serialize itemHeat');
+    assert.equal(source.itemIsBroken(id), false, 'load reconstructs broken from saved condition');
+    subject.command({ type: 'setCondition', id, condition: 0 });
+    assert.equal(source.itemIsBroken(id), true);
+    source.itemSetBroken(id, false);
+    assert.equal(source.itemIsBroken(id), false, 'isBroken never infers condition==0');
+    subject.importInventoryGraph(subject.exportInventoryGraph());
+    assert.equal(source.itemIsBroken(id), true);
+});
+
+test('clothing wetness owns native state, exact early returns, and versioned atomic persistence', async () => {
+    const subject = await engine();
+    const source = subject.sourceActions;
+
+    subject.registerItemDefinition(shoe('Fixture.Dry', { type: 'Clothing' }), { owner: 'fixture' });
+    subject.registerItemDefinition(shoe('Fixture.Blood', {
+        type: 'Clothing', rawFields: [{ name: 'BloodLocation', value: 'Shoes' }],
+    }), { owner: 'fixture' });
+    subject.registerItemDefinition(shoe('Fixture.Normal', { type: 'Normal', bodyLocation: null }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.Dry', x: 5, y: 5 }).id;
+    const blood = subject.command({ type: 'spawnItem', fullType: 'Fixture.Blood', x: 5, y: 5 }).id;
+    const normal = subject.command({ type: 'spawnItem', fullType: 'Fixture.Normal', x: 5, y: 5 }).id;
+
+    source.itemSetWetness(id, 120);
+    assert.equal(source.itemWetness(id), 100);
+    source.itemUpdateWetness(id);
+    assert.equal(source.itemWetness(id), 0, 'factory null bloodClothingType clears unequipped wetness');
+    source.itemSetWetness(id, -5);
+    assert.equal(source.itemWetness(id), 0);
+    const graph = subject.exportInventoryGraph();
+
+    graph.items[0] = { ...graph.items[0], ownerContainerId: 1, worldPosition: null, bodyLocation: 'base:shoes', wetness: 42 };
+    graph.wornOrder = [id];
+    subject.importInventoryGraph(graph);
+    source.itemUpdateWetness(id);
+    assert.equal(source.itemWetness(id), 42, 'default update returns for equipped clothing before clearing null coverage');
+    source.itemUpdateWetness(id, true);
+    assert.equal(source.itemWetness(id), 0, 'forced update bypasses equipped early return');
+    source.itemSetWetness(id, 12.5);
+    const saved = subject.exportInventoryGraph();
+
+    assert.equal(saved.version, 2);
+    assert.equal(saved.items[0].wetness, 12.5);
+    subject.importInventoryGraph(saved);
+    assert.equal(source.itemWetness(id), 12.5);
+
+    for (const mutate of [
+        (copy) => {
+            copy.version = 3;
+        },
+        (copy) => {
+            copy.items[0].wetness = 100.000_000_1;
+        },
+        (copy) => {
+            copy.items[0].wetness = '42';
+        },
+        (copy) => {
+            delete copy.items[0].wetness;
+        },
+        (copy) => {
+            delete copy.items[0].wetness;
+            Object.setPrototypeOf(copy.items[0], { wetness: 42 });
+        },
+        (copy) => {
+            copy.items[2].wetness = 1;
+        },
+    ]) {
+        const invalid = structuredClone(saved);
+
+        mutate(invalid);
+        assert.throws(() => subject.importInventoryGraph(invalid));
+        assert.deepEqual(subject.exportInventoryGraph(), saved);
+    }
+
+    const legacy = structuredClone(saved);
+
+    legacy.version = 1;
+
+    for (const row of legacy.items) {
+        delete row.wetness;
+    }
+
+    subject.importInventoryGraph(legacy);
+    assert.equal(source.itemWetness(id), 0, 'v1 migration uses real Clothing constructor wetness0');
+    assert.throws(() => source.itemWetness(normal), /unsupported/u);
+    source.itemUpdateWetness(blood);
+    assert.equal(source.itemWetness(blood), 0, 'constructor timestamp makes the first call subminute');
+});
+
+test('clothing source timestamps accumulate, flush rebase and load resets without offline drying', async () => {
+    const subject = await engine();
+    const source = subject.sourceActions;
+    const f = Math.fround;
+
+    subject.importDoors([], {
+        squares: [{
+            x: 5, y: 5, z: 0, roomId: 7, outside: false, solid: false,
+            solidTrans: false, tree: false, independentWalls: 0,
+            reachWalls: { north: false, west: false }, vehicleObstructed: false, solidFloor: true,
+            floorFlags: 1, stairTypes: 0, slopeDirection: 0, slopeMin: 0, slopeMax: 0,
+        }],
+    });
+    subject.registerItemDefinition(shoe('Fixture.WetClock', {
+        type: 'Clothing', rawFields: [{ name: 'BloodLocation', value: 'Shoes' }],
+        tags: ['base:breakwhenwet'],
+    }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.WetClock', x: 5, y: 5 }).id;
+
+    source.itemSetWetness(id, 50);
+    source.worldClockSet('timeOfDay', 9.01);
+    source.itemUpdateWetness(id);
+    assert.equal(source.itemWetness(id), 50, 'subminute queries accumulate from construction, not each call');
+    source.worldClockSet('timeOfDay', 9.02);
+    const firstAge = source.worldClockGet('worldAgeHours');
+
+    source.itemUpdateWetness(id);
+    const firstWetness = f(50 - f(f(firstAge - 2) * 20));
+
+    assert.equal(source.itemWetness(id), firstWetness);
+    source.worldClockSet('timeOfDay', 9.03);
+    source.itemFlushWetness(id);
+    assert.equal(source.itemWetness(id), firstWetness, 'flush retains the minutely gate');
+    source.worldClockSet('timeOfDay', 9.1);
+    source.itemUpdateWetness(id);
+    assert.equal(source.itemWetness(id), firstWetness, 'negative flush stamp rebases to now');
+    source.worldClockSet('timeOfDay', 9.131_25);
+    source.itemUpdateWetness(id);
+    assert.ok(source.itemWetness(id) < firstWetness);
+    const saved = subject.exportInventoryGraph();
+    const savedWetness = source.itemWetness(id);
+
+    source.worldClockSet('nightsSurvived', 100);
+    subject.importInventoryGraph(saved);
+    source.itemUpdateWetness(id);
+    assert.equal(source.itemWetness(id), savedWetness, 'load resets stamp at restored/current age');
+    source.itemSetWetness(id, 100);
+    source.itemUpdateWetness(id);
+    assert.equal(subject.getItem(id).condition, 30, 'breaking waits until next eligible update');
+    const wetOwner = subject.getItem(id).ownerContainerId;
+
+    source.containerSetDrawDirty(wetOwner, false);
+    source.worldClockSet('timeOfDay', 9.2);
+    source.itemUpdateWetness(id);
+    assert.equal(subject.getItem(id).condition, 0);
+    assert.equal(source.itemIsBroken(id), true);
+    assert.equal(source.containerDrawDirty(wetOwner), true, 'retained clothing break must invalidate its real container');
+    assert.ok(source.itemWetness(id) < 100, 'breaking does not return before drying');
+    const equipped = subject.exportInventoryGraph();
+
+    equipped.items[0] = {
+        ...equipped.items[0], condition: 30, ownerContainerId: 1,
+        worldPosition: null, bodyLocation: 'base:shoes', wetness: 50,
+    };
+    equipped.wornOrder = [id];
+    subject.importInventoryGraph(equipped);
+    const lastAge = source.worldClockGet('worldAgeHours');
+
+    source.worldClockSet('timeOfDay', 9.231_25);
+    source.itemUpdateWetness(id);
+    assert.equal(source.itemWetness(id), 50);
+    const now = source.worldClockGet('worldAgeHours');
+
+    source.itemUpdateWetness(id, true);
+    assert.equal(source.itemWetness(id), f(50 - f(f(f(now - lastAge) * 20) * 2)));
+    const beforeRebase = source.itemWetness(id);
+
+    source.worldClockSet('timeOfDay', 8);
+    source.itemUpdateWetness(id, true);
+    assert.equal(source.itemWetness(id), beforeRebase, 'future timestamp corrects down without negative drying');
+    subject.registerItemDefinition(shoe('Fixture.WetRemove', {
+        type: 'Clothing', removeOnBroken: true,
+        rawFields: [{ name: 'BloodLocation', value: 'Shoes' }], tags: ['base:breakwhenwet'],
+    }), { owner: 'fixture' });
+    const removed = subject.command({ type: 'spawnItem', fullType: 'Fixture.WetRemove', x: 5, y: 5 }).id;
+
+    source.itemSetWetness(removed, 100);
+    source.worldClockSet('timeOfDay', 8.031_25);
+    source.itemUpdateWetness(removed);
+    assert.equal(subject.getItem(removed), null, 'wet break keeps the authoritative removeOnBroken path');
+    subject.registerItemDefinition(shoe('Fixture.WetCallback', {
+        type: 'Clothing', onBreak: 'Fixture.OnBreak',
+        rawFields: [{ name: 'BloodLocation', value: 'Shoes' }], tags: ['BreakWhenWet'],
+    }), { owner: 'fixture' });
+    const callback = subject.command({ type: 'spawnItem', fullType: 'Fixture.WetCallback', x: 5, y: 5 }).id;
+    const callbackOwner = subject.getItem(callback).ownerContainerId;
+
+    source.containerSetDrawDirty(callbackOwner, false);
+    source.itemSetWetness(callback, 100);
+    source.worldClockSet('timeOfDay', 8.062_5);
+    assert.throws(() => source.itemUpdateWetness(callback), /unsupported/u);
+    assert.equal(subject.getItem(callback).condition, 30);
+    assert.equal(source.itemIsBroken(callback), false);
+    assert.equal(source.itemWetness(callback), 100);
+    assert.equal(source.containerDrawDirty(callbackOwner), false, 'callback refusal must precede break effects');
+    subject.registerItemDefinition({ ...subject.getItemDefinition('Fixture.WetCallback'), onBreak: null },
+        { owner: 'fixture', override: true });
+    source.itemUpdateWetness(callback);
+    assert.equal(subject.getItem(callback).condition, 30, 'refused break still advances its original wetness timestamp');
+    source.worldClockSet('timeOfDay', 8.1);
+    source.itemUpdateWetness(callback);
+    assert.equal(subject.getItem(callback).condition, 0);
+    assert.equal(source.containerDrawDirty(callbackOwner), true);
+});
+
+test('eligible outdoor and unknown-square clothing explicitly refuse actual missing climate authority', async () => {
+    const subject = await engine();
+    const source = subject.sourceActions;
+
+    subject.registerItemDefinition(shoe('Fixture.WetOutside', {
+        type: 'Clothing', rawFields: [{ name: 'BloodLocation', value: 'Shoes' }],
+    }), { owner: 'fixture' });
+    const id = subject.command({ type: 'spawnItem', fullType: 'Fixture.WetOutside', x: 5, y: 5 }).id;
+
+    source.itemSetWetness(id, 50);
+    source.worldClockSet('timeOfDay', 9.031_25);
+    assert.throws(() => source.itemUpdateWetness(id), /roof and climate authority/u);
+    assert.equal(source.itemWetness(id), 50);
+    importPickupSquares(subject);
+    source.worldClockSet('timeOfDay', 9.062_5);
+    assert.throws(() => source.itemUpdateWetness(id), /roof and climate authority/u);
+    assert.equal(source.itemWetness(id), 50, 'outside does not imply zero rain');
+    const before = subject.worldClockState();
+
+    subject.sourceTiming.setGameMode('LastStand');
+    subject.step(0);
+    const f = Math.fround;
+    const delta = f(f(f(f(1 / 90) / 60) * f(0.8)) / 2);
+
+    assert.equal(subject.worldClockState().timeOfDay, f(before.timeOfDay + delta),
+        'GameMode LastStand is not the independent Core.lastStand flag');
+});
+
+test('native roof wire distinguishes unknown blocker authority from known source flags and preserves failed imports', async () => {
+    const subject = await engine();
+    const square = {
+        x: 5, y: 5, z: 0, roomId: -1, outside: true, solid: false,
+        solidTrans: false, tree: false, independentWalls: 0, vehicleObstructed: false, solidFloor: true,
+    };
+
+    subject.importDoors([], { squares: [square, { ...square, z: 1 }] });
+    assert.equal(subject.getSquare(5, 5, 0).haveRoof, null, 'unknown upper flags are never decoded as no roof');
+    assert.equal(subject.getSquare(5, 5, 1).haveRoof, false, 'a blocker does not roof itself');
+    subject.importDoors([], { squares: [{ ...square, rainBlockers: 0 }, { ...square, z: 1, rainBlockers: 2 }] });
+    assert.equal(subject.getSquare(5, 5, 0).haveRoof, true);
+    assert.equal(subject.getSquare(5, 5, 1).haveRoof, false);
+
+    for (const rainBlockers of [-1, 4, 0.5, null]) {
+        assert.throws(() => subject.importDoors([], { squares: [{ ...square, rainBlockers }] }));
+        assert.equal(subject.getSquare(5, 5, 0).haveRoof, true, 'boundary rejection preserves native metadata');
+    }
+
+    const partialBlockers = [0, 0, 0, 0];
+
+    delete partialBlockers[1];
+
+    for (const rainBlockers of [Array.from({ length: 4 }), partialBlockers]) {
+        assert.throws(() => subject.importDoors([nativeDoor({
+            id: 'door:5:5:1:0', x: 5, y: 5, z: 1, rainBlockers,
+        })], {
+            squares: [{ ...square, rainBlockers: 0 }, { ...square, z: 1, rainBlockers: 0 }],
+        }), TypeError);
+        assert.equal(subject.getSquare(5, 5, 0).haveRoof, true, 'missing door states cannot erase existing roof authority');
+    }
+});
+
+test('pre-roof ABI1 geometry imports retain unknown authority and refuse explicit blocker fields', async () => {
+    const subject = await createEngine(legacyModule(moduleBytes,
+        ['door_import_rain_blockers_version', 'door_import_rain_blockers']));
+    const square = {
+        x: 5, y: 5, z: 0, roomId: -1, outside: true, solid: false,
+        solidTrans: false, tree: false, independentWalls: 0, vehicleObstructed: false, solidFloor: true,
+    };
+
+    subject.importDoors([], { squares: [square, { ...square, z: 1 }] });
+    assert.equal(subject.getSquare(5, 5, 0).haveRoof, null, 'legacy reserved zero cannot invent no upper blocker');
+    assert.throws(() => subject.importDoors([], { squares: [{ ...square, rainBlockers: 0 }] }), /unsupported/iu);
+    assert.throws(() => subject.importDoors([nativeDoor({ rainBlockers: [0, 0, 0, 0] })], {
+        squares: [square],
+    }), /unsupported/iu);
+    assert.equal(subject.getSquare(5, 5, 0).haveRoof, null, 'capability refusal precedes replacement');
 });

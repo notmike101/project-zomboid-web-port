@@ -5,6 +5,7 @@ import { dirname, extname, join, parse, relative, resolve, sep } from 'node:path
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
+import { MAX_FILE_BYTES } from '../src/mod-manager.js';
 import { nativeTileSources } from '../src/world-objects.js';
 
 const extensions = new Set(['.pack', '.png', '.jpg', '.jpeg', '.dds', '.x', '.fbx', '.ogg', '.wav', '.bank', '.bin', '.lotheader', '.lotpack', '.tiles', '.txt', '.fnt', '.lua', '.xml', '.json', '.info', '.js', '.mjs', '.vert', '.frag', '.glsl', '.tmx', '.tga', '.bmp', '.gif', '.ini', '.cfg', '.properties', '.mesh', '.anim', '.ttf', '.otf', '.woff', '.woff2', '.csv', '.css', '.svg', '.html', '.webp', '.mp3', '.flac']);
@@ -24,11 +25,17 @@ const startup = {
         footstep: 'media/sound/PZ_FootSteps_Concrete_01.wav',
         doorOpen: 'media/sound/dooropen.wav', doorClose: 'media/sound/doorclose.wav',
     },
+    tileDepth: {
+        assignments: 'media/tileDepthTextureAssignments.txt',
+        images: ['DEPTH_preset_depthmaps_01.png', 'DEPTH_whole_tile.png', 'DEPTH_billboard.png'].map((name) => `media/depthmaps/${name}`),
+        seams: 'media/depthmaps/SEAMS_01.png',
+    },
     spawn: { x: 190.5, y: 190.5 },
 };
 const startupPaths = new Set([
     ...startup.packs, ...startup.cells.flatMap(({ navigation, header, lotpack }) => [navigation, header, lotpack]),
     ...Object.values(startup.character), ...startup.tileDefinitions.map(({ path }) => path), ...Object.values(startup.audio),
+    startup.tileDepth.assignments, ...startup.tileDepth.images, startup.tileDepth.seams,
     'media/scripts/generated/items/clothing.txt', 'media/scripts/generated/items/container.txt',
 ]);
 
@@ -159,6 +166,43 @@ async function standardLibrary(root) {
     }
 
     return [{ path: 'stdlib.lua', full }];
+}
+
+/**
+ * Resolve literal UI texture demands from already selected original or explicit mod Lua.
+ * Startup-only merges must not select additional Lua merely to discover more images.
+ *
+ * @param {{path:string,full:string}[]} files - Approved existing/explicit source inventory.
+ * @returns {Promise<Set<string>>} Exact approved media/ui PNG paths passed to texture consumers.
+ */
+async function literalUITextures(files) {
+    const requested = new Set();
+
+    for (const file of files.filter(({ path }) => /^(?:media|mods\/.+\/media)\/lua\/(?:shared|client|server)\/.+\.lua$/u.test(path))) {
+        // eslint-disable-next-line no-await-in-loop -- Bound each selected source before reading it.
+        const info = await stat(file.full);
+
+        if (info.size > MAX_FILE_BYTES) {
+            throw new Error(`Selected Lua exceeds the ${MAX_FILE_BYTES}-byte texture discovery limit: ${file.path}`);
+        }
+
+        // eslint-disable-next-line no-await-in-loop -- Never buffer the selected Lua tree at once.
+        const source = await readFile(file.full, 'utf8');
+
+        if (Buffer.byteLength(source) > MAX_FILE_BYTES) {
+            throw new Error(`Selected Lua read beyond its ${MAX_FILE_BYTES}-byte texture discovery limit: ${file.path}`);
+        }
+
+        for (const match of source.matchAll(/\b(?:getTexture|getImageButtonControl)\s*\(\s*(["'])([^"'\r\n]+)\1\s*\)/gu)) {
+            const path = match[2];
+
+            if (/^media\/ui\/.+\.png$/u.test(path) && isContentPath(path)) {
+                requested.add(path);
+            }
+        }
+    }
+
+    return requested;
 }
 
 /**
@@ -348,7 +392,7 @@ export function isContentPath(path) {
  * @param {string} [options.output] - Separate content directory.
  * @param {string} [options.modsSource] - Optional separately chosen user mod directory.
  * @param {boolean} [options.indexOnly] - Index existing copied content without copying.
- * @param {boolean} [options.startupOnly] - Copy only bounded startup assets (and optional stdlib).
+ * @param {boolean} [options.startupOnly] - Copy bounded startup assets, optional stdlib and literal UI images demanded by selected Lua.
  * @param {boolean} [options.hash] - Stream hashes instead of stat-only indexing.
  * @param {string} [options.sourceBuild] - Explicit observed version label, otherwise unknown.
  * @returns {Promise<object>} Manifest written into the content root.
@@ -407,23 +451,27 @@ export async function provisionContent(options = {}) {
     }
 
     // Approve existing copied trees before any writes, including on restart.
-    await inventory(join(output, 'media'), 'media');
-    await inventory(join(output, 'mods'), 'mods');
-    await standardLibrary(output);
+    const existing = [...await inventory(join(output, 'media'), 'media'), ...await inventory(join(output, 'mods'), 'mods'), ...await standardLibrary(output)];
 
     if (!options.indexOnly) {
         let files = [...await inventory(join(source, 'media'), 'media'), ...await standardLibrary(source)];
         const sourceMatches = matchStartupPaths(files);
+        const mods = modsSource ? await inventory(modsSource, 'mods') : [];
 
         if (options.startupOnly) {
             const selected = new Set(sourceMatches.values());
+            const images = await literalUITextures([...existing, ...mods]);
+
+            for (const { path } of files) {
+                if (images.has(path) || /^media\/depthmaps\/depth_[^/]+\.png$/i.test(path)) {
+                    selected.add(path);
+                }
+            }
 
             files = files.filter(({ path }) => selected.has(path) || path === 'stdlib.lua');
         }
 
-        if (modsSource) {
-            files.push(...await inventory(modsSource, 'mods'));
-        }
+        files.push(...mods);
 
         await copyAbsent(files, output);
     }
@@ -446,6 +494,11 @@ export async function provisionContent(options = {}) {
         character: Object.fromEntries(Object.entries(startup.character).map(([role, path]) => [role, matched.get(path)])),
         tileDefinitions: startup.tileDefinitions.map(({ path, fileId }) => ({ path: matched.get(path), fileId })),
         audio: Object.fromEntries(Object.entries(startup.audio).map(([role, path]) => [role, matched.get(path)])),
+        tileDepth: {
+            assignments: matched.get(startup.tileDepth.assignments),
+            images: copied.filter(({ path }) => /^media\/depthmaps\/depth_[^/]+\.png$/i.test(path)).map(({ path }) => path),
+            seams: matched.get(startup.tileDepth.seams),
+        },
     };
     const files = [];
 

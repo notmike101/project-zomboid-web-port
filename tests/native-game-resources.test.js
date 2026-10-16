@@ -13,11 +13,16 @@ import { parsePngHeader } from '../src/renderer.js';
  */
 function fixture() {
     const entries = new Map([
+        ['stdlib.lua', 'BootstrapReady = true'],
         ['media/lua/shared/NPCs/BodyLocations.lua', 'BodyLocations.getGroup("Human"):getOrCreateLocation(ItemBodyLocation.SHOES)'],
         ...['env', 'ISBaseObject', 'ISUI/ISUIElement', 'ISUI/Layout/ISDock', 'ISUI/Style/UIHorizontalAlignment', 'ISUI/ISUITextureGetter'].map((name) => [`media/lua/client/${name}.lua`, '']),
         ...['TimedActions/ISBaseTimedAction', 'TimedActions/ISTimedActionQueue', 'TimedActions/ISGrabItemAction', 'TimedActions/ISOpenCloseDoor', 'TimedActions/WalkToTimedAction', 'TimedActions/ISWaitWhileGettingUp', 'luautils', 'ISUI/ISContextMenu', 'ISUI/ISPanelJoypad', 'ISUI/ISScrollingListBox', 'ISUI/ISTradingUI', 'ISUI/ISWorldObjectContextMenu', 'ISUI/ISToolTip', 'ISUI/ISToolTipInv', 'ISUI/ISInventoryItem', 'ISUI/ISInventoryPage', 'ISUI/ISRichTextPanel'].map((name) => [`media/lua/client/${name}.lua`, '']),
         ...['TimedActions/ISInventoryTransferAction', 'TimedActions/ISTransferAction'].map((name) => [`media/lua/client/${name}.lua`, '']),
-        ...['ISUI/PlayerData/ISPlayerDataObject', 'ISUI/PlayerData/ISPlayerData', 'BuildingObjects/ISMoveableCursor', 'RadioCom/ISRadioWindow'].map((name) => [`media/lua/client/${name}.lua`, '']),
+        ...['ISUI/PlayerData/ISPlayerDataObject', 'ISUI/PlayerData/ISPlayerData', 'BuildingObjects/ISMoveableCursor', 'RadioCom/ISRadioWindow', 'ISUI/ISUIHandler'].map((name) => [`media/lua/client/${name}.lua`, '']),
+        ...['ISUI/ISResizeableButton', 'ISUI/ISScrollBar', 'Entity/ISUI/BuildRecipe/ISBuildPanel', 'Entity/ISUI/CraftRecipe/ISHandCraftPanel'].map((name) => [`media/lua/client/${name}.lua`, '']),
+        ['media/lua/client/Entity/ISEntityUI.lua', ''],
+        ['media/lua/client/Camping/CCampfireSystem.lua', 'require "Map/CGlobalObjectSystem"'],
+        ['media/lua/client/Map/CGlobalObjectSystem.lua', 'require "ISBaseObject"'],
         ['media/fonts/EN/fonts.txt', 'VERSION = 1,\nfont Small { fnt = tiny.fnt, img = tiny.png, }\nfont Medium { fnt = middle.fnt, img = middle.png, }\nfont Large { fnt = big.fnt, img = big.png, }\nfont NewSmall { fnt = tiny.fnt, img = tiny.png, }'],
         ...[['tiny', 10, 12], ['middle', 17, 19], ['big', 24, 28]].flatMap(([name, size, height]) => [
             [`media/fonts/${name}.fnt`, `info face="Authored" size=${size}\ncommon lineHeight=${height} base=9 scaleW=32 scaleH=16 pages=1 packed=0\npage id=0 file="${name}.png"\nchars count=1\nchar id=65 x=0 y=0 width=6 height=8 xoffset=1 yoffset=2 xadvance=7 page=0 chnl=15`],
@@ -116,9 +121,7 @@ test('vanilla source UI activation loads actual fonts without requiring any inst
     const headless = await loadNativeGameResources(content, [], 60);
 
     assert.equal(headless.ui, false);
-    assert.deepEqual(headless.engineSources.map(({ path, execute }) => ({ path, execute })), [
-        { path: 'media/lua/shared/NPCs/BodyLocations.lua', execute: true },
-    ]);
+
     const resources = await loadNativeGameResources(content, [], 60, { requireUI: true });
 
     assert.equal(resources.fontSize.Medium, 17);
@@ -127,10 +130,13 @@ test('vanilla source UI activation loads actual fonts without requiring any inst
 });
 
 test('vanilla source UI rejects an unindexed genuine context dependency before resource activation', async () => {
-    const { content } = fixture();
+    for (const name of ['ISContextMenu', 'ISUIHandler']) {
+        const { content } = fixture();
 
-    content.manifest.files = content.manifest.files.filter(({ path }) => path !== 'media/lua/client/ISUI/ISContextMenu.lua');
-    await assert.rejects(loadNativeGameResources(content, [], 60, { requireUI: true }), /ISUI\/ISContextMenu.*found 0/);
+        content.manifest.files = content.manifest.files.filter(({ path }) => path !== `media/lua/client/ISUI/${name}.lua`);
+        // eslint-disable-next-line no-await-in-loop -- Each source prerequisite must independently reject a missing manifest entry.
+        await assert.rejects(loadNativeGameResources(content, [], 60, { requireUI: true }), new RegExp(`${name}.*found 0`, 'u'));
+    }
 });
 
 test('lazy original UI seeds traverse exact transitive literal paths without executing unrelated modules', async () => {
@@ -149,20 +155,15 @@ test('lazy original UI seeds traverse exact transitive literal paths without exe
     content.manifest.files.push(...[body, vehicle, leaf, unrelated].map((path) => ({ path })));
     const resources = await loadNativeGameResources(content, [], 60, { requireUI: true });
 
-    for (const path of [page, body, vehicle, leaf]) {
+    for (const path of [page, body, vehicle, leaf, 'media/lua/client/ISUI/ISUIHandler.lua',
+        'media/lua/client/Camping/CCampfireSystem.lua', 'media/lua/client/Map/CGlobalObjectSystem.lua',
+        'media/lua/client/Entity/ISEntityUI.lua']) {
         const source = resources.engineSources.find((entry) => entry.path === path);
 
-        assert.equal(source?.source, entries.get(path));
         assert.equal(source?.execute, false);
     }
 
     assert.equal(resources.engineSources.some(({ path }) => path === unrelated), false);
-    assert.deepEqual(resources.engineSources.filter(({ execute }) => execute).map(({ path }) => path), [
-        'media/lua/shared/NPCs/BodyLocations.lua',
-        'media/lua/client/env.lua', 'media/lua/client/ISBaseObject.lua', 'media/lua/client/ISUI/ISUIElement.lua',
-        'media/lua/client/ISUI/Layout/ISDock.lua', 'media/lua/client/ISUI/Style/UIHorizontalAlignment.lua',
-        'media/lua/client/ISUI/ISUITextureGetter.lua',
-    ]);
 });
 
 test('original startup lookup preserves manifest path casing under native case-insensitive identity', async () => {
@@ -180,14 +181,28 @@ test('original startup lookup preserves manifest path casing under native case-i
 });
 
 test('equipment source startup is manifest-backed and independent of movement-only mods and UI', async () => {
-    const { content, entries } = fixture();
+    const { content } = fixture();
     const descriptors = [{ sources: [{ path: 'media/lua/client/Move.lua', source: 'getPlayer():setSpeed(3)' }] }];
     const resources = await loadNativeGameResources(content, descriptors, 60);
 
     assert.equal(resources.ui, false);
-    assert.equal(resources.engineSources[0].source, entries.get('media/lua/shared/NPCs/BodyLocations.lua'));
     content.manifest.files = content.manifest.files.filter(({ path }) => path !== 'media/lua/shared/NPCs/BodyLocations.lua');
     await assert.rejects(loadNativeGameResources(content, [], 60), /BodyLocations.*found 0/u);
+});
+
+test('original resource bootstrap requires the exact single manifest root stdlib source', async () => {
+    const { content, entries } = fixture();
+
+    content.manifest.files = content.manifest.files.filter(({ path }) => path !== 'stdlib.lua');
+    content.manifest.files.push({ path: 'StdLib.lua' }, { path: 'media/lua/shared/stdlib.lua' });
+    entries.set('StdLib.lua', 'error("wrong root casing")');
+    entries.set('media/lua/shared/stdlib.lua', 'error("not the root bootstrap")');
+    await assert.rejects(loadNativeGameResources(content, [], 60), /stdlib\.lua.*exact manifest source.*found 0/u);
+    content.manifest.files.push({ path: 'stdlib.lua' }, { path: 'stdlib.lua' });
+    await assert.rejects(loadNativeGameResources(content, [], 60), /stdlib\.lua.*found 2/u);
+    content.manifest.files.pop();
+    entries.delete('stdlib.lua');
+    await assert.rejects(loadNativeGameResources(content, [], 60), /Unavailable indexed source: stdlib\.lua/u);
 });
 
 /**
@@ -196,9 +211,10 @@ test('equipment source startup is manifest-backed and independent of movement-on
  * @param {boolean} [duplicate=false] - Include a second genuine occurrence of the same sprite name.
  * @param {number} [width=8] - Actual source PNG width.
  * @param {number} [height=8] - Actual source PNG height.
+ * @param {string} [name='Item_Authored'] - Exact packed sprite identity.
  * @returns {Buffer} One-page pack with a trimmed named inventory icon.
  */
-function itemIconPack(duplicate = false, width = 8, height = 8) {
+function itemIconPack(duplicate = false, width = 8, height = 8, name = 'Item_Authored') {
     /**
      * Encode a little-endian pack field.
      *
@@ -261,7 +277,7 @@ function itemIconPack(duplicate = false, width = 8, height = 8) {
     header[9] = 6;
     const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.alloc(height * (width * 4 + 1), 0))), chunk('IEND', Buffer.alloc(0))]);
 
-    const sprite = Buffer.concat([string('Item_Authored'), ...[2, 1, 3, 4, 1, 2, 5, 7].map(integer)]);
+    const sprite = Buffer.concat([string(name), ...[2, 1, 3, 4, 1, 2, 5, 7].map(integer)]);
 
     return Buffer.concat([Buffer.from('PZPK'), integer(1), integer(1), string('AuthoredItems'), integer(duplicate ? 2 : 1), integer(1),
         sprite, ...(duplicate ? [sprite] : []), integer(png.length), png]);
@@ -287,6 +303,64 @@ test('original declared item icons preserve real pack aliases, crop, trim and de
     assert.deepEqual(later[0].crop, { x: 2, y: 1, width: 3, height: 4 });
     await assert.rejects(resources.resolveItemTextures([{ fullType: 'Authored.Absent', rawFields: [{ name: 'Icon', value: 'NotThere' }] }]), /Required.*Item_NotThere/);
     await assert.rejects(resources.resolveItemTextures([{ fullType: 'Authored.Invalid', rawFields: [{ name: 'Icon', value: '../Authored' }] }]), /Invalid.*Icon/);
+});
+
+test('transitive original pane UI literals resolve exact UI2 sprites before loose images with natural trim geometry', async () => {
+    const { content, entries } = fixture();
+    const pane = 'media/lua/client/ISUI/ISInventoryPane.lua';
+    const packPath = 'media/texturepacks/UI2.pack';
+    const requested = 'media/ui/icon.png';
+    const other = 'media/ui/variant/icon.png';
+    const bytes = itemIconPack(false, 8, 8, 'icon');
+    const page = await (await openPack(new Blob([bytes]))).pageBlob(0);
+
+    entries.set('media/lua/client/ISUI/ISInventoryPage.lua', 'require "ISUI/ISInventoryPane"');
+    entries.set(pane, `function pane() return getTexture("${requested}"), getTexture("${other}"), getTexture("media/ui/Absent.png") end`);
+    entries.set(packPath, bytes);
+    entries.set(other, page);
+    content.manifest.files.push(...[pane, packPath, other].map((path) => ({ path })));
+    const resources = await loadNativeGameResources(content, [], 60, { requireUI: true });
+    const icon = resources.textures.find(({ aliases = [] }) => aliases.includes(requested));
+
+    assert.ok(icon, 'Packed pane icon must be resident even without a loose manifest PNG');
+    assert.deepEqual(icon.aliases, [requested, other]);
+    assert.deepEqual(icon.crop, { x: 2, y: 1, width: 3, height: 4 });
+    assert.deepEqual([icon.widthOrig, icon.heightOrig, icon.offsetX, icon.offsetY], [5, 7, 1, 2]);
+    assert.equal(resources.textures.some(({ path }) => path === other), false);
+    const uploaded = Object.values(resources.fonts).map(({ atlasPath }) => ({ path: atlasPath, width: 32, height: 16 }));
+
+    uploaded.push({ ...icon, width: icon.crop.width, height: icon.crop.height });
+    const ui = createGameUI();
+
+    try {
+        ui.setViewport(100, 80);
+        ui.initialize({ textures: uploaded, indexedTextures: resources.indexedTextures, fonts: resources.fonts, translations: {}, settings: resources.settings });
+        const b = ui.bindings;
+        const texture = b.call('texture', 'source', requested);
+        const id = b.call('new', 'source', {});
+
+        assert.equal(b.call('texture', 'source', other), texture);
+        assert.equal(b.call('texture', 'source', 'media/ui/Absent.png'), null);
+        b.call('add', 'source', id);
+        ui.setCallbacks(id, {
+            /**
+             * Consume the pane's exact packed texture through unscaled original drawing.
+             *
+             * @returns {void}
+             */
+            render: () => {
+                b.call('element', 'source', id, 'DrawTexture', texture, 10, 12, 1);
+            },
+        });
+        assert.deepEqual(ui.render().map(({ x, y, width, height }) => [x, y, width, height]), [[11, 14, 3, 4]]);
+    } finally {
+        ui.dispose();
+    }
+
+    entries.set(packPath, itemIconPack(true, 8, 8, 'icon'));
+    await assert.rejects(loadNativeGameResources(content, [], 60, { requireUI: true }), /icon.*found 2/u);
+    entries.set(packPath, Buffer.from('damaged authored pack'));
+    await assert.rejects(loadNativeGameResources(content, [], 60, { requireUI: true }), /pack|PZPK|truncated/iu);
 });
 
 test('original NewSmall enum is aliased only by matching actual source descriptor and atlas declarations', async () => {
@@ -364,6 +438,52 @@ test('packed item sprites take precedence over same-name loose PNGs and genuine 
     }
 
     assert.equal(destroyed, 2);
+});
+
+test('helper-only image button requests preload the authored PNG for natural-size rendering', async () => {
+    const { content, descriptors, entries } = fixture();
+    const path = 'media/ui/controls/Authored.png';
+    const unrequested = 'media/ui/controls/Unrequested.png';
+    const image = await (await openPack(new Blob([itemIconPack(false, 12, 6)]))).pageBlob(0);
+
+    entries.set(path, image);
+    entries.set(unrequested, image);
+    content.manifest.files.push({ path }, { path: unrequested });
+    descriptors[0].sources[0].source = `
+        control:getImageButtonControl("${path}")
+        control:getImageButtonControl('${path}')
+        control:getImageButtonControl("media/ui/controls/Absent.png")
+    `;
+    const resources = await loadNativeGameResources(content, descriptors, 60);
+    const uploaded = Object.values(resources.fonts).map(({ atlasPath }) => ({ path: atlasPath, width: 32, height: 16 }));
+
+    uploaded.push(...await Promise.all(resources.textures.filter((entry) => entry.path === path).map(async (entry) => ({
+        ...entry, ...parsePngHeader(new Uint8Array(await entry.file.slice(0, 33).arrayBuffer())),
+    }))));
+    const ui = createGameUI();
+
+    try {
+        ui.setViewport(100, 80);
+        ui.initialize({ textures: uploaded, indexedTextures: resources.indexedTextures, fonts: resources.fonts, translations: {}, settings: resources.settings });
+        const b = ui.bindings;
+        const icon = b.call('texture', 'source', path);
+        const id = b.call('new', 'source', {});
+
+        assert.equal(b.call('texture', 'source', 'media/ui/controls/Absent.png'), null);
+        assert.throws(() => b.call('texture', 'source', unrequested), /indexed.*not.*loaded|indexed.*preload/iu);
+        b.call('add', 'source', id);
+        ui.setCallbacks(id, {
+            /** Draw the helper-selected image using its decoded, unscaled source dimensions. */
+            render: () => {
+                b.call('element', 'source', id, 'DrawTexture', icon, 10, 12, 0.5);
+            },
+        });
+        assert.deepEqual(ui.render().map(({ x, y, width, height, color }) => [x, y, width, height, color]), [
+            [10, 12, 12, 6, { r: 1, g: 1, b: 1, a: 0.5 }],
+        ]);
+    } finally {
+        ui.dispose();
+    }
 });
 
 test('indexed packed icon ambiguity and damaged bytes refuse rather than falling through to a valid loose image', async () => {

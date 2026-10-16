@@ -3,7 +3,10 @@
 use super::{
     BAD_FORMAT, BLOCKED, ENGINE, NAV_WALL_NORTH, NAV_WALL_WEST, OK, OUT_OF_RANGE, SCRATCH,
 };
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
+};
 
 type SquareKey = (i32, i32, i32);
 const NORTH: u32 = 1;
@@ -26,6 +29,8 @@ const DOOR_INTERACTION_PROPERTIES_MASK: u32 = INTERACTION_PROPERTIES_MASK & !(32
 const LIMIT: usize = 65_536;
 const REACH_UNKNOWN: u32 = 1 << 19;
 
+const RAIN_SHIFT: u32 = 20;
+const RAIN_UNKNOWN: u8 = 4;
 #[derive(Clone, Copy, PartialEq)]
 struct Door {
     id: u32,
@@ -41,6 +46,8 @@ struct Door {
     interaction_properties: [u16; 4],
     reach_properties: [u8; 4],
     reach_known: bool,
+    rain_blockers: [u8; 4],
+    rain_known: bool,
     has_curtain: bool,
     curtain_open: bool,
     curtain_inside: bool,
@@ -63,6 +70,9 @@ impl Door {
     fn reach_properties(self) -> u8 {
         self.reach_properties
             [if self.flags & TOGGLED != 0 { 2 } else { 0 } + usize::from(self.open())]
+    }
+    fn rain_blockers(self) -> u8 {
+        self.rain_blockers[if self.flags & TOGGLED != 0 { 2 } else { 0 } + usize::from(self.open())]
     }
     fn blocked(self) -> bool {
         !self.open() || self.flags & BARRICADED != 0
@@ -144,6 +154,8 @@ struct Square {
     reach_walls: u8,
     reach_known: bool,
     floor: Option<Floor>,
+    rain_blockers: u8,
+    have_roof: Option<bool>,
 }
 impl Square {
     fn solid(self) -> bool {
@@ -164,6 +176,8 @@ struct Floor {
 struct Doors {
     rows: Vec<Door>,
     squares: HashMap<SquareKey, Square>,
+    roof_columns: HashSet<(i32, i32)>,
+    rain_version: bool,
     removed: HashMap<SquareKey, u8>,
     edges: HashMap<SquareKey, u8>,
     // Low seven bits retain legacy stand/square facts; upper bits are source facts.
@@ -178,6 +192,8 @@ impl Doors {
         Self {
             rows: Vec::new(),
             squares: HashMap::new(),
+            roof_columns: HashSet::new(),
+            rain_version: false,
             removed: HashMap::new(),
             edges: HashMap::new(),
             sprite_facts: HashMap::new(),
@@ -196,8 +212,10 @@ impl Doors {
             } else {
                 REACH_UNKNOWN
             };
-            let sprite_facts =
-                door.sprite_facts() as u32 | ((door.interaction_properties() as u32) << 7) | reach;
+            let sprite_facts = door.sprite_facts() as u32
+                | ((door.interaction_properties() as u32) << 7)
+                | reach
+                | ((door.rain_blockers() as u32) << RAIN_SHIFT);
             if sprite_facts != 0 {
                 *self.sprite_facts.entry(door.position()).or_default() |= sprite_facts;
             }
@@ -206,6 +224,33 @@ impl Doors {
             }
             let (key, bit) = door.edge();
             *self.edges.entry(key).or_default() |= bit;
+        }
+    }
+    fn rebuild_roof_column(
+        squares: &mut HashMap<SquareKey, Square>,
+        sprite_facts: &HashMap<SquareKey, u32>,
+        x: i32,
+        y: i32,
+    ) {
+        let mut roof = Some(false);
+        for z in (0..=31).rev() {
+            let key = (x, y, z);
+            let Some(square) = squares.get_mut(&key) else {
+                continue;
+            };
+            square.have_roof = roof;
+            let blockers = square.rain_blockers
+                | ((sprite_facts.get(&key).copied().unwrap_or(0) >> RAIN_SHIFT) as u8);
+            if blockers & 3 != 0 {
+                roof = Some(true);
+            } else if blockers & RAIN_UNKNOWN != 0 && roof != Some(true) {
+                roof = None;
+            }
+        }
+    }
+    fn rebuild_roofs(&mut self) {
+        for &(x, y) in &self.roof_columns {
+            Self::rebuild_roof_column(&mut self.squares, &self.sprite_facts, x, y);
         }
     }
     // SplitMix64 is a port-owned saved RNG, NOT native CellularAutomaton parity.
@@ -594,6 +639,7 @@ thread_local! {
     static DOORS: RefCell<Doors> = RefCell::new(Doors::new(1, 4));
     static STAGING: RefCell<Option<(Doors, bool)>> = const { RefCell::new(None) };
     static RESTORE: RefCell<Option<DoorRestore>> = const { RefCell::new(None) };
+    static SOURCE_CHUNK_GENERATION: Cell<u32> = const { Cell::new(1) };
 }
 pub(super) fn rng_state() -> u64 {
     DOORS.with(|state| state.borrow().rng)
@@ -625,8 +671,33 @@ pub(super) fn flags(x: i32, y: i32, base: u8) -> u8 {
             | state.edges.get(&key).copied().unwrap_or(0)
     })
 }
+pub(super) fn has_square(x: i32, y: i32, z: i32) -> bool {
+    DOORS.with(|state| state.borrow().squares.contains_key(&(x, y, z)))
+}
+/// Derived source roof authority exists only for resident source z31..0 columns.
+pub(crate) fn source_have_roof(x: i32, y: i32, z: i32) -> Result<bool, ()> {
+    DOORS.with(|state| {
+        state
+            .borrow()
+            .squares
+            .get(&(x, y, z))
+            .and_then(|square| square.have_roof)
+            .ok_or(())
+    })
+}
+fn retire_source_chunks() {
+    SOURCE_CHUNK_GENERATION.with(|generation| {
+        generation.set(
+            generation
+                .get()
+                .checked_add(1)
+                .expect("source chunk generation exhausted"),
+        );
+    });
+}
 pub(super) fn reset() {
     DOORS.with(|state| *state.borrow_mut() = Doors::new(1, 4));
+    retire_source_chunks();
     door_import_abort();
     door_restore_abort();
 }
@@ -637,6 +708,24 @@ pub extern "C" fn door_import_begin(seed: u32, houses: u32, initialize: u32) -> 
     }
     STAGING.with(|state| *state.borrow_mut() = Some((Doors::new(seed, houses), initialize != 0)));
     OK
+}
+/// Opt into blocker metadata before staging any geometry; legacy reserved zero is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn door_import_rain_blockers_version(version: u32) -> i32 {
+    if version != 1 {
+        return BAD_FORMAT;
+    }
+    STAGING.with(|stage| {
+        let mut stage = stage.borrow_mut();
+        let Some((state, _)) = stage.as_mut() else {
+            return BAD_FORMAT;
+        };
+        if state.rain_version || !state.rows.is_empty() || !state.squares.is_empty() {
+            return BAD_FORMAT;
+        }
+        state.rain_version = true;
+        OK
+    })
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn door_import_abort() {
@@ -677,6 +766,8 @@ pub extern "C" fn door_import_stage() -> i32 {
         interaction_properties: [0; 4],
         reach_properties: [0; 4],
         reach_known: false,
+        rain_blockers: [RAIN_UNKNOWN; 4],
+        rain_known: false,
         // Actual new-blueprint IsoDoor constructors leave these JVM fields zero.
         has_curtain: false,
         curtain_open: false,
@@ -725,6 +816,43 @@ pub extern "C" fn door_import_interaction_properties(
     })
 }
 #[unsafe(no_mangle)]
+pub extern "C" fn door_import_rain_blockers(
+    id: u32,
+    initial_closed: u32,
+    initial_open: u32,
+    toggled_closed: u32,
+    toggled_open: u32,
+) -> i32 {
+    let masks = [initial_closed, initial_open, toggled_closed, toggled_open];
+    if masks.iter().any(|mask| *mask > RAIN_UNKNOWN as u32) {
+        return BAD_FORMAT;
+    }
+    STAGING.with(|stage| {
+        let mut stage = stage.borrow_mut();
+        let Some((state, _)) = stage.as_mut() else {
+            return BAD_FORMAT;
+        };
+        if !state.rain_version {
+            return BAD_FORMAT;
+        }
+        let index = if state.rows.last().is_some_and(|door| door.id == id) {
+            state.rows.len() - 1
+        } else {
+            let Some(index) = state.rows.iter().position(|door| door.id == id) else {
+                return BAD_FORMAT;
+            };
+            index
+        };
+        let door = &mut state.rows[index];
+        if door.rain_known {
+            return BAD_FORMAT;
+        }
+        door.rain_blockers = masks.map(|mask| mask as u8);
+        door.rain_known = true;
+        OK
+    })
+}
+#[unsafe(no_mangle)]
 pub extern "C" fn door_square_stage() -> i32 {
     let w = words();
     if !integer(w[0], -25_600.0, 25_855.0)
@@ -737,7 +865,7 @@ pub extern "C" fn door_square_stage() -> i32 {
             .any(|v| !integer(*v, 0.0, WALLS as f64) || *v as u8 & !WALLS != 0)
         || !integer(w[10], 0.0, INTERACTION_PROPERTIES_MASK as f64)
         || w[10] as u32 & !INTERACTION_PROPERTIES_MASK != 0
-        || w[11] != 0.0
+        || !integer(w[11], 0.0, RAIN_UNKNOWN as f64)
     {
         return BAD_FORMAT;
     }
@@ -746,6 +874,9 @@ pub extern "C" fn door_square_stage() -> i32 {
         let Some((state, _)) = state.as_mut() else {
             return BAD_FORMAT;
         };
+        if !state.rain_version && w[11] != 0.0 {
+            return BAD_FORMAT;
+        }
         let key = (w[0] as i32, w[1] as i32, w[2] as i32);
         if state.squares.len() >= 1_048_576 || state.squares.contains_key(&key) {
             return BAD_FORMAT;
@@ -764,8 +895,17 @@ pub extern "C" fn door_square_stage() -> i32 {
                 reach_walls: 0,
                 reach_known: false,
                 floor: None,
+                rain_blockers: if state.rain_version {
+                    w[11] as u8
+                } else {
+                    RAIN_UNKNOWN
+                },
+                have_roof: None,
             },
         );
+        if key.2 >= 0 {
+            state.roof_columns.insert((key.0, key.1));
+        }
         OK
     })
 }
@@ -957,7 +1097,9 @@ pub extern "C" fn door_import_commit() -> i32 {
             state.initialize();
         }
         state.rebuild();
+        state.rebuild_roofs();
         DOORS.with(|live| *live.borrow_mut() = state);
+        retire_source_chunks();
         super::actions::invalidate();
         OK
     })
@@ -975,7 +1117,12 @@ pub extern "C" fn square_read(x: i32, y: i32, z: i32) -> i32 {
             y as f64,
             z as f64,
             square.room as f64,
-            square.flags as f64,
+            (square.flags
+                | match square.have_roof {
+                    Some(true) => 64 | 128,
+                    Some(false) => 64,
+                    None => 0,
+                }) as f64,
             if state.can_stand(key, square) {
                 1.0
             } else {
@@ -984,6 +1131,21 @@ pub extern "C" fn square_read(x: i32, y: i32, z: i32) -> i32 {
         ]);
         OK
     })
+}
+/// Original IsoGridSquare.getChunk owns an 8x8 chunk (IsoCell.getChunkForGridSquare).
+/// Source-square import replaces the resident domain atomically; staging and saved door
+/// state do not replace it. A chunk handle is meaningful only for a resident square.
+#[unsafe(no_mangle)]
+pub extern "C" fn source_square_chunk_read(x: i32, y: i32, z: i32) -> i32 {
+    if !has_square(x, y, z) {
+        return OUT_OF_RANGE;
+    }
+    put(&[
+        x.div_euclid(8) as f64,
+        y.div_euclid(8) as f64,
+        SOURCE_CHUNK_GENERATION.with(|generation| generation.get()) as f64,
+    ]);
+    OK
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn square_blocked_to(
@@ -1270,6 +1432,16 @@ pub extern "C" fn door_header_read() {
 pub extern "C" fn door_toggle(id: u32) -> i32 {
     super::actions::queue_request_door(id)
 }
+/// Original context-key ToggleDoor calls ToggleDoorActual directly, not a timed
+/// action or the menu's couldBeOpen predicate (retained javap 687:10474-10480).
+/// Returns OK on mutation, BLOCKED on a valid refusal, OUT_OF_RANGE otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn source_context_toggle_door(id: u32) -> i32 {
+    if super::health() <= 0.0 {
+        return OUT_OF_RANGE;
+    }
+    commit_toggle(id)
+}
 pub(super) fn commit_toggle(id: u32) -> i32 {
     let (ax, ay) = ENGINE.with(|engine| {
         let engine = engine.borrow();
@@ -1348,10 +1520,28 @@ pub(super) fn commit_toggle(id: u32) -> i32 {
             row.flags ^= OPEN;
             row.flags |= TOGGLED;
             // Native setLockedByKey(false) also calls setIsLocked(false).
-            row.flags &= !(SELECTED | KEY_LOCKED | LOCKED);
+            row.flags &= !(KEY_LOCKED | LOCKED);
         }
         state.revision += 1;
         state.rebuild();
+        for i in 0..state.rows.len() {
+            let row = state.rows[i];
+            if row.flags & SELECTED == 0 {
+                continue;
+            }
+            let old = Door {
+                flags: row.flags ^ OPEN,
+                ..row
+            }
+            .position();
+            let new = row.position();
+            let state = &mut *state;
+            Doors::rebuild_roof_column(&mut state.squares, &state.sprite_facts, old.0, old.1);
+            if (old.0, old.1) != (new.0, new.1) {
+                Doors::rebuild_roof_column(&mut state.squares, &state.sprite_facts, new.0, new.1);
+            }
+            state.rows[i].flags &= !SELECTED;
+        }
         OK
     })
 }
@@ -1459,6 +1649,7 @@ pub extern "C" fn door_restore_commit() -> i32 {
             state.rng = rng;
             state.houses = houses;
             state.rebuild();
+            state.rebuild_roofs();
             super::actions::invalidate();
             OK
         })
@@ -1482,6 +1673,229 @@ mod tests {
         } else {
             result
         }
+    }
+    fn stage_rain_square((x, y, z): SquareKey, blockers: f64) -> i32 {
+        put(&[
+            x as f64, y as f64, z as f64, -1.0, 32.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, blockers,
+        ]);
+        door_square_stage()
+    }
+    #[test]
+    fn rain_wire_requires_explicit_per_import_admission_before_any_rows() {
+        reset();
+        assert_eq!(door_import_rain_blockers_version(1), BAD_FORMAT);
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(door_import_rain_blockers_version(0), BAD_FORMAT);
+        assert_eq!(door_import_rain_blockers_version(2), BAD_FORMAT);
+        assert_eq!(stage_rain_square((0, 0, 1), 1.0), BAD_FORMAT);
+        assert_eq!(stage_rain_square((0, 0, 1), 4.0), BAD_FORMAT);
+        assert_eq!(stage_rain_square((0, 0, 1), 0.0), OK);
+        assert_eq!(door_import_rain_blockers_version(1), BAD_FORMAT);
+        assert_eq!(stage_rain_square((0, 0, 0), 0.0), OK);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_have_roof(0, 0, 1), Ok(false));
+        assert_eq!(
+            source_have_roof(0, 0, 0),
+            Err(()),
+            "legacy reserved zero and solidFloor predicate establish no blocker authority"
+        );
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(door_import_rain_blockers_version(99), BAD_FORMAT);
+        assert_eq!(source_have_roof(0, 0, 0), Err(()));
+        assert_eq!(door_import_rain_blockers_version(1), OK);
+        assert_eq!(door_import_rain_blockers_version(1), BAD_FORMAT);
+        assert_eq!(stage_rain_square((0, 0, 1), 0.0), OK);
+        assert_eq!(stage_rain_square((0, 0, 0), 0.0), OK);
+        assert_eq!(source_have_roof(0, 0, 0), Err(()));
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_have_roof(0, 0, 0), Ok(false));
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        stage_door(NORTH, 0);
+        assert_eq!(door_import_rain_blockers_version(1), BAD_FORMAT);
+        assert_eq!(door_import_rain_blockers(1, 0, 0, 0, 0), BAD_FORMAT);
+        door_import_abort();
+        assert_eq!(source_have_roof(0, 0, 0), Ok(false));
+        // Each new import returns to the legacy wire, independent of live metadata.
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(stage_rain_square((0, 0, 1), 0.0), OK);
+        assert_eq!(stage_rain_square((0, 0, 0), 0.0), OK);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_have_roof(0, 0, 0), Err(()));
+    }
+    #[test]
+    fn roof_columns_assign_prior_blockers_across_gaps_and_keep_unknown_authority() {
+        reset();
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(door_import_rain_blockers_version(1), OK);
+        assert_eq!(stage_rain_square((0, 0, 32), 1.0), BAD_FORMAT);
+        for (key, blockers) in [
+            ((0, 0, 31), 1.0),
+            ((0, 0, 7), 0.0),
+            ((0, 0, 0), 0.0),
+            ((0, 0, -1), 1.0),
+            ((1, 0, 31), 4.0),
+            ((1, 0, 20), 0.0),
+            ((1, 0, 10), 2.0),
+            ((1, 0, 0), 0.0),
+            ((2, 0, 0), 0.0),
+        ] {
+            assert_eq!(stage_rain_square(key, blockers), OK);
+        }
+        assert_eq!(source_have_roof(0, 0, 0), Err(()));
+        assert_eq!(door_import_commit(), OK);
+        for (key, roof) in [
+            ((0, 0, 31), Ok(false)),
+            ((0, 0, 7), Ok(true)),
+            ((0, 0, 0), Ok(true)),
+            ((0, 0, -1), Err(())),
+            ((0, 0, 32), Err(())),
+            ((0, 0, 1), Err(())),
+            ((1, 0, 31), Ok(false)),
+            ((1, 0, 20), Err(())),
+            ((1, 0, 10), Err(())),
+            ((1, 0, 0), Ok(true)),
+            ((2, 0, 0), Ok(false)),
+        ] {
+            assert_eq!(source_have_roof(key.0, key.1, key.2), roof, "{key:?}");
+        }
+        assert_eq!(square_read(0, 0, 31), OK);
+        assert_eq!(words()[4] as u32, 32 | 64);
+        assert_eq!(square_read(0, 0, 0), OK);
+        assert_eq!(words()[4] as u32, 32 | 64 | 128);
+        assert_eq!(square_read(1, 0, 20), OK);
+        assert_eq!(words()[4] as u32, 32);
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(door_import_rain_blockers_version(1), OK);
+        assert_eq!(stage_rain_square((0, 0, 0), 0.0), OK);
+        for invalid in [-1.0, 5.0, 0.5, f64::NAN] {
+            assert_eq!(stage_rain_square((0, 0, 1), invalid), BAD_FORMAT);
+        }
+        assert_eq!(source_have_roof(0, 0, 0), Ok(true));
+        door_import_abort();
+        assert_eq!(source_have_roof(0, 0, 0), Ok(true));
+        reset();
+        assert_eq!(source_have_roof(0, 0, 0), Err(()));
+    }
+    #[test]
+    fn moving_door_rain_snapshots_refresh_both_columns_and_restore_geometry_metadata() {
+        reset();
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(door_import_rain_blockers_version(1), OK);
+        for key in [
+            (0, 0, 0),
+            (0, -1, 0),
+            (-1, 1, 0),
+            (-1, 0, 0),
+            (0, 0, 1),
+            (-1, 1, 1),
+        ] {
+            assert_eq!(stage_rain_square(key, 0.0), OK);
+        }
+        put(&[
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            NORTH as f64,
+            -1.0,
+            -1.0,
+            -1.0,
+            0.0,
+            2.0,
+            0.0,
+            0.0,
+        ]);
+        assert_eq!(door_import_stage(), OK);
+        assert_eq!(door_import_rain_blockers(1, 1, 2, 0, 2), OK);
+        assert_eq!(door_import_rain_blockers(1, 0, 0, 0, 0), BAD_FORMAT);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_have_roof(0, 0, 0), Ok(true));
+        assert_eq!(source_have_roof(-1, 1, 0), Ok(false));
+        // Restore is the same admitted geometry-state transition used by web saves.
+        assert_eq!(door_restore_begin(1, 1, 1, 0, 1), OK);
+        put(&[1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(door_restore_stage(), OK);
+        assert_eq!(door_restore_commit(), OK);
+        assert_eq!(source_have_roof(0, 0, 0), Ok(false));
+        assert_eq!(source_have_roof(-1, 1, 0), Ok(true));
+        assert_eq!(source_have_roof(-1, 1, 1), Ok(false));
+        assert_eq!(door_restore_begin(2, 1, 1, 0, 1), OK);
+        put(&[1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(door_restore_stage(), OK);
+        assert_eq!(door_restore_commit(), OK);
+        assert_eq!(source_have_roof(0, 0, 0), Ok(false));
+        assert_eq!(source_have_roof(-1, 1, 0), Ok(false));
+    }
+    #[test]
+    fn unknown_door_blockers_do_not_erase_known_positive_blockers() {
+        reset();
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(door_import_rain_blockers_version(1), OK);
+        for key in [(0, 0, 0), (0, -1, 0), (0, 0, 2), (0, 0, 1)] {
+            assert_eq!(
+                stage_rain_square(key, if key.2 == 1 { 2.0 } else { 0.0 }),
+                OK
+            );
+        }
+        put(&[
+            1.0,
+            0.0,
+            0.0,
+            2.0,
+            NORTH as f64,
+            -1.0,
+            -1.0,
+            -1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]);
+        assert_eq!(door_import_stage(), OK);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_have_roof(0, 0, 2), Ok(false));
+        assert_eq!(source_have_roof(0, 0, 1), Err(()));
+        assert_eq!(source_have_roof(0, 0, 0), Ok(true));
+    }
+    #[test]
+    fn source_chunk_identity_follows_atomic_square_residency() {
+        reset();
+        assert_eq!(source_square_chunk_read(5, 5, 0), OUT_OF_RANGE);
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        for key in [(5, 5, 0), (7, 7, 1), (8, 5, 0), (-1, -2, 0)] {
+            assert_eq!(stage_square(key, 0.0), OK);
+        }
+        assert_eq!(source_square_chunk_read(5, 5, 0), OUT_OF_RANGE);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_square_chunk_read(5, 5, 0), OK);
+        let first = words();
+        assert_eq!(&first[..2], &[0.0, 0.0]);
+        assert_eq!(source_square_chunk_read(7, 7, 1), OK);
+        assert_eq!(&words()[..3], &first[..3]);
+        assert_eq!(source_square_chunk_read(8, 5, 0), OK);
+        assert_eq!(&words()[..2], &[1.0, 0.0]);
+        assert_eq!(source_square_chunk_read(-1, -2, 0), OK);
+        assert_eq!(&words()[..2], &[-1.0, -1.0]);
+        assert_eq!(source_square_chunk_read(6, 5, 0), OUT_OF_RANGE);
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(stage_square((5, 5, 0), 0.0), OK);
+        assert_eq!(source_square_chunk_read(5, 5, 0), OK);
+        assert_eq!(&words()[..3], &first[..3]);
+        door_import_abort();
+        assert_eq!(source_square_chunk_read(5, 5, 0), OK);
+        assert_eq!(&words()[..3], &first[..3]);
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(stage_square((5, 5, 0), 0.0), OK);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_square_chunk_read(5, 5, 0), OK);
+        assert_ne!(words()[2], first[2]);
+        reset();
+        assert_eq!(source_square_chunk_read(5, 5, 0), OUT_OF_RANGE);
+        assert_eq!(door_import_begin(1, 1, 0), OK);
+        assert_eq!(stage_square((5, 5, 0), 0.0), OK);
+        assert_eq!(door_import_commit(), OK);
+        assert_eq!(source_square_chunk_read(5, 5, 0), OK);
+        assert_ne!(words()[2], first[2]);
     }
     #[test]
     fn floor_facts_publish_atomically_and_preserve_source_float_heights() {
@@ -1574,6 +1988,50 @@ mod tests {
             engine.x = actor.0 as f32 + 0.5;
             engine.y = actor.1 as f32 + 0.5;
         });
+    }
+    #[test]
+    fn source_context_toggle_door_is_direct_live_and_preserves_refusals() {
+        use crate::actions::{queue_commit_door, queue_current, queue_event_read, queue_length};
+
+        source_menu_scene((0, 0, 0), false, NORTH | LOCKED | KEY_LOCKED, 0);
+        assert_eq!(queue_commit_door(1, 1, 1), OUT_OF_RANGE);
+        assert_eq!(source_context_toggle_door(1), OK);
+        assert!(DOORS.with(|state| state.borrow().rows[0].open()));
+        assert_eq!(source_context_toggle_door(1), OK);
+        assert!(!DOORS.with(|state| state.borrow().rows[0].open()));
+        assert_eq!(DOORS.with(|state| state.borrow().revision), 2);
+        assert_eq!(queue_length(), 0);
+        assert_eq!(queue_current(), 0);
+        assert_eq!(queue_event_read(), 0);
+        assert_eq!(queue_commit_door(1, 1, 1), OUT_OF_RANGE);
+
+        for (actor, outside, flags, obstruction, alive, id, expected) in [
+            ((0, 0, 0), true, NORTH | LOCKED, 0, true, 1, BLOCKED),
+            ((0, 0, 0), true, NORTH | KEY_LOCKED, 0, true, 1, BLOCKED),
+            ((0, 0, 0), true, NORTH | CUSTOM_LOCK, 0, true, 1, BLOCKED),
+            ((0, 0, 0), false, NORTH | BARRICADED, 0, true, 1, BLOCKED),
+            ((0, 0, 0), false, NORTH, 16, true, 1, BLOCKED),
+            ((5, 5, 0), false, NORTH, 0, true, 1, OUT_OF_RANGE),
+            ((0, 0, 0), false, NORTH, 0, false, 1, OUT_OF_RANGE),
+            ((0, 0, 0), false, NORTH, 0, true, 999, OUT_OF_RANGE),
+        ] {
+            source_menu_scene(actor, outside, flags, obstruction);
+            if !alive {
+                ENGINE.with(|engine| engine.borrow_mut().health = 0.0);
+            }
+            let before = DOORS.with(|state| {
+                let state = state.borrow();
+                (state.rows[0], state.revision)
+            });
+            assert_eq!(source_context_toggle_door(id), expected);
+            assert!(DOORS.with(|state| {
+                let state = state.borrow();
+                (state.rows[0], state.revision) == before
+            }));
+            assert_eq!(queue_length(), 0);
+            assert_eq!(queue_current(), 0);
+            assert_eq!(queue_event_read(), 0);
+        }
     }
     #[test]
     fn source_menu_permission_uses_live_inside_rooms_without_mutating_door() {
@@ -1872,7 +2330,7 @@ mod tests {
             assert_eq!(blocked((0, 0, 0), (1, 0, 0)), expected);
             assert_eq!(blocked((1, 0, 0), (0, 0, 0)), expected);
             assert_eq!(square_read(1, 0, 0), OK);
-            assert_eq!(&words()[..6], &[1.0, 0.0, 0.0, -1.0, 32.0, 1.0]);
+            assert_eq!(&words()[..6], &[1.0, 0.0, 0.0, -1.0, 96.0, 1.0]);
             assert_eq!(flags(1, 0, 0), 0);
         }
         for (properties, expected) in [(2, 1), (2 | 8, 0), (32, 1)] {
@@ -2112,7 +2570,7 @@ mod tests {
             assert_eq!(stage_square((2, 0, 0), mask), BAD_FORMAT);
             assert_eq!(blocked((0, 0, 0), (1, 0, 0)), 1);
         }
-        put(&[2.0, 0.0, 0.0, -1.0, 32.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        put(&[2.0, 0.0, 0.0, -1.0, 32.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0]);
         assert_eq!(door_square_stage(), BAD_FORMAT);
         stage_door(0, 0);
         assert_eq!(door_import_interaction_properties(1, 4, 0, 4, 0), OK);

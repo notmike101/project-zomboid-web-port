@@ -304,7 +304,7 @@ function nativePackageFiles(descriptor) {
  *
  * @param {object[]} descriptors - Selected enabled packages.
  * @param {object} content - Private directory.
- * @param {{path:string,source:string,execute?:boolean}[]} [additionalSources] - Original startup text; execute defaults true.
+ * @param {{path:string,source:string,execute?:boolean}[]} [additionalSources] - Ordered original startup text, including an optional explicit root stdlib.lua; execute defaults true.
  * @returns {Promise<object[]>} Startup seeds followed by require-only dependencies, installed once by module name.
  */
 async function engineSources(descriptors, content, additionalSources = []) {
@@ -330,8 +330,8 @@ async function engineSources(descriptors, content, additionalSources = []) {
     }
 
     for (const item of additionalSources) {
-        if (!item || typeof item.path !== 'string' || !LUA_PATH.test(item.path) || item.path.includes('\\') || item.path.split('/').some((part) => part === '.' || part === '..') || typeof item.source !== 'string' || item.source.charCodeAt(0) === 27 || item.source.includes('\0') || (item.execute !== undefined && typeof item.execute !== 'boolean')) {
-            throw new TypeError('Engine startup sources require original media/lua paths and Lua text');
+        if (!item || typeof item.path !== 'string' || (!LUA_PATH.test(item.path) && item.path !== 'stdlib.lua') || item.path.includes('\\') || item.path.split('/').some((part) => part === '.' || part === '..') || typeof item.source !== 'string' || item.source.charCodeAt(0) === 27 || item.source.includes('\0') || (item.execute !== undefined && typeof item.execute !== 'boolean')) {
+            throw new TypeError('Engine startup sources require original media/lua paths or exact root stdlib.lua and Lua text');
         }
 
         const name = item.path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, '').toLowerCase();
@@ -503,7 +503,7 @@ async function prepareNativeSession(descriptors, content, options = {}) {
     }
 
     const startup = await equipmentStartup(content);
-    const sources = await engineSources(descriptors, content, [...startup, ...(options.engineSources ?? [])]);
+    const sources = await engineSources(descriptors, content, [...(options.engineSources ?? []), ...startup]);
     const session = await createLuaSession({
         ui: options.ui,
         sourceFiles: options.sourceFiles,

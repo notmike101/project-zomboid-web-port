@@ -22,7 +22,7 @@ const STAIR_TYPES = new Set(['stairsTN', 'stairsMN', 'stairsBN', 'stairsTW', 'st
 const STAIR_BITS = new Map([...STAIR_TYPES].map((type, index) => [type, 1 << index]));
 const SLOPE_DIRECTIONS = new Set(['N', 'NW', 'W', 'SW', 'S', 'SE', 'E', 'NE']);
 const EARLY_OTHER_TYPES = new Set(['lightswitch', 'curtainN', 'curtainS', 'curtainE', 'curtainW']);
-const FURNITURE_CONTAINERS = new Set(['barbecue', 'barbecuepropane', 'fireplace', 'clothingdryer', 'clothingwasher', 'woodstove', 'microwave']);
+const FURNITURE_CLASSES = new Map([['clothingdryer', 'IsoClothingDryer'], ['clothingwasher', 'IsoClothingWasher'], ['woodstove', 'IsoFireplace'], ['microwave', 'IsoStove']]);
 const CAMPING_SPRITES = new Set(['camping_01_04', 'camping_01_05', 'camping_01_06']);
 const STOVE_CONTAINERS = new Set(['stove', 'toaster', 'coffeemaker']);
 const REACH_WALLS = Object.freeze([
@@ -31,6 +31,7 @@ const REACH_WALLS = Object.freeze([
     Object.freeze({ north: false, west: true }),
     Object.freeze({ north: true, west: true }),
 ]);
+const EMPTY_CONTEXT_OBJECTS = Object.freeze([]);
 
 /**
  * Resolve exact original roles, preserving the actual manifest's portable casing.
@@ -442,6 +443,18 @@ function doorSquareFlags(sprite, square) {
 }
 
 /**
+ * Source rain blocking is flag presence, independent of stair/slope floor predicates.
+ *
+ * @param {object} sprite - Final surviving current sprite.
+ * @returns {number} solidfloor bit 0 and BlockRain bit 1.
+ */
+function rainBlockers(sprite) {
+    const props = sprite.properties;
+
+    return props.has('blueprint') ? 0 : (props.has('solidfloor') ? 1 : 0) | (props.has('BlockRain') ? 2 : 0);
+}
+
+/**
  * RecalcProperties skips blueprint before both current flags and cached type membership.
  *
  * @param {object} target - Source relation snapshot receiving positive facts.
@@ -607,20 +620,42 @@ function constructWindow(closed, sprites, north) {
 }
 
 /**
- * Recognize constructors that win before attachment and tree classification.
+ * Resolve the source constructors that precede attachment and tree classification.
  *
  * @param {object} sprite - Current shared source definition.
- * @returns {boolean} Whether an earlier non-window object constructor wins.
+ * @returns {string|undefined} Exact native class selected before overlays.
  */
 function beforeOverlays(sprite) {
     const props = sprite.properties;
     const container = props.get('container');
 
-    return props.get('IsoType') === 'IsoCombinationWasherDryer' || container === 'brazier'
-        || sprite.tileType === 'jukebox' || sprite.tileType === 'radio'
-        || (props.has('container') && (FURNITURE_CONTAINERS.has(container)
-            || STOVE_CONTAINERS.has(container?.toLowerCase())
-            || (container === 'campfire' && !CAMPING_SPRITES.has(sprite.name))));
+    if (props.has('container') && (container === 'barbecue' || container === 'barbecuepropane')) {
+        return 'IsoBarbecue';
+    }
+
+    // CellLoader 1038..1127 skips these three names, not the other campfire sprites.
+    if ((props.has('container') && (container === 'fireplace' || (container === 'campfire' && !CAMPING_SPRITES.has(sprite.name))))
+        || container === 'brazier') {
+        return 'IsoFireplace';
+    }
+
+    if (props.get('IsoType') === 'IsoCombinationWasherDryer') {
+        return 'IsoCombinationWasherDryer';
+    }
+
+    if (props.has('container') && FURNITURE_CLASSES.has(container)) {
+        return FURNITURE_CLASSES.get(container);
+    }
+
+    if (props.has('container') && STOVE_CONTAINERS.has(container?.toLowerCase())) {
+        return 'IsoStove';
+    }
+
+    if (sprite.tileType === 'jukebox') {
+        return 'IsoJukebox';
+    }
+
+    return sprite.tileType === 'radio' ? 'IsoRadio' : undefined;
 }
 
 /**
@@ -628,13 +663,13 @@ function beforeOverlays(sprite) {
  *
  * @param {object[]} objects - Current actual object order.
  * @param {object} sprite - New wall overlay.
- * @returns {boolean} Whether the overlay attaches instead of creating an object.
+ * @returns {object|undefined} Actual host, or independent fallback when absent.
  */
 function wallOverlayTarget(objects, sprite) {
     const props = sprite.properties;
 
     if (props.has('attachedSE')) {
-        return objects.some((object) => object.sprite.properties.has('WallSE'));
+        return objects.find((object) => object.sprite.properties.has('WallSE'));
     }
 
     let edge = 0;
@@ -646,22 +681,22 @@ function wallOverlayTarget(objects, sprite) {
     }
 
     if (!edge) {
-        return objects.some((object) => object.sprite.properties.has('cutN') || object.sprite.properties.has('cutW'));
+        return objects.findLast((object) => object.sprite.properties.has('cutN') || object.sprite.properties.has('cutW'));
     }
 
     const wall = objects.find((object) => !object.sprite.properties.has('WallSE') && (object.sprite.cutMask & edge));
 
     if (wall) {
-        return true;
+        return wall;
     }
 
     const window = objects.find((object) => object.kind === 'window' && object.special && (object.north ? 2 : 4) === edge);
 
     if (window?.sprite.properties.has(edge === 2 ? 'WindowN' : 'WindowW')) {
-        return true;
+        return window;
     }
 
-    return objects.some((object) => {
+    return objects.find((object) => {
         if (object.kind !== 'door' || (object.north ? 2 : 4) !== edge || !object.sprite.properties.has('GarageDoor')) {
             return false;
         }
@@ -703,6 +738,20 @@ function insertObject(objects, object, special) {
 }
 
 /**
+ * Preserve an attached placement on its actual owner, not as a second IsoObject.
+ *
+ * @param {object|undefined} owner - Earlier native host.
+ * @param {object} record - Source visual placement.
+ * @returns {void}
+ */
+function attachPlacement(owner, record) {
+    if (owner) {
+        record.owner = owner;
+        owner.attachments.push(record);
+    }
+}
+
+/**
  * Replay one source factory placement using only retained metadata gates.
  * Generic texture fallback and later entity/runtime state are outside this metadata boundary.
  *
@@ -717,31 +766,48 @@ function replayPlacement(objects, placement, registry, square) {
     const sprite = variant || registry.sprites.get(placement.spriteName);
     const props = sprite.properties;
     const floor = objects.find((object) => object.sprite.properties.has('solidfloor'));
+    const record = { placement, sprite };
+
+    square.depthPlacements.push(record);
 
     if (sprite.rawFloor && props.has('diamondFloor') && !props.has('transparentFloor') && floor?.sprite.properties.has('diamondFloor')) {
         if (floor.componentCandidate) {
             throw new Error(`Unsupported component floor replacement at ${square.x},${square.y},${square.z}`);
         }
 
+        floor.attachments.length = 0;
+        floor.mainPlacement = record;
+        record.owner = floor;
+        record.isParentSprite = true;
         floor.sprite = sprite;
 
         return;
     }
 
-    const object = { sprite, kind: 'other', north: false, special: false };
+    const object = { sprite, kind: 'other', north: false, special: false, sourceObjectClass: 'IsoObject', placement, mainPlacement: record, attachments: [] };
+    const earlyClass = beforeOverlays(sprite);
+
+    record.owner = object;
+    record.isParentSprite = true;
     let special = false;
     let replacement;
 
     if (sprite.tileType === 'doorN' || sprite.tileType === 'doorW') {
+        object.sourceObjectClass = 'IsoDoor';
         object.kind = 'door';
         object.north = sprite.tileType === 'doorN';
         object.open = props.has('open');
         object.partners = doorPartners(sprite, registry.sprites);
-        object.placement = placement;
         special = true;
     } else if (EARLY_OTHER_TYPES.has(sprite.tileType)) {
+        object.sourceObjectClass = sprite.tileType === 'lightswitch' ? 'IsoLightSwitch' : 'IsoCurtain';
         special = sprite.tileType !== 'lightswitch';
+
+        if (special) {
+            object.kind = 'curtain';
+        }
     } else if (props.has('windowN') || props.has('windowW')) {
+        object.sourceObjectClass = 'IsoWindow';
         object.kind = 'window';
         object.north = props.has('windowN');
         object.open = false;
@@ -750,47 +816,77 @@ function replayPlacement(objects, placement, registry, square) {
         replacement = constructWindow(sprite, registry.sprites, object.north);
         special = true;
     } else if (props.has('WindowN') || props.has('WindowW')) {
-        const overlay = objects.some((previous) => previous.sprite.tileType === 'wall'
+        const overlay = objects.findLast((previous) => previous.sprite.tileType === 'wall'
             && ((previous.sprite.properties.has('cutN') && props.has('WindowN'))
                 || (previous.sprite.properties.has('cutW') && props.has('WindowW'))));
 
         if (overlay) {
+            delete record.owner;
+            delete record.isParentSprite;
+            attachPlacement(overlay, record);
+
             return;
         }
 
         object.kind = 'frame';
+        object.sourceObjectClass = 'IsoWindowFrame';
         object.north = props.has('WindowN');
-    } else if (!beforeOverlays(sprite)) {
-        if (props.has('signal')) {
-            if (props.get('signal') !== 'radio' && props.get('signal') !== 'tv') {
-                throw new Error(`Unsupported original signal ${JSON.stringify(props.get('signal'))} on ${sprite.name}`);
-            }
-        } else if (props.has('Countertop')) {
-            if (objects.some((previous) => previous.sprite.properties.has('CountertopAttach'))) {
-                return;
-            }
-        } else if (props.has('WallOverlay')) {
-            if (wallOverlayTarget(objects, sprite)) {
-                return;
-            }
-        } else if (props.has('FloorOverlay')) {
-            return;
-        } else if (props.get('CustomName') !== 'Mannequin' && sprite.tileType === 'tree') {
-            if (sprite.name.startsWith('vegetation_trees') && !floor?.sprite.name.startsWith('blends_natural')) {
-                return;
-            }
-
-            const previous = objects.findIndex((candidate) => candidate.kind === 'tree');
-
-            if (previous !== -1) {
-                objects.splice(previous, 1);
-            }
-
-            object.kind = 'tree';
+    } else if (earlyClass) {
+        object.sourceObjectClass = earlyClass;
+    } else if (props.has('signal')) {
+        if (props.get('signal') !== 'radio' && props.get('signal') !== 'tv') {
+            throw new Error(`Unsupported original signal ${JSON.stringify(props.get('signal'))} on ${sprite.name}`);
         }
+
+        object.sourceObjectClass = props.get('signal') === 'radio' ? 'IsoRadio' : 'IsoTelevision';
+    } else if (props.has('Countertop')) {
+        const host = objects.find((previous) => previous.sprite.properties.has('CountertopAttach'));
+
+        if (host) {
+            delete record.owner;
+            delete record.isParentSprite;
+            attachPlacement(host, record);
+
+            return;
+        }
+    } else if (props.has('WallOverlay')) {
+        const host = wallOverlayTarget(objects, sprite);
+
+        if (host) {
+            delete record.owner;
+            delete record.isParentSprite;
+            attachPlacement(host, record);
+
+            return;
+        }
+    } else if (props.has('FloorOverlay')) {
+        delete record.owner;
+        delete record.isParentSprite;
+        attachPlacement(floor, record);
+
+        return;
+    } else if (props.get('CustomName') === 'Mannequin') {
+        object.sourceObjectClass = 'IsoMannequin';
+    } else if (sprite.tileType === 'tree') {
+        if (sprite.name.startsWith('vegetation_trees') && !floor?.sprite.name.startsWith('blends_natural')) {
+            delete record.owner;
+            delete record.isParentSprite;
+
+            return;
+        }
+
+        const previous = objects.findIndex((candidate) => candidate.kind === 'tree');
+
+        if (previous !== -1) {
+            objects.splice(previous, 1);
+        }
+
+        object.kind = 'tree';
+        object.sourceObjectClass = 'IsoTree';
     }
 
     insertObject(objects, object, special);
+    record.sprite = object.sprite;
 
     if (replacement && variant) {
         // CellLoader calls setSmashed(true) before optional setGlassRemoved(true).
@@ -801,6 +897,8 @@ function replayPlacement(objects, placement, registry, square) {
         if (!object.sprite) {
             throw new Error(`Missing original current window sprite at ${square.x},${square.y},${square.z}`);
         }
+
+        record.sprite = object.sprite;
     }
 }
 
@@ -829,6 +927,8 @@ function projectDoor(object, square, doors, doorVisuals, doorIds) {
     const closedY = int32(placement.y + (open && doubleDoor ? (north ? DOUBLE_NORTH_DY : DOUBLE_WEST_DY)[part] : 0), 'closed door y');
     const id = `door:${closedX}:${closedY}:${placement.z}:${placement.order}`;
 
+    object.contextDoorId = id;
+
     if (doorIds.has(id)) {
         throw new Error(`Duplicate original door identity ${id}`);
     }
@@ -836,6 +936,7 @@ function projectDoor(object, square, doors, doorVisuals, doorIds) {
     doorIds.add(id);
     doors.push({ id, x: closedX, y: closedY, z: placement.z, order: placement.order, north, open, locked: false, lockedByKey: false, forceLocked: props.has('forceLocked'), keyId: -1, roomId: -1, oppositeRoomId: -1, attachedE: toggledOpen.properties.has('attachedE'), attachedS: toggledOpen.properties.has('attachedS'), barricaded: false, independentWalls: 0, doubleDoor, garageDoor, interiorSide: props.has('InteriorSide'), hoppable: closed.properties.has('HoppableN') || closed.properties.has('HoppableW'), standEdges: [standEdges(initialClosed), standEdges(initialOpen), standEdges(toggledClosed), standEdges(toggledOpen)], squareFlags: [doorSquareFlags(initialClosed, square), doorSquareFlags(initialOpen, square), doorSquareFlags(toggledClosed, square), doorSquareFlags(toggledOpen, square)], interactionProperties: [initialClosed, initialOpen, toggledClosed, toggledOpen].map((current) => addInteractionProperties({}, current)), customLock: false });
     doors[doors.length - 1].reachWalls = Object.freeze([initialClosed, initialOpen, toggledClosed, toggledOpen].map((current) => REACH_WALLS[reachWallMask(current)]));
+    doors[doors.length - 1].rainBlockers = Object.freeze([initialClosed, initialOpen, toggledClosed, toggledOpen].map(rainBlockers));
     doors[doors.length - 1].curtainCapabilities = Object.freeze([initialClosed, initialOpen, toggledClosed, toggledOpen].map((current) =>
         !current.properties.has('GarageDoor') && !slidingGlass && current.properties.has('doorTrans')));
     doorVisuals.push({ id, x: closedX, y: closedY, z: placement.z, order: placement.order, sourceX: placement.x, sourceY: placement.y, sourceSpriteName: placement.spriteName, closedSpriteName: closed.name, openSpriteName: openSprite.name, closedSpriteId: closed.id, openSpriteId: openSprite.id, closedSheetIndex: closed.tileSheetIndex, openSheetIndex: openSprite.tileSheetIndex, toggledClosedSpriteName: toggledClosed.name, toggledOpenSpriteName: toggledOpen.name });
@@ -894,6 +995,7 @@ function projectSquareObjects(square, objects, doors, doorVisuals, doorIds) {
         square.solidTrans ||= props.has('solidtrans');
         square.tree ||= sprite.tileType === 'tree' || props.has('tree');
         square.solidFloor ||= props.has('solidfloor') || STAIR_TYPES.has(sprite.tileType);
+        square.rainBlockers |= rainBlockers(sprite);
         floorFlags |= (props.has('solidfloor') ? 1 : 0) | (props.has('solid') ? 2 : 0)
             | (props.has('solidtrans') ? 4 : 0) | (props.has('windowN') ? 8 : 0) | (props.has('windowW') ? 16 : 0);
         stairTypes |= STAIR_BITS.get(sprite.tileType) ?? 0;
@@ -910,6 +1012,20 @@ function projectSquareObjects(square, objects, doors, doorVisuals, doorIds) {
             slope = props.get('SlopedSurfaceDirection');
         }
     }
+
+    /*
+        Keep the actual post-constructor object order/membership, not an edge-only candidate census.
+        These records retain source facts for context selection; gameplay state stays native.
+    */
+    square.contextObjects = objects.map((object) => ({
+        kind: object.kind, special: object.special, north: object.north,
+        sprite: object.sprite.name, properties: object.sprite.properties,
+        tileType: object.sprite.tileType,
+        sourceObjectClass: object.sourceObjectClass,
+        componentCandidate: object.componentCandidate,
+        doorId: object.contextDoorId,
+        destroyed: object.destroyed === true, open: object.open === true,
+    }));
 
     square.reachWalls = REACH_WALLS[reachWalls];
 
@@ -959,13 +1075,147 @@ function aggregateCollision(square, sprite) {
 }
 
 /**
+ * Preserve the native wall draw dispatch and the direction inherited by attachments.
+ *
+ * @param {object} sprite - Constructor-resolved native sprite, including its cached cuts.
+ * @returns {string|undefined} Native WallShaper direction, absent for ordinary sprites.
+ */
+function depthWallDirection(sprite) {
+    if (sprite.rawFloor || sprite.properties.get('RenderLayer') === 'Floor') {
+        return undefined;
+    }
+
+    if (sprite.cutMask === 6) {
+        return 'NW';
+    }
+
+    if ((sprite.cutMask & 4) || sprite.tileType === 'doorW' || sprite.tileType === 'doorFrW') {
+        return sprite.properties.has('WallSE') ? 'SE' : 'W';
+    }
+
+    if ((sprite.cutMask & 2) || sprite.tileType === 'doorN' || sprite.tileType === 'doorFrN') {
+        return 'N';
+    }
+
+    return undefined;
+}
+
+/**
+ * Test an authored seam property on non-blueprint neighbor objects.
+ *
+ * @param {object[]} rows - Ordered actual objects on a neighboring square.
+ * @param {string} key - Original sprite property name.
+ * @returns {boolean} Whether a live neighbor has the property.
+ */
+function hasSeamProperty(rows, key) {
+    return rows.some((row) => !row.sprite.properties.has('blueprint') && row.sprite.properties.has(key));
+}
+
+/**
+ * Select the actual first solid floor used by native seam drawing.
+ *
+ * @param {object[]} rows - Ordered actual square objects.
+ * @returns {object|undefined} First solid-floor owner, if present.
+ */
+function seamFloor(rows) {
+    return rows.find((row) => row.sprite.properties.has('solidfloor'));
+}
+
+/**
+ * Select additional native seam draws, without replacing the main sprite's ordinary draw.
+ * FBORenderCell renders seams before the main sprite, never on its attached sprites.
+ *
+ * @param {object} object - Actual native owner.
+ * @param {object} square - Source square.
+ * @param {object[]} objects - Ordered surviving objects.
+ * @param {Map<string,object[]>} neighbors - Actual objects by source square.
+ * @returns {object[]} Immutable additional draw inputs.
+ */
+function depthSeams(object, square, objects, neighbors) {
+    const { sprite } = object;
+    const props = sprite.properties;
+    const southBoundary = ((square.y % 8) + 8) % 8 === 7;
+    const eastBoundary = ((square.x % 8) + 8) % 8 === 7;
+
+    if (!southBoundary && !eastBoundary) {
+        return EMPTY_CONTEXT_OBJECTS;
+    }
+
+    const south = neighbors.get(`${square.x},${square.y + 1},${square.z}`) ?? EMPTY_CONTEXT_OBJECTS;
+    const east = neighbors.get(`${square.x + 1},${square.y},${square.z}`) ?? EMPTY_CONTEXT_OBJECTS;
+    let seams;
+    /**
+     * Append one immutable native seam draw in source order.
+     *
+     * @param {string} name - Authored seam texture name.
+     * @param {number} x - Native horizontal screen offset.
+     * @param {string} [direction] - WallShaper direction for wall seams.
+     * @returns {number} Number of accumulated seam draws.
+     */
+    const add = (name, x, direction) => (seams ??= []).push(Object.freeze({
+        name, screenOffset: Object.freeze({ x, y: 3 }), ...(direction && { direction }),
+    }));
+
+    if ((sprite.rawFloor || props.get('RenderLayer') === 'Floor') && object === seamFloor(objects)) {
+        // The complete shipped startup placement census contains no water; never guess another map's quality.
+        if ((southBoundary && seamFloor(south) && hasSeamProperty(south, 'water')) || (eastBoundary && seamFloor(east) && hasSeamProperty(east, 'water'))) {
+            throw new Error(`Original water-neighbor seams require native waterQuality at ${square.x},${square.y},${square.z}`);
+        }
+
+        let height = '';
+
+        if (props.has('FloorHeightTwoThirds')) {
+            height = 'TwoThirds';
+        } else if (props.has('FloorHeightOneThird')) {
+            height = 'OneThird';
+        }
+
+        if (southBoundary && seamFloor(south)) {
+            add(`FloorSouth${height}`, -6);
+        }
+
+        if (eastBoundary && seamFloor(east)) {
+            add(`FloorEast${height}`, 6);
+        }
+    } else if (depthWallDirection(sprite) && !props.has('HoppableN') && !props.has('HoppableW')
+        && sprite.tilesetName !== 'walls_logs'
+        && !(sprite.tilesetName === 'carpentry_02' && sprite.tileSheetIndex >= 80 && sprite.tileSheetIndex <= 82)) {
+        const southWall = hasSeamProperty(south, 'WallW') || hasSeamProperty(south, 'WallNW') || hasSeamProperty(south, 'DoorWallW')
+            || south.some((row) => row.kind === 'frame' && !row.north);
+        const eastWall = hasSeamProperty(east, 'WallN') || hasSeamProperty(east, 'WallNW') || hasSeamProperty(east, 'DoorWallN')
+            || east.some((row) => row.kind === 'frame' && row.north);
+
+        // DoWallLightingNW draws its north half first, then its west half.
+        if (props.has('WallNW')) {
+            if (eastBoundary && eastWall) {
+                add('WallEast', 6, 'NW');
+            }
+
+            if (southBoundary && southWall) {
+                add('WallSouth', -6, 'NW');
+            }
+        }
+
+        if (southBoundary && southWall && (props.has('WallW') || props.has('WindowW'))) {
+            add('WallSouth', -6, 'W');
+        }
+
+        if (eastBoundary && eastWall && (props.has('WallN') || props.has('WindowN'))) {
+            add('WallEast', 6, 'N');
+        }
+    }
+
+    return seams ? Object.freeze(seams) : EMPTY_CONTEXT_OBJECTS;
+}
+
+/**
  * Consume source chunks sequentially without retaining their visual placement lists.
  * Ephemeral actual-object metadata survives until all shared sprite mutations finish.
  * Rooms use deterministic dense identities plus their source cell/local mapping.
  *
  * @param {object[]} cells - Original openMapCell results.
  * @param {Map} registry - Complete source-backed tile registry.
- * @returns {Promise<{doors:object[],squares:object[],doorVisuals:object[],rooms:object[],coverage:object}>} Atomic projection.
+ * @returns {Promise<{doors:object[],squares:object[],doorVisuals:object[],depthContexts:object,rooms:object[],coverage:object}>} Atomic projection.
  */
 async function projectWorldObjects(cells, registry) {
     if (!Array.isArray(cells) || !(registry instanceof Map)) {
@@ -981,6 +1231,7 @@ async function projectWorldObjects(cells, registry) {
     const doorIds = new Set();
     const replay = replayRegistry(registry);
     const actualSquares = new Map();
+    const depthContexts = {};
 
     for (const cell of ordered) {
         if (!Number.isInteger(cell.cellX) || !Number.isInteger(cell.cellY) || cell.cellSize !== 256 || cell.chunkSize !== 8 || cell.chunksPerAxis !== 32
@@ -1029,7 +1280,7 @@ async function projectWorldObjects(cells, registry) {
                     const roomId = roomAt(rects, x + dx, y + dy, z);
 
                     // Coverage: the current WASM world has no vehicle objects; this is not a native-map vehicle census.
-                    squares.push({ x: x + dx, y: y + dy, z, roomId, outside: roomId === -1, solid: false, solidTrans: false, tree: false, solidFloor: false, floorFlags: 0, stairTypes: 0, slopeDirection: 0, slopeMin: 0, slopeMax: 0, hoppableEdges: 0, windowEdges: 0, independentWalls: 0, windows: 0, doorWalls: 0, vehicleObstructed: false, reachWalls: REACH_WALLS[0] });
+                    squares.push({ x: x + dx, y: y + dy, z, roomId, outside: roomId === -1, solid: false, solidTrans: false, tree: false, solidFloor: false, rainBlockers: 0, floorFlags: 0, stairTypes: 0, slopeDirection: 0, slopeMin: 0, slopeMax: 0, hoppableEdges: 0, windowEdges: 0, independentWalls: 0, windows: 0, doorWalls: 0, vehicleObstructed: false, reachWalls: REACH_WALLS[0], contextObjects: EMPTY_CONTEXT_OBJECTS });
                 }
             }
 
@@ -1063,6 +1314,7 @@ async function projectWorldObjects(cells, registry) {
                 if (!objects) {
                     objects = [];
                     actualSquares.set(square, objects);
+                    square.depthPlacements = [];
                 }
 
                 replayPlacement(objects, placement, replay, square);
@@ -1094,7 +1346,97 @@ async function projectWorldObjects(cells, registry) {
         door.independentWalls = square.independentWalls;
     }
 
-    return { doors, squares, doorVisuals, rooms, buildings, coverage: { vehicles: 'absent-from-current-wasm-world', barricades: 'not-spawned-by-original-map-loader' } };
+    const neighbors = new Map();
+    const properties = new Map();
+    const doorSprites = new Map();
+    let hasWater = false;
+
+    for (const [square, objects] of actualSquares) {
+        neighbors.set(`${square.x},${square.y},${square.z}`, objects);
+
+        for (const { sprite } of square.depthPlacements) {
+            if (!properties.has(sprite)) {
+                properties.set(sprite, Object.freeze(Object.fromEntries(sprite.properties)));
+            }
+        }
+
+        for (const object of objects) {
+            if (object.kind !== 'door') {
+                continue;
+            }
+
+            const states = {};
+
+            for (const sprite of [object.sprite, object.partners.closed, object.partners.open, object.partners.toggledClosed, object.partners.toggledOpen]) {
+                if (!properties.has(sprite)) {
+                    properties.set(sprite, Object.freeze(Object.fromEntries(sprite.properties)));
+                }
+
+                states[sprite.name] = Object.freeze({ spriteProperties: properties.get(sprite), wallDirection: depthWallDirection(sprite) });
+            }
+
+            doorSprites.set(object, Object.freeze(states));
+        }
+
+        hasWater ||= objects.some((object) => !object.sprite.properties.has('blueprint') && object.sprite.properties.has('water'));
+    }
+
+    // IsoWaterGeometry needs authored shore zones only when natural ground actually touches water.
+    for (const [square, objects] of actualSquares) {
+        if (!hasWater) {
+            break;
+        }
+
+        if (!objects.find((object) => object.sprite.properties.has('solidfloor'))?.sprite.name.startsWith('blends_natural')) {
+            continue;
+        }
+
+        for (let dx = -1; dx <= 1; dx += 1) {
+            for (let dy = -1; dy <= 1; dy += 1) {
+                if ((dx || dy) && neighbors.get(`${square.x + dx},${square.y + dy},${square.z}`)?.some((object) =>
+                    !object.sprite.properties.has('blueprint') && object.sprite.properties.has('water'))) {
+                    throw new Error(`Original shoreline seams require authored IsoWaterFlow zones and native water shader policy at ${square.x},${square.y},${square.z}`);
+                }
+            }
+        }
+    }
+
+    for (const [square, objects] of actualSquares) {
+        for (const record of square.depthPlacements) {
+            const { placement, owner, sprite, isParentSprite } = record;
+            const key = `${placement.x},${placement.y},${placement.z},${placement.order}`;
+            const rendered = owner !== undefined && objects.includes(owner)
+                && (owner.mainPlacement === record || owner.attachments.includes(record));
+
+            if (Object.hasOwn(depthContexts, key)) {
+                throw new Error(`Duplicate original placement identity ${key}`);
+            }
+
+            const seams = rendered && isParentSprite ? depthSeams(owner, square, objects, neighbors) : EMPTY_CONTEXT_OBJECTS;
+            const wallDirection = owner && depthWallDirection(owner.sprite);
+
+            depthContexts[key] = Object.freeze({
+                sourceX: placement.x, sourceY: placement.y, z: placement.z, order: placement.order,
+                sourceSpriteName: placement.spriteName, currentSpriteName: sprite.name, rendered,
+                ...(owner && {
+                    objectClass: owner.sourceObjectClass, sourceObjectClass: owner.sourceObjectClass,
+                    ownerId: `${owner.placement.x},${owner.placement.y},${owner.placement.z},${owner.placement.order}`,
+                    parentSpriteName: owner.sprite.name, parentSpriteProperties: properties.get(owner.sprite),
+                    isParentSprite: sprite === owner.sprite, doorId: owner.contextDoorId,
+                    isMainSprite: owner.mainPlacement === record,
+                    ...(owner.kind === 'door' && { doorSprites: doorSprites.get(owner) }),
+                    ...(owner.sourceObjectClass === 'IsoFireplace' && { fireplaceUsesParentDepth: true }),
+                    ...(wallDirection && { wallDirection }),
+                }),
+                spriteProperties: properties.get(sprite),
+                scaleX: 1, scaleY: 1, soffX: 0, soffY: 0, seams,
+            });
+        }
+
+        delete square.depthPlacements;
+    }
+
+    return { doors, squares, doorVisuals, depthContexts: Object.freeze(depthContexts), rooms, buildings, coverage: { vehicles: 'absent-from-current-wasm-world', barricades: 'not-spawned-by-original-map-loader' } };
 }
 
 export { loadNativeTileRegistry, nativeTileSources, projectWorldObjects };

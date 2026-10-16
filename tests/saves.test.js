@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createEngine } from '../src/engine.js';
-import { createSaveStore, validateSave } from '../src/saves.js';
+import { createSaveStore, SAVE_VERSION, validateSave } from '../src/saves.js';
 import { completeActions, importPickupSquares } from './queue-test-helpers.js';
 
 /**
@@ -94,7 +94,7 @@ function encode(value) {
  * Like engine.test.js's legacyModule fixture, only WASM sections are changed.
  *
  * @param {Uint8Array} bytes - Compiled engine module.
- * @param {'pre-body' | 'trap' | 'pre-hand' | 'hand-trap' | 'graph-trap'} mode - Native capability or capture failure.
+ * @param {'pre-body' | 'trap' | 'pre-hand' | 'hand-trap' | 'graph-trap' | 'pre-climate' | 'climate-trap'} mode - Actual native capability or capture failure.
  * @returns {Uint8Array} Independent native module fixture.
  */
 function bodyModule(bytes, mode) {
@@ -141,10 +141,23 @@ function bodyModule(bytes, mode) {
 
                 let trappedExport = 'body_part_value';
 
-                if (mode === 'graph-trap') {
-                    trappedExport = 'item_import_commit';
-                } else if (mode === 'hand-trap') {
-                    trappedExport = 'hand_item_get';
+                switch (mode) {
+                    case 'graph-trap': {
+                        trappedExport = 'item_import_commit';
+
+                        break;
+                    }
+                    case 'hand-trap': {
+                        trappedExport = 'hand_item_get';
+
+                        break;
+                    }
+                    case 'climate-trap': {
+                        trappedExport = 'climate_save_size';
+
+                        break;
+                    }
+                // No default
                 }
 
                 if (name === trappedExport && kind === 0) {
@@ -153,7 +166,8 @@ function bodyModule(bytes, mode) {
 
                 if ((mode !== 'pre-body' || !(name.startsWith('body_')
                     || name === 'thermal_action_modifier' || name === 'set_injury_severity'))
-                && (mode !== 'pre-hand' || !name.startsWith('hand_item'))) {
+                && (mode !== 'pre-hand' || !name.startsWith('hand_item'))
+                && (mode !== 'pre-climate' || !name.startsWith('climate_'))) {
                     entries.push(bytes.subarray(entry, offset));
                 }
             }
@@ -161,7 +175,7 @@ function bodyModule(bytes, mode) {
             const payload = [...encode(entries.length), ...entries.flatMap((entry) => [...entry])];
 
             output.push(id, ...encode(payload.length), ...payload);
-        } else if (id === 10 && ['trap', 'hand-trap', 'graph-trap'].includes(mode)) {
+        } else if (id === 10 && ['trap', 'hand-trap', 'graph-trap', 'climate-trap'].includes(mode)) {
             const count = unsigned();
             const payload = [...encode(count)];
 
@@ -234,15 +248,15 @@ test('integrity-valid malformed cell backup fails staged restoration', async () 
 
 test('future save format and duplicate cell coordinates are refused', async () => {
     const { record } = await fixture();
-    const payload = structuredClone(record);
+    const payload = await validateSave(record);
 
     delete payload.integrity;
 
-    payload.formatVersion = 4;
-    await assert.rejects(validateSave(await signed(payload)), /version/u);
-    payload.formatVersion = 1;
+    payload.formatVersion = SAVE_VERSION + 1;
+    await assert.rejects(validateSave(await signed(payload)), TypeError);
+    payload.formatVersion = SAVE_VERSION;
     payload.world.cells.push({ ...payload.world.cells[0] });
-    await assert.rejects(validateSave(await signed(payload)), /Duplicate/u);
+    await assert.rejects(validateSave(await signed(payload)), TypeError);
 });
 
 test('live backup exports and restores without IndexedDB access', async () => {
@@ -462,7 +476,7 @@ test('portable door state preserves unlocked closure and RNG after matching sour
     completeActions(engine);
     const exported = JSON.parse(await (await store.exportLive(engine, { cells })).text());
 
-    assert.equal(exported.formatVersion, 3);
+    assert.equal(exported.formatVersion, 6);
     assert.equal(exported.engine.state.values.length, 12);
     assert.equal(exported.doorState.seed, 0xFF_FF_FF_FF);
     assert.equal(exported.doorState.doors[0].locked, false);
@@ -588,7 +602,7 @@ test('legacy and current backups without door state retain explicit source initi
     assert.equal(Object.hasOwn(restored, 'doorState'), false);
     const current = structuredClone(restored.record);
 
-    assert.equal(current.formatVersion, 3);
+    assert.equal(current.formatVersion, 6);
     assert.equal(Object.hasOwn(await validateSave(current), 'doorState'), false);
     assert.equal(Object.hasOwn(await store.restore(current), 'doorState'), false);
 });
@@ -901,7 +915,7 @@ test('portable equipment preserves custom identities, detached bound groups and 
     const captured = JSON.parse(await exported.text());
     const restored = await store.restore(captured);
 
-    assert.equal(captured.formatVersion, 3);
+    assert.equal(captured.formatVersion, 6);
     assert.deepEqual(restored.engine.saveState(), actor);
     assert.equal(captured.equipmentState.version, 1);
     assert.equal(captured.equipmentState.groups.find(({ name }) => name === 'FixtureGroup').active, false);
@@ -1264,4 +1278,368 @@ test('supported original transfer actor traits and metabolic target survive auth
     delete legacyBody.integrity;
     delete legacyBody.bodyState.metabolicTarget;
     assert.equal((await store.restore(await signed(legacyBody))).engine.sourceActions.getMetabolicTarget(), 1.5);
+});
+
+test('format5 clothing wetness survives restore and authenticated graph1 migrates with constructor defaults', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.command({ type: 'cancel' });
+    engine.registerItemDefinition({
+        fullType: 'Fixture.Wet', type: 'Clothing', bodyLocation: null, conditionMax: 10,
+        stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0,
+    }, { owner: 'fixture' });
+    const id = engine.command({ type: 'spawnItem', fullType: 'Fixture.Wet', x: 5, y: 5 }).id;
+
+    engine.sourceActions.itemSetWetness(id, 47.5);
+    const cells = record.world.cells.map((cell) => ({ ...cell, bytes: Buffer.from(cell.bytes, 'base64') }));
+    const saved = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+    const restored = await store.restore(saved);
+
+    assert.equal(saved.formatVersion, 6);
+    assert.equal(saved.inventoryGraph.version, 2);
+    assert.equal(restored.engine.sourceActions.itemWetness(id), 47.5);
+    const legacy = structuredClone(saved);
+
+    delete legacy.integrity;
+    legacy.formatVersion = 3;
+    delete legacy.worldClock;
+    legacy.inventoryGraph.version = 1;
+    delete legacy.inventoryGraph.items[0].wetness;
+    const signedLegacy = await signed(legacy);
+    const migrated = await validateSave(signedLegacy);
+
+    assert.equal(migrated.formatVersion, 6);
+    assert.equal(migrated.inventoryGraph.version, 2);
+    assert.equal(migrated.inventoryGraph.items[0].wetness, 0);
+    assert.equal((await store.restore(signedLegacy)).engine.sourceActions.itemWetness(id), 0);
+    assert.equal(signedLegacy.inventoryGraph.version, 1, 'migration cannot mutate authenticated input');
+
+    /**
+     * Reject one authenticated invalid wetness or graph-version record.
+     *
+     * @param {number} outer - Save format version.
+     * @param {number} inner - Inventory graph version.
+     * @param {number|string} wetness - Invalid wetness or version-pair payload.
+     * @returns {Promise<void>} Resolves after rejection is asserted.
+     */
+    async function rejectInvalid(outer, inner, wetness) {
+        const invalid = structuredClone(saved);
+
+        delete invalid.integrity;
+        invalid.formatVersion = outer;
+        invalid.inventoryGraph.version = inner;
+        invalid.inventoryGraph.items[0].wetness = wetness;
+        await assert.rejects(validateSave(await signed(invalid)), /wetness|graph/iu);
+    }
+
+    await rejectInvalid(4, 2, 101);
+    await rejectInvalid(4, 2, '47.5');
+    await rejectInvalid(4, 3, 47.5);
+    await rejectInvalid(3, 1, 47.5);
+    await rejectInvalid(4, 1, 47.5);
+    await rejectInvalid(5, 2, 101);
+    await rejectInvalid(5, 1, 47.5);
+    assert.equal(engine.sourceActions.itemWetness(id), 47.5);
+});
+
+test('authenticated world-item placement and orientation round-trip with atomic malformed-state refusal', async () => {
+    const { engine, record, store } = await fixture();
+
+    engine.command({ type: 'cancel' });
+    engine.registerItemDefinition({
+        fullType: 'Fixture.WorldVisual', type: 'Normal', clothingItem: 'FixtureVisual', bodyLocation: null, conditionMax: 10,
+        stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0,
+    }, { owner: 'fixture' });
+    const id = engine.command({ type: 'spawnItem', fullType: 'Fixture.WorldVisual', x: 5.125, y: 5.75 }).id;
+
+    engine.initializeItemVisual(id, { baseTextureCount: 2, textureChoiceCount: 0, allowRandomTint: false, allowRandomHue: false });
+    const graph = engine.exportInventoryGraph();
+
+    Object.assign(graph.items[0].worldVisual, { worldXRotation: 12, worldYRotation: 34, worldZRotation: 56, worldScale: 0.75 });
+    engine.importInventoryGraph(graph);
+    const cells = record.world.cells.map((cell) => ({ ...cell, bytes: Buffer.from(cell.bytes, 'base64') }));
+    const saved = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+
+    assert.deepEqual((await store.restore(saved)).engine.worldItemVisuals(), engine.worldItemVisuals());
+    const malformed = structuredClone(saved);
+
+    delete malformed.integrity;
+    malformed.inventoryGraph.items[0].worldVisual.xoff = 0.5;
+    await assert.rejects(store.restore(await signed(malformed)), /offset/iu);
+    assert.deepEqual(engine.exportInventoryGraph(), graph);
+    const badVisual = structuredClone(saved);
+
+    delete badVisual.integrity;
+    badVisual.inventoryGraph.items[0].visual.tint[0] = 2;
+    await assert.rejects(store.restore(await signed(badVisual)), /ItemVisual/iu);
+    assert.deepEqual(engine.exportInventoryGraph(), graph);
+    const legacy = structuredClone(saved);
+
+    delete legacy.integrity;
+    delete legacy.inventoryGraph.items[0].worldVisual;
+    delete legacy.inventoryGraph.items[0].visual;
+    const migrated = (await store.restore(await signed(legacy))).engine.worldItemVisuals()[0];
+
+    assert.deepEqual([migrated.x + migrated.xoff, migrated.y + migrated.yoff], [5.125, 5.75]);
+    assert.deepEqual([migrated.worldXRotation, migrated.worldYRotation, migrated.worldZRotation, migrated.worldScale], [0, 0, -1, 1]);
+    assert.equal(migrated.visual, undefined, 'legacy absence is not an invented historical selection');
+});
+
+test('authenticated v1-v4 saves start a new source-default timeline without changing prior state', async () => {
+    const { engine, record, store } = await fixture();
+    const current = JSON.parse(await (await store.exportLive(engine, {
+        cells: [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }],
+        modState: record.modState, settings: { retained: true },
+    })).text());
+    const expectedClock = {
+        version: 1, year: 1_993, month: 6, day: 22,
+        timeOfDay: 9, lastTimeOfDay: 9, nightsSurvived: 0, minutesPerDay: 90,
+    };
+
+    /**
+     * Restore and authenticate one legacy envelope without changing prior state.
+     *
+     * @param {number} version - Legacy save format version.
+     * @returns {Promise<void>} Resolves after migration and integrity assertions.
+     */
+    async function assertLegacyRestore(version) {
+        const payload = structuredClone(version < 3 ? record : current);
+
+        delete payload.integrity;
+        delete payload.worldClock;
+        payload.formatVersion = version;
+        payload.revision = 17;
+
+        if (version === 2) {
+            payload.engine.state = engine.saveState();
+            payload.itemDefs = [];
+            payload.items = [];
+        } else if (version === 3) {
+            payload.inventoryGraph.version = 1;
+        }
+
+        const legacy = await signed(payload);
+        const before = structuredClone(legacy);
+        const restored = await store.restore(legacy);
+
+        assert.deepEqual(legacy, before);
+        assert.equal(restored.record.formatVersion, 6);
+        assert.equal(restored.record.migratedFrom, version);
+        assert.equal(restored.record.revision, 17);
+        assert.deepEqual(restored.record.worldClock, expectedClock);
+        assert.deepEqual(restored.engine.worldClockState(), expectedClock);
+        assert.deepEqual(restored.record.world, payload.world);
+        assert.deepEqual(restored.record.modState, payload.modState);
+        assert.deepEqual(restored.record.settings, payload.settings);
+        assert.deepEqual(restored.engine.saveState().values.slice(0, payload.engine.state.values.length), payload.engine.state.values);
+        assert.deepEqual(await validateSave(restored.record), restored.record, 'migration must re-sign the resulting envelope');
+        legacy.revision++;
+        await assert.rejects(store.restore(legacy), /integrity/u);
+    }
+
+    await assertLegacyRestore(1);
+    await assertLegacyRestore(2);
+    await assertLegacyRestore(3);
+    await assertLegacyRestore(4);
+});
+
+test('world clock restores before clothing load so wetness has no offline catch-up', async () => {
+    const { engine, record, store } = await fixture();
+    const clock = {
+        version: 1, year: 2_000, month: 1, day: 28,
+        timeOfDay: 9, lastTimeOfDay: 8.5, nightsSurvived: 8, minutesPerDay: 60,
+    };
+
+    engine.command({ type: 'cancel' });
+    engine.importWorldClockState(clock);
+    engine.registerItemDefinition({
+        fullType: 'Fixture.ClockBag', isBag: true, capacity: 10, bodyLocation: null,
+        conditionMax: 10, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0,
+    }, { owner: 'fixture' });
+    engine.registerItemDefinition({
+        fullType: 'Fixture.ClockClothing', type: 'Clothing', bodyLocation: null,
+        rawFields: [{ name: 'BloodLocation', value: 'Shirt' }],
+        conditionMax: 10, stackLimit: 1, removeOnBroken: false, conditionLowerChanceOneIn: 0,
+    }, { owner: 'fixture' });
+    const bag = engine.command({ type: 'spawnItem', fullType: 'Fixture.ClockBag', x: 5, y: 5 }).id;
+    const id = engine.command({ type: 'spawnItem', fullType: 'Fixture.ClockClothing', x: 5, y: 5 }).id;
+    const graph = engine.exportInventoryGraph();
+    const ownerContainerId = engine.getItem(bag).internalContainerId;
+
+    graph.items = graph.items.map((item) => item.id === id
+        ? { ...item, ownerContainerId, worldPosition: null, wetness: 47.5 }
+        : item);
+    engine.importInventoryGraph(graph);
+    const cells = [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }];
+    const saved = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+    const restored = await store.restore(saved);
+
+    assert.deepEqual(saved.worldClock, clock);
+    assert.deepEqual(restored.engine.worldClockState(), clock);
+    assert.deepEqual(restored.engine.exportInventoryGraph(), engine.exportInventoryGraph());
+    assert.equal(Object.hasOwn(saved.inventoryGraph.items.find((item) => item.id === id), 'lastWetnessUpdate'), false);
+    restored.engine.sourceActions.itemUpdateWetness(id);
+    assert.equal(restored.engine.sourceActions.itemWetness(id), 47.5, 'load initializes timestamp at restored age, not default age');
+    restored.engine.sourceActions.worldClockSet('timeOfDay', 9.031_25);
+    restored.engine.sourceActions.itemUpdateWetness(id);
+    assert.equal(restored.engine.sourceActions.itemWetness(id), 46.875, 'a later eligible minute dries from the restored timestamp');
+    engine.step(0.1);
+    restored.engine.importWorldClockState(clock);
+    restored.engine.step(0.1);
+    assert.deepEqual(restored.engine.worldClockState(), engine.worldClockState());
+});
+
+test('format5 authenticates clock before normalization and refuses missing or malformed clock state', async () => {
+    const { engine, record, store } = await fixture();
+    const saved = JSON.parse(await (await store.exportLive(engine, {
+        cells: [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }],
+    })).text());
+    const before = engine.worldClockState();
+    const tampered = structuredClone(saved);
+
+    tampered.worldClock.timeOfDay = 'invalid';
+    await assert.rejects(validateSave(tampered), /integrity/u);
+
+    const noncanonical = structuredClone(saved);
+
+    delete noncanonical.integrity;
+    Object.assign(noncanonical.worldClock, { month: -1, day: 40, timeOfDay: 9.1 });
+    const normalized = await validateSave(await signed(noncanonical));
+
+    assert.equal(normalized.worldClock.month, -1, 'saved setters retain source direct-assignment semantics');
+    assert.equal(normalized.worldClock.day, 40);
+    assert.equal(normalized.worldClock.timeOfDay, Math.fround(9.1));
+    assert.deepEqual(await validateSave(normalized), normalized, 'canonical f32 snapshot must remain authentically signed');
+
+    /**
+     * Reject one authenticated invalid clock without changing live time.
+     *
+     * @param {function(object): void} change - Invalid clock mutation.
+     * @returns {Promise<void>} Resolves after restore rejection and state assertions.
+     */
+    async function rejectInvalidClock(change) {
+        const invalid = structuredClone(saved);
+
+        delete invalid.integrity;
+        change(invalid);
+        await assert.rejects(store.restore(await signed(invalid)), /clock|year|nightsSurvived|timeOfDay|minutesPerDay/iu);
+        assert.deepEqual(engine.worldClockState(), before);
+    }
+
+    await rejectInvalidClock((payload) => {
+        delete payload.worldClock;
+    });
+    await rejectInvalidClock((payload) => {
+        payload.worldClock.version = 2;
+    });
+    await rejectInvalidClock((payload) => {
+        payload.worldClock.year = 2_147_483_648;
+    });
+    await rejectInvalidClock((payload) => {
+        payload.worldClock.nightsSurvived = 0.5;
+    });
+    await rejectInvalidClock((payload) => {
+        payload.worldClock.timeOfDay = '9';
+    });
+    await rejectInvalidClock((payload) => {
+        payload.worldClock.minutesPerDay = 1e39;
+    });
+});
+
+test('format6 authenticates exact climate and deterministically begins a new legacy weather epoch without mutating records', async () => {
+    const { engine, record, store } = await fixture();
+    const cells = [{ x: 0, y: 0, bytes: Buffer.from(record.world.cells[0].bytes, 'base64') }];
+    const unconfigured = JSON.parse(await (await store.exportLive(engine, { cells })).text());
+
+    assert.equal((await store.restore(unconfigured)).engine.isClimateInitialized(), false,
+        'native absence survives a legitimate core-mode save without seeding weather');
+
+    engine.initializeClimate(0x89_AB_CD_EF);
+    engine.frameStep(1);
+    const saved = JSON.parse(await (await store.exportLive(engine, { cells, modState: record.modState })).text());
+    const restored = await store.restore(saved);
+
+    assert.equal(saved.formatVersion, 6);
+    assert.deepEqual(restored.engine.saveClimateState(), engine.saveClimateState());
+    const tampered = structuredClone(saved);
+
+    tampered.climate.bytes = 'AAAA';
+    await assert.rejects(store.restore(tampered), /integrity/iu);
+    delete tampered.integrity;
+    await assert.rejects(store.restore(await signed(tampered)), /climate/iu);
+    assert.deepEqual(engine.saveClimateState(), restored.engine.saveClimateState(),
+        'authenticated malformed producer state cannot alter the committed world');
+    const legacy = structuredClone(saved);
+
+    delete legacy.integrity;
+    delete legacy.climate;
+    delete legacy.queue;
+    delete legacy.doorState;
+    legacy.formatVersion = 5;
+    const authenticated = await signed(legacy);
+    const before = structuredClone(authenticated);
+    const first = await store.restore(authenticated);
+    const second = await store.restore(authenticated);
+
+    assert.deepEqual(authenticated, before, 'reading must not rewrite an authenticated legacy record');
+    assert.deepEqual(first.engine.worldClockState(), engine.worldClockState());
+    assert.deepEqual(first.engine.exportInventoryGraph(), engine.exportInventoryGraph());
+    assert.deepEqual(first.record.modState, record.modState);
+    assert.deepEqual(first.record.climateEpoch, {
+        version: 1, kind: 'legacy-new-source-weather', sourceIntegrity: authenticated.integrity,
+        seed: Number.parseInt(authenticated.integrity.slice(0, 8), 16),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    });
+    assert.deepEqual(first.engine.saveClimateState(), second.engine.saveClimateState());
+    assert.equal(first.engine.isClimateInitialized(), true);
+    const selectedZone = structuredClone(first.record);
+
+    delete selectedZone.integrity;
+    selectedZone.climateEpoch.timeZone = 'UTC';
+    const zoned = await store.restore(await signed(selectedZone));
+    const zonedBackup = JSON.parse(await (await store.exportLive(zoned.engine, {
+        cells, climateEpoch: zoned.record.climateEpoch,
+    })).text());
+
+    assert.equal(zonedBackup.climateEpoch.timeZone, 'UTC');
+    assert.deepEqual((await store.restore(zonedBackup)).engine.saveClimateState(), zoned.engine.saveClimateState(),
+        'a migrated epoch retains its selected zone through full native capture instead of adopting the next host zone');
+});
+
+test('climate persistence omits only genuinely absent native exports and propagates real native capture failure', async () => {
+    const bytes = await readFile(new URL('../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url));
+    const legacyBytes = bodyModule(bytes, 'pre-climate');
+    const legacy = await createEngine(legacyBytes);
+    const legacyStore = createSaveStore({ engineSource: legacyBytes, appVersion: 'test' });
+    const record = JSON.parse(await (await legacyStore.exportLive(legacy)).text());
+
+    assert.equal(Object.hasOwn(record, 'climate'), false);
+    assert.equal(legacy.canSaveClimateState(), false);
+    const before = structuredClone(record);
+    const currentStore = createSaveStore({ engineSource: bytes, appVersion: 'test' });
+    const migrated = await currentStore.restore(record);
+    const repeated = await currentStore.restore(record);
+
+    for (const staged of [migrated, repeated]) {
+        assert.equal(staged.engine.isClimateInitialized(), false,
+            'new weather waits for restored source geometry and queue timing');
+        assert.equal(staged.climateSeed, staged.record.climateEpoch.seed);
+        staged.engine.loadDoorState(staged.doorState);
+        staged.engine.loadQueueState(staged.queueState);
+        staged.engine.sourceActions.validateSourceOwners(staged.sourceOwners);
+        staged.engine.initializeClimate(staged.climateSeed, staged.record.climateEpoch.timeZone);
+        assert.equal(staged.engine.isClimateInitialized(), true,
+            'genuinely unsupported prior weather begins a new source epoch');
+    }
+
+    assert.deepEqual(record, before, 'migration must not rewrite the authenticated input');
+    assert.deepEqual(migrated.engine.saveClimateState(), repeated.engine.saveClimateState());
+    const current = JSON.parse(await (await currentStore.exportLive(migrated.engine)).text());
+
+    await assert.rejects(legacyStore.restore(current), /unsupported/iu);
+    const trappedBytes = bodyModule(bytes, 'climate-trap');
+    const trapped = await createEngine(trappedBytes);
+    const trappedStore = createSaveStore({ engineSource: trappedBytes, appVersion: 'test' });
+
+    await assert.rejects(trappedStore.exportLive(trapped), WebAssembly.RuntimeError);
 });

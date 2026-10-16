@@ -250,14 +250,14 @@ function canonicalTags(value, fail) {
  */
 function definitions(text, provenance, kind, mapping) {
     const { records, fail } = scriptRecords(text, provenance, kind);
-    const names = new Map(Object.entries(mapping).map(([name, spec]) => [kind === 'item' ? name.toLowerCase() : name, spec]));
+    const names = new Map(Object.entries(mapping).map(([name, spec]) => [name.toLowerCase(), spec]));
 
     for (const record of records) {
         // Original Item constructor's script actualWeight precedes ordered DoParam.
         let actualWeight = 1;
 
         for (const field of record.rawFields) {
-            const spec = names.get(kind === 'item' ? field.name.trim().toLowerCase() : field.name);
+            const spec = names.get(field.name.trim().toLowerCase());
 
             if (!spec || field.children) {
                 continue;
@@ -267,6 +267,11 @@ function definitions(text, provenance, kind, mapping) {
             let value = field.value;
 
             if (type === 'boolean') {
+                if (key === 'hidden') {
+                    record[key] = value.toLowerCase() === 'true';
+                    continue;
+                }
+
                 if (!['true', 'false'].includes(value)) {
                     fail(`Invalid ${field.name} boolean.`, field.offset);
                 }
@@ -328,8 +333,12 @@ function parseItemDefinitions(text, provenance) {
         ConditionMax: ['conditionMax', 'integer'], ConditionLowerChanceOneIn: ['conditionLowerChanceOneIn', 'positiveInteger'],
         RemoveOnBroken: ['removeOnBroken', 'boolean'], Weight: ['weight', 'javaWeight'], RunSpeedModifier: ['runSpeedModifier', 'number'],
         WorldStaticModel: ['worldStaticModel'], ClothingItem: ['clothingItem'], Tags: ['tags', 'tags'],
+        StaticModel: ['staticModel'], WorldScale: ['worldScale', 'positive'], WorldRender: ['worldRender', 'boolean'],
+        ScaleWorldIcon: ['scaleWorldIcon', 'positive'], Cosmetic: ['cosmetic', 'boolean'], WorldTexture: ['worldTexture'],
+        UseWorldItem: ['useWorldItem', 'boolean'],
         Capacity: ['capacity', 'javaInt'], WeightReduction: ['weightReduction', 'javaInt'], MaxItemSize: ['maxItemSize', 'javaFloat'],
         DisplayCategory: ['displayCategory'],
+        Hidden: ['hidden', 'boolean'],
         OnlyAcceptCategory: ['onlyAcceptCategory'], AcceptItemFunction: ['acceptItemFunction'],
         AmmoType: ['ammoType'],
     });
@@ -343,7 +352,11 @@ function parseItemDefinitions(text, provenance) {
  * @returns {object[]} Ordered model definitions, absent fields omitted.
  */
 function parseModelDefinitions(text, provenance) {
-    return definitions(text, provenance, 'model', { mesh: ['mesh'], texture: ['texture'], scale: ['scale', 'positive'] });
+    return definitions(text, provenance, 'model', {
+        mesh: ['mesh'], texture: ['texture'], scale: ['scale', 'positive'], shader: ['shader'],
+        static: ['isStatic', 'boolean'], cullFace: ['cullFace'], invertX: ['invertX', 'boolean'],
+        postProcess: ['postProcess'], undoCoreScale: ['undoCoreScale', 'boolean'],
+    });
 }
 
 /**
@@ -446,7 +459,7 @@ function parseClothingDefinition(text, provenance) {
         }
     }
 
-    const result = { textures: [], rawFields, provenance: structuredClone(provenance) };
+    const result = { textures: [], baseTextures: [], textureChoices: [], rawFields, provenance: structuredClone(provenance) };
 
     for (const field of rawFields) {
         if (field.name === 'm_MaleModel' || field.name === 'm_FemaleModel') {
@@ -461,6 +474,25 @@ function parseClothingDefinition(text, provenance) {
 
         if (['textureChoices', 'm_BaseTextures'].includes(field.name) && field.value) {
             result.textures.push(field.value);
+            result[field.name === 'textureChoices' ? 'textureChoices' : 'baseTextures'].push(field.value);
+        }
+
+        const key = { m_AttachBone: 'attachBone', m_Static: 'isStatic', m_AllowRandomTint: 'allowRandomTint', m_AllowRandomHue: 'allowRandomHue', m_Shader: 'shader' }[field.name];
+
+        if (key) {
+            if (Object.hasOwn(result, key)) {
+                fail();
+            }
+
+            if (['isStatic', 'allowRandomTint', 'allowRandomHue'].includes(key)) {
+                if (!['true', 'false'].includes(field.value)) {
+                    fail();
+                }
+
+                result[key] = field.value === 'true';
+            } else {
+                result[key] = field.value;
+            }
         }
     }
 

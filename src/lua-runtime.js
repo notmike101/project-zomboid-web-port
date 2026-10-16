@@ -16,19 +16,38 @@
  */
 import { MOODLE_TYPES } from './engine.js';
 import { normalItemIcon } from './item-definitions.js';
-import { WORLD_CONTEXT_PRELUDE } from './native-world-context.js';
+import { createContextKeyInput, WORLD_CONTEXT_PRELUDE } from './native-world-context.js';
 
 /** @typedef {{path:string, source:string, execute?:boolean}} LuaSource */
 /** @typedef {{id:string, nativeId?:string, engineSource?:boolean, api?:object, sources:LuaSource[], registerCleanup?:(cleanup:()=>void)=>void}} LuaPackage */
 /** @typedef {string|number|boolean|null|JSONValue[]|{[key: string]: JSONValue}} JSONValue */
 
-const EVENTS = new Set(['OnTick', 'OnPlayerUpdate', 'OnPlayerMove', 'OnGameStart', 'OnLoad', 'OnPostSave', 'OnResolutionChange', 'OnRightMouseDown', 'OnEquipPrimary', 'OnEquipSecondary', 'OnDestroyIsoThumpable', 'OnDoTileBuilding2', 'OnDoTileBuilding3', 'RenderOpaqueObjectsInWorld', 'OnCreatePlayer', 'OnPlayerDeath', 'OnMainMenuEnter', 'OnKeyPressed', 'OnKeyReleased', 'OnKeyKeepPressed', 'OnPreFillWorldObjectContextMenu', 'OnFillWorldObjectContextMenu', 'OnPressWalkTo', 'OnContainerUpdate', 'RequestTrade', 'AcceptedTrade', 'TradingUIAddItem', 'TradingUIRemoveItem', 'TradingUIUpdateState']);
-const EXTERNAL_EVENTS = new Set(['OnGameStart', 'OnLoad', 'OnPostSave', 'OnResolutionChange', 'OnRightMouseDown', 'OnEquipPrimary', 'OnEquipSecondary', 'OnCreatePlayer', 'OnPlayerDeath', 'OnMainMenuEnter', 'OnKeyPressed', 'OnKeyReleased', 'OnKeyKeepPressed']);
+const EVENTS = new Set(['OnTick', 'OnPlayerUpdate', 'OnPlayerMove', 'OnGameStart', 'OnLoad', 'OnPostSave', 'OnResolutionChange', 'OnRightMouseDown', 'OnEquipPrimary', 'OnEquipSecondary', 'OnDestroyIsoThumpable', 'OnDoTileBuilding2', 'OnDoTileBuilding3', 'RenderOpaqueObjectsInWorld', 'OnCreatePlayer', 'OnPlayerDeath', 'OnMainMenuEnter', 'OnKeyStartPressed', 'OnKeyPressed', 'OnKeyKeepPressed', 'OnPreFillWorldObjectContextMenu', 'OnFillWorldObjectContextMenu', 'OnPressWalkTo', 'OnContainerUpdate', 'RequestTrade', 'AcceptedTrade', 'TradingUIAddItem', 'TradingUIRemoveItem', 'TradingUIUpdateState']);
+const EXTERNAL_EVENTS = new Set(['OnGameStart', 'OnLoad', 'OnPostSave', 'OnResolutionChange', 'OnRightMouseDown', 'OnEquipPrimary', 'OnEquipSecondary', 'OnCreatePlayer', 'OnPlayerDeath', 'OnMainMenuEnter', 'OnKeyStartPressed', 'OnKeyPressed', 'OnKeyKeepPressed']);
 
 EVENTS.add('OnClothingUpdated');
+EVENTS.add('OnRefreshInventoryWindowContainers');
+EVENTS.add('SetDragItem');
+EVENTS.add('OnContextKey');
+EVENTS.add('OnCGlobalObjectSystemInit');
 
 const UI_PRELUDE = String.raw`
 local function ui(operation, ...) return hostCall('ui', operation, ...) end
+local collection
+UITransition={
+    new=function()
+        local id=ui('transitionNew')
+        local value=nativeObject('UITransition')
+        local meta=getmetatable(value)
+        meta.__gc=function() ui('transitionRelease',id) end
+        setmetatable(value,meta)
+        for _,name in ipairs({'init','update','fraction','setFadeIn','reset','setIgnoreUpdateTime','getElapsed','setElapsed'}) do
+            value[name]=function(_,...) return ui('transition',id,name,...) end
+        end
+        return value
+    end,
+    UpdateAll=function() return ui('transitionUpdateAll') end,
+}
 function getISUIStackTrace(level)
     assert(type(level)=='number' and level>=0 and level%1==0, 'invalid UI stack depth')
     return traceback('', 2)
@@ -54,31 +73,66 @@ function instanceof(value, class)
     if class == 'Texture' or class == 'UIElement' then return rawType(value) == 'table' and nativeTypes[value] == class end
     rawError(fault('unsupported native class: ' .. tostring(class)), 2)
 end
+-- Keep native UI identity helpers private without occupying shared-chunk local slots.
+do
+local sourceUIObjects=setmetatable({}, {__mode='v'})
+-- Host callbacks borrow targets; only live Lua ownership may retain their native-wrapper cycles.
+local sourceUITargets=setmetatable({}, {__mode='v'})
+-- Ephemeron edges retain a detached tree from either end without globally rooting abandoned trees.
+local sourceUIParents=setmetatable({}, {__mode='k'})
+local sourceUIChildren=setmetatable({}, {__mode='k'})
+local sourceUIAttached={}
+local sourceUIList
+local function retainSourceUIRoots(ids)
+    -- Borrow every boundary before native cleanup cuts any ownership edge in the forest.
+    for _,id in ipairs(ids) do
+        local object=sourceUIObjects[id]
+        if object then sourceUIAttached[id]=object end
+    end
+end
 UIElement = {new = function(target)
     local owner = context()
+    local id
     local function callback(name, ...)
+        local target=sourceUITargets[id]
+        if not target then return end
         local args = table.pack(...)
         return guarded(owner, function()
             if __pz_context_call then return __pz_context_call(target,name,table.unpack(args,1,args.n)) end
             if target[name] then return target[name](target, table.unpack(args, 1, args.n)) end
         end)
     end
-    local id = ui('new', {update = function() return callback('update') end,
+    id = ui('new', {retainRoots=retainSourceUIRoots,attached=function(enabled)
+        local object=sourceUIObjects[id]
+        local previous=object and sourceUIParents[object]
+        if previous then
+            sourceUIChildren[previous][object]=nil
+            sourceUIParents[object]=nil
+        end
+        sourceUIAttached[id]=enabled and object or nil
+    end,
+        update = function() return callback('update') end,
         prerender = function() return callback('prerender') end,
         render = function() return callback('render') end,
         input = function(name, ...)
-            if not target[name] then return false end
+            local target=sourceUITargets[id]
+            if not target or not target[name] then return false end
             return callback(name, ...)
         end})
     ui('element', id, 'setConsumeMouseEvents', true)
     local object = nativeObject('UIElement')
     object.__ui = id
+    local meta=getmetatable(object)
+    meta.__gc=function() ui('release',id) end
+    setmetatable(object,meta)
     for _, name in ipairs({'getX','getY','getWidth','getHeight','getAbsoluteX','getAbsoluteY',
         'setX','setY','setWidth','setHeight','setAnchorLeft','setAnchorRight','setAnchorTop','setAnchorBottom',
         'setWantKeyEvents','setConsumeMouseEvents','setWantExtraMouseEvents','setForceCursorVisible',
-        'isVisible','getIsVisible','setEnabled','isEnabled','setAlwaysOnTop','backMost','bringToTop','isMouseOver','isPointOver',
+        'setUIName',
+        'isVisible','getIsVisible','isReallyVisible','setEnabled','isEnabled','setAlwaysOnTop','backMost','bringToTop','isMouseOver','isPointOver',
+        'setScrollChildren','getScrollChildren','setScrollWithParent','getScrollWithParent','getMaxDrawHeight','setMaxDrawHeight','clearMaxDrawHeight','setCapture','isCapture',
         'getXScroll','getYScroll','setXScroll','setYScroll','getScrollHeight','setScrollHeight',
-        'setStencilRect','clearStencilRect','suspendStencil','resumeStencil',
+        'setStencilRect','clearStencilRect','repaintStencilRect','suspendStencil','resumeStencil',
         'DrawTextureScaled','DrawTextureScaledColor','DrawTextureScaledUniform','DrawTextureScaledAspect','DrawTexture','DrawTextureColor',
         'DrawTextRight','DrawTextCentre','DrawText'}) do
         object[name] = function(_, ...)
@@ -87,19 +141,45 @@ UIElement = {new = function(target)
             return ui('element', id, name, table.unpack(args, 1, args.n))
         end
     end
+    function object:getTable() return target end
+    function object:getUIName()
+        local name,class=rawget(target,'name'),rawget(target,'Type')
+        local fallback=class and (name~=nil and tostring(class)..': '..tostring(name) or tostring(class)) or nil
+        return ui('element',id,'getUIName',fallback)
+    end
     function object:setVisible(value)
         local result = ui('element', id, 'setVisible', value)
         if __pz_source_visibility then __pz_source_visibility(target, value) end
         return result
     end
-    function object:AddChild(child) return ui('element',id,'AddChild',child.__ui) end
-    function object:RemoveChild(child) return ui('element',id,'RemoveChild',child.__ui) end
+    function object:AddChild(child)
+        assert(child and rawEqual(sourceUIObjects[child.__ui],child),'expected resident native UIElement')
+        local result=ui('element',id,'AddChild',child.__ui)
+        local previous=sourceUIParents[child]
+        if previous then sourceUIChildren[previous][child]=nil end
+        local children=sourceUIChildren[object]
+        if not children then children={};sourceUIChildren[object]=children end
+        children[child]=true
+        sourceUIParents[child]=object
+        return result
+    end
+    function object:RemoveChild(child)
+        assert(child and rawEqual(sourceUIObjects[child.__ui],child),'expected resident native UIElement')
+        local result=ui('element',id,'RemoveChild',child.__ui)
+        if sourceUIParents[child]==object then
+            sourceUIChildren[object][child]=nil
+            sourceUIParents[child]=nil
+        end
+        return result
+    end
     function object:DrawItemIcon(value,x,y,alpha,width,height)
         assert(value and (nativeTypes[value]=='InventoryItem' or nativeTypes[value]=='InventoryContainer'),'expected native inventory icon')
         assert(value:getFluidContainer()==nil and value:getTextureColorMask()==nil and value:getTextureFluidMask()==nil,'unsupported fluid or masked item icon')
         local texture=assert(value:getTex(),'original inventory icon unavailable')
         return self:DrawTextureScaledAspect(texture,x,y,width,height,value:getR(),value:getG(),value:getB(),alpha)
     end
+    sourceUIObjects[id]=object
+    sourceUITargets[id]=target
     return object
 end}
 local function playerUIReferences(operation, index, first, second)
@@ -111,15 +191,187 @@ end
 UIManager = {
     AddUI = function(object) ui('add',object.__ui) end,
     RemoveElement = function(object) ui('remove',object.__ui) end,
+    getUI = function()
+        if not sourceUIList then
+            sourceUIList=collection(function()
+                local values=ui('getUI')
+                for index,id in ipairs(values) do
+                    values[index]=assert(sourceUIObjects[id],'live UI element has no resident native wrapper')
+                end
+                return values
+            end)
+        end
+        return sourceUIList
+    end,
     setPlayerInventory = function(index, first, second) return playerUIReferences('playerInventory', index, first, second) end,
     setPlayerInventoryTooltip = function(index, first, second) return playerUIReferences('playerInventoryTooltip', index, first, second) end,
 }
+end
 UIFont = {Small='Small',Medium='Medium',Large='Large',NewSmall='NewSmall'}
 local textManager = nativeObject('TextManager')
 function textManager:MeasureStringX(font, text) return ui('measureX',font,text) end
 function textManager:MeasureStringY(font, text) return ui('measureY',font,text) end
 function textManager:getFontHeight(font) return ui('fontHeight',font) end
 function getTextManager() ui('fontHeight','Small'); return textManager end
+-- Native ObjectTooltip layout uses real font metrics and the same UI drawing primitives as source Lua.
+ObjectTooltip={new=function()
+    local value=UIElement.new({})
+    nativeTypes[value]='ObjectTooltip'
+    value.padLeft,value.padTop,value.padRight,value.padBottom=5,5,5,5
+    value:setWidth(130)
+    value:setHeight(130)
+    local font=ui('settings').tooltipFont
+    assert(font=='Small' or font=='Medium' or font=='Large','original tooltip font configuration unavailable')
+    local lineSpacing=getTextManager():getFontHeight(font)
+    local character,measureOnly,weightOfStack=nil,false,0
+    function value:getFont() return font end
+    function value:getLineSpacing() return lineSpacing end
+    function value:getCharacter() return character end
+    function value:setCharacter(other)
+        assert(other==nil or nativeTypes[other]=='IsoPlayer','expected native tooltip character')
+        character=other
+    end
+    function value:isMeasureOnly() return measureOnly end
+    function value:setMeasureOnly(enabled)
+        assert(rawType(enabled)=='boolean','expected tooltip measurement flag')
+        measureOnly=enabled
+    end
+    function value:getWeightOfStack() return weightOfStack end
+    function value:setWeightOfStack(weight)
+        assert(rawType(weight)=='number','expected tooltip stack weight')
+        weightOfStack=(string.unpack('f',string.pack('f',weight)))
+    end
+    for _,name in ipairs({'DrawText','DrawTextCentre','DrawTextRight','DrawTextureScaled','DrawTextureScaledAspect'}) do
+        local draw=value[name]
+        value[name]=function(self,...)
+            if not measureOnly then return draw(self,...) end
+        end
+    end
+    function value:adjustWidth(x,text)
+        self:setWidth(math.max(self:getWidth(),x+textManager:MeasureStringX(font,text)+self.padRight))
+    end
+    function value:DrawProgressBar(x,y,width,height,fraction,r,g,b,a)
+        if measureOnly then return end
+        fraction=math.max(0,math.min(1,fraction))
+        local filled=math.floor(width*fraction)
+        self:DrawTextureScaledColor(nil,x-1,y-1,width+2,height,0.25,0.25,0.25,1)
+        if fraction~=0 and fraction~=1 then
+            self:DrawTextureScaledColor(nil,x+filled,y,width-filled,height-2,0.5,0.5,0.5,1)
+        end
+        self:DrawTextureScaledColor(nil,x,y,filled,height-2,r,g,b,a)
+    end
+    function value:beginLayout()
+        local pad=textManager:MeasureStringX(font,'0')
+        self.padLeft,self.padTop,self.padRight,self.padBottom=pad,math.floor(pad/2),pad,math.floor(pad/2)
+        local layout=nativeObject('ObjectTooltip.Layout')
+        local layoutIndex=getmetatable(layout).__index
+        getmetatable(layout).__index=function(self,key)
+            if key=='next' then return nil end
+            return layoutIndex(self,key)
+        end
+        local rows={}
+        layout.items,layout.minLabelWidth,layout.minValueWidth=collection(function() return rows end),0,0
+        layout.nextPadY,layout.offsetY=0,0
+        function layout:setMinLabelWidth(width) self.minLabelWidth=width end
+        function layout:setMinValueWidth(width) self.minValueWidth=width end
+        function layout:addItem()
+            local row=nativeObject('ObjectTooltip.LayoutItem')
+            local rowIndex=getmetatable(row).__index
+            getmetatable(row).__index=function(self,key)
+                if key=='label' or key=='value' then return nil end
+                return rowIndex(self,key)
+            end
+            row.r0,row.g0,row.b0,row.a0,row.r1,row.g1,row.b1,row.a1=0,0,0,0,0,0,0,0
+            row.labelWidth,row.valueWidth,row.valueWidthRight,row.progressWidth,row.height=0,0,0,0,0
+            row.hasValue,row.couldHaveValue,row.rightJustify,row.progressFraction=false,false,false,-1
+            function row:setLabel(text,r,g,b,a) self.label,self.r0,self.g0,self.b0,self.a0=text,r,g,b,a end
+            function row:setValue(text,r,g,b,a)
+                self.value,self.r1,self.g1,self.b1,self.a1=text,r,g,b,a
+                self.hasValue,self.rightJustify=true,true
+            end
+            function row:setValueRight(number,positiveIsGood)
+                number=math.modf(number)
+                local settings=ui('settings')
+                local bad=(number<0 and positiveIsGood) or (number>0 and not positiveIsGood)
+                local tint=bad and settings.badHighlight or settings.goodHighlight
+                self:setValue((number>0 and '+' or '')..tostring(number),tint.r,tint.g,tint.b,1)
+            end
+            function row:setValueRightNoPlus(number)
+                local rounded=math.modf((number+0.005)*100)/100
+                self:setValue(math.type(number)=='integer' and tostring(number) or tostring(rounded),1,1,1,1)
+            end
+            function row:setProgress(fraction,r,g,b,a)
+                self.progressFraction,self.r1,self.g1,self.b1,self.a1=fraction,r,g,b,a
+                self.hasValue=true
+            end
+            function row:reset()
+                self.label,self.value=nil,nil
+                self.hasValue,self.couldHaveValue,self.rightJustify,self.progressFraction=false,false,false,-1
+            end
+            function row:calcSizes()
+                self.labelWidth,self.valueWidth,self.valueWidthRight,self.progressWidth=0,0,0,0
+                if self.label then self.labelWidth=textManager:MeasureStringX(font,self.label) end
+                if self.hasValue then
+                    if self.value then
+                        local width=textManager:MeasureStringX(font,self.value)
+                        if self.rightJustify then self.valueWidthRight=width else self.valueWidth=width end
+                    elseif self.progressFraction~=-1 then self.progressWidth=80 end
+                end
+                local function lines(text) local _,count=(text or ''):gsub('\n','');return count+1 end
+                self.height=math.max(lines(self.label),self.hasValue and lines(self.value) or 1)*lineSpacing
+            end
+            function row:render(x,y,valueX,rightWidth,tooltip)
+                if self.label then tooltip:DrawText(font,self.label,x,y,self.r0,self.g0,self.b0,self.a0) end
+                if self.value then
+                    if self.rightJustify then
+                        tooltip:DrawTextRight(font,self.value,x+valueX+rightWidth,y,self.r1,self.g1,self.b1,self.a1)
+                    else tooltip:DrawText(font,self.value,x+valueX,y,self.r1,self.g1,self.b1,self.a1) end
+                end
+                if self.progressFraction~=-1 then
+                    tooltip:DrawProgressBar(x+valueX,y+math.floor(lineSpacing/2)-1,rightWidth,
+                        font=='Large' and 7 or font=='Medium' and 6 or 5,
+                        self.progressFraction,self.r1,self.g1,self.b1,self.a1)
+                end
+            end
+            rows[#rows+1]=row
+            return row
+        end
+        function layout:render(x,y,tooltip)
+            local label,left,right,progress,width,valueX=self.minLabelWidth,self.minValueWidth,self.minValueWidth,0,0,0
+            local gap=math.max(8,textManager:MeasureStringX(font,'W'))
+            for _,row in ipairs(rows) do
+                row:calcSizes()
+                if row.hasValue then
+                    label,left,right,progress=math.max(label,row.labelWidth),math.max(left,row.valueWidth),
+                        math.max(right,row.valueWidthRight),math.max(progress,row.progressWidth)
+                    valueX=math.max(valueX,math.max(row.labelWidth,self.minLabelWidth)+gap)
+                    width=math.max(width,label+gap+math.max(left,right,progress))
+                else
+                    if row.couldHaveValue then label=math.max(label,row.labelWidth) end
+                    width=math.max(width,row.labelWidth)
+                end
+            end
+            tooltip:setWidth(math.max(tooltip:getWidth(),x+width+tooltip.padRight))
+            for _,row in ipairs(rows) do row:render(x,y,valueX,right,tooltip);y=y+row.height end
+            if self.next then return self.next:render(x,y+self.next.nextPadY,tooltip) end
+            return y
+        end
+        function layout:free()
+            rows={}
+            self.next=nil
+            self.minLabelWidth,self.minValueWidth,self.nextPadY,self.offsetY=0,0,0,0
+        end
+        return layout
+    end
+    function value:endLayout(layout)
+        while layout do
+            local nextLayout=layout.next
+            layout:free()
+            layout=nextLayout
+        end
+    end
+    return value
+end}
 function getText(key,...) return ui('text',key,...) end
 function getTextOrNull(key,...) return ui('textOrNull',key,...) end
 function getMouseX() return ui('mouse').x end
@@ -132,24 +384,55 @@ function getPlayerScreenLeft(index) singlePlayer(index); return 0 end
 function getPlayerScreenTop(index) singlePlayer(index); return 0 end
 function getPlayerScreenWidth(index) return singlePlayer(index).width end
 function getPlayerScreenHeight(index) return singlePlayer(index).height end
-local function color(read, write)
-    local value = nativeObject('Color')
-    for _, pair in ipairs({{'getR','r'},{'getG','g'},{'getB','b'},{'getA','a'},
-        {'getRedFloat','r'},{'getGreenFloat','g'},{'getBlueFloat','b'},{'getAlphaFloat','a'}}) do
+local function color(read, write, class)
+    local value = nativeObject(class or 'Color')
+    for _, pair in ipairs({{'getR','r'},{'getG','g'},{'getB','b'},{'getA','a'}}) do
         value[pair[1]] = function() return read()[pair[2]] end
+    end
+    if class~='ColorInfo' then
+        for _,pair in ipairs({{'getRedFloat','r'},{'getGreenFloat','g'},{'getBlueFloat','b'},{'getAlphaFloat','a'}}) do
+            value[pair[1]]=function() return read()[pair[2]] end
+        end
     end
     if write then function value:set(r,g,b,a) write({r=r,g=g,b=b,a=a}) end end
     return value
 end
 Color = {gray = color(function() return ui('gray') end, function(value) ui('gray',value) end)}
+ColorInfo={new=function(...)
+    local args=table.pack(...)
+    assert(args.n==0 or args.n==4,'ColorInfo requires zero or four float components')
+    local value
+    value=color(function() return value end,nil,'ColorInfo')
+    for index,component in ipairs({'r','g','b','a'}) do
+        local input=args.n==0 and 1 or args[index]
+        assert(rawType(input)=='number','ColorInfo requires numeric components')
+        value[component]=string.unpack('f',string.pack('f',input))
+    end
+    return value
+end}
 local core = nativeObject('Core')
+local selectingAll=false
+function core:isSelectingAll() hostCall('state');return selectingAll end
+function core:setIsSelectingAll(enabled)
+    assert(rawType(enabled)=='boolean','select-all state must be boolean')
+    hostCall('state');selectingAll=enabled
+end
 function core:isDedicated() hostCall('state');return false end
 function core:getScreenWidth() return ui('viewport').width end
 function core:getScreenHeight() return ui('viewport').height end
 function core:getOptionMoodleSize() return ui('settings').moodleSize end
 function core:getOptionFontSizeReal() return ui('settings').fontSizeReal end
-function core:getGoodHighlitedColor() return color(function() return ui('settings').goodHighlight end) end
-function core:getBadHighlitedColor() return color(function() return ui('settings').badHighlight end) end
+function core:getOptionDoContainerOutline() return ui('settings').doContainerOutline end
+function core:setOptionDoContainerOutline(enabled) ui('setCoreOption','doContainerOutline',enabled) end
+function core:getObjectHighlitedColor() return color(function() return ui('settings').objectHighlight end,nil,'ColorInfo') end
+function core:setObjectHighlitedColor(value)
+    assert(nativeTypes[value]=='ColorInfo','expected native ColorInfo')
+    ui('setCoreOption','objectHighlight',{r=value:getR(),g=value:getG(),b=value:getB(),a=value:getA()})
+end
+function core:getWorldItemHighlightColor() return color(function() return hostCall('worldItemHighlightColor') end,nil,'ColorInfo') end
+function core:saveOptions() ui('saveOptions') end
+function core:getGoodHighlitedColor() return color(function() return ui('settings').goodHighlight end,nil,'ColorInfo') end
+function core:getBadHighlitedColor() return color(function() return ui('settings').badHighlight end,nil,'ColorInfo') end
 function getCore() hostCall('state'); return core end
 PerformanceSettings = {getLockFPS = function() return ui('settings').lockFPS end}
 function getFileReader(path, create)
@@ -231,28 +514,28 @@ local container,sourceItem
 local function item(id)
     if id == nil then return nil end
     if itemCache[id] then return itemCache[id] end
-    local row=assert(hostCall('item',id),'native item is unavailable')
-    local value=nativeObject(row.internalContainerId and 'InventoryContainer' or 'InventoryItem')
-    local function record() return assert(hostCall('item',id),'native item is unavailable') end
-    function value:getFullType() return record().fullType end
-    function value:getCondition() return record().condition end
-    function value:getConditionMax() return hostCall('itemDefinition',record().fullType).conditionMax end
+    local inner=hostCall('item',id,'internalContainerId')
+    local value=nativeObject(inner and 'InventoryContainer' or 'InventoryItem')
+    local function field(name) return hostCall('item',id,name) end
+    function value:getFullType() return field('fullType') end
+    function value:getCondition() return field('condition') end
+    function value:getConditionMax() return hostCall('itemDefinition',field('fullType'),'conditionMax') end
     function value:getWeight() return hostCall('itemWeight',id,'weight') end
     function value:getActualWeight() return hostCall('itemWeight',id,'actualWeight') end
     function value:getContentsWeight() return hostCall('itemWeights',id).contentsWeight end
     function value:getBodyLocation()
-        local name=hostCall('itemDefinition',record().fullType).bodyLocation
+        local name=hostCall('itemDefinition',field('fullType'),'bodyLocation')
         return name~=nil and locationObject(hostCall('equipment','lookup',name)) or nil
     end
     function value:canBeEquipped()
-        local name=hostCall('itemDefinition',record().fullType).canBeEquipped
+        local name=hostCall('itemDefinition',field('fullType'),'canBeEquipped')
         return name~=nil and locationObject(hostCall('equipment','lookup',name)) or nil
     end
     function value:getUnequippedWeight() return hostCall('itemWeights',id).unequippedWeight end
     function value:getEquippedWeight() return hostCall('itemWeights',id).equippedWeight end
     function value:getHotbarEquippedWeight() return hostCall('itemWeights',id).hotbarEquippedWeight end
     function value:getContainer()
-        local owner=record().ownerContainerId
+        local owner=field('ownerContainerId')
         return owner~=0 and container(owner) or nil
     end
     function value:getOutermostContainer()
@@ -266,8 +549,8 @@ local function item(id)
         local outer=self:getOutermostContainer()
         return outer and outer:getParent()==player and player or self:getOwner()
     end
-    function value:getInventory() return container(record().internalContainerId) end
-    if row.internalContainerId then
+    function value:getInventory() return container(field('internalContainerId')) end
+    if inner then
         function value:getInventoryWeight() return hostCall('sourceActions','itemInventoryWeight',id) end
     end
     function value:getEffectiveCapacity(character)
@@ -275,7 +558,7 @@ local function item(id)
         return hostCall('sourceActions','itemContainerCapacity',id,character==player and 1 or 0,true)
     end
     function value:getCapacity() return hostCall('sourceActions','itemContainerCapacity',id,0,false) end
-    function value:getWeightReduction() return hostCall('itemDefinition',record().fullType).weightReduction end
+    function value:getWeightReduction() return hostCall('itemDefinition',field('fullType'),'weightReduction') end
     function value:getCurrentCondition()
         local maximum=self:getConditionMax()
         assert(type(maximum)=='number' and maximum>0, 'unsupported item condition percentage without positive original ConditionMax')
@@ -297,6 +580,7 @@ function player:getInventory()
     inventory=value
     return value
 end
+function player:getMaxWeight() return hostCall('inventoryState').maxWeight end
 function player:getHealth() return hostCall('health') end
 function player:isDead() return hostCall('isDead') end
 local moodles = nativeObject('Moodles')
@@ -441,10 +725,11 @@ local function allowSourceAdmission()
 end
 local worldItems, doorObjects = {}, {}
 local worldItem
-local actorState = {farming=false,aiming=false,asleep=false,dragging=false,animation=nil,variables={},events={}}
+local actorState = {farming=false,asleep=false,dragging=false,animation=nil,variables={},events={}}
 local jobs, transactions, nextTransaction = {}, {}, 1
 local restoring = false
 local itemVisuals={}
+local sourceItemClasses={}
 local function indexedCollection(size,at)
     local value=nativeObject('ArrayList')
     function value:size() return size() end
@@ -457,9 +742,13 @@ local function indexedCollection(size,at)
         for index=0,size()-1 do if at(index)==target then return true end end
         return false
     end
+    function value:indexOf(target)
+        for index=0,size()-1 do if rawEqual(at(index),target) then return index end end
+        return -1
+    end
     return value
 end
-local function collection(read)
+collection=function(read)
     local value=nativeObject('ArrayList')
     function value:size() return #read() end
     function value:isEmpty() return #read()==0 end
@@ -469,7 +758,20 @@ local function collection(read)
         return values[index+1]
     end
     function value:contains(target) for _,entry in ipairs(read()) do if entry==target then return true end end;return false end
+    function value:indexOf(target)
+        for index,entry in ipairs(read()) do if rawEqual(entry,target) then return index-1 end end
+        return -1
+    end
     return value
+end
+local function categoryItems(items,category)
+    assert(rawType(category)=='string','expected nonnull item category')
+    local matches={}
+    for index=0,items:size()-1 do
+        local entry=items:get(index)
+        if entry:getCategory()==category then matches[#matches+1]=entry end
+    end
+    return collection(function() return matches end)
 end
 local containerCache,containerIds={},setmetatable({}, {__mode='k'})
 local function containerPolicy(value,entry)
@@ -553,7 +855,19 @@ container=function(id)
     end
     function value:isInside(entry) return qa('containerIsInside',id,(assert(itemIds[entry],'expected native item'))) end
     function value:isExistYet() return hostCall('container',id)~=nil end
-    function value:isVehicleSeat() record();return false end
+    function value:isVehicleSeat()
+        local kind=record().kind
+        assert(kind=='actor' or kind=='floor' or kind=='bag','unsupported native vehicle container')
+        return false
+    end
+    function value:isOccupiedVehicleSeat()
+        assert(not self:isVehicleSeat(),'unsupported native vehicle-seat occupancy')
+        return false
+    end
+    function value:getVehiclePart()
+        assert(not self:isVehicleSeat(),'unsupported native vehicle part')
+        return nil
+    end
     function value:isRemoveItemAllowed(entry) return qa('containerRemoveAllowed',id,(assert(itemIds[entry],'expected native item'))) end
     function value:isItemAllowed(entry) return qa('containerItemAllowed',id,(assert(itemIds[entry],'expected native item')),containerPolicy(value,entry)) end
     function value:hasRoomFor(...)
@@ -570,7 +884,8 @@ container=function(id)
     function value:DoRemoveItem(entry) transferOperation(entry,1,id);return entry end
     function value:AddItem(entry) transferOperation(entry,2,id);return entry end
     value.DoAddItemBlind=value.AddItem
-    function value:setDrawDirty(enabled) assert(rawType(enabled)=='boolean');actorState.inventoryDirty=enabled end
+    function value:setDrawDirty(enabled) assert(rawType(enabled)=='boolean');return qa('containerSetDrawDirty',id,enabled) end
+    function value:isDrawDirty() return qa('containerDrawDirty',id) end
     function value:setExplored(enabled) assert(rawType(enabled)=='boolean');qa('containerSetFlags',id,0,enabled) end
     function value:isExplored() return record().explored end
     function value:setHasBeenLooted(enabled) assert(rawType(enabled)=='boolean');qa('containerSetFlags',id,1,enabled) end
@@ -578,6 +893,20 @@ container=function(id)
     local items=indexedCollection(function() return qa('containerItemCount',id) end,
         function(index) return sourceItem(qa('containerItemGet',id,index)) end)
     function value:getItems() return items end
+    function value:getItemsFromCategory(category) return categoryItems(items,category) end
+    function value:isEmpty() return items:isEmpty() end
+    function value:isEmptyOrUnwanted(character)
+        assert(character==player,'unsupported unwanted inventory actor')
+        for index=0,items:size()-1 do if not items:get(index):isUnwanted(character) then return false end end
+        return true
+    end
+    function value:isLockedToCharacter(character)
+        assert(character==player,'unsupported inventory lock actor')
+        local row=record()
+        assert(row.kind=='actor' or row.kind=='floor' or row.kind=='bag','unsupported object-owned container lock')
+        -- Original ItemContainer delegates only an IsoThumpable parent; these native kinds cannot own one.
+        return false
+    end
     for _,method in ipairs({'getContainerPosition','getFreezerPosition','getTakeSound','getPutSound','getOpenSound','getCloseSound'}) do
         value[method]=function()
             local row=record()
@@ -600,33 +929,28 @@ local function floorViewRoot(value)
 end
 local function newFloorView()
     local value=nativeObject('ItemContainer')
-    local ids,seen={},{}
+    local handle=hostCall('sourceFloorView','new')
+    local meta=getmetatable(value)
+    meta.__gc=function() hostCall('sourceFloorView','release',handle) end
+    setmetatable(value,meta)
     local explored=false
+    local drawDirty=true
     floorViews[value]=true
-    local function live(id)
-        local record=hostCall('item',id)
-        local owner=record and record.ownerContainerId~=0 and hostCall('container',record.ownerContainerId)
-        if not record or not record.worldPosition or not owner or owner.kind~='floor' then return false end
-        local position=record.worldPosition
-        local stamp=seen[id]
-        return stamp==nil or (stamp.ownerContainerId==record.ownerContainerId and stamp.x==position.x and stamp.y==position.y and stamp.z==position.z)
-    end
-    local function at(index)
-        local cursor=0
-        for _,id in ipairs(ids) do
-            if live(id) then
-                if cursor==index then return sourceItem(id) end
-                cursor=cursor+1
-            end
-        end
-        return nil
-    end
-    local function size()
-        local count=0
-        for _,id in ipairs(ids) do if live(id) then count=count+1 end end
-        return count
-    end
+    local function at(index) return sourceItem(hostCall('sourceFloorView','at',handle,index)) end
+    local function size() return hostCall('sourceFloorView','size',handle) end
     function value:getType() return 'floor' end
+    function value:isEmpty() return size()==0 end
+    function value:isEmptyOrUnwanted(character)
+        assert(character==player,'unsupported unwanted presentation actor')
+        for _,id in ipairs(hostCall('sourceFloorView','ids',handle)) do
+            if not sourceItem(id):isUnwanted(character) then return false end
+        end
+        return true
+    end
+    function value:isLockedToCharacter(character) assert(character==player);return false end
+    for _,method in ipairs({'getContainerPosition','getFreezerPosition','getTakeSound','getPutSound','getOpenSound','getCloseSound'}) do
+        value[method]=function() local root=floorViewRoot(value);return root[method](root) end
+    end
     function value:getParent() return nil end
     function value:getContainingItem() return nil end
     function value:getCapacity() return 50 end
@@ -636,8 +960,8 @@ local function newFloorView()
     function value:getMaxWeight() return 50 end
     function value:getCapacityWeight()
         local weight=0
-        for _,id in ipairs(ids) do
-            if live(id) then weight=hostCall('sourceFloatAdd',weight,hostCall('itemWeights',id).unequippedWeight) end
+        for _,id in ipairs(hostCall('sourceFloorView','ids',handle)) do
+            weight=hostCall('sourceFloatAdd',weight,hostCall('itemWeights',id).unequippedWeight)
         end
         return weight
     end
@@ -647,28 +971,27 @@ local function newFloorView()
     function value:getOutermostContainer() return self end
     function value:isInCharacterInventory(character) assert(character==player);return false end
     function value:isVehicleSeat() return false end
+    function value:isOccupiedVehicleSeat() return false end
+    function value:getVehiclePart() return nil end
     function value:isExistYet() return player:getCurrentSquare()~=nil end
     function value:isInside(entry) assert(itemIds[entry]);return false end
     function value:contains(entry)
-        local id=itemIds[entry];return id~=nil and seen[id]~=nil and live(id) or false
+        local id=itemIds[entry]
+        return id~=nil and rawEqual(itemCache[id],entry) and hostCall('sourceFloorView','contains',handle,id) or false
     end
     function value:setExplored(enabled) assert(rawType(enabled)=='boolean');explored=enabled end
     function value:isExplored() return explored end
-    function value:setDrawDirty(enabled) assert(rawType(enabled)=='boolean');actorState.inventoryDirty=enabled end
-    function value:clear() ids,seen={},{} end
+    function value:setDrawDirty(enabled) assert(rawType(enabled)=='boolean');drawDirty=enabled end
+    function value:isDrawDirty() return drawDirty end
+    function value:clear() hostCall('sourceFloorView','clear',handle);drawDirty=true end
     function value:removeItemsFromProcessItems()
         -- This transient presentation never registers native processing or owns an item.
-        for _,id in ipairs(ids) do if live(id) then hostCall('item',id) end end
+        for _,id in ipairs(hostCall('sourceFloorView','ids',handle)) do hostCall('item',id) end
     end
     function value:AddItem(entry)
         local id=assert(itemIds[entry],'floor presentation requires a native item')
-        assert(live(id),'floor presentation requires live true world/floor ownership')
-        if not seen[id] then
-            local record=hostCall('item',id)
-            local position=record.worldPosition
-            ids[#ids+1]=id
-            seen[id]={ownerContainerId=record.ownerContainerId,x=position.x,y=position.y,z=position.z}
-        end
+        assert(rawEqual(itemCache[id],entry),'floor presentation requires a native item')
+        if hostCall('sourceFloorView','add',handle,id) then drawDirty=true end
         return entry
     end
     function value:hasRoomFor(...) return floorViewRoot(value):hasRoomFor(...) end
@@ -678,22 +1001,311 @@ local function newFloorView()
         return entry:getContainer():isRemoveItemAllowed(entry)
     end
     local entries=indexedCollection(size,at)
+    -- The native-filtered ordinal query also supplies the upper-bound check.
+    function entries:get(index)
+        assert(rawType(index)=='number' and index%1==0 and index>=0,'collection index out of range')
+        return (assert(at(index),'collection index out of range'))
+    end
+    function entries:contains(target) return value:contains(target) end
+    function entries:indexOf(target)
+        local targetId=itemIds[target]
+        if targetId==nil or not rawEqual(itemCache[targetId],target) then return -1 end
+        return hostCall('sourceFloorView','indexOf',handle,targetId)
+    end
     function entries:clear() value:clear() end
     function value:getItems() return entries end
+    function value:getItemsFromCategory(category) return categoryItems(entries,category) end
     return value
 end
 local activePlayerValues={player}
 local activePlayers=collection(function() hostCall('state');return activePlayerValues end)
 IsoPlayer={getPlayers=function() hostCall('state');return activePlayers end}
+local keyRingType=nativeObject('ItemType')
+local keyRingTag=nativeObject('ItemTag')
+local litLanternTag=nativeObject('ItemTag')
+ItemType=setmetatable({KEY_RING=keyRingType},{__index=function(_,name)
+    rawError(fault('unsupported native ItemType.'..tostring(name)),2)
+end})
+ItemTag=setmetatable({KEY_RING=keyRingTag,LIT_LANTERN=litLanternTag},{__index=function(_,name)
+    rawError(fault('unsupported native ItemTag.'..tostring(name)),2)
+end})
+local function tooltipLabel(layout,key)
+    local row=layout:addItem()
+    row:setLabel(getText(key)..':',1,1,0.8,1)
+    return row
+end
+local function tooltipProgress(layout,key,fraction,inverted)
+    local settings=ui('settings')
+    local first=inverted and settings.goodHighlight or settings.badHighlight
+    local last=inverted and settings.badHighlight or settings.goodHighlight
+    local row=tooltipLabel(layout,key)
+    row:setProgress(fraction,first.r+(last.r-first.r)*fraction,
+        first.g+(last.g-first.g)*fraction,first.b+(last.b-first.b)*fraction,1)
+    return row
+end
+local function clothingTooltip(entry,tooltip,layout,state)
+    local clothing=assert(state.clothing,'native Clothing tooltip state unavailable')
+    if not clothing.cosmetic then
+        tooltipProgress(layout,'Tooltip_weapon_Condition',entry:getCondition()/entry:getConditionMax())
+        tooltipProgress(layout,'Tooltip_item_Insulation',clothing.insulation)
+        if clothing.windResistance>0 then tooltipProgress(layout,'Tooltip_item_Windresist',clothing.windResistance) end
+        if clothing.waterResistance>0 then tooltipProgress(layout,'Tooltip_item_Waterresist',clothing.waterResistance) end
+    end
+    if clothing.bloodLevel~=0 then tooltipProgress(layout,'Tooltip_clothing_bloody',clothing.bloodLevel/100,true) end
+    if clothing.dirtyness>=1 then tooltipProgress(layout,'Tooltip_clothing_dirty',clothing.dirtyness/100,true) end
+    if clothing.wetness~=0 then tooltipProgress(layout,'Tooltip_clothing_wet',clothing.wetness/100,true) end
+    if clothing.holeCount>0 then tooltipLabel(layout,'Tooltip_clothing_holes'):setValueRightNoPlus(clothing.holeCount) end
+    local equipped=qa('itemEquipmentState',(assert(itemIds[entry],'expected native clothing')))
+    local character=tooltip:getCharacter()
+    local compare=not (equipped.worn or equipped.held) and character~=nil
+    local previous={biteDefense=0,scratchDefense=0,bulletDefense=0}
+    if compare then
+        local worn=character:getWornItems()
+        local location=entry:getBodyLocation()
+        for index=0,worn:size()-1 do
+            local current=worn:get(index)
+            local candidate=current:getItem()
+            if qa('itemIsClothing',(assert(itemIds[candidate],'expected worn item'))) and current:getLocation()~=nil
+                and (location==current:getLocation() or worn:getBodyLocationGroup():isExclusive(location,current:getLocation())) then
+                local other=qa('itemTooltipState',itemIds[candidate]).clothing
+                for key in pairs(previous) do previous[key]=previous[key]+other[key] end
+            end
+        end
+    end
+    local settings=ui('settings')
+    for _,pair in ipairs({{'biteDefense','Tooltip_BiteDefense'},{'scratchDefense','Tooltip_ScratchDefense'},{'bulletDefense','Tooltip_BulletDefense'}}) do
+        local key,label=pair[1],pair[2]
+        local defense=clothing[key]
+        if compare and defense~=previous[key] then
+            local row=layout:addItem()
+            if defense>0 or previous[key]>0 then
+                row:setLabel(getText(label)..':',1,1,0.8,1)
+                local better=defense>previous[key]
+                local tint=better and settings.goodHighlight or settings.badHighlight
+                row:setValue(tostring(math.floor(defense))..(better and ' (+' or ' (-')..
+                    tostring(math.floor(math.abs(defense-previous[key])))..')',tint.r,tint.g,tint.b,1)
+            end
+        elseif defense~=0 then tooltipLabel(layout,label):setValueRightNoPlus(math.floor(defense)) end
+    end
+    -- Respiratory rows require original per-item filter/tank mod-data; native state refuses unresolved tagged items.
+    if clothing.runSpeedModifier~=1 then
+        local fraction=clothing.runSpeedModifier-1
+        local tint=fraction>0 and settings.goodHighlight or settings.badHighlight
+        tooltipLabel(layout,'Tooltip_RunSpeedModifier'):setProgress(math.abs(fraction),tint.r,tint.g,tint.b,1)
+    end
+    if clothing.combatSpeedModifier~=1 then
+        -- The original color/direction branch tests run speed, not combat speed.
+        local better=clothing.runSpeedModifier>1
+        local tint=better and settings.goodHighlight or settings.badHighlight
+        tooltipLabel(layout,'Tooltip_CombatSpeedModifier'):setProgress(
+            better and clothing.combatSpeedModifier-1 or 1-clothing.combatSpeedModifier,tint.r,tint.g,tint.b,1)
+    end
+end
+local function inventoryTooltip(entry,tooltip,embedded,offset)
+    assert(nativeTypes[tooltip]=='ObjectTooltip','expected native ObjectTooltip')
+    local id=assert(itemIds[entry],'expected native inventory item')
+    local state=qa('itemTooltipState',id)
+    local definition=hostCall('itemDefinition',entry:getFullType())
+    local font,line=tooltip:getFont(),tooltip:getLineSpacing()
+    local y=tooltip.padTop+offset
+    local name=entry:getName(tooltip:getCharacter())
+    -- ObjectTooltip owns no default draw or special object in the inventory constructor.
+    tooltip:DrawText(font,name,tooltip.padLeft,y,1,1,0.8,1)
+    tooltip:adjustWidth(tooltip.padLeft,name)
+    y=y+line+5
+    local layout=embedded or tooltip:beginLayout()
+    if embedded then layout.offsetY=y else layout:setMinLabelWidth(80);layout:setMinValueWidth(80) end
+    local settings=ui('settings')
+    local function label(key,tint)
+        local row=layout:addItem()
+        tint=tint or {r=1,g=1,b=0.8}
+        row:setLabel(getText(key),tint.r,tint.g,tint.b,1)
+        return row
+    end
+    if tooltip:getCharacter() then
+        if #state.researchableRecipes>0 then
+            label(#state.researchableRecipes==1 and 'Tooltip_item_CanResearch' or 'Tooltip_item_CanResearchPlural',settings.goodHighlight)
+        end
+        if entry:isFavouriteRecipeInput(tooltip:getCharacter()) then label('Tooltip_item_IsFavouriteInput',settings.goodHighlight) end
+        if entry:isNoRecipes(tooltip:getCharacter()) then label('Tooltip_NoRecipes_More',settings.badHighlight) end
+        if entry:isUnwanted(tooltip:getCharacter()) then label('Tooltip_Unwanted_More',settings.badHighlight) end
+    end
+    local weight=tooltipLabel(layout,'Tooltip_item_Weight')
+    local equipment=qa('itemEquipmentState',id)
+    local special=state.clothing~=nil or qa('itemIsDrainableComboItem',id) or entry:getFullType():find('Walkie',1,true)~=nil or qa('itemIsKeyRingType',id)
+    local function clean(number)
+        local rounded=math.modf((number+0.005)*100)/100
+        return tostring(rounded)
+    end
+    local function comparedWeight(first,second,key)
+        weight:setValue(clean(first)..'    ('..clean(second)..' '..getText(key)..')',1,1,1,1)
+    end
+    if special and (equipment.worn or equipment.held or state.fakeEquipped) then
+        comparedWeight(entry:getEquippedWeight(),entry:getUnequippedWeight(),'Tooltip_item_Unequipped')
+    elseif state.attachedSlot>-1 then
+        comparedWeight(entry:getHotbarEquippedWeight(),entry:getUnequippedWeight(),'Tooltip_item_Unattached')
+    elseif special then comparedWeight(entry:getUnequippedWeight(),entry:getEquippedWeight(),'Tooltip_item_Equipped')
+    else
+        local number=entry:getUnequippedWeight()
+        weight:setValueRightNoPlus(number>0 and math.max(0.01,number) or number)
+    end
+    if tooltip:getWeightOfStack()>0 then tooltipLabel(layout,'Tooltip_item_StackWeight'):setValueRightNoPlus(math.max(0.01,tooltip:getWeightOfStack())) end
+    if state.maxAmmo>0 then
+        tooltipLabel(layout,'Tooltip_weapon_AmmoCount'):setValue(tostring(state.currentAmmoCount)..' / '..tostring(state.maxAmmo),1,1,1,1)
+    end
+    if state.ammoType then tooltipLabel(layout,'ContextMenu_AmmoType'):setValue(ui('itemName',state.ammoType),1,1,1,1) end
+    if state.gunType then tooltipLabel(layout,'ContextMenu_GunType'):setValue(state.gunType,1,1,1,1) end
+    for _,category in ipairs(state.forageFocusCategories) do
+        tooltipLabel(layout,'UI_search_mode_item_focus'):setValue(getText('IGUI_SearchMode_Categories_'..category),1,1,1,1)
+    end
+    if state.fatigueChange~=0 then
+        local tint=state.fatigueChange<0 and settings.goodHighlight or settings.badHighlight
+        tooltipLabel(layout,'Tooltip_item_Fatigue'):setProgress(math.abs(state.fatigueChange),tint.r,tint.g,tint.b,1)
+    end
+    if state.clothing then clothingTooltip(entry,tooltip,layout,state)
+    elseif definition.sourceCategory~='Item' then
+        rawError(fault('unsupported native tooltip subtype: '..tostring(definition.sourceCategory)),2)
+    end
+    if state.remoteControlId~=-1 then tooltipLabel(layout,'Tooltip_TrapControllerID'):setValue(tostring(state.remoteControlId),1,1,0.8,1) end
+    if state.haveBeenRepaired>0 then tooltipLabel(layout,'Tooltip_weapon_Repaired'):setValue(tostring(state.haveBeenRepaired)..'x',1,1,1,1) end
+    if state.equippedNoSprint then label('Tooltip_CantSprintEquipped',{r=1,g=0.1,b=0.1}) end
+    if state.wet then tooltipProgress(layout,'Tooltip_Wetness',state.wetCooldown/10000,true) end
+    if state.maxCapacity>0 then
+        local capacity=state.maxCapacity
+        if state.conditionAffectsCapacity then
+            rawError(fault('unsupported native facility: VehiclePart.getNumberByCondition capacity'),2)
+        end
+        tooltipLabel(layout,'Tooltip_container_Capacity'):setValue(
+            state.itemCapacity>-1 and tostring(state.itemCapacity)..' / '..tostring(capacity) or '0 / '..tostring(capacity),1,1,0.8,1)
+    end
+    if state.hasSharpness then tooltipProgress(layout,'Tooltip_weapon_Sharpness',state.sharpness) end
+    if not state.clothing and entry:getConditionMax()>0 and
+        (state.mechanicType>0 or state.showCondition or entry:getCondition()<entry:getConditionMax()) then
+        tooltipProgress(layout,'Tooltip_weapon_Condition',entry:getCondition()/entry:getConditionMax())
+    end
+    if tooltip:getCharacter() and tooltip:getCharacter():hasReadMap(entry) then label('Tooltip_literature_HasBeenRead') end
+    if state.fishingLure then label('Tooltip_IsFishingLure') end
+    for _,component in ipairs({'attributes','fluidContainer','worldFluidContainer','durability'}) do
+        assert(state[component]==nil,'unsupported native tooltip component: '..component)
+    end
+    for _,pair in ipairs({{'visionModifier','Tooltip_item_VisionImpariment'},{'hearingModifier','Tooltip_item_HearingImpariment'}}) do
+        local modifier=state[pair[1]]
+        if modifier~=1 then
+            local tint=modifier>1 and settings.goodHighlight or settings.badHighlight
+            tooltipLabel(layout,pair[2]):setProgress(math.abs(modifier-1),tint.r,tint.g,tint.b,1)
+        end
+    end
+    if state.discomfortModifier~=0 then
+        local tint=state.discomfortModifier<0 and settings.goodHighlight or settings.badHighlight
+        tooltipLabel(layout,'Tooltip_item_Discomfort'):setProgress(math.abs(state.discomfortModifier),tint.r,tint.g,tint.b,1)
+    end
+    if state.tooltip then label(state.tooltip) end
+    if not embedded then
+        y=layout:render(tooltip.padLeft,y,tooltip)
+        tooltip:endLayout(layout)
+        tooltip:setHeight(y+tooltip.padBottom)
+        tooltip:setWidth(math.max(150,tooltip:getWidth()))
+    end
+end
 sourceItem=function(id)
     if id==nil then return nil end
     local value=item(id)
+    local clothing=qa('itemIsClothing',id)
+    -- Cache method construction only; subtype changes and all mutable getters remain native-owned.
+    if sourceItemClasses[id]==clothing then return value end
     itemIds[value]=id
     function value:getID() return id end
     function value:getType() return self:getFullType():match('%.([^%.]+)$') end
+    function value:isHumanCorpse()
+        local receiver=itemIds[self]
+        assert(receiver~=nil and rawEqual(itemCache[receiver],self),'expected native inventory item')
+        local fullType=hostCall('item',receiver,'fullType')
+        local kind=fullType:match('%.([^%.]+)$'):lower()
+        return kind=='corpsefemale' or kind=='corpsemale'
+    end
     function value:getCategory()
-        local definition=hostCall('itemDefinition',self:getFullType())
-        return definition.sourceCategory
+        return hostCall('itemDefinition',self:getFullType(),'sourceCategory')
+    end
+    function value:isHidden() return qa('itemIsHidden',id) end
+    function value:IsFood() return qa('itemIsFood',id) end
+    function value:IsLiterature()
+        local receiver=itemIds[self]
+        assert(receiver~=nil and rawEqual(itemCache[receiver],self),'expected native inventory item')
+        return qa('itemIsLiterature',receiver)
+    end
+    function value:hasBeenSeen(character)
+        assert(rawEqual(character,player),'expected native player')
+        local receiver=itemIds[self]
+        assert(receiver~=nil and rawEqual(itemCache[receiver],self),'expected native inventory item')
+        return qa('itemHasBeenSeen',receiver,0)
+    end
+    function value:hasBeenHeard(character)
+        assert(rawEqual(character,player),'expected native player')
+        local receiver=itemIds[self]
+        assert(receiver~=nil and rawEqual(itemCache[receiver],self),'expected native inventory item')
+        return qa('itemHasBeenHeard',receiver,0)
+    end
+    function value:isNoRecipes(character)
+        local receiver=itemIds[self]
+        assert(receiver~=nil and rawEqual(itemCache[receiver],self),'expected native inventory item')
+        if character==nil then return qa('itemIsNoRecipes',receiver,nil) end
+        assert(rawEqual(character,player),'expected native player')
+        return qa('itemIsNoRecipes',receiver,0)
+    end
+    function value:isFavouriteRecipeInput(character)
+        local receiver=itemIds[self]
+        assert(receiver~=nil and rawEqual(itemCache[receiver],self),'expected native inventory item')
+        assert(rawEqual(character,player),'expected native player for original recipe membership')
+        qa('itemFavouriteRecipeInputIdentity',receiver,0)
+        -- IsoPlayer.isFavouriteRecipe reads Boolean recipeFavourite:<name> in this
+        -- actual shared/persisted player table, independent of the item's favorite flag.
+        -- No active preferences proves false without guessing an empty recipe index.
+        for key,preference in rawNext,playerData do
+            if rawType(key)=='string' and rawStringSub(key,1,16)=='recipeFavourite:' and preference~=false then
+                rawError(fault('unsupported native facility: original recipe membership and player recipe knowledge'),2)
+            end
+        end
+        return false
+    end
+    function value:isItemType(kind)
+        assert(kind==keyRingType,'unsupported native ItemType predicate')
+        return qa('itemIsKeyRingType',id)
+    end
+    function value:hasTag(tag)
+        if tag==keyRingTag then return qa('itemHasKeyRingTag',id) end
+        assert(tag==litLanternTag,'unsupported native ItemTag predicate')
+        local definition=assert(hostCall('itemDefinition',self:getFullType()),'native item definition unavailable')
+        for _,identifier in ipairs(definition.tags) do
+            if identifier=='base:litlantern' then return true end
+        end
+        return false
+    end
+    function value:getDisplayCategory() return qa('itemDisplayCategory',id) end
+    function value:setDisplayCategory(category)
+        assert(category==nil or rawType(category)=='string','expected native display category')
+        return qa('itemSetDisplayCategory',id,category)
+    end
+    function value:isUnwanted(character)
+        assert(character==player,'unsupported unwanted item actor')
+        local key=qa('itemUnwantedKey',id)
+        local unwanted=character:getModData()[key]
+        assert(unwanted==nil or rawType(unwanted)=='boolean','expected original unwanted-item boolean')
+        return unwanted==true
+    end
+    function value:updateAge() qa('itemUpdateAge',id) end
+    function value:isBroken() return qa('itemIsBroken',id) end
+    function value:setBroken(enabled) qa('itemSetBroken',id,enabled) end
+    function value:getItemHeat() return qa('itemHeat',id) end
+    function value:setItemHeat(heat) qa('itemSetHeat',id,heat) end
+    if clothing then
+        function value:updateWetness(force)
+            if force==nil then force=false end
+            qa('itemUpdateWetness',id,force)
+        end
+        function value:getWetness() return qa('itemWetness',id) end
+        function value:setWetness(wetness) qa('itemSetWetness',id,wetness) end
+    else
+        value.updateWetness,value.getWetness,value.setWetness=nil,nil,nil
     end
     function value:getIsCraftingConsumed() return hostCall('sourceItemState',id,'consumed') end
     function value:isFavorite() return hostCall('sourceItemState',id,'favorite') end
@@ -711,7 +1323,35 @@ sourceItem=function(id)
     function value:isOnGroundOrInsideBagOnSquare(square)
         return self:isOnGroundOnSquare(square) or self:isInsideBagOnSquare(square)
     end
-    function value:getName() return ui('itemName',self:getFullType()) end
+    function value:getDisplayName() return ui('itemName',self:getFullType()) end
+    function value:getName()
+        local name=self:getDisplayName()
+        if not qa('itemIsClothing',id) then return name end
+        local clothing=qa('itemNameState',id)
+        local descriptors={}
+        if clothing.dirtyness>15 then descriptors[#descriptors+1]=getText('IGUI_ClothingName_Dirty') end
+        if clothing.bloodLevel>25 then descriptors[#descriptors+1]=getText('IGUI_ClothingName_Bloody') end
+        if clothing.wetness>=100 then descriptors[#descriptors+1]=getText('IGUI_ClothingName_Soaked')
+        elseif clothing.wetness>25 then descriptors[#descriptors+1]=getText('IGUI_ClothingName_Wet') end
+        if clothing.broken then descriptors[#descriptors+1]=getText('Tooltip_Clothing_broken')
+        elseif clothing.condition<clothing.conditionMax/3 then descriptors[#descriptors+1]=getText('IGUI_ClothingName_Worn') end
+        return #descriptors==0 and name or getText('IGUI_ClothingNaming',table.concat(descriptors,', '),name)
+    end
+    function value:DoTooltip(tooltip,layout)
+        assert(itemIds[self]==id and rawEqual(itemCache[id],self),'expected native inventory item receiver')
+        assert(nativeTypes[tooltip]=='ObjectTooltip','expected native ObjectTooltip')
+        if layout~=nil then
+            assert(nativeTypes[layout]=='ObjectTooltip.Layout','expected native ObjectTooltip.Layout')
+            local state=qa('itemTooltipState',id)
+            if state.clothing then clothingTooltip(self,tooltip,layout,state) end
+        else inventoryTooltip(self,tooltip,nil,0) end
+    end
+    function value:DoTooltipEmbedded(tooltip,layout,y)
+        assert(itemIds[self]==id and rawEqual(itemCache[id],self),'expected native inventory item receiver')
+        assert(layout==nil or nativeTypes[layout]=='ObjectTooltip.Layout','expected native ObjectTooltip.Layout')
+        assert(rawType(y)=='number' and y%1==0,'expected native embedded tooltip offset')
+        inventoryTooltip(self,tooltip,layout,y)
+    end
     local function appearance()
         local definition=hostCall('itemDefinition',value:getFullType())
         local fields={}
@@ -725,6 +1365,21 @@ sourceItem=function(id)
         icon=assert(icon,'original item Icon metadata unavailable')
         return assert(getTexture('media/textures/Item_'..icon..'.png'),'original item icon texture unavailable')
     end
+    local function clothingAsset()
+        local fullType=hostCall('item',id,'fullType')
+        local definition=assert(hostCall('itemDefinition',fullType),'native item definition unavailable')
+        assert(not definition.clothingItem and not definition.replacePrimaryHand and not definition.replaceSecondHand,
+            'unsupported native clothing asset selection')
+        for _,field in ipairs(definition.rawFields or {}) do
+            local name=field.name:lower()
+            assert(name~='clothingitem' and name~='replaceprimaryhand' and name~='replacesecondhand' and name~='alternatemodelname',
+                'unsupported native clothing asset selection')
+        end
+        -- Original getVisual returns nil when getClothingItem has no asset, before allocating ItemVisual.
+        return nil
+    end
+    function value:getClothingItem() return clothingAsset() end
+    function value:getVisual() return clothingAsset() end
     function value:getFluidContainer() appearance();return nil end
     function value:getTextureColorMask() appearance();return nil end
     function value:getTextureFluidMask() appearance();return nil end
@@ -746,10 +1401,47 @@ sourceItem=function(id)
     function value:setJobDelta(deltaValue) assert(rawType(deltaValue)=='number');jobs[id]=jobs[id] or {};jobs[id].delta=deltaValue end
     function value:getJobDelta() return jobs[id] and jobs[id].delta or 0 end
     function value:getJobType() return jobs[id] and jobs[id].type or '' end
+    sourceItemClasses[id]=clothing
     return value
+end
+function player:isKnownPoison(entry)
+    assert(rawEqual(self,player),'expected native player')
+    local id=itemIds[entry]
+    assert(id~=nil and rawEqual(itemCache[id],entry),'expected native inventory item')
+    return qa('playerIsKnownPoison',id)
+end
+function player:hasReadMap(entry)
+    assert(rawEqual(self,player),'expected native player')
+    if entry==nil then return qa('playerHasReadMap',nil,0) end
+    local id=itemIds[entry]
+    assert(id~=nil and rawEqual(itemCache[id],entry),'expected native inventory item')
+    return qa('playerHasReadMap',id,0)
 end
 function player:getPrimaryHandItem() return sourceItem(hostCall('handItems').primary) end
 function player:getSecondaryHandItem() return sourceItem(hostCall('handItems').secondary) end
+do
+local function handItemState(character,entry)
+    assert(rawEqual(character,player),'expected native player')
+    local id
+    if entry~=nil then
+        id=itemIds[entry]
+        assert(id~=nil and rawEqual(itemCache[id],entry),'expected native inventory item')
+    end
+    return hostCall('handItems'),id
+end
+function player:isHandItem(entry)
+    local hands,id=handItemState(self,entry)
+    return hands.primary==id or hands.secondary==id
+end
+function player:isPrimaryHandItem(entry)
+    local hands,id=handItemState(self,entry)
+    return hands.primary==id
+end
+function player:isSecondaryHandItem(entry)
+    local hands,id=handItemState(self,entry)
+    return hands.secondary==id
+end
+end
 local function setHandItem(slot,value)
     assert(value==nil or itemIds[value]~=nil,'expected native held inventory item')
     local id=value and assert(itemIds[value],'expected stable native held item identity') or nil
@@ -762,15 +1454,73 @@ worldItem=function(id)
     if worldItems[id] then return worldItems[id] end
     local value=nativeObject('IsoWorldInventoryObject')
     function value:getItem() return sourceItem(id) end
-    function value:getName() return self:getItem():getName() end
-    local highlighted={}
-    function value:setHighlighted(index,enabled,blink)
-        assert(index==0 and rawType(enabled)=='boolean' and (blink==nil or rawType(blink)=='boolean'),'invalid original world highlight')
-        highlighted[index]={enabled=enabled,blink=blink==true}
-        actorState.worldHighlights=actorState.worldHighlights or {}
-        actorState.worldHighlights[id]=highlighted[index]
+    -- Only typed native world-item objects are constructed here; their inherited IsoObject container slots are empty.
+    function value:getContainerCount()
+        local row=assert(hostCall('item',id),'native world item no longer exists')
+        assert(row.worldPosition,'native world item is detached')
+        return 0
     end
-    function value:isHighlighted(index) assert(index==0);return highlighted[index] and highlighted[index].enabled or false end
+    function value:getContainerByIndex(index)
+        assert(rawType(index)=='number' and index%1==0,'expected native container index')
+        self:getContainerCount()
+        return nil
+    end
+    local highlight={enabled=false,blink=false,outline=false,outlineAttached=false,
+        color={r=1,g=1,b=1,a=1},outlineColor={r=1,g=1,b=1,a=1}}
+    local function publish()
+        actorState.worldHighlights=actorState.worldHighlights or {}
+        actorState.worldHighlights[id]=highlight
+        hostCall('sourceHighlight','item',id,highlight)
+    end
+    local function highlightPlayer(index) assert(index==0,'unsupported original highlight viewport') end
+    local function highlightColor(r,g,b,a)
+        local result={}
+        for component,input in pairs({r=r,g=g,b=b,a=a}) do
+            assert(rawType(input)=='number' and input==input and math.abs(input)~=math.huge,'invalid highlight color')
+            result[component]=string.unpack('f',string.pack('f',math.max(0,math.min(1,input))))
+        end
+        assert(result.r and result.g and result.b and result.a,'missing highlight color component')
+        return result
+    end
+    function value:setHighlighted(index,enabled,blink)
+        highlightPlayer(index)
+        assert(rawType(enabled)=='boolean' and (blink==nil or rawType(blink)=='boolean'),'invalid original world highlight')
+        highlight.enabled,highlight.blink=enabled,blink==true
+        local tint=core:getWorldItemHighlightColor()
+        highlight.color=highlightColor(tint:getR(),tint:getG(),tint:getB(),1)
+        highlight.outline=enabled
+        highlight.outlineColor=highlightColor(tint:getR(),tint:getG(),tint:getB(),tint:getA())
+        publish()
+    end
+    function value:isHighlighted(index) highlightPlayer(index);return highlight.enabled end
+    function value:setOutlineHighlight(index,enabled)
+        highlightPlayer(index);assert(rawType(enabled)=='boolean')
+        highlight.outline=enabled;publish()
+    end
+    function value:isOutlineHighlight(index) highlightPlayer(index);return highlight.outline end
+    function value:setOutlineHlAttached(index,enabled)
+        highlightPlayer(index);assert(rawType(enabled)=='boolean')
+        highlight.outlineAttached=enabled;publish()
+    end
+    function value:isOutlineHlAttached(index) highlightPlayer(index);return highlight.outlineAttached end
+    function value:setHighlightColor(index,r,g,b,a)
+        highlightPlayer(index)
+        if nativeTypes[r]=='ColorInfo' then r,g,b,a=r:getR(),r:getG(),r:getB(),r:getA() end
+        highlight.color=highlightColor(r,g,b,a);publish()
+    end
+    function value:getHighlightColor(index) highlightPlayer(index);return color(function() return highlight.color end,nil,'ColorInfo') end
+    function value:setOutlineHighlightCol(index,r,g,b,a)
+        highlightPlayer(index)
+        if nativeTypes[r]=='ColorInfo' then r,g,b,a=r:getR(),r:getG(),r:getB(),r:getA() end
+        highlight.outlineColor=highlightColor(r,g,b,a);publish()
+    end
+    function value:getOutlineHighlightCol(index)
+        highlightPlayer(index)
+        local function byte(input) return math.floor(string.unpack('f',string.pack('f',input*255))) end
+        local tint=highlight.outlineColor
+        local packed=(byte(tint.a)<<24)|(byte(tint.b)<<16)|(byte(tint.g)<<8)|byte(tint.r)
+        return packed>=0x80000000 and packed-0x100000000 or packed
+    end
     function value:getFluidContainer() return self:getItem():getFluidContainer() end
     function value:getSquare()
         local record=hostCall('item',id)
@@ -803,6 +1553,13 @@ local function door(id)
     if doorObjects[id] then return doorObjects[id] end
     local value=nativeObject('IsoDoor')
     local function record() return assert(hostCall('door',id),'source door disappeared') end
+    -- This native door constructor has no primary or secondary IsoObject containers.
+    function value:getContainerCount() record();return 0 end
+    function value:getContainerByIndex(index)
+        assert(rawType(index)=='number' and index%1==0,'expected native container index')
+        record()
+        return nil
+    end
     function value:getSquare() local row=record();return cell:getGridSquare(row.x,row.y,row.z) end
     function value:IsOpen() return record().open end
     function value:getNorth() return record().north end
@@ -901,6 +1658,7 @@ local function drainSourceLifecycle()
     end
 end
 local ordinaryInsert,ordinaryRemove,ordinaryWipe,ordinaryIpairs,ordinaryPairs=table.insert,table.remove,table.wipe,table.ipairs,table.pairs
+local nativeViewIpairs,nativeViewPairs=ipairs,pairs
 function table.insert(value,...)
     local meta=views[value]
     if not meta then return ordinaryInsert(value,...) end
@@ -938,8 +1696,8 @@ function table.wipe(value)
     if ordinaryWipe then return ordinaryWipe(value) end
     for key in rawNext,value do value[key]=nil end
 end
-table.ipairs=function(value) if views[value] then return ipairs(value) end;return ordinaryIpairs(value) end
-table.pairs=function(value) if views[value] then return pairs(value) end;return ordinaryPairs(value) end
+table.ipairs=function(value) if views[value] then return nativeViewIpairs(value) end;return ordinaryIpairs(value) end
+table.pairs=function(value) if views[value] then return nativeViewPairs(value) end;return ordinaryPairs(value) end
 local function builtInDoorCompletion(action)
     if action.Type~='ISWaitWhileGettingUp' or not ISWorldObjectContextMenu
         or not sourceDoorCompletion or ISWorldObjectContextMenu.onOpenCloseDoor~=sourceDoorCompletion
@@ -1107,7 +1865,18 @@ function player:getZ() return self:getCurrentSquare():getZ() end
 function player:isFarming() return actorState.farming end
 function player:setIsFarming(value) assert(rawType(value)=='boolean');actorState.farming=value end
 function player:isAsleep() return actorState.asleep end
-function player:isAiming() return actorState.aiming end
+function player:isAiming() return qa('actorIsAiming',self:getPlayerNum()) end
+function player:isForceAim() return qa('actorInputState',self:getPlayerNum()).forceAim end
+function player:setIsAiming(enabled)
+    assert(rawType(enabled)=='boolean','expected native aiming boolean')
+    qa('setIsAiming',self:getPlayerNum(),enabled)
+end
+function player:setForceAim(enabled)
+    assert(rawType(enabled)=='boolean','expected native force-aim boolean')
+    qa('setForceAim',self:getPlayerNum(),enabled)
+end
+function player:toggleForceAim() return qa('toggleForceAim',self:getPlayerNum()) end
+function player:nullifyAiming() qa('nullifyAiming',self:getPlayerNum()) end
 function player:isDraggingCorpse() return actorState.dragging end
 function player:getVehicle() return actorState.vehicle end
 function player:pressedMovement() return hostCall('sourceInput','movement') end
@@ -1141,6 +1910,15 @@ for _,pair in ipairs({{'getMultiplier','gameMultiplier'},{'getTrueMultiplier','m
     gameTime[pair[1]]=function() return timing('getState')[pair[2]] end
 end
 function gameTime:setMultiplier(value) return timing('set','multiplier',value) end
+for _,pair in ipairs({{'Year','year'},{'Month','month'},{'Day','day'},
+    {'TimeOfDay','timeOfDay'},{'LastTimeOfDay','lastTimeOfDay'},
+    {'NightsSurvived','nightsSurvived'},{'MinutesPerDay','minutesPerDay'}}) do
+    gameTime['get'..pair[1]]=function() return qa('worldClockGet',pair[2]) end
+    gameTime['set'..pair[1]]=function(_,value) qa('worldClockSet',pair[2],value) end
+end
+for _,pair in ipairs({{'WorldAgeHours','worldAgeHours'},{'Hour','hour'},{'Minutes','minutes'}}) do
+    gameTime['get'..pair[1]]=function() return qa('worldClockGet',pair[2]) end
+end
 function core:getGameMode() return timing('getGameMode') end
 function core:getOptionTimedActionGameSpeedReset() return hostCall('sourceContext','timedActionGameSpeedReset') end
 function getGameSpeed() return hostCall('sourceContext','gameSpeed') end
@@ -1165,7 +1943,14 @@ function player:isEquipped(entry)
     local state=qa('itemEquipmentState',(assert(itemIds[entry],'expected native item')))
     return state.worn or state.held
 end
-function player:removeAttachedItem(entry) transferOperation(entry,8,qa('transferRead',eventScope.actionId).sourceContainerId) end
+function player:removeAttachedItem(entry)
+    local id=assert(itemIds[entry],'expected native attached item')
+    if eventScope then
+        transferOperation(entry,8,qa('transferRead',eventScope.actionId).sourceContainerId)
+    elseif qa('removeAttachedItem',id) then
+        __pz_dispatch('OnClothingUpdated',player)
+    end
+end
 function player:removeFromHands(entry)
     transferOperation(entry,5,qa('transferRead',eventScope.actionId).sourceContainerId)
     return true
@@ -1209,21 +1994,36 @@ function instanceof(value,class)
     if class=='IsoPlayer' or class=='IsoGameCharacter' then return label=='IsoPlayer' end
     if class=='IsoWorldInventoryObject' or class=='IItemProvider' then return label=='IsoWorldInventoryObject' end
     if class=='IsoDoor' then return label=='IsoDoor' end
-    if class=='BaseVehicle' or class=='IsoDeadBody' or class=='IsoMannequin' then
+    if class=='IsoObject' then
+        if value==nil then return false end
+        if label==nil then return originalInstanceof(value,class) end
+        return label=='IsoPlayer' or label=='IsoDoor' or label=='IsoWorldInventoryObject'
+    end
+    if class=='BaseVehicle' or class=='IsoDeadBody' or class=='IsoMannequin' or class=='IsoThumpable'
+        or class=='IsoClothingWasher' or class=='IsoClothingDryer' or class=='IsoCombinationWasherDryer' or class=='IsoStove' then
         if value==nil then return false end
         if label==nil then return originalInstanceof(value,class) end
         return label==class
     end
+    if class=='DrainableComboItem' then
+        local id=itemIds[value]
+        if id==nil or not rawEqual(itemCache[id],value) then return false end
+        return qa('itemIsDrainableComboItem',id)
+    end
     if class=='Food' or class=='Clothing' then
         if value==nil or not itemIds[value] or label=='IsoWorldInventoryObject' then return false end
-        local definition=hostCall('itemDefinition',value:getFullType())
-        local kind=(definition.type or 'Normal'):lower():gsub('^base:','')
-        return kind==class:lower()
+        return qa(class=='Food' and 'itemIsFood' or 'itemIsClothing',itemIds[value])
     end
     if class=='Radio' then
         if label~='InventoryItem' then return false end
-        local definition=hostCall('itemDefinition',value:getFullType())
-        return definition.type=='Radio' or definition.type=='base:radio'
+        local kind=hostCall('itemDefinition',value:getFullType(),'type')
+        return kind=='Radio' or kind=='base:radio'
+    end
+    local id=itemIds[value]
+    if id~=nil and rawEqual(itemCache[id],value) then
+        local fullType=hostCall('item',id,'fullType')
+        local kind=hostCall('itemDefinition',fullType,'type') or 'Normal'
+        return kind:lower():gsub('^base:','')==class:lower()
     end
     return originalInstanceof(value,class)
 end
@@ -1508,12 +2308,22 @@ function __pz_source_owners()
     end
     return result
 end
-local function constructSource(row,deferDoorCompletion)
-    local names={walk='ISWalkToTimedAction',door='ISOpenCloseDoor',grab='ISGrabItemAction',transfer='ISInventoryTransferAction',getUp='ISWaitWhileGettingUp'}
-    local name=assert(names[row.kind],'unsupported source constructor '..tostring(row.kind))
+local constructSource
+do
+local sources={
+    walk={name='ISWalkToTimedAction',path='TimedActions/WalkToTimedAction'},
+    door={name='ISOpenCloseDoor',path='TimedActions/ISOpenCloseDoor'},
+    grab={name='ISGrabItemAction',path='TimedActions/ISGrabItemAction'},
+    transfer={name='ISInventoryTransferAction',path='TimedActions/ISInventoryTransferAction'},
+    getUp={name='ISWaitWhileGettingUp',path='TimedActions/ISWaitWhileGettingUp'},
+}
+constructSource=function(row,deferDoorCompletion)
+    local source=assert(sources[row.kind],'unsupported source constructor '..tostring(row.kind))
+    local name=source.name
+    if not sourceClasses[name] then require(source.path) end
     local prototype=assert(sourceClasses[name],'original source constructor is not loaded: '..name)
     local constructor=assert(sourceConstructors[name],'original source constructor identity missing')
-    if row.kind=='walk' then return constructor(prototype,player,assert(cell:getGridSquare(row.target.x,row.target.y,row.target.z),'source square unavailable')) end
+    if row.kind=='walk' then return constructor(prototype,player,(assert(cell:getGridSquare(row.target.x,row.target.y,row.target.z),'source square unavailable'))) end
     if row.kind=='door' then return constructor(prototype,player,door(row.target.id)) end
     if row.kind=='grab' then
         local first=assert(row.groups[1] and row.groups[1].itemIds[1],'source grab has no stable group')
@@ -1530,6 +2340,7 @@ local function constructSource(row,deferDoorCompletion)
         action:setOnComplete(assert(sourceDoorCompletion,'original door continuation unavailable'),{value},value,0)
     end
     return action
+end
 end
 residentAction=function(id)
     if actionObjects[id] then return actionObjects[id] end
@@ -1849,6 +2660,8 @@ local hostCall, enter, leave, context, fault, own = __pz_call, __pz_enter, __pz_
 local rawLoad, info, upvalue, join = load, debug.getinfo, debug.getupvalue, debug.upvaluejoin
 local rawError, rawWarn, traceback, rawNext = error, warn, debug.traceback, next
 local rawType = type
+local rawEqual = rawequal
+local rawStringSub = string.sub
 local rawPrint = print
 local nativeTypes = setmetatable({}, {__mode = 'k'})
 function type(value)
@@ -2002,10 +2815,64 @@ end
 local function nativeObject(name)
     local value = setmetatable({}, {__index = function(_, method) return unsupported(name .. ':' .. tostring(method)) end})
     nativeTypes[value] = name
+    if name=='IsoWorldInventoryObject' or name=='IsoDoor' then
+        -- Inherited IsoObject.getChunk delegates to the current square, including detached nil.
+        function value:getChunk()
+            local square=self:getSquare()
+            return square and square:getChunk() or nil
+        end
+        -- These concrete classes cannot be IsoBarbecue or IsoFireplace, regardless of item name or sprite.
+        function value:isPropaneBBQ()
+            assert(rawEqual(self,value),'expected native world object')
+            return false
+        end
+        function value:isFireInteractionObject()
+            assert(rawEqual(self,value),'expected native world object')
+            return false
+        end
+        -- The represented fresh constructors leave IsoObject.name null; item display names are a separate field.
+        function value:getName()
+            assert(rawEqual(self,value),'expected native world object')
+            return nil
+        end
+    end
     return value
+end
+function string.sort(first,second)
+    assert(rawType(first)=='string' and rawType(second)=='string',
+        'unsupported native facility: string.sort requires strings; Java numeric coercion is unsupported')
+    return hostCall('sourceStringSort',first,second)
+end
+function timSort(items,compare)
+    -- LuaManager.GlobalObject snapshots delegate.values(), sorts, then rawsets indices i+1.
+    if rawType(items)~='table' or nativeTypes[items] or rawlen(items)<2 or compare==nil then return end
+    local values={}
+    for _,value in table.ipairs(items) do values[#values+1]=value end
+    local sequenceLength=#values
+    for key,value in rawNext,items do
+        if rawType(key)~='number' or key%1~=0 or key<1 or key>sequenceLength then
+            values[#values+1]=value
+        end
+    end
+    -- Only ordinals cross Wasmoon: native userdata and cyclic Lua tables stay resident.
+    local order=hostCall('sourceTimSort',#values,function(a,b)
+        local first,second=values[a],values[b]
+        if rawEqual(first,second) then return 0 end
+        -- TimSortComparator uses pcallBoolean == Boolean.TRUE, not Lua truthiness.
+        local ok,result=pcall(compare,first,second)
+        return ok and result==true and -1 or 1
+    end)
+    for index,ordinal in ipairs(order) do rawset(items,index,values[ordinal]) end
 end
 local locationObject, locationToken
 local player = nativeObject('IsoPlayer')
+-- Original IsoPlayer flag is independent from ItemContainer.drawDirty; animal eating is its native producer.
+local inventoryPageDirty=false
+function player:isInvPageDirty() hostCall('state');return inventoryPageDirty end
+function player:setInvPageDirty(enabled)
+    assert(rawType(enabled)=='boolean','inventory page dirty state must be boolean')
+    hostCall('state');inventoryPageDirty=enabled
+end
 function player:getX() return hostCall('state').x end
 function player:getY() return hostCall('state').y end
 function player:getPlayerNum() return 0 end
@@ -2020,6 +2887,7 @@ function player:transmitModData() hostCall('flush') end
 local cell = nativeObject('IsoCell')
 local squares = setmetatable({}, {__mode = 'v'})
 local squareRecords = setmetatable({}, {__mode = 'k'})
+local chunks = setmetatable({}, {__mode = 'v'})
 function cell:getGridSquare(x, y, z)
     local record = hostCall('square', x, y, z)
     if record == nil then return nil end
@@ -2034,6 +2902,19 @@ function cell:getGridSquare(x, y, z)
     function square:getX() return current().x end
     function square:getY() return current().y end
     function square:getZ() return current().z end
+    function square:DistToProper(other,...)
+        assert(select('#',...)==0,'unsupported IsoGridSquare DistToProper overload')
+        local source,target=squareRecords[self],squareRecords[other]
+        assert(source and target,'DistToProper requires genuine IsoGridSquare values')
+        return hostCall('sourceActions','squareDistanceToProper',source.x,source.y,source.z,target.x,target.y,target.z)
+    end
+    function square:getChunk()
+        local chunk=hostCall('sourceActions','squareChunk',record.x,record.y,record.z)
+        if chunk==nil then return nil end
+        local identity=chunk.generation..':'..chunk.x..':'..chunk.y
+        if not chunks[identity] then chunks[identity]=nativeObject('IsoChunk') end
+        return chunks[identity]
+    end
     function square:canStand() return current().canStand end
     function square:isBlockedTo(other, ...)
         assert(select('#', ...) == 0, 'unsupported IsoGridSquare isBlockedTo overload')
@@ -2373,9 +3254,12 @@ export async function createLuaSession(options = {}) {
 
     lua.global.setMemoryMax(memoryLimitBytes);
     const packages = new Map();
+    const sourceFloorViews = new Map();
+    let nextSourceFloorView = 1;
     const owners = new Map();
     const contexts = [];
     const errors = [];
+    const sourceHighlightOwner = Symbol('Lua session world highlights');
     let closed = false;
     let sourceActions = options.sourceActions;
     let sourceTiming = options.sourceTiming;
@@ -2549,6 +3433,27 @@ export async function createLuaSession(options = {}) {
     });
     lua.global.set('__pz_call', (operation, ...args) => {
         switch (operation) {
+            case 'sourceStringSort':
+                api();
+
+                if (args.length !== 2 || typeof args[0] !== 'string' || typeof args[1] !== 'string') {
+                    throw new TypeError('string.sort requires two strings');
+                }
+
+                // Original Kahlua StringLib.sort is Java String.compareTo > 0: case-sensitive UTF-16 units.
+                return args[0] > args[1];
+            case 'sourceTimSort':
+                api();
+
+                if (args.length !== 2 || !Number.isSafeInteger(args[0]) || args[0] < 0 || typeof args[1] !== 'function') {
+                    throw new TypeError('timSort requires a value count and resident comparator');
+                }
+
+                /*
+                Arrays.sort(Object[], Comparator) and ECMAScript Array.sort are stable.
+                Keep original one-based Lua ordinals; never serialize the resident values.
+                */
+                return Array.from({ length: args[0] }, (_, index) => index + 1).sort(args[1]);
             case 'state': return api().movement.getState();
             case 'handItems': return capability('character', 'getHandItems');
             case 'sourceSetHandItem': {
@@ -2571,7 +3476,7 @@ export async function createLuaSession(options = {}) {
 
                 const [name, path, value, append] = args;
 
-                if (path !== 'layout.ini') {
+                if (path !== 'layout.ini' && path !== 'entityLayout.ini') {
                     throw new Error(`unsupported native Core file: ${path}`);
                 }
 
@@ -2606,8 +3511,104 @@ export async function createLuaSession(options = {}) {
 
                 throw new Error(`unsupported native Core file operation: ${name}`);
             }
+            case 'sourceFloorView': {
+                const [name, handle, target] = args;
+
+                if (name === 'release') {
+                    sourceFloorViews.delete(handle);
+
+                    return;
+                }
+
+                api().items.playerInventoryId();
+
+                if (name === 'new') {
+                    const id = nextSourceFloorView++;
+
+                    sourceFloorViews.set(id, []);
+
+                    return id;
+                }
+
+                const placements = sourceFloorViews.get(handle);
+
+                if (!placements || !['clear', 'add', 'at', 'size', 'indexOf', 'contains', 'ids'].includes(name)
+                    || (['add', 'at', 'indexOf', 'contains'].includes(name) && (!Number.isInteger(target) || target < 0))) {
+                    throw new TypeError('native floor view requires its resident handle and a valid operation');
+                }
+
+                if (name === 'clear') {
+                    placements.length = 0;
+
+                    return;
+                }
+
+                if (typeof sourceActions?.itemMatchesFloorPlacement !== 'function') {
+                    throw new TypeError('unsupported native facility: sourceActions.itemMatchesFloorPlacement');
+                }
+
+                let index = 0;
+                const ids = name === 'ids' ? [] : null;
+
+                // Only transient presentation stamps live here; every query reads actual native ownership/placement.
+                for (let offset = 0; offset < placements.length; offset += 5) {
+                    const id = placements[offset];
+
+                    if ((name === 'contains' || name === 'add') && id !== target) {
+                        continue;
+                    }
+
+                    const live = sourceActions.itemMatchesFloorPlacement(id, placements[offset + 1], placements[offset + 2],
+                        placements[offset + 3], placements[offset + 4]);
+
+                    if (name === 'contains' || name === 'add') {
+                        if (name === 'add' && !live) {
+                            throw new TypeError('floor presentation requires live true world/floor ownership');
+                        }
+
+                        return name === 'contains' ? live : false;
+                    }
+
+                    if (!live) {
+                        continue;
+                    }
+
+                    if (name === 'at' && index === target) {
+                        return id;
+                    }
+
+                    if (name === 'indexOf' && id === target) {
+                        return index;
+                    }
+
+                    ids?.push(id);
+                    index += 1;
+                }
+
+                if (name === 'add') {
+                    const row = capability('items', 'get', target);
+                    const owner = row?.ownerContainerId && capability('items', 'getContainer', row.ownerContainerId);
+
+                    if (!row?.worldPosition || owner?.kind !== 'floor') {
+                        throw new TypeError('floor presentation requires live true world/floor ownership');
+                    }
+
+                    placements.push(target, row.ownerContainerId, row.worldPosition.x, row.worldPosition.y, row.worldPosition.z);
+
+                    return true;
+                }
+
+                switch (name) {
+                    case 'ids': return ids;
+                    case 'size': return index;
+                    case 'indexOf': return -1;
+                    case 'contains': return false;
+                    default: return null;
+                }
+            }
             case 'sourceActions': {
-                api().movement.getState();
+                // Preserve the SDK handle's alive() guard without allocating an unused movement snapshot.
+                api().items.playerInventoryId();
                 const [name, ...values] = args;
 
                 if (typeof sourceActions?.[name] !== 'function') {
@@ -2643,14 +3644,6 @@ export async function createLuaSession(options = {}) {
             case 'sourceContext': {
                 api().movement.getState();
                 const [name, ...values] = args;
-
-                if (name === 'keyBinding') {
-                    if (!['Interact', 'Toggle Inventory', 'Toggle mode', 'Run', 'Rotate building'].includes(values[0]) || !sourceContext?.inputBindings) {
-                        throw new TypeError('unsupported source key binding');
-                    }
-
-                    return sourceContext.inputBindings[values[0]] ?? null;
-                }
 
                 if (name === 'room' || name === 'building') {
                     const records = sourceContext?.[name === 'room' ? 'rooms' : 'buildings'];
@@ -2791,6 +3784,17 @@ export async function createLuaSession(options = {}) {
             case 'action': return api().actions.submit(args[0] === 'cancel' ? { type: 'cancel' } : { type: args[0], x: args[1], y: args[2] });
             case 'flush': return flushSaveData();
             case 'now': return (options.now ?? Date.now)();
+            case 'worldItemHighlightColor':
+                // Core's constructor exists without a rendered UI; attached clients read their live option.
+                return options.ui
+                    ? options.ui.bindings.call('settings', current().apiId ?? current().id).worldItemHighlight
+                    : { r: 0.5, g: 1, b: 1, a: 1 };
+            case 'sourceHighlight': {
+                // Headless sessions retain Lua presentation state; attached UIs forward it to the world renderer.
+                options.ui?.setWorldHighlight(args[0], args[1], jsonCopy(args[2]), sourceHighlightOwner);
+
+                return undefined;
+            }
             case 'ui': {
                 if (!options.ui?.bindings) {
                     throw new Error('unsupported native facility: UI resources');
@@ -2819,7 +3823,31 @@ export async function createLuaSession(options = {}) {
             }
             case 'readOptions': return capability('ui', 'readOptions', args[0]);
             case 'writeOptions': return capability('ui', 'writeOptions', args[0], jsonCopy(args[1]));
-            case 'item': return capability('items', 'get', args[0]);
+            case 'item': {
+                const record = capability('items', 'get', args[0]);
+
+                if (args.length === 1) {
+                    return record;
+                }
+
+                if (args.length !== 2) {
+                    throw new TypeError('Item field queries require one native identity and one scalar field.');
+                }
+
+                switch (args[1]) {
+                    case 'fullType':
+                    case 'condition':
+                    case 'ownerContainerId':
+                    case 'internalContainerId':
+                        if (!record) {
+                            throw new Error('native item is unavailable');
+                        }
+
+                        return record[args[1]] ?? null;
+                    default:
+                        throw new TypeError(`Unsupported scalar item field: ${args[1]}`);
+                }
+            }
             case 'container': return capability('items', 'getContainer', args[0]);
             case 'playerInventoryId': return capability('items', 'playerInventoryId');
             case 'containerState': return capability('items', 'containerState', args[0], args[1] === 1 ? 1 : null);
@@ -2855,6 +3883,28 @@ export async function createLuaSession(options = {}) {
             }
             case 'itemDefinition': {
                 const definition = capability('items.definitions', 'get', args[0]);
+
+                if (args.length === 2) {
+                    switch (args[1]) {
+                        case 'sourceCategory':
+                        case 'type':
+                        case 'conditionMax':
+                        case 'bodyLocation':
+                        case 'canBeEquipped':
+                        case 'weightReduction':
+                            if (!definition) {
+                                throw new Error('native item definition unavailable');
+                            }
+
+                            return definition[args[1]] ?? null;
+                        default:
+                            throw new TypeError(`Unsupported scalar item definition field: ${args[1]}`);
+                    }
+                }
+
+                if (args.length !== 1) {
+                    throw new TypeError('Item definition queries require a full type and at most one scalar field.');
+                }
 
                 if (definition) {
                     definition.normalIcon = normalItemIcon(definition);
@@ -2950,6 +4000,12 @@ export async function createLuaSession(options = {}) {
     const sourcePrepareSave = lua.global.get('__pz_source_prepare_save');
     const sourceOwners = lua.global.get('__pz_source_owners');
     const worldContextMenu = lua.global.get('__pz_world_context');
+    const inventoryPages = lua.global.get('__pz_inventory_pages');
+    const clientSystems = lua.global.get('__pz_client_systems');
+    const actorInputUpdate = lua.global.get('__pz_actor_input_update');
+    const contextKeyState = lua.global.get('__pz_context_key_state');
+    const contextKeyAttempt = lua.global.get('__pz_context_key_attempt');
+    const contextKeyInput = createContextKeyInput();
     const worldPointer = lua.global.get('__pz_world_pointer');
     const worldPhase = lua.global.get('__pz_world_phase');
     const worldBuildInput = lua.global.get('__pz_world_build_input');
@@ -3156,6 +4212,50 @@ export async function createLuaSession(options = {}) {
     }
 
     /**
+     * Attach the resident original inventory pages after genuine player startup.
+     *
+     * @returns {void} Original widgets remain in this session and native UI registry.
+     */
+    function initializeInventoryPages() {
+        sourceEntry(() => inventoryPages(), '<inventory-pages>', 'pz-base-game');
+    }
+
+    /**
+     * Refresh the native player input owner from current configured physical bindings.
+     *
+     * @returns {void} No ticking, movement or synthetic key dispatch.
+     */
+    function updateActorInput() {
+        sourceEntry(() => actorInputUpdate(), '<actor-input>', 'pz-base-game');
+    }
+
+    /**
+     * Run Interact only after one accepted native update, using its actual float clock.
+     *
+     * @param {boolean} allowed - Actual host keyboard/UI admission for this update.
+     * @returns {boolean} Whether original contextual selection consumed the press.
+     */
+    function updateContextKey(allowed) {
+        return sourceEntry(() => {
+            const state = contextKeyState();
+
+            if (state.cancelled) {
+                contextKeyInput.cancel();
+
+                return false;
+            }
+
+            return contextKeyInput.update(sourceTiming.getState().elapsedSeconds, state.down,
+                allowed && !state.grappleThrowOutWindow, (milliseconds, seconds) => contextKeyAttempt(milliseconds, seconds));
+        }, '<context-key>', 'pz-base-game');
+    }
+
+    /** Cancel the owning input lifetime without synthesizing a physical release. */
+    function cancelContextKey() {
+        contextKeyInput.cancel();
+    }
+
+    /**
      * Open the unchanged original world-menu route and its WebGPU widgets.
      *
      * @param {{screenX:number,screenY:number,worldX:number,worldY:number,z?:number,playerIndex?:number}} request - Actual renderer hit and screen input.
@@ -3253,8 +4353,10 @@ export async function createLuaSession(options = {}) {
             contexts.push({ id, path: item.path });
             try {
                 run(() => {
-                    if (typeof item.path !== 'string' || !/^media\/lua\/(shared|client|server)\/.+\.lua$/.test(item.path) || item.path.includes('\\') || item.path.split('/').some((part) => part === '.' || part === '..')) {
-                        throw new TypeError('unsupported native Lua source path; expected media/lua/{shared,client,server}/*.lua text');
+                    const originalStandardLibrary = entry.engineSource && item.path === 'stdlib.lua';
+
+                    if (typeof item.path !== 'string' || (!originalStandardLibrary && !/^media\/lua\/(shared|client|server)\/.+\.lua$/.test(item.path)) || item.path.includes('\\') || item.path.split('/').some((part) => part === '.' || part === '..')) {
+                        throw new TypeError('unsupported native Lua source path; expected media/lua/{shared,client,server}/*.lua text or owned engine stdlib.lua');
                     }
 
                     if (typeof item.source !== 'string' || item.source.charCodeAt(0) === 27 || item.source.includes('\0')) {
@@ -3617,6 +4719,13 @@ export async function createLuaSession(options = {}) {
                 contexts.pop();
             }
         }
+
+        contexts.push({ id: apiId, path: '<client-systems>', apiId });
+        try {
+            run(() => clientSystems());
+        } finally {
+            contexts.pop();
+        }
     }
 
     /**
@@ -3880,10 +4989,13 @@ export async function createLuaSession(options = {}) {
             options.ui?.bindings.cleanup(entry.id);
         }
 
+        options.ui?.clearWorldHighlights(sourceHighlightOwner);
+
         lua.global.close();
         options.sourceFiles?.dispose();
         closed = true;
         packages.clear();
+        sourceFloorViews.clear();
         contexts.length = 0;
     }
 
@@ -3893,7 +5005,7 @@ export async function createLuaSession(options = {}) {
 
     return Object.freeze({
         preload, activatePackage, dispatch, applyOptions, flushSaveData, flushSourceFiles, restoreSaveData,
-        attachSourceActions, dispatchSourceAction, prepareSourceSave, exportSourceOwners, restoreSourceActions, completeSourceRestore, openWorldContextMenu,
+        attachSourceActions, dispatchSourceAction, prepareSourceSave, exportSourceOwners, restoreSourceActions, completeSourceRestore, initializeInventoryPages, updateActorInput, updateContextKey, cancelContextKey, openWorldContextMenu,
         updateWorldPointer, renderWorldPhase, buildingInput, diagnostics, close,
     });
 }

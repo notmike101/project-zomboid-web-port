@@ -26,9 +26,12 @@
 use std::cell::RefCell;
 
 mod actions;
+mod actor_input;
 mod body;
 mod doors;
 mod timing;
+mod weather;
+mod world_clock;
 
 /// Engine ABI version; the host refuses any other value.
 const API_VERSION: u32 = 1;
@@ -985,6 +988,9 @@ pub extern "C" fn reset() {
     moodle_reset();
     body::reset();
     timing::reset();
+    world_clock::reset();
+    reset_climate();
+    actor_input::reset();
 }
 
 /// Sets movement speed in world units per second; only [0.1, 10] is accepted.
@@ -1141,7 +1147,10 @@ pub extern "C" fn frame_step(raw_elapsed_seconds: f64) -> i32 {
     )
 }
 fn advance_frame(movement: f64, raw: f64) -> i32 {
-    timing::frame(raw);
+    let clock_result = timing::world_clock_frame(raw);
+    if clock_result != OK {
+        return clock_result;
+    }
     mutate(|engine| {
         // ponytail: wraps after ~2.3 years at 60 Hz; reset() re-zeroes it.
         engine.tick = engine.tick.wrapping_add(1);
@@ -1470,6 +1479,9 @@ pub extern "C" fn state_load(values: *const f64) -> i32 {
         world.path_index = 0;
     });
     actions::invalidate();
+    actor_input::reset();
+    world_clock::reset();
+    reset_climate();
     mutate(|engine| {
         engine.x = x as f32;
         engine.y = y as f32;
@@ -2171,6 +2183,10 @@ struct ItemDefinition {
     only_category: u32,
     accept_function: u32,
     graph_flags: u32,
+    presentation_flags: u32,
+    display_category: u32,
+    tooltip: [f64; 22],
+    visual_rules: Option<ItemVisualRules>,
 }
 
 #[derive(Clone, Copy)]
@@ -2182,12 +2198,182 @@ struct Item {
     world_object: bool,
     x: f64,
     y: f64,
+    world_visual: WorldItemVisual,
+    visual: Option<ItemVisual>,
     condition: i32,
     count: u32,
     slot: u32,
     weight: f32,
     actual_weight: f32,
     source_flags: u32,
+    display_category: u32,
+    broken: bool,
+    item_heat: f32,
+    wetness: f32,
+    last_wetness_update: f32,
+    tooltip: [f64; 22],
+    blood_level: f32,
+    dirtyness: f32,
+    holes: [u8; 18],
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct ItemVisualRules {
+    base_count: u32,
+    choice_count: u32,
+    flags: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ItemVisual {
+    base_texture: i32,
+    texture_choice: i32,
+    hue: f32,
+    tint: [f32; 4],
+}
+
+impl ItemVisual {
+    fn valid(&self) -> bool {
+        (-1..4096).contains(&self.base_texture)
+            && (-1..4096).contains(&self.texture_choice)
+            && self.hue.is_finite()
+            && (-1.0..=1.0).contains(&self.hue)
+            && self
+                .tint
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            && self.tint[3] == 1.0
+    }
+
+    fn matches(&self, rules: ItemVisualRules) -> bool {
+        let index = |value: i32, count: u32| {
+            if count == 0 {
+                value == -1
+            } else {
+                value >= 0 && (value as u32) < count
+            }
+        };
+        self.valid()
+            && index(self.base_texture, rules.base_count)
+            && index(self.texture_choice, rules.choice_count)
+            && (rules.flags & 2 != 0 || self.hue == 0.0)
+            && (rules.flags & 1 != 0 || self.tint == [1.0; 4])
+    }
+
+    fn initialize(rules: ItemVisualRules) -> Self {
+        // ItemVisual.pickUninitializedValues: hue, tint, base, choice.
+        let hue = if rules.flags & 2 != 0 {
+            doors::random(200) as f32 / 100.0 - 1.0
+        } else {
+            0.0
+        };
+        let tint = if rules.flags & 1 != 0 {
+            let unit = || doors::random(1 << 24) as f32 / (1 << 24) as f32;
+            let h = unit();
+            let s = unit() * 0.6;
+            // Verified source Sandbox NoBlackClothes=true default. Runtime
+            // overrides are not an admitted producer, not a per-item option.
+            let b = 0.2 + unit() * (0.9_f32 - 0.2_f32);
+            let sector = h * 6.0;
+            let f = sector - sector.floor();
+            let p = b * (1.0 - s);
+            let q = b * (1.0 - s * f);
+            let t = b * (1.0 - s * (1.0 - f));
+            let rgb = match sector as u32 {
+                0 => [b, t, p],
+                1 => [q, b, p],
+                2 => [p, b, t],
+                3 => [p, q, b],
+                4 => [t, p, b],
+                _ => [b, p, q],
+            };
+            let rgb = rgb.map(|value| (value * 255.0 + 0.5) as i32 as f32 / 255.0);
+            [rgb[0], rgb[1], rgb[2], 1.0]
+        } else {
+            [1.0; 4]
+        };
+        Self {
+            base_texture: if rules.base_count == 0 {
+                -1
+            } else {
+                doors::random(rules.base_count as u64) as i32
+            },
+            texture_choice: if rules.choice_count == 0 {
+                -1
+            } else {
+                doors::random(rules.choice_count as u64) as i32
+            },
+            hue,
+            tint,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WorldItemVisual {
+    // Port absolute positions were f64 before this projection; retain their
+    // exact fractions. Source constructor offsets are explicitly rounded f32.
+    xoff: f64,
+    yoff: f64,
+    zoff: f32,
+    rotation: [f32; 3],
+    scale: f32,
+}
+
+impl WorldItemVisual {
+    fn loaded(x: f64, y: f64) -> Self {
+        Self {
+            xoff: x - x.floor(),
+            yoff: y - y.floor(),
+            zoff: 0.0,
+            rotation: [0.0, 0.0, -1.0],
+            scale: 1.0,
+        }
+    }
+
+    fn valid(&self) -> bool {
+        self.xoff.is_finite()
+            && self.yoff.is_finite()
+            && (0.0..1.0).contains(&self.xoff)
+            && (0.0..1.0).contains(&self.yoff)
+            && self.zoff.is_finite()
+            && self.rotation.iter().all(|value| value.is_finite())
+            && self.scale.is_finite()
+    }
+}
+
+impl Item {
+    // IsoWorldInventoryObject construction resets X/Y, preserves scale and
+    // nonnegative Z, and draws Z before zero-offset random placement.
+    fn place_world(&mut self, x: f64, y: f64, source_constructor: bool) {
+        let mut visual = WorldItemVisual::loaded(x, y);
+        visual.scale = self.world_visual.scale;
+        visual.rotation[2] = self.world_visual.rotation[2];
+        if visual.rotation[2] < 0.0 {
+            visual.rotation[2] = doors::random(360) as f32;
+        }
+        if source_constructor {
+            visual.xoff = visual.xoff as f32 as f64;
+            visual.yoff = visual.yoff as f32 as f64;
+            if visual.xoff == 0.0 {
+                visual.xoff = (doors::random(1000) as f32 / 1000.0) as f64;
+            }
+            if visual.yoff == 0.0 {
+                visual.yoff = (doors::random(1000) as f32 / 1000.0) as f64;
+            }
+        }
+        self.x = if source_constructor {
+            x.floor() + visual.xoff
+        } else {
+            x
+        };
+        self.y = if source_constructor {
+            y.floor() + visual.yoff
+        } else {
+            y
+        };
+        self.world_visual = visual;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2205,6 +2391,7 @@ struct Container {
     type_token: u32,
     only_category: u32,
     accept_function: u32,
+    draw_dirty: bool,
 }
 
 impl Container {
@@ -2223,6 +2410,7 @@ impl Container {
             type_token: 1,
             only_category: 0,
             accept_function: 0,
+            draw_dirty: true,
         }
     }
 }
@@ -2359,6 +2547,13 @@ impl Items {
             && item.owner_container != 0
             && item.x.is_finite()
             && item.y.is_finite()
+            && item.world_visual.valid()
+            && item.visual.is_none_or(|visual| {
+                visual.valid()
+                    && definition
+                        .visual_rules
+                        .is_none_or(|rules| visual.matches(rules))
+            })
             && item.condition >= 0
             && item.condition <= definition.condition_max
             && item.count > 0
@@ -2527,6 +2722,12 @@ impl Items {
 
     fn container(&self, id: u32) -> Option<&Container> {
         self.containers.iter().find(|row| row.id == id)
+    }
+
+    fn dirty_container(&mut self, id: u32) {
+        if let Some(row) = self.containers.iter_mut().find(|row| row.id == id) {
+            row.draw_dirty = true;
+        }
     }
 
     fn parent_container(&self, id: u32) -> Option<u32> {
@@ -2778,6 +2979,7 @@ impl Items {
             type_token: 2,
             only_category: 0,
             accept_function: 0,
+            draw_dirty: true,
         });
         Ok(id)
     }
@@ -2854,7 +3056,9 @@ impl Items {
             };
             if item.world_object != (owner.kind == 2)
                 || (item.world_object
-                    && owner.xyz != (item.x.floor() as i32, item.y.floor() as i32, 0))
+                    && (owner.xyz != (item.x.floor() as i32, item.y.floor() as i32, 0)
+                        || item.world_visual.xoff != item.x - item.x.floor()
+                        || item.world_visual.yoff != item.y - item.y.floor()))
                 || (self.definitions[item.definition as usize].bag
                     != (item.internal_container != 0))
                 || (item.internal_container != 0
@@ -3277,6 +3481,804 @@ pub extern "C" fn container_remove_allowed(id: u32, item: u32) -> i32 {
         1
     })
 }
+// Item.InstanceItem constructs these subclasses only for their exact ItemType.
+// Factory class and unresolved instance-state admission cannot change for live instances.
+fn item_identity_check(state: &Items, id: u32, flags: u32) -> i32 {
+    let Some(row) = state.definitions.get(id as usize) else {
+        return OUT_OF_RANGE;
+    };
+    if flags & !65535 != 0 {
+        return OUT_OF_RANGE;
+    }
+    if (row.presentation_flags ^ flags) & (2 | 2048 | 4096 | 8192 | 16384 | 32768) != 0
+        && state.live.iter().any(|item| item.definition == id)
+    {
+        return UNSUPPORTED;
+    }
+    OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_class_check(id: u32, flags: u32) -> i32 {
+    ITEMS.with(|state| item_identity_check(&state.borrow(), id, flags))
+}
+
+/// IsoGameCharacter.isKnownPoison(InventoryItem), not the ScriptItem overload.
+#[unsafe(no_mangle)]
+pub extern "C" fn player_is_known_poison(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        let flags = state.definitions[item.definition as usize].presentation_flags;
+        if flags & 512 != 0 {
+            return 0;
+        } // ItemTag.NO_DETECT precedes SHOW_POISON.
+        if flags & 1024 != 0 {
+            return 1;
+        }
+        if flags & 2 == 0 {
+            return 0;
+        } // Factory class, never display category or Lua IsFood().
+        // Food poison power/herbalist/detection state, recipes, Cooking and
+        // addedPoisonBy attribution have no admitted authoritative producers.
+        UNSUPPORTED
+    })
+}
+
+/// Shared non-recorded-media prefix of InventoryItem.hasBeenSeen/hasBeenHeard.
+/// A media declaration is not a recordedMediaIndex; unresolved index/registry/
+/// player listening progress must refuse rather than invent an item seen flag.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_media_progress(id: u32, player: u32) -> i32 {
+    if player != 0 {
+        return UNSUPPORTED;
+    }
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        if state.definitions[item.definition as usize].presentation_flags & 4096 != 0 {
+            return UNSUPPORTED;
+        }
+        0
+    })
+}
+
+/// IsoPlayer.hasReadMap first tests concrete MapItem class, including null=false.
+/// Real maps need getMediaId (stash/map ID) and persisted player readPrintMedia;
+/// neither authority is admitted, so never substitute a constructor-empty set.
+#[unsafe(no_mangle)]
+pub extern "C" fn player_has_read_map(id: u32, player: u32) -> i32 {
+    if player != 0 {
+        return UNSUPPORTED;
+    }
+    if id == 0 {
+        return 0;
+    }
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        if state.definitions[item.definition as usize].presentation_flags & 8192 != 0 {
+            return UNSUPPORTED;
+        }
+        0
+    })
+}
+
+/// InventoryItem.isNoRecipes: null player or absent itemNoRecipes is false.
+/// Bit 16384 denotes unresolved modData/creation authority, never a stored recipe
+/// preference. Comparing a present key needs real player fullName and item modData.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_no_recipes(id: u32, player: u32, has_player: u32) -> i32 {
+    if has_player > 1 {
+        return OUT_OF_RANGE;
+    }
+    if player != 0 {
+        return UNSUPPORTED;
+    }
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        if has_player == 0 {
+            return 0;
+        }
+        if state.definitions[item.definition as usize].presentation_flags & 16384 != 0 {
+            return UNSUPPORTED;
+        }
+        0
+    })
+}
+
+/// Identity admission only: no recipe membership, preference, or false proof.
+/// The private Lua owner evaluates its real persisted player modData.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_favourite_recipe_input_identity(id: u32, player: u32) -> i32 {
+    if player != 0 {
+        return UNSUPPORTED;
+    }
+    ITEMS.with(|state| {
+        if state.borrow().live.iter().any(|item| item.id == id) {
+            OK
+        } else {
+            OUT_OF_RANGE
+        }
+    })
+}
+
+/// Presentation bits: hidden, Food, KEY_RING type/tag, unavailable unwanted authority,
+/// Clothing, non-null factory bloodClothingType, OnBreak, BREAK_WHEN_WET, NO_DETECT, SHOW_POISON, Literature, unresolved media, MapItem, unresolved item modData, DrainableComboItem.
+/// Category, broken and itemHeat use original factory/load reconstruction, not graph storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_presentation_set(
+    id: u32,
+    owner: u32,
+    flags: u32,
+    category: u32,
+) -> i32 {
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        let index = id as usize;
+        if flags & !65535 != 0
+            || owner == 0
+            || state.frozen
+            || state.importing
+            || state.source_transfer
+            || (state.transaction_owner != 0 && state.transaction_owner != owner)
+            || state
+                .definitions
+                .get(index)
+                .is_none_or(|row| row.owner != owner)
+        {
+            return OUT_OF_RANGE;
+        }
+        let class_check = item_identity_check(&state, id, flags);
+        if class_check != OK {
+            return class_check;
+        }
+        if state.transaction_owner != 0
+            && index < state.transaction_start
+            && !state.journal.iter().any(|(old, _)| *old == index)
+        {
+            let row = state.definitions[index];
+            state.journal.push((index, row));
+        }
+        state.definitions[index].presentation_flags = flags;
+        state.definitions[index].display_category = category;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_presentation_query(id: u32, field: u32) -> f64 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE as f64;
+        };
+        let row = &state.definitions[item.definition as usize];
+        match field {
+            0..=3 => ((row.presentation_flags >> field) & 1) as f64,
+            4 => item.display_category as f64,
+            5 => {
+                if row.presentation_flags & 16 != 0 {
+                    UNSUPPORTED as f64
+                } else {
+                    item.definition as f64
+                }
+            }
+            6 => u32::from(row.presentation_flags & 2048 != 0) as f64,
+            7 => u32::from(row.presentation_flags & 32768 != 0) as f64,
+            _ => OUT_OF_RANGE as f64,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_display_category_set(id: u32, category: u32) -> i32 {
+    change_item(id, |state, index| {
+        state.live[index].display_category = category;
+        OK
+    })
+}
+
+// Script Item constructor/factory fields, in private ABI order:
+// insulation, wind/water resistance, bite/scratch/bullet defense, run/combat speed,
+// cosmetic, vision/hearing/discomfort, fatigue (/100), maxAmmo, max/itemCapacity,
+// mechanicType, wetCooldown, isWet, equippedNoSprint, conditionAffectsCapacity,
+// flags (unresolved producers, SHOW_CONDITION, fishingLure). Java primitive-zero
+// defaults; capacities are -1.
+const TOOLTIP_DEFAULTS: [f64; 22] = [
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+];
+
+fn tooltip_number(field: usize, value: f64) -> Result<f64, i32> {
+    if !value.is_finite() {
+        return Err(NONFINITE);
+    }
+    if field >= 22 {
+        return Err(OUT_OF_RANGE);
+    }
+    if field == 21 {
+        return if value.fract() == 0.0 && (0.0..=7.0).contains(&value) {
+            Ok(value)
+        } else {
+            Err(OUT_OF_RANGE)
+        };
+    }
+    if matches!(field, 8 | 18..=20) {
+        return if value == 0.0 || value == 1.0 {
+            Ok(value)
+        } else {
+            Err(OUT_OF_RANGE)
+        };
+    }
+    if matches!(field, 13 | 14 | 16) {
+        return if value.fract() == 0.0 && value >= i32::MIN as f64 && value <= i32::MAX as f64 {
+            Ok(value)
+        } else {
+            Err(OUT_OF_RANGE)
+        };
+    }
+    if value.abs() > F32_MAX {
+        return Err(OUT_OF_RANGE);
+    }
+    let value = value as f32;
+    Ok(if matches!(field, 3..=5) {
+        value.min(100.0)
+    } else {
+        value
+    } as f64)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_tooltip_set(id: u32, owner: u32, field: u32, value: f64) -> i32 {
+    let value = match tooltip_number(field as usize, value) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        let index = id as usize;
+        if owner == 0
+            || state.frozen
+            || state.importing
+            || state.source_transfer
+            || (state.transaction_owner != 0 && state.transaction_owner != owner)
+            || state
+                .definitions
+                .get(index)
+                .is_none_or(|row| row.owner != owner)
+        {
+            return OUT_OF_RANGE;
+        }
+        if state.transaction_owner != 0
+            && index < state.transaction_start
+            && !state.journal.iter().any(|(old, _)| *old == index)
+        {
+            let old = state.definitions[index];
+            state.journal.push((index, old));
+        }
+        state.definitions[index].tooltip[field as usize] = value;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_definition_tooltip_read(id: u32, page: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(row) = state.definitions.get(id as usize) else {
+            return OUT_OF_RANGE;
+        };
+        if page > 1 {
+            return OUT_OF_RANGE;
+        }
+        let start = page as usize * 12;
+        let end = (start + 12).min(22);
+        SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch.fill(0.0);
+            scratch[..end - start].copy_from_slice(&row.tooltip[start..end]);
+        });
+        OK
+    })
+}
+
+/// Pages 0/1: unmodified factory instance values for saves. Page 2: live clothing
+/// and condition-gated defenses. Pages 3/4: original ItemVisual hole bytes.
+/// Page 5: script-backed fields (which remain live across definition changes).
+#[unsafe(no_mangle)]
+pub extern "C" fn item_tooltip_read(id: u32, page: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        let row = &state.definitions[item.definition as usize];
+        if page > 5 {
+            return OUT_OF_RANGE;
+        }
+        SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch.fill(0.0);
+            match page {
+                0 | 1 => {
+                    let start = page as usize * 12;
+                    let end = (start + 12).min(22);
+                    scratch[..end - start].copy_from_slice(&item.tooltip[start..end]);
+                }
+                2 => {
+                    let defense = |index| {
+                        if item.condition > 0 {
+                            item.tooltip[index]
+                        } else {
+                            0.0
+                        }
+                    };
+                    scratch[..12].copy_from_slice(&[
+                        item.blood_level as f64,
+                        item.dirtyness as f64,
+                        item.wetness as f64,
+                        item.holes.iter().filter(|value| **value > 0).count() as f64,
+                        defense(3),
+                        defense(4),
+                        defense(5),
+                        item.condition as f64,
+                        row.condition_max as f64,
+                        -1.0,
+                        0.0,
+                        -1.0,
+                    ]);
+                }
+                3 | 4 => {
+                    let start = (page as usize - 3) * 12;
+                    let end = (start + 12).min(18);
+                    for (out, value) in scratch.iter_mut().zip(&item.holes[start..end]) {
+                        *out = *value as f64;
+                    }
+                }
+                5 => {
+                    // Cosmetic, vision, hearing, discomfort, mechanic, no-sprint,
+                    // condition-capacity and component declarations delegate to ScriptItem.
+                    for (out, field) in scratch.iter_mut().zip([8, 9, 10, 11, 16, 19, 20, 21]) {
+                        *out = row.tooltip[field];
+                    }
+                    scratch[8] = u32::from(row.graph_flags & 2 != 0) as f64;
+                    let flags = row.tooltip[21] as u32;
+                    scratch[7] = (flags & 1) as f64;
+                    scratch[9] = u32::from(flags & 2 != 0) as f64;
+                    scratch[10] = u32::from(flags & 4 != 0) as f64;
+                }
+                _ => unreachable!(),
+            }
+        });
+        OK
+    })
+}
+
+/// Import into the staged item only; any invalid later field poisons the whole graph.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_tooltip(id: u32, field: u32, value: f64) -> i32 {
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        let valid = if field < 22 {
+            tooltip_number(field as usize, value).is_ok_and(|number| number == value)
+        } else if field < 24 {
+            value.is_finite() && (0.0..=100.0).contains(&value) && (value as f32) as f64 == value
+        } else {
+            field < 42
+                && value.is_finite()
+                && (0.0..=255.0).contains(&value)
+                && value.fract() == 0.0
+        };
+        let index = state.staged.iter().position(|item| item.id == id);
+        if !state.importing || !valid || index.is_none() {
+            state.abort_import();
+            return BAD_FORMAT;
+        }
+        let item = &mut state.staged[index.unwrap()];
+        match field {
+            0..=21 => item.tooltip[field as usize] = value,
+            22 => item.blood_level = value as f32,
+            23 => item.dirtyness = value as f32,
+            _ => item.holes[field as usize - 24] = value as u8,
+        }
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_leaf_query(id: u32, field: u32) -> f64 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE as f64;
+        };
+        match field {
+            0 => u32::from(item.broken) as f64,
+            1 => item.item_heat as f64,
+            2 if state.definitions[item.definition as usize].presentation_flags & 32 != 0 => {
+                item.wetness as f64
+            }
+            2 => UNSUPPORTED as f64,
+            3 => {
+                u32::from(state.definitions[item.definition as usize].presentation_flags & 32 != 0)
+                    as f64
+            }
+            _ => OUT_OF_RANGE as f64,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_leaf_set(id: u32, field: u32, value: f64) -> i32 {
+    if !value.is_finite() {
+        return NONFINITE;
+    }
+    if field > 2 || (field == 0 && value != 0.0 && value != 1.0) {
+        return OUT_OF_RANGE;
+    }
+    change_item(id, |state, index| {
+        let flags = state.definitions[state.live[index].definition as usize].presentation_flags;
+        if (field == 0 && value != 0.0 && flags & 128 != 0) || (field == 2 && flags & 32 == 0) {
+            return UNSUPPORTED;
+        }
+        let item = &mut state.live[index];
+        match field {
+            0 => item.broken = value != 0.0,
+            1 => item.item_heat = (value as f32).clamp(0.0, 3.0),
+            2 => item.wetness = (value as f32).clamp(0.0, 100.0),
+            _ => unreachable!(),
+        }
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_update_age(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        let state = state.borrow();
+        let Some(item) = state.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        let row = &state.definitions[item.definition as usize];
+        // InventoryContainer dispatches updateAge recursively to its contents.
+        // Supported leaves inherit the empty base method; a Food descendant
+        // still needs its actual override, never a bag-level success/no-op.
+        let unavailable = |entry: &Item| {
+            let row = &state.definitions[entry.definition as usize];
+            row.presentation_flags & 2 != 0 || row.graph_flags & 4 != 0
+        };
+        if unavailable(item)
+            || (row.bag
+                && state
+                    .live
+                    .iter()
+                    .any(|child| unavailable(child) && state.inside(child.owner_container, id)))
+        {
+            UNSUPPORTED
+        } else {
+            OK
+        }
+    })
+}
+
+#[repr(align(8))]
+struct ClimateScratch([u8; 4096]);
+thread_local! {
+    static CLIMATE_SCRATCH: RefCell<ClimateScratch> = const { RefCell::new(ClimateScratch([0; 4096])) };
+    static CLIMATE_SAVED: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static CLIMATE_RESTORE: RefCell<Option<(Vec<u8>, usize)>> = const { RefCell::new(None) };
+}
+
+fn reset_climate() {
+    weather::reset();
+    CLIMATE_SAVED.with(|saved| saved.borrow_mut().clear());
+    CLIMATE_RESTORE.with(|staging| *staging.borrow_mut() = None);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_scratch_ptr() -> *mut u8 {
+    CLIMATE_SCRATCH.with(|scratch| scratch.borrow_mut().0.as_mut_ptr())
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_scratch_size() -> u32 {
+    4096
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_initialize(seed: u32, time_zone_length: u32) -> i32 {
+    if weather::configured() {
+        return OUT_OF_RANGE;
+    }
+    if time_zone_length == 0 || time_zone_length > 128 {
+        return OUT_OF_RANGE;
+    }
+    CLIMATE_SCRATCH.with(|scratch| {
+        let scratch = scratch.borrow();
+        let time_zone = &scratch.0[..time_zone_length as usize];
+        if std::str::from_utf8(time_zone).is_err() {
+            return BAD_FORMAT;
+        }
+        timing::with_game_mode(|mode| {
+            weather::initialize(seed, world_clock::sample(), mode, time_zone)
+        })
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_is_initialized() -> u32 {
+    u32::from(weather::configured())
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_save_size() -> i32 {
+    let bytes = weather::save();
+    if bytes.is_empty() || bytes.len() > 1_048_576 {
+        return OUT_OF_RANGE;
+    }
+    let size = bytes.len() as i32;
+    CLIMATE_SAVED.with(|saved| *saved.borrow_mut() = bytes);
+    size
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_save_read(offset: u32) -> i32 {
+    CLIMATE_SAVED.with(|saved| {
+        let saved = saved.borrow();
+        let Some(bytes) = saved.get(offset as usize..) else {
+            return OUT_OF_RANGE;
+        };
+        let count = bytes.len().min(4096);
+        CLIMATE_SCRATCH
+            .with(|scratch| scratch.borrow_mut().0[..count].copy_from_slice(&bytes[..count]));
+        count as i32
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_restore_begin(length: u32) -> i32 {
+    CLIMATE_RESTORE.with(|staging| {
+        *staging.borrow_mut() = None;
+        if length == 0 || length > 1_048_576 {
+            return BAD_FORMAT;
+        }
+        *staging.borrow_mut() = Some((vec![0; length as usize], 0));
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_restore_write(offset: u32, count: u32) -> i32 {
+    CLIMATE_RESTORE.with(|staging| {
+        let mut staging = staging.borrow_mut();
+        let Some((bytes, next)) = staging.as_mut() else {
+            return BAD_FORMAT;
+        };
+        if offset as usize != *next
+            || count == 0
+            || count > 4096
+            || *next + count as usize > bytes.len()
+        {
+            *staging = None;
+            return BAD_FORMAT;
+        }
+        CLIMATE_SCRATCH.with(|scratch| {
+            bytes[*next..*next + count as usize]
+                .copy_from_slice(&scratch.borrow().0[..count as usize]);
+        });
+        *next += count as usize;
+        OK
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_restore_commit() -> i32 {
+    CLIMATE_RESTORE.with(|staging| {
+        let Some((bytes, next)) = staging.borrow_mut().take() else {
+            return BAD_FORMAT;
+        };
+        if next != bytes.len() {
+            return BAD_FORMAT;
+        }
+        weather::load(&bytes)
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn climate_restore_abort() -> i32 {
+    CLIMATE_RESTORE.with(|staging| *staging.borrow_mut() = None);
+    OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_update_wetness(id: u32, force: u32) -> i32 {
+    if force > 1 {
+        return OUT_OF_RANGE;
+    }
+    change_item(id, |state, index| {
+        update_item_wetness(state, index, force != 0)
+    })
+}
+
+#[derive(Clone, Copy)]
+enum WetDryState {
+    Invalid,
+    Dryer,
+    Wetter(f32),
+}
+
+fn rain_wetness() -> Result<WetDryState, i32> {
+    match weather::precipitation() {
+        Some((rain, false)) if rain > 0.0 => Ok(WetDryState::Wetter(rain)),
+        Some(_) => Ok(WetDryState::Dryer),
+        None => Err(UNSUPPORTED),
+    }
+}
+
+fn wetness_state(state: &Items, item: Item, equipped: bool) -> Result<WetDryState, i32> {
+    if item.world_object {
+        return match doors::room((item.x.floor() as i32, item.y.floor() as i32, 0)) {
+            Some(room) if room >= 0 => Ok(WetDryState::Dryer),
+            Some(_) => rain_wetness(), // Source world-item branch never tests haveRoof.
+            None => Err(UNSUPPORTED),  // Absent projection does not prove a null source square.
+        };
+    }
+    let Some(container) = state.container(item.owner_container) else {
+        return Ok(WetDryState::Invalid);
+    };
+    match container.parent_kind {
+        0 | 2 => Ok(WetDryState::Dryer), // Direct null/bag or admitted non-machine parent.
+        1 => {
+            let (x, y, z) = ENGINE.with(|engine| {
+                let engine = engine.borrow();
+                (engine.x.floor() as i32, engine.y.floor() as i32, 0)
+            });
+            let room = doors::room((x, y, z)).ok_or(UNSUPPORTED)?;
+            if room >= 0 || doors::source_have_roof(x, y, z).map_err(|()| UNSUPPORTED)? {
+                return Ok(WetDryState::Dryer);
+            }
+            let raining = rain_wetness()?;
+            match raining {
+                WetDryState::Wetter(_) if equipped => Err(UNSUPPORTED),
+                // Equipped rain protection needs actual sleep/rest/bed/vehicle authority.
+                _ => Ok(WetDryState::Dryer),
+            }
+        }
+        _ => Err(UNSUPPORTED),
+    }
+}
+
+fn update_item_wetness(state: &mut Items, index: usize, force: bool) -> i32 {
+    let item = state.live[index];
+    let flags = state.definitions[item.definition as usize].presentation_flags;
+    if flags & 32 == 0 {
+        return UNSUPPORTED;
+    }
+    let equipped = item.slot != 0 || state.held.contains(&item.id);
+    if !force && equipped {
+        return OK;
+    }
+    if flags & 64 == 0 {
+        state.live[index].wetness = 0.0;
+        return OK;
+    }
+    let now = world_clock::age();
+    let last = world_clock::check_hours(item.last_wetness_update, now);
+    state.live[index].last_wetness_update = last;
+    let delta = now - last;
+    if delta < 0.016666668_f32 {
+        return OK;
+    }
+    state.live[index].last_wetness_update = now;
+    if flags & 256 != 0 && item.wetness >= 100.0 {
+        let result = set_item_condition(state, index, 0);
+        if result != OK {
+            return result;
+        }
+    }
+    let classification = match wetness_state(state, item, equipped) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    if matches!(classification, WetDryState::Dryer) && item.wetness > 0.0 {
+        let mut decrease = delta * 20.0_f32;
+        if equipped {
+            decrease *= 2.0_f32;
+        }
+        if let Some(current) = state.live.get_mut(index).filter(|row| row.id == item.id) {
+            current.wetness = (item.wetness - decrease).clamp(0.0, 100.0);
+        }
+    } else if let WetDryState::Wetter(mut rain) = classification
+        && item.wetness < 100.0
+    {
+        if rain < 0.1_f32 {
+            rain = 0.0;
+        }
+        let increase = (rain * delta) * 100.0_f32;
+        if let Some(current) = state.live.get_mut(index).filter(|row| row.id == item.id) {
+            current.wetness = (item.wetness + increase).clamp(0.0, 100.0);
+        }
+    }
+    OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_flush_wetness(id: u32) -> i32 {
+    change_item(id, |state, index| {
+        if state.definitions[state.live[index].definition as usize].presentation_flags & 32 == 0 {
+            return UNSUPPORTED;
+        }
+        if state.live[index].last_wetness_update < 0.0 {
+            return OK;
+        }
+        let result = update_item_wetness(state, index, true);
+        if result != OK {
+            return result;
+        }
+        if let Some(item) = state.live.get_mut(index).filter(|item| item.id == id) {
+            item.last_wetness_update = -1.0;
+        }
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_wetness(id: u32, value: f64) -> i32 {
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if !state.importing || !value.is_finite() || !(0.0..=100.0).contains(&value) {
+            state.abort_import();
+            return BAD_FORMAT;
+        }
+        let Some(index) = state.staged.iter().position(|item| item.id == id) else {
+            state.abort_import();
+            return BAD_FORMAT;
+        };
+        let definition = state.staged[index].definition as usize;
+        if state.definitions[definition].presentation_flags & 32 == 0 {
+            state.abort_import();
+            return BAD_FORMAT;
+        }
+        state.staged[index].wetness = value as f32;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn container_draw_dirty_get(id: u32) -> i32 {
+    ITEMS.with(|state| {
+        state
+            .borrow()
+            .container(id)
+            .map_or(OUT_OF_RANGE, |row| i32::from(row.draw_dirty))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn container_draw_dirty_set(id: u32, value: u32) -> i32 {
+    ITEMS.with(|state| {
+        let mut state = state.borrow_mut();
+        if value > 1 || state.importing || state.transaction_owner != 0 {
+            return OUT_OF_RANGE;
+        }
+        let Some(row) = state.containers.iter_mut().find(|row| row.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        row.draw_dirty = value != 0;
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn source_player_direction() -> u32 {
+    ENGINE.with(|state| {
+        let state = state.borrow();
+        let angle = (state.heading_y as f64).atan2(state.heading_x as f64) as f32;
+        ((6_i32 - (8.5_f32 + 1.2732395_f32 * angle) as i32) & 7) as u32
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn item_definition_container_set(
     id: u32,
@@ -3411,6 +4413,7 @@ pub extern "C" fn container_import_stage() -> i32 {
             type_token: 0,
             only_category: 0,
             accept_function: 0,
+            draw_dirty: true,
         });
         OK
     })
@@ -3567,6 +4570,38 @@ pub extern "C" fn item_equipment_state_read(id: u32) -> i32 {
             ])
         });
         OK
+    })
+}
+// IsoGridSquare.DistToProper: f32 centers/deltas, then IsoUtils.DistanceTo's
+// double-precision squares, sum and square root before the final float cast.
+#[unsafe(no_mangle)]
+pub extern "C" fn source_square_distance_to_proper(
+    from_x: i32,
+    from_y: i32,
+    from_z: i32,
+    to_x: i32,
+    to_y: i32,
+    to_z: i32,
+) -> f64 {
+    if !doors::has_square(from_x, from_y, from_z) || !doors::has_square(to_x, to_y, to_z) {
+        return OUT_OF_RANGE as f64;
+    }
+    let dx = ((to_x as f32 + 0.5) - (from_x as f32 + 0.5)) as f64;
+    let dy = ((to_y as f32 + 0.5) - (from_y as f32 + 0.5)) as f64;
+    ((dx * dx + dy * dy).sqrt() as f32) as f64
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn source_actor_remove_attached_item(id: u32) -> i32 {
+    change_item(id, |items, index| {
+        let Some(attached) = items.attached.iter().position(|old| *old == id) else {
+            return 0;
+        };
+        if items.live[index].owner_container != PLAYER_INVENTORY {
+            return OUT_OF_RANGE;
+        }
+        items.attached.remove(attached);
+        1
     })
 }
 
@@ -3911,6 +4946,10 @@ pub extern "C" fn item_definition_register(
             only_category: old.map_or(0, |row| row.only_category),
             accept_function: old.map_or(0, |row| row.accept_function),
             graph_flags: old.map_or(0, |row| row.graph_flags),
+            presentation_flags: old.map_or(0, |row| row.presentation_flags),
+            display_category: old.map_or(0, |row| row.display_category),
+            tooltip: old.map_or(TOOLTIP_DEFAULTS, |row| row.tooltip),
+            visual_rules: old.and_then(|row| row.visual_rules),
         };
         if index == items.definitions.len() {
             items.definitions.push(row);
@@ -4107,6 +5146,252 @@ pub extern "C" fn item_read_id(id: u32) -> i32 {
     })
 }
 
+/// Restore captured original XML selection bounds before staging saved visuals.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_visual_rules_register(
+    definition: u32,
+    base_count: u32,
+    choice_count: u32,
+    flags: u32,
+) -> i32 {
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        let index = definition as usize;
+        if items.importing
+            || items.source_transfer
+            || items.transaction_owner != 0
+            || index >= items.definitions.len()
+            || base_count > 4096
+            || choice_count > 4096
+            || flags > 3
+        {
+            return OUT_OF_RANGE;
+        }
+        let rules = ItemVisualRules {
+            base_count,
+            choice_count,
+            flags,
+        };
+        if items.definitions[index]
+            .visual_rules
+            .is_some_and(|old| old != rules)
+            || items.live.iter().any(|item| {
+                item.definition == definition
+                    && item.visual.is_some_and(|visual| !visual.matches(rules))
+            })
+        {
+            return BAD_FORMAT;
+        }
+        items.definitions[index].visual_rules = Some(rules);
+        OK
+    })
+}
+
+/// Explicit first-use operation, never a side effect of snapshot or save reads.
+/// Counts/flags come from the original ready ClothingItem XML, not renderer RNG.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_visual_initialize(
+    id: u32,
+    base_count: u32,
+    choice_count: u32,
+    flags: u32,
+) -> i32 {
+    if base_count > 4096 || choice_count > 4096 || flags > 3 {
+        return OUT_OF_RANGE;
+    }
+    change_item(id, |items, index| {
+        let rules = ItemVisualRules {
+            base_count,
+            choice_count,
+            flags,
+        };
+        let definition = items.live[index].definition as usize;
+        let registered = items.definitions[definition].visual_rules;
+        if registered.is_some_and(|old| old != rules)
+            || (registered.is_none()
+                && items.live.iter().any(|item| {
+                    item.definition as usize == definition
+                        && item.visual.is_some_and(|visual| !visual.matches(rules))
+                }))
+        {
+            return BAD_FORMAT;
+        }
+        items.definitions[definition].visual_rules = Some(rules);
+        if items.live[index].visual.is_none() {
+            items.live[index].visual = Some(ItemVisual::initialize(rules));
+            let owner = items.live[index].owner_container;
+            items.dirty_container(owner);
+        }
+        OK
+    })
+}
+
+/// Scratch: baseTexture, textureChoice, hue, tint RGBA. Status 1 is unset.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_visual_read(id: u32) -> i32 {
+    ITEMS.with(|items| {
+        let items = items.borrow();
+        let Some(item) = items.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        let Some(visual) = item.visual else {
+            return 1;
+        };
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..7].copy_from_slice(&[
+                visual.base_texture as f64,
+                visual.texture_choice as f64,
+                visual.hue as f64,
+                visual.tint[0] as f64,
+                visual.tint[1] as f64,
+                visual.tint[2] as f64,
+                visual.tint[3] as f64,
+            ]);
+        });
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_visual(id: u32) -> i32 {
+    let values = SCRATCH.with(|scratch| *scratch.borrow());
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        let visual = ItemVisual {
+            base_texture: values[0] as i32,
+            texture_choice: values[1] as i32,
+            hue: values[2] as f32,
+            tint: [
+                values[3] as f32,
+                values[4] as f32,
+                values[5] as f32,
+                values[6] as f32,
+            ],
+        };
+        if !items.importing
+            || !visual.valid()
+            || values[..2]
+                .iter()
+                .any(|value| *value != *value as i32 as f64)
+            || values[2..7]
+                .iter()
+                .any(|value| *value != *value as f32 as f64)
+        {
+            items.abort_import();
+            return BAD_FORMAT;
+        }
+        let Some(item) = items.staged.iter_mut().find(|item| item.id == id) else {
+            items.abort_import();
+            return BAD_FORMAT;
+        };
+        item.visual = Some(visual);
+        OK
+    })
+}
+
+/// Scratch: offsets XYZ, item rotations XYZ (degrees), item scale.
+#[unsafe(no_mangle)]
+pub extern "C" fn item_world_visual_read(id: u32) -> i32 {
+    ITEMS.with(|items| {
+        let items = items.borrow();
+        let Some(item) = items.live.iter().find(|item| item.id == id) else {
+            return OUT_OF_RANGE;
+        };
+        let visual = item.world_visual;
+        SCRATCH.with(|scratch| {
+            scratch.borrow_mut()[..7].copy_from_slice(&[
+                visual.xoff,
+                visual.yoff,
+                visual.zoff as f64,
+                visual.rotation[0] as f64,
+                visual.rotation[1] as f64,
+                visual.rotation[2] as f64,
+                visual.scale as f64,
+            ]);
+        });
+        OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn item_import_world_visual(id: u32) -> i32 {
+    let values = SCRATCH.with(|scratch| *scratch.borrow());
+    ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        let visual = WorldItemVisual {
+            xoff: values[0],
+            yoff: values[1],
+            zoff: values[2] as f32,
+            rotation: [values[3] as f32, values[4] as f32, values[5] as f32],
+            scale: values[6] as f32,
+        };
+        if !items.importing
+            || !visual.valid()
+            || values[2..7]
+                .iter()
+                .any(|value| *value != *value as f32 as f64)
+        {
+            items.abort_import();
+            return BAD_FORMAT;
+        }
+        let Some(item) = items.staged.iter_mut().find(|item| item.id == id) else {
+            items.abort_import();
+            return BAD_FORMAT;
+        };
+        item.world_visual = visual;
+        OK
+    })
+}
+
+/// Match the live floor placement using the same f64 coordinates exposed by item_read_id.
+#[unsafe(no_mangle)]
+pub extern "C" fn source_item_matches_floor_placement(
+    id: u32,
+    owner_container: u32,
+    x: f64,
+    y: f64,
+    z: f64,
+) -> i32 {
+    if id == 0 || owner_container == 0 {
+        return OUT_OF_RANGE;
+    }
+    if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+        return NONFINITE;
+    }
+    ITEMS.with(|items| {
+        let items = items.borrow();
+        i32::from(
+            items
+                .live
+                .iter()
+                .find(|item| item.id == id)
+                .is_some_and(|item| {
+                    item.world_object
+                        && item.owner_container == owner_container
+                        && item.x == x
+                        && item.y == y
+                        && z == 0.0
+                        && items
+                            .container(item.owner_container)
+                            .is_some_and(|owner| owner.kind == 2)
+                }),
+        )
+    })
+}
+
+/// Current admitted world only: navigation, doors, inventory items and one actor
+/// cannot produce static movers. This is not an original map/save corpse census.
+/// Static-mover admission/simulation remains unsupported; adding it must replace
+/// this empty-model count with its authoritative store.
+#[unsafe(no_mangle)]
+pub extern "C" fn source_square_static_moving_object_count(x: i32, y: i32, z: i32) -> i32 {
+    if doors::has_square(x, y, z) {
+        0
+    } else {
+        OUT_OF_RANGE
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn source_world_item_count(x: i32, y: i32, z: i32) -> u32 {
     ITEMS.with(|items| {
@@ -4199,12 +5484,13 @@ pub extern "C" fn item_spawn(definition: u32, x: f64, y: f64, count: u32, condit
                 type_token: row.type_token,
                 only_category: row.only_category,
                 accept_function: row.accept_function,
+                draw_dirty: true,
             });
             id
         } else {
             0
         };
-        let item = Item {
+        let mut item = Item {
             id: next as u32,
             definition,
             owner_container: floor,
@@ -4212,14 +5498,27 @@ pub extern "C" fn item_spawn(definition: u32, x: f64, y: f64, count: u32, condit
             world_object: true,
             x,
             y,
+            world_visual: WorldItemVisual::loaded(x, y),
+            visual: None,
             condition,
             count,
             slot: 0,
             weight: row.weight,
             actual_weight: row.weight,
             source_flags: 0,
+            display_category: row.display_category,
+            broken: condition == 0,
+            item_heat: 1.0,
+            wetness: 0.0,
+            last_wetness_update: world_clock::age(),
+            tooltip: row.tooltip,
+            blood_level: 0.0,
+            dirtyness: 0.0,
+            holes: [0; 18],
         };
+        item.place_world(x, y, false);
         items.live.push(item);
+        items.dirty_container(floor);
         items.last_id = item.id;
         mutate(|engine| engine.next_item_id += 1);
         OK
@@ -4310,10 +5609,11 @@ pub extern "C" fn item_drop(id: u32, x: f64, y: f64) -> i32 {
         item.owner_container = floor;
         item.world_object = true;
         item.slot = 0;
-        item.x = x;
-        item.y = y;
+        item.place_world(x, y, false);
         items.clear_held(id);
         items.remove_worn(id);
+        items.dirty_container(PLAYER_INVENTORY);
+        items.dirty_container(floor);
         OK
     })
 }
@@ -4321,32 +5621,46 @@ pub extern "C" fn item_drop(id: u32, x: f64, y: f64) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn item_set_condition(id: u32, condition: i32) -> i32 {
     change_item(id, |items, index| {
-        let definition = items.definitions[items.live[index].definition as usize];
-        if condition < 0 || condition > definition.condition_max {
-            return OUT_OF_RANGE;
-        }
-        if condition == 0 && definition.remove_on_broken {
-            if items.live[index].internal_container != 0 {
-                return UNSUPPORTED;
-            }
-            items
-                .retired_source_flags
-                .retain(|(old, _)| actions::source_flags_needed(*old));
-            if actions::source_flags_needed(id) {
-                if items.retired_source_flags.len() == MAX_ITEMS * 3 {
-                    return OUT_OF_RANGE;
-                }
-                let flags = items.live[index].source_flags;
-                items.retired_source_flags.push((id, flags));
-            }
-            items.live.remove(index);
-            items.clear_held(id);
-            items.remove_worn(id);
-        } else {
-            items.live[index].condition = condition;
-        }
-        OK
+        set_item_condition(items, index, condition)
     })
+}
+fn set_item_condition(items: &mut Items, index: usize, condition: i32) -> i32 {
+    let id = items.live[index].id;
+    let definition = items.definitions[items.live[index].definition as usize];
+    if condition < 0 || condition > definition.condition_max {
+        return OUT_OF_RANGE;
+    }
+    if condition == 0 && definition.presentation_flags & 128 != 0 {
+        return UNSUPPORTED;
+    }
+    if condition == 0 && definition.remove_on_broken {
+        if items.live[index].internal_container != 0 {
+            return UNSUPPORTED;
+        }
+        items
+            .retired_source_flags
+            .retain(|(old, _)| actions::source_flags_needed(*old));
+        if actions::source_flags_needed(id) {
+            if items.retired_source_flags.len() == MAX_ITEMS * 3 {
+                return OUT_OF_RANGE;
+            }
+            let flags = items.live[index].source_flags;
+            items.retired_source_flags.push((id, flags));
+        }
+        let owner = items.live[index].owner_container;
+        items.dirty_container(owner);
+        items.live.remove(index);
+        items.clear_held(id);
+        items.remove_worn(id);
+    } else {
+        items.live[index].condition = condition;
+        items.live[index].broken = condition == 0;
+        if condition == 0 && definition.presentation_flags & 32 != 0 {
+            let owner = items.live[index].owner_container;
+            items.dirty_container(owner);
+        }
+    }
+    OK
 }
 
 #[unsafe(no_mangle)]
@@ -4441,12 +5755,29 @@ pub extern "C" fn item_import_stage(
             world_object: world_object == 1,
             x,
             y,
+            world_visual: WorldItemVisual::loaded(x, y),
+            visual: None,
             condition,
             count,
             slot,
             weight,
             actual_weight,
             source_flags: 0,
+            display_category: items
+                .definitions
+                .get(definition as usize)
+                .map_or(0, |row| row.display_category),
+            broken: condition == 0,
+            item_heat: 1.0,
+            wetness: 0.0,
+            last_wetness_update: world_clock::age(),
+            tooltip: items
+                .definitions
+                .get(definition as usize)
+                .map_or(TOOLTIP_DEFAULTS, |row| row.tooltip),
+            blood_level: 0.0,
+            dirtyness: 0.0,
+            holes: [0; 18],
         };
         if items
             .definitions
@@ -4657,6 +5988,772 @@ mod tests {
     const DT: f64 = 1.0 / 60.0;
 
     #[test]
+    fn source_constructor_preserves_explicit_offsets_and_nonnegative_rotation_without_rng_draws() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_spawn(0, 5.25, 5.75, 1, 100), OK);
+        let rng = doors::rng_state();
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            let item = &mut items.live[0];
+            item.world_visual.rotation = [12.0, 34.0, 56.0];
+            item.world_visual.scale = 0.75;
+            item.place_world(5.125, 5.5, true);
+            assert_eq!(item.world_visual.rotation, [0.0, 0.0, 56.0]);
+            assert_eq!(item.world_visual.scale, 0.75);
+            assert_eq!((item.x, item.y), (5.125, 5.5));
+            assert_eq!(
+                (item.world_visual.xoff, item.world_visual.yoff),
+                (0.125, 0.5)
+            );
+        });
+        assert_eq!(doors::rng_state(), rng);
+    }
+
+    #[test]
+    fn item_visual_first_use_is_quantized_once_dirty_and_transaction_guarded() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_spawn(0, 5.25, 5.75, 1, 100), OK);
+        let id = item_last_id();
+        let owner = ITEMS.with(|items| items.borrow().live[0].owner_container);
+        let before = doors::rng_state();
+        assert_eq!(item_definition_begin(1), OK);
+        assert_eq!(item_visual_initialize(id, 2, 1, 1), OUT_OF_RANGE);
+        assert_eq!(doors::rng_state(), before);
+        assert_eq!(item_visual_read(id), 1);
+        assert_eq!(item_definition_rollback(1), OK);
+        assert_eq!(container_draw_dirty_set(owner, 0), OK);
+        assert_eq!(item_visual_initialize(id, 2, 1, 1), OK);
+        assert_eq!(container_draw_dirty_get(owner), 1);
+        let visual = ITEMS.with(|items| items.borrow().live[0].visual.unwrap());
+        assert!(visual.base_texture >= 0 && visual.base_texture < 2);
+        assert_eq!(visual.texture_choice, 0);
+        assert_ne!(visual.tint, [1.0; 4]);
+        assert_eq!(visual.hue, 0.0);
+        assert!(
+            visual.tint[..3]
+                .iter()
+                .all(|value| { (0..=255).any(|byte| *value == byte as f32 / 255.0) })
+        );
+        let after = doors::rng_state();
+        assert_ne!(after, before);
+        assert_eq!(container_draw_dirty_set(owner, 0), OK);
+        assert_eq!(item_visual_initialize(id, 2, 1, 1), OK);
+        assert_eq!(container_draw_dirty_get(owner), 0);
+        assert_eq!(doors::rng_state(), after);
+        assert_eq!(item_visual_initialize(id, 1, 1, 1), BAD_FORMAT);
+        assert_eq!(doors::rng_state(), after);
+        assert_eq!(item_import_begin(), OK);
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            items.staged = items.live.clone();
+            items.staged_containers = items.containers.clone();
+        });
+        assert_eq!(item_visual_read(id), OK);
+        SCRATCH.with(|scratch| scratch.borrow_mut()[3] = f64::NAN);
+        assert_eq!(item_import_visual(id), BAD_FORMAT);
+        assert_eq!(
+            ITEMS.with(|items| items.borrow().live[0].visual.unwrap()),
+            visual
+        );
+        assert_eq!(doors::rng_state(), after);
+    }
+
+    #[test]
+    fn invalid_native_world_visual_import_never_replaces_live_graph_or_rng() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_spawn(0, 5.25, 5.75, 1, 100), OK);
+        let before = ITEMS.with(|items| items.borrow().live[0]);
+        let rng = doors::rng_state();
+        assert_eq!(item_import_begin(), OK);
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            items.staged = items.live.clone();
+            items.staged_containers = items.containers.clone();
+        });
+        assert_eq!(item_world_visual_read(before.id), OK);
+        SCRATCH.with(|scratch| scratch.borrow_mut()[6] = f64::INFINITY);
+        assert_eq!(item_import_world_visual(before.id), BAD_FORMAT);
+        assert_eq!(item_import_commit(), OUT_OF_RANGE);
+        assert_eq!(
+            ITEMS.with(|items| items.borrow().live[0].world_visual),
+            before.world_visual
+        );
+        assert_eq!(doors::rng_state(), rng);
+        assert_eq!(item_import_begin(), OK);
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            items.staged = items.live.clone();
+            items.staged_containers = items.containers.clone();
+        });
+        assert_eq!(item_world_visual_read(before.id), OK);
+        SCRATCH.with(|scratch| scratch.borrow_mut()[0] = 0.5);
+        assert_eq!(item_import_world_visual(before.id), OK);
+        assert_eq!(item_import_commit(), BAD_FORMAT);
+        assert_eq!(
+            ITEMS.with(|items| items.borrow().live[0].world_visual),
+            before.world_visual
+        );
+        assert_eq!(doors::rng_state(), rng);
+        item_import_abort();
+    }
+
+    #[test]
+    fn immediate_attachment_removal_changes_only_owned_membership_and_reports_transition_once() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_spawn(0, 5.0, 5.0, 1, 100), OK);
+        let floor = item_last_id();
+        assert_eq!(source_actor_remove_attached_item(floor), 0);
+        assert_eq!(item_spawn(0, 5.0, 5.0, 1, 100), OK);
+        let id = u32::MAX;
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            items.live[1].id = id;
+            items.live[1].owner_container = PLAYER_INVENTORY;
+            items.live[1].world_object = false;
+            items.attached.push(id);
+            items.held = [id, id];
+        });
+        for guard in 0..3 {
+            ITEMS.with(|items| {
+                let mut items = items.borrow_mut();
+                items.importing = guard == 0;
+                items.source_transfer = guard == 1;
+                items.transaction_owner = u32::from(guard == 2);
+            });
+            assert_eq!(source_actor_remove_attached_item(id), OUT_OF_RANGE);
+            ITEMS.with(|items| assert_eq!(items.borrow().attached, [id]));
+        }
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            items.transaction_owner = 0;
+            // A foreign item cannot be detached through actor-owned membership.
+            items.attached.push(floor);
+        });
+        assert_eq!(source_actor_remove_attached_item(floor), OUT_OF_RANGE);
+        assert_eq!(source_actor_remove_attached_item(0), OUT_OF_RANGE);
+        assert_eq!(source_actor_remove_attached_item(123), OUT_OF_RANGE);
+        assert_eq!(source_actor_remove_attached_item(id), 1);
+        assert_eq!(source_actor_remove_attached_item(id), 0);
+        assert_eq!(item_equipment_state_read(id), OK);
+        SCRATCH.with(|scratch| assert_eq!(&scratch.borrow()[..3], &[0.0, 1.0, 0.0]));
+        ITEMS.with(|items| {
+            let items = items.borrow();
+            assert_eq!(items.attached, [floor]);
+            assert_eq!(items.held, [id, id]);
+            assert_eq!(items.live[1].owner_container, PLAYER_INVENTORY);
+            assert!(!items.live[1].world_object);
+        });
+    }
+
+    #[test]
+    fn tooltip_defenses_use_condition_gate_and_visual_import_is_atomic() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_definition_presentation_set(0, 1, 32, 0), OK);
+        assert_eq!(item_definition_tooltip_set(0, 1, 4, 130.0), OK);
+        assert_eq!(item_definition_tooltip_set(0, 1, 0, 0.25), OK);
+        assert_eq!(item_definition_tooltip_set(0, 1, 8, 0.5), OUT_OF_RANGE);
+        assert_eq!(
+            item_definition_tooltip_set(0, 1, 0, f64::INFINITY),
+            NONFINITE
+        );
+        assert_eq!(item_definition_tooltip_set(0, 2, 0, 0.5), OUT_OF_RANGE);
+        assert_eq!(item_spawn(0, 5.0, 5.0, 1, 1), OK);
+        let id = item_last_id();
+        assert_eq!(item_tooltip_read(id, 2), OK);
+        SCRATCH.with(|scratch| assert_eq!(scratch.borrow()[5], 100.0));
+        assert_eq!(item_set_condition(id, 0), OK);
+        assert_eq!(item_tooltip_read(id, 2), OK);
+        SCRATCH.with(|scratch| assert_eq!(scratch.borrow()[5], 0.0));
+        assert_eq!(item_tooltip_read(id, 0), OK);
+        SCRATCH.with(|scratch| {
+            assert_eq!(scratch.borrow()[0], 0.25);
+            assert_eq!(
+                scratch.borrow()[4],
+                100.0,
+                "save the stored defense, not its broken presentation"
+            );
+        });
+        assert_eq!(item_tooltip_read(0, 0), OUT_OF_RANGE);
+        assert_eq!(item_tooltip_read(id, 6), OUT_OF_RANGE);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        assert_eq!(
+            item_import_stage(id, 0, PLAYER_INVENTORY, 0.0, 0.0, 1, 1, 0, 1.0, 1.0, 0, 0),
+            OK
+        );
+        assert_eq!(item_import_tooltip(id, 22, 12.5), OK);
+        assert_eq!(item_import_tooltip(id, 24, 255.0), OK);
+        assert_eq!(item_import_tooltip(id, 41, 1.0), OK);
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(item_tooltip_read(id, 2), OK);
+        SCRATCH.with(|scratch| {
+            assert_eq!(scratch.borrow()[0], 12.5);
+            assert_eq!(scratch.borrow()[3], 2.0);
+            assert_eq!(scratch.borrow()[5], 100.0);
+        });
+        assert_eq!(begin_actor_container_fixture(), OK);
+        assert_eq!(
+            item_import_stage(id, 0, PLAYER_INVENTORY, 0.0, 0.0, 1, 1, 0, 1.0, 1.0, 0, 0),
+            OK
+        );
+        assert_eq!(item_import_tooltip(id, 22, 75.0), OK);
+        assert_eq!(item_import_tooltip(id, 42, 1.0), BAD_FORMAT);
+        assert_ne!(item_import_commit(), OK);
+        assert_eq!(item_tooltip_read(id, 2), OK);
+        SCRATCH.with(|scratch| assert_eq!(scratch.borrow()[0], 12.5));
+    }
+
+    #[test]
+    fn known_poison_preserves_tag_order_and_refuses_unknown_food_authority() {
+        reset();
+        for (ordinal, flags, expected) in [
+            (0, 0, 0),
+            (1, 1024, 1),
+            (2, 512 | 1024, 0),
+            (3, 2, UNSUPPORTED),
+            (4, 2 | 1024, 1),
+            (5, 2 | 512 | 1024, 0),
+        ] {
+            assert_eq!(
+                item_definition_register(ordinal, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+                OK
+            );
+            assert_eq!(item_definition_presentation_set(ordinal, 1, flags, 0), OK);
+            assert_eq!(item_spawn(ordinal, 5.0, 5.0, 1, 100), OK);
+            let id = item_last_id();
+            assert_eq!(player_is_known_poison(id), expected);
+            assert_eq!(item_definition_class_check(ordinal, flags ^ 2), UNSUPPORTED);
+            assert_eq!(
+                item_definition_presentation_set(ordinal, 1, flags ^ 2, 0),
+                UNSUPPORTED
+            );
+            assert_eq!(player_is_known_poison(id), expected);
+        }
+        assert_eq!(player_is_known_poison(0), OUT_OF_RANGE);
+        assert_eq!(player_is_known_poison(u32::MAX), OUT_OF_RANGE);
+        assert_eq!(item_definition_class_check(0, 65536), OUT_OF_RANGE);
+        assert_eq!(item_definition_class_check(u32::MAX, 0), OUT_OF_RANGE);
+    }
+
+    #[test]
+    fn literature_predicate_preserves_factory_class_across_live_definition_updates() {
+        reset();
+        for (ordinal, flags, expected) in [(0, 0, 0.0), (1, 32, 0.0), (2, 2048, 1.0)] {
+            assert_eq!(
+                item_definition_register(ordinal, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+                OK
+            );
+            assert_eq!(item_definition_presentation_set(ordinal, 1, flags, 0), OK);
+            assert_eq!(item_spawn(ordinal, 5.0, 5.0, 1, 100), OK);
+            let id = item_last_id();
+            assert_eq!(item_presentation_query(id, 6), expected);
+            assert_eq!(
+                item_definition_class_check(ordinal, flags ^ 2048),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                item_definition_presentation_set(ordinal, 1, flags ^ 2048, 0),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                item_definition_presentation_set(ordinal, 1, flags | 1, 17),
+                OK
+            );
+            assert_eq!(item_presentation_query(id, 6), expected);
+        }
+        assert_eq!(item_presentation_query(0, 6), OUT_OF_RANGE as f64);
+        assert_eq!(item_presentation_query(u32::MAX, 6), OUT_OF_RANGE as f64);
+        assert_eq!(
+            item_definition_register(3, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_definition_presentation_set(3, 1, 2048, 0), OK);
+        assert_eq!(
+            item_definition_class_check(3, 0),
+            OK,
+            "unused definitions may change factory class"
+        );
+        assert_eq!(item_definition_presentation_set(3, 1, 0, 0), OK);
+    }
+
+    #[test]
+    fn media_progress_refuses_unresolved_media_and_preserves_live_authority() {
+        reset();
+        for (ordinal, flags, expected) in [(0, 0, 0), (1, 16, 0), (2, 4096, UNSUPPORTED)] {
+            assert_eq!(
+                item_definition_register(ordinal, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+                OK
+            );
+            assert_eq!(item_definition_presentation_set(ordinal, 1, flags, 0), OK);
+            assert_eq!(item_spawn(ordinal, 5.0, 5.0, 1, 100), OK);
+            let id = item_last_id();
+            assert_eq!(item_media_progress(id, 0), expected);
+            assert_eq!(item_media_progress(id, 1), UNSUPPORTED);
+            assert_eq!(
+                item_definition_class_check(ordinal, flags ^ 4096),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                item_definition_presentation_set(ordinal, 1, flags ^ 4096, 0),
+                UNSUPPORTED
+            );
+            assert_eq!(item_media_progress(id, 0), expected);
+        }
+        assert_eq!(item_media_progress(0, 0), OUT_OF_RANGE);
+        assert_eq!(item_media_progress(u32::MAX, 0), OUT_OF_RANGE);
+    }
+
+    #[test]
+    fn map_read_checks_concrete_class_before_unavailable_persistent_history() {
+        reset();
+        for (ordinal, flags, expected) in [(0, 0, 0), (1, 32, 0), (2, 8192, UNSUPPORTED)] {
+            assert_eq!(
+                item_definition_register(ordinal, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+                OK
+            );
+            assert_eq!(item_definition_presentation_set(ordinal, 1, flags, 0), OK);
+            assert_eq!(item_spawn(ordinal, 5.0, 5.0, 1, 100), OK);
+            let id = item_last_id();
+            assert_eq!(player_has_read_map(id, 0), expected);
+            assert_eq!(player_has_read_map(id, 1), UNSUPPORTED);
+            assert_eq!(
+                item_definition_class_check(ordinal, flags ^ 8192),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                item_definition_presentation_set(ordinal, 1, flags ^ 8192, 0),
+                UNSUPPORTED
+            );
+            assert_eq!(player_has_read_map(id, 0), expected);
+        }
+        assert_eq!(player_has_read_map(0, 0), 0, "source null is not a MapItem");
+        assert_eq!(player_has_read_map(0, 1), UNSUPPORTED);
+        assert_eq!(player_has_read_map(u32::MAX, 0), OUT_OF_RANGE);
+    }
+
+    #[test]
+    fn no_recipes_admits_absent_item_moddata_and_refuses_unresolved_authority() {
+        reset();
+        for (ordinal, flags, expected) in [(0, 0, 0), (1, 16384, UNSUPPORTED)] {
+            assert_eq!(
+                item_definition_register(ordinal, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+                OK
+            );
+            assert_eq!(item_definition_presentation_set(ordinal, 1, flags, 0), OK);
+            assert_eq!(item_spawn(ordinal, 5.0, 5.0, 1, 100), OK);
+            let id = item_last_id();
+            assert_eq!(item_no_recipes(id, 0, 1), expected);
+            assert_eq!(item_no_recipes(id, 0, 0), 0);
+            assert_eq!(item_no_recipes(id, 1, 1), UNSUPPORTED);
+            assert_eq!(item_no_recipes(id, 0, 2), OUT_OF_RANGE);
+            assert_eq!(
+                item_definition_class_check(ordinal, flags ^ 16384),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                item_definition_presentation_set(ordinal, 1, flags ^ 16384, 0),
+                UNSUPPORTED
+            );
+            assert_eq!(item_no_recipes(id, 0, 1), expected);
+        }
+        assert_eq!(item_no_recipes(0, 0, 0), OUT_OF_RANGE);
+        assert_eq!(item_no_recipes(u32::MAX, 0, 1), OUT_OF_RANGE);
+    }
+
+    #[test]
+    fn favourite_recipe_input_identity_never_claims_recipe_preference_authority() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_spawn(0, 5.0, 5.0, 1, 100), OK);
+        let id = item_last_id();
+        assert_eq!(item_favourite_recipe_input_identity(id, 0), OK);
+        assert_eq!(item_source_state_set(id, 0, 1), OK);
+        assert_eq!(item_favourite_recipe_input_identity(id, 0), OK);
+        assert_eq!(item_favourite_recipe_input_identity(id, 1), UNSUPPORTED);
+        assert_eq!(item_favourite_recipe_input_identity(0, 0), OUT_OF_RANGE);
+        assert_eq!(
+            item_favourite_recipe_input_identity(u32::MAX, 0),
+            OUT_OF_RANGE
+        );
+    }
+
+    #[test]
+    fn drainable_combo_item_class_is_not_food_and_cannot_change_for_live_instances() {
+        reset();
+        for (ordinal, flags, expected) in [(0, 0, 0.0), (1, 32, 0.0), (2, 2, 0.0), (3, 32768, 1.0)]
+        {
+            assert_eq!(
+                item_definition_register(ordinal, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+                OK
+            );
+            assert_eq!(item_definition_presentation_set(ordinal, 1, flags, 0), OK);
+            assert_eq!(item_spawn(ordinal, 5.0, 5.0, 1, 100), OK);
+            let id = item_last_id();
+            assert_eq!(item_presentation_query(id, 7), expected);
+            assert_eq!(
+                item_definition_class_check(ordinal, flags ^ 32768),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                item_definition_presentation_set(ordinal, 1, flags ^ 32768, 0),
+                UNSUPPORTED
+            );
+            assert_eq!(item_presentation_query(id, 7), expected);
+        }
+        assert_eq!(item_presentation_query(0, 7), OUT_OF_RANGE as f64);
+        assert_eq!(item_presentation_query(u32::MAX, 7), OUT_OF_RANGE as f64);
+    }
+
+    #[test]
+    fn climate_time_zone_transport_rejects_malformed_bytes_before_admission() {
+        reset();
+        assert_eq!(climate_initialize(1, 0), OUT_OF_RANGE);
+        assert_eq!(climate_initialize(1, 129), OUT_OF_RANGE);
+        CLIMATE_SCRATCH.with(|scratch| scratch.borrow_mut().0[0] = 0xff);
+        assert_eq!(climate_initialize(1, 1), BAD_FORMAT);
+        assert!(!weather::configured());
+    }
+
+    #[test]
+    fn generated_weather_drives_outdoor_clothing_without_world_floor_roof_shortcut() {
+        reset();
+        assert_eq!(doors::door_import_begin(1, 1, 0), OK);
+        assert_eq!(doors::door_import_rain_blockers_version(1), OK);
+        for (z, blocker) in [(0, 0), (1, 2)] {
+            SCRATCH.with(|scratch| {
+                *scratch.borrow_mut() = [
+                    5.0,
+                    5.0,
+                    z as f64,
+                    -1.0,
+                    33.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    blocker as f64,
+                ];
+            });
+            assert_eq!(doors::door_square_stage(), OK);
+        }
+        assert_eq!(doors::door_import_commit(), OK);
+        assert_eq!(doors::source_have_roof(5, 5, 0), Ok(true));
+        assert_eq!(
+            world_clock::world_clock_import(1993.0, 0.0, 0.0, 0.0, 0.0, 0.0, 90.0),
+            OK
+        );
+        CLIMATE_SCRATCH
+            .with(|scratch| scratch.borrow_mut().0[..15].copy_from_slice(b"America/Chicago"));
+        assert_eq!(climate_initialize(0x1234_5678, 15), OK);
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_definition_presentation_set(0, 1, 32 | 64, 0), OK);
+        assert_eq!(item_spawn(0, 5.0, 5.0, 1, 100), OK);
+        let id = item_last_id();
+        let mut observed = [false; 3];
+        let mut ordinal_day = 0;
+        for (month, days) in [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+            .into_iter()
+            .enumerate()
+        {
+            for day in 0..days {
+                for hour in 0..24 {
+                    let nights = ordinal_day + i32::from(hour >= 7);
+                    assert_eq!(
+                        world_clock::world_clock_import(
+                            1993.0,
+                            month as f64,
+                            day as f64,
+                            hour as f64,
+                            hour as f64,
+                            nights as f64,
+                            90.0
+                        ),
+                        OK
+                    );
+                    assert_eq!(weather::advance(world_clock::sample()), OK);
+                    let (rain, snow) = weather::precipitation().unwrap();
+                    let now = world_clock::age();
+                    let delta = 0.03125_f32;
+                    ITEMS.with(|items| {
+                        let mut items = items.borrow_mut();
+                        items.live[0].wetness = 50.0;
+                        items.live[0].last_wetness_update = now - delta;
+                    });
+                    assert_eq!(item_update_wetness(id, 0), OK);
+                    let expected = if rain > 0.0 && !snow {
+                        observed[usize::from(rain < 0.1)] = true;
+                        (50.0_f32 + ((if rain < 0.1 { 0.0 } else { rain }) * delta) * 100.0_f32)
+                            .clamp(0.0, 100.0)
+                    } else {
+                        observed[2] |= rain > 0.0 && snow;
+                        50.0_f32 - delta * 20.0_f32
+                    };
+                    assert_eq!(
+                        item_leaf_query(id, 2),
+                        expected as f64,
+                        "month={month} day={day} hour={hour} rain={rain} snow={snow}"
+                    );
+                }
+                ordinal_day += 1;
+            }
+        }
+        assert_eq!(
+            observed, [true; 3],
+            "generated heavy rain, subthreshold rain and snow must each reach the real cloth consumer"
+        );
+    }
+
+    #[test]
+    fn condition_break_refuses_callbacks_before_effects_but_after_wetness_timestamp() {
+        for remove in [0, 1] {
+            reset();
+            assert_eq!(
+                item_definition_register(0, 1, 100, 0, 1, remove, 0, 0, 1.0, 0),
+                OK
+            );
+            assert_eq!(
+                item_definition_presentation_set(0, 1, 32 | 64 | 128 | 256, 0),
+                OK
+            );
+            assert_eq!(item_spawn(0, 5.0, 5.0, 1, 100), OK);
+            let id = item_last_id();
+            assert_eq!(item_set_condition(id, 0), UNSUPPORTED);
+            assert_eq!(item_leaf_set(id, 2, 100.0), OK);
+            assert_eq!(world_clock::world_clock_set(3, 10.0), OK);
+            assert_eq!(item_update_wetness(id, 0), UNSUPPORTED);
+            ITEMS.with(|state| {
+                let state = state.borrow();
+                let item = state.live.iter().find(|item| item.id == id).unwrap();
+                assert_eq!(item.condition, 100);
+                assert!(!item.broken);
+                assert_eq!(item.wetness, 100.0);
+                assert_eq!(item.last_wetness_update, world_clock::age());
+            });
+            assert_eq!(item_definition_presentation_set(0, 1, 32 | 64 | 256, 0), OK);
+            assert_eq!(item_update_wetness(id, 0), OK);
+            assert_eq!(
+                item_leaf_query(id, 0),
+                0.0,
+                "refused callback still consumed the wetness interval"
+            );
+            let owner = ITEMS.with(|state| state.borrow().live[0].owner_container);
+            assert_eq!(container_draw_dirty_set(owner, 0), OK);
+            assert_eq!(item_set_condition(id, 0), OK);
+            assert_eq!(container_draw_dirty_get(owner), 1);
+            if remove == 0 {
+                assert_eq!(item_leaf_query(id, 0), 1.0);
+                assert_eq!(item_read_id(id), OK);
+            } else {
+                assert_eq!(item_leaf_query(id, 0), OUT_OF_RANGE as f64);
+            }
+        }
+    }
+
+    #[test]
+    fn presentation_flags_distinguish_keyring_type_food_and_tag_and_reject_invalid_ids() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_definition_presentation_set(0, 1, 4, 17), OK);
+        assert_eq!(item_spawn(0, 5.0, 5.0, 1, 100), OK);
+        let id = item_last_id();
+        assert_eq!(item_presentation_query(id, 0), 0.0);
+        assert_eq!(item_presentation_query(id, 1), 0.0);
+        assert_eq!(item_presentation_query(id, 2), 1.0);
+        assert_eq!(item_presentation_query(id, 3), 0.0);
+        assert_eq!(item_presentation_query(id, 4), 17.0);
+        assert_eq!(item_presentation_query(0, 0), OUT_OF_RANGE as f64);
+        assert_eq!(item_presentation_query(u32::MAX, 0), OUT_OF_RANGE as f64);
+        assert_eq!(item_presentation_query(id, 8), OUT_OF_RANGE as f64);
+        assert_eq!(item_display_category_set(id, 0), OK);
+        assert_eq!(item_presentation_query(id, 4), 0.0);
+        assert_eq!(
+            item_definition_register(1, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_definition_presentation_set(1, 1, 2, 0), OK);
+        assert_eq!(item_spawn(1, 5.0, 5.0, 1, 100), OK);
+        let food = item_last_id();
+        assert_eq!(item_presentation_query(food, 1), 1.0);
+        assert_eq!(item_presentation_query(food, 2), 0.0);
+        assert_eq!(item_presentation_query(food, 3), 0.0);
+        assert_eq!(item_update_age(id), OK);
+        assert_eq!(
+            item_update_age(food),
+            UNSUPPORTED,
+            "Food override cannot use the empty base method"
+        );
+        assert_eq!(container_draw_dirty_get(u32::MAX), OUT_OF_RANGE);
+        assert_eq!(container_draw_dirty_set(PLAYER_INVENTORY, 2), OUT_OF_RANGE);
+    }
+
+    #[test]
+    fn leaf_abi_rejects_callback_loss_and_poisons_invalid_wetness_imports() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        assert_eq!(item_definition_presentation_set(0, 1, 32 | 64 | 128, 0), OK);
+        assert_eq!(item_spawn(0, 5.0, 5.0, 1, 100), OK);
+        let id = item_last_id();
+        assert_eq!(item_leaf_set(id, 0, 1.0), UNSUPPORTED);
+        assert_eq!(item_leaf_query(id, 0), 0.0);
+        assert_eq!(item_leaf_set(id, 2, 60.5), OK);
+        assert_eq!(item_update_wetness(id, 0), OK);
+        assert_eq!(
+            item_leaf_query(id, 2),
+            60.5,
+            "subminute update preserves actual wetness"
+        );
+        assert_eq!(item_leaf_set(id, 2, f64::NAN), NONFINITE);
+        assert_eq!(item_leaf_set(id, 0, 0.5), OUT_OF_RANGE);
+        assert_eq!(item_leaf_set(id, 3, 0.0), OUT_OF_RANGE);
+        assert_eq!(item_leaf_query(0, 0), OUT_OF_RANGE as f64);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        assert_eq!(
+            item_import_stage(id, 0, PLAYER_INVENTORY, 0.0, 0.0, 100, 1, 0, 1.0, 1.0, 0, 0),
+            OK
+        );
+        assert_eq!(item_import_wetness(id, 100.0000001), BAD_FORMAT);
+        assert_ne!(item_import_commit(), OK);
+        assert_eq!(item_leaf_query(id, 2), 60.5);
+        assert_eq!(begin_actor_container_fixture(), OK);
+        assert_eq!(
+            item_import_stage(id, 0, PLAYER_INVENTORY, 0.0, 0.0, 100, 1, 0, 1.0, 1.0, 0, 0),
+            OK
+        );
+        assert_eq!(item_import_wetness(id, 17.5), OK);
+        assert_eq!(item_import_commit(), OK);
+        assert_eq!(item_leaf_query(id, 2), 17.5);
+    }
+
+    #[test]
+    fn floor_placement_query_reads_current_flags_owner_and_exact_coordinates_without_scratch() {
+        reset();
+        assert_eq!(
+            item_definition_register(0, 1, 100, 0, 1, 0, 0, 0, 1.0, 0),
+            OK
+        );
+        let x = 5.000000000000001;
+        assert_eq!(item_spawn(0, x, 5.5, 1, 100), OK);
+        let id = item_last_id();
+        let owner = ITEMS.with(|items| items.borrow().live[0].owner_container);
+        SCRATCH.with(|scratch| scratch.borrow_mut().fill(17.0));
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, x, 5.5, 0.0),
+            1
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, 5.0, 5.5, 0.0),
+            0
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, x, 5.0, 0.0),
+            0
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, x, 5.5, 1.0),
+            0
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(u32::MAX, owner, x, 5.5, 0.0),
+            0
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(id, u32::MAX, x, 5.5, 0.0),
+            0
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(0, owner, x, 5.5, 0.0),
+            OUT_OF_RANGE
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(id, 0, x, 5.5, 0.0),
+            OUT_OF_RANGE
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, f64::NAN, 5.5, 0.0),
+            NONFINITE
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, x, f64::INFINITY, 0.0),
+            NONFINITE
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, x, 5.5, f64::NEG_INFINITY),
+            NONFINITE
+        );
+        ITEMS.with(|items| items.borrow_mut().live[0].world_object = false);
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, x, 5.5, 0.0),
+            0
+        );
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            items.live[0].world_object = true;
+            items.live[0].owner_container = PLAYER_INVENTORY;
+        });
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, x, 5.5, 0.0),
+            0
+        );
+        assert_eq!(
+            source_item_matches_floor_placement(id, PLAYER_INVENTORY, x, 5.5, 0.0),
+            0
+        );
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            items.live[0].owner_container = owner;
+            items
+                .containers
+                .iter_mut()
+                .find(|row| row.id == owner)
+                .unwrap()
+                .kind = 3;
+        });
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, x, 5.5, 0.0),
+            0
+        );
+        ITEMS.with(|items| items.borrow_mut().containers.retain(|row| row.id != owner));
+        assert_eq!(
+            source_item_matches_floor_placement(id, owner, x, 5.5, 0.0),
+            0
+        );
+        SCRATCH.with(|scratch| assert!(scratch.borrow().iter().all(|value| *value == 17.0)));
+    }
+
+    #[test]
     fn synthetic_upper_edge_floor_items_spawn_import_and_drop_at_inclusive_bounds() {
         for (x, y) in [(10.0, 5.0), (5.0, 10.0), (10.0, 10.0)] {
             reset();
@@ -4668,6 +6765,7 @@ mod tests {
             let id = item_last_id();
             let floor = ITEMS.with(|items| items.borrow().live[0].owner_container);
             assert_eq!(source_world_item_get(x as i32, y as i32, 0, 0), id as f64);
+            assert_eq!(source_item_matches_floor_placement(id, floor, x, y, 0.0), 1);
             assert_eq!(begin_actor_container_fixture(), OK);
             stage_floor_container_fixture(floor, x as i32, y as i32);
             assert_eq!(
@@ -4684,6 +6782,7 @@ mod tests {
             assert_eq!(item_drop(id, x, 10.01), OUT_OF_RANGE);
             assert_eq!(item_drop(id, x, y), OK);
             assert_eq!(source_world_item_get(x as i32, y as i32, 0, 0), id as f64);
+            assert_eq!(source_item_matches_floor_placement(id, floor, x, y, 0.0), 1);
             ITEMS.with(|items| {
                 let items = items.borrow();
                 assert_eq!((items.live[0].x, items.live[0].y), (x, y));

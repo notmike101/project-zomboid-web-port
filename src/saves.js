@@ -1,7 +1,7 @@
-import { createEngine, validateNavigationCell } from './engine.js';
+import { createEngine, validateNavigationCell, WORLD_CLOCK_DEFAULT_STATE, normalizeWorldClockState, normalizeWorldItemVisual, normalizeItemVisual } from './engine.js';
 
 const SAVE_FORMAT = 'pz-web-save';
-const SAVE_VERSION = 3;
+const SAVE_VERSION = 6;
 const MAX_SAVE_BYTES = 16 * 1_024 * 1_024;
 const DATABASE = 'pz-web-saves';
 
@@ -105,6 +105,27 @@ function decodeQueue(queue) {
 }
 
 /**
+ * Decode integrity-covered native weather without coercing float or RNG bits.
+ *
+ * @param {object} climate - Versioned portable native bytes.
+ * @returns {Uint8Array} Detached exact state.
+ */
+function decodeClimate(climate) {
+    if (!climate || climate.version !== 1 || Object.keys(climate).length !== 2
+        || typeof climate.bytes !== 'string' || climate.bytes.length > 1_398_104) {
+        throw new TypeError('Invalid saved climate encoding.');
+    }
+
+    const text = atob(climate.bytes);
+
+    if (!text.length || text.length > 1_048_576 || btoa(text) !== climate.bytes) {
+        throw new TypeError('Invalid saved climate bytes.');
+    }
+
+    return Uint8Array.from(text, (character) => character.charCodeAt(0));
+}
+
+/**
  * Extend an authenticated legacy payload without mutating its world or mod data.
  *
  * @param {object} payload - Detached, integrity-verified version-one or flat version-two payload.
@@ -154,6 +175,7 @@ function migrateLegacySave(payload) {
             worldPosition: location === 'ground' ? { x, y, z: 0 } : null,
             weight: item.weight ?? weight, actualWeight: item.actualWeight ?? weight,
             favorite: false, consumed: false,
+            ...((itemDefs[definitionOrdinal].type?.toLowerCase().replace(/^base:/u, '') === 'clothing') ? { wetness: 0 } : {}),
         };
     });
     const rest = { ...payload };
@@ -170,7 +192,7 @@ function migrateLegacySave(payload) {
         },
         itemDefs,
         inventoryGraph: {
-            version: 1, containers, items, nextContainerId: containers.length + 1,
+            version: 2, containers, items, nextContainerId: containers.length + 1,
             organized: false, disorganized: false, equippedMultiplier: 0.3,
             dropItemsOnSquareCenter: false,
             ...(payload.equipmentState ? { wornOrder: payload.equipmentState.wornOrder } : {}),
@@ -186,7 +208,7 @@ function migrateLegacySave(payload) {
  * @returns {void} Throws for invalid definitions or item records.
  */
 function validateInventory(record) {
-    const items = record.formatVersion === SAVE_VERSION ? record.inventoryGraph?.items : record.items;
+    const items = record.formatVersion >= 3 ? record.inventoryGraph?.items : record.items;
 
     if (!Array.isArray(record.itemDefs) || record.itemDefs.length > 4_096
         || !Array.isArray(items) || items.length > 4_096) {
@@ -226,7 +248,7 @@ function validateInventory(record) {
 
     for (const item of items) {
         const definition = definitions.get(item?.fullType);
-        const flat = record.formatVersion !== SAVE_VERSION;
+        const flat = record.formatVersion < 3;
 
         if (!item || !definition || !integer(item.id, 1, 0xFF_FF_FF_FF)
             || ids.has(item.id)
@@ -235,6 +257,7 @@ function validateInventory(record) {
             || !integer(item.condition, 0, definition.conditionMax)
             || !integer(item.count, 1, definition.stackLimit)
             || (item.weight !== undefined && !itemWeight(item.weight))
+            || (flat && Object.hasOwn(item, 'wetness'))
             || (item.actualWeight !== undefined && !itemWeight(item.actualWeight))
             || (item.bodyLocation !== null && ((flat && item.location !== 'inventory')
                 || typeof item.bodyLocation !== 'string' || !item.bodyLocation))
@@ -248,6 +271,19 @@ function validateInventory(record) {
             || typeof item.favorite !== 'boolean' || typeof item.consumed !== 'boolean'
             || ['location', 'x', 'y', 'slot'].some((key) => Object.hasOwn(item, key)))) {
             throw new TypeError('Invalid saved inventory definition reference or weight.');
+        }
+
+        if (!flat) {
+            const clothing = definition.type?.toLowerCase().replace(/^base:/u, '') === 'clothing';
+            const graphVersion = record.inventoryGraph.version;
+
+            const invalidWetness = graphVersion === 1 || !clothing
+                ? Object.hasOwn(item, 'wetness')
+                : !Object.hasOwn(item, 'wetness') || !Number.isFinite(item.wetness) || item.wetness < 0 || item.wetness > 100;
+
+            if (invalidWetness) {
+                throw new TypeError('Saved wetness requires graph2 finite [0,100] Clothing state only.');
+            }
         }
 
         ids.add(item.id);
@@ -288,7 +324,7 @@ const savedName = (value) => typeof value === 'string' && value.length > 0 && va
 function validateGraph(record) {
     const graph = record.inventoryGraph;
 
-    if (!graph || graph.version !== 1 || !Array.isArray(graph.containers) || !graph.containers.length
+    if (!graph || graph.version !== (record.formatVersion === 3 ? 1 : 2) || !Array.isArray(graph.containers) || !graph.containers.length
         || graph.containers.length > 8_193 || !integer(graph.nextContainerId, 2, 0x1_00_00_00_00)
         || typeof graph.organized !== 'boolean' || typeof graph.disorganized !== 'boolean'
         || typeof graph.dropItemsOnSquareCenter !== 'boolean'
@@ -378,6 +414,18 @@ function validateGraph(record) {
         const owner = containers.get(item.ownerContainerId);
         const definition = record.itemDefs[item.definitionOrdinal];
         const internal = containers.get(item.internalContainerId);
+
+        if (Object.hasOwn(item, 'worldVisual')) {
+            normalizeWorldItemVisual(item.worldVisual, item.worldPosition);
+        }
+
+        if (Object.hasOwn(item, 'visual')) {
+            if (!definition.clothingItem || !definition.itemVisualRules) {
+                throw new TypeError('Saved ItemVisual needs its captured original XML selection bounds.');
+            }
+
+            normalizeItemVisual(item.visual, definition.itemVisualRules);
+        }
 
         if (!owner || !integer(item.ownerContainerId, 1, 0xFF_FF_FF_FF)
             || ((definition.isBag === true || definition.type === 'Container')
@@ -562,7 +610,7 @@ function validateDoorState(state) {
 async function validateSave(record) {
     const copy = structuredClone(record);
 
-    if (copy?.format !== SAVE_FORMAT || ![1, 2, SAVE_VERSION].includes(copy.formatVersion)) {
+    if (copy?.format !== SAVE_FORMAT || ![1, 2, 3, 4, 5, SAVE_VERSION].includes(copy.formatVersion)) {
         throw new TypeError('Unsupported browser save format/version; native saves are not supported.');
     }
 
@@ -582,7 +630,7 @@ async function validateSave(record) {
         throw new TypeError('Browser save integrity check failed; current game remains unchanged.');
     }
 
-    if ((copy.formatVersion === SAVE_VERSION && Object.hasOwn(copy, 'items'))
+    if ((copy.formatVersion >= 3 && Object.hasOwn(copy, 'items'))
         || (copy.formatVersion === 2 && Object.hasOwn(copy, 'inventoryGraph'))) {
         throw new TypeError('Browser save contains conflicting flat/graph inventory formats.');
     }
@@ -626,16 +674,68 @@ async function validateSave(record) {
         decodeQueue(copy.queue);
     }
 
-    let validated = copy;
+    let validated = payload;
 
-    if (copy.formatVersion !== SAVE_VERSION) {
+    if (copy.formatVersion < 3) {
         if (copy.formatVersion === 2) {
             validateInventory(copy);
         }
 
-        const migrated = migrateLegacySave(payload);
+        validated = migrateLegacySave(payload);
+    }
 
-        validated = { ...migrated, integrity: await digest(migrated) };
+    if (copy.formatVersion === 3) {
+        validateInventory(copy);
+        validateGraph(copy);
+        validated = {
+            ...payload, formatVersion: SAVE_VERSION, migratedFrom: 3,
+            inventoryGraph: {
+                ...copy.inventoryGraph, version: 2,
+                items: copy.inventoryGraph.items.map((item) => (
+                    copy.itemDefs[item.definitionOrdinal].type?.toLowerCase().replace(/^base:/u, '') === 'clothing'
+                        ? { ...item, wetness: 0 }
+                        : item)),
+            },
+        };
+    }
+
+    if (copy.formatVersion === 4) {
+        validated = { ...payload, formatVersion: SAVE_VERSION, migratedFrom: 4 };
+    }
+
+    // Legacy port saves have no world history: begin an explicit new source-default timeline.
+    validated.worldClock = normalizeWorldClockState(copy.formatVersion < 5
+        ? WORLD_CLOCK_DEFAULT_STATE
+        : copy.worldClock);
+
+    if (copy.formatVersion < 6 || (!Object.hasOwn(copy, 'climate') && !Object.hasOwn(copy, 'climateEpoch'))) {
+        validated = {
+            ...validated, formatVersion: SAVE_VERSION,
+            ...(copy.formatVersion < 6 ? { migratedFrom: validated.migratedFrom ?? copy.formatVersion } : {}),
+        };
+        delete validated.climate;
+        validated.climateEpoch = {
+            version: 1, kind: 'legacy-new-source-weather', sourceIntegrity: integrity,
+            seed: Number.parseInt(integrity.slice(0, 8), 16),
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        };
+    }
+
+    if (Object.hasOwn(validated, 'climate')) {
+        decodeClimate(validated.climate);
+    }
+
+    if (Object.hasOwn(validated, 'climateEpoch')) {
+        const epoch = validated.climateEpoch;
+
+        if (!epoch || Object.keys(epoch).length !== 5 || epoch.version !== 1
+            || epoch.kind !== 'legacy-new-source-weather' || typeof epoch.sourceIntegrity !== 'string'
+            || !/^[a-f0-9]{64}$/u.test(epoch.sourceIntegrity)
+            || epoch.seed !== Number.parseInt(epoch.sourceIntegrity.slice(0, 8), 16)
+            || typeof epoch.timeZone !== 'string' || !epoch.timeZone || epoch.timeZone.includes('\0')
+            || new TextEncoder().encode(epoch.timeZone).length > 128) {
+            throw new TypeError('Invalid saved new source weather epoch.');
+        }
     }
 
     validateInventory(validated);
@@ -645,7 +745,7 @@ async function validateSave(record) {
         validateHandState(validated.handState, validated.inventoryGraph.items);
     }
 
-    return validated;
+    return { ...validated, integrity: await digest(validated) };
 }
 
 /**
@@ -741,6 +841,13 @@ function createSaveStore({ engineSource, appVersion, initializeEquipment }) {
             engine.worldImportCell(cell.x, cell.y, decodeCell(cell.bytes));
         }
 
+        engine.loadState(validated.engine.state);
+        engine.importWorldClockState(validated.worldClock);
+
+        if (Object.hasOwn(validated, 'climate')) {
+            engine.loadClimateState(decodeClimate(validated.climate));
+        }
+
         if (Object.hasOwn(validated, 'equipmentState')) {
             engine.loadEquipmentState(validated.equipmentState);
         } else if (initializeEquipment) {
@@ -756,8 +863,6 @@ function createSaveStore({ engineSource, appVersion, initializeEquipment }) {
         if (Object.hasOwn(validated, 'handState')) {
             engine.loadHandState(validated.handState);
         }
-
-        engine.loadState(validated.engine.state);
 
         if (Object.hasOwn(validated, 'moodleState')) {
             engine.loadMoodleState(validated.moodleState);
@@ -779,10 +884,22 @@ function createSaveStore({ engineSource, appVersion, initializeEquipment }) {
             engine.sourceActions.validateSourceOwners(validated.queue.sourceOwners);
         }
 
+        const pendingClimateSeed = !Object.hasOwn(validated, 'climate') && validated.climateEpoch
+            && engine.canSaveClimateState()
+            ? validated.climateEpoch.seed
+            : undefined;
+
+        if (pendingClimateSeed !== undefined && !(queueState && Object.hasOwn(validated, 'doorState'))) {
+            engine.initializeClimate(pendingClimateSeed, validated.climateEpoch.timeZone);
+        }
+
         return {
             engine, record: validated,
             ...(Object.hasOwn(validated, 'doorState') ? { doorState: structuredClone(validated.doorState) } : {}),
             ...(queueState ? { queueState, sourceOwners: structuredClone(validated.queue.sourceOwners) } : {}),
+            ...(pendingClimateSeed !== undefined && queueState && Object.hasOwn(validated, 'doorState')
+                ? { climateSeed: pendingClimateSeed }
+                : {}),
         };
     }
 
@@ -800,6 +917,10 @@ function createSaveStore({ engineSource, appVersion, initializeEquipment }) {
             format: SAVE_FORMAT, formatVersion: SAVE_VERSION, id: captured.id ?? 'autosave', revision: 1,
             updatedAt: new Date().toISOString(), application: { version: appVersion },
             engine: { abiVersion: 1, state: engine.saveState() },
+            worldClock: engine.worldClockState(),
+            ...(typeof engine.canSaveClimateState === 'function' && engine.canSaveClimateState()
+                ? { climate: { version: 1, bytes: encodeCell(engine.saveClimateState()) } }
+                : {}),
             itemDefs: engine.itemDefinitions(),
             inventoryGraph: engine.exportInventoryGraph(),
             ...(typeof engine.canSaveEquipmentState === 'function' && engine.canSaveEquipmentState()
@@ -829,6 +950,7 @@ function createSaveStore({ engineSource, appVersion, initializeEquipment }) {
             },
             contentPacks: captured.contentPacks ?? [], mods: captured.mods ?? [],
             modState: captured.modState ?? {}, settings: captured.settings ?? {},
+            ...(captured.climateEpoch ? { climateEpoch: captured.climateEpoch } : {}),
         };
     }
 

@@ -10,9 +10,13 @@ const SOURCE_UI_MODULES = [
     'TimedActions/ISOpenCloseDoor', 'TimedActions/WalkToTimedAction', 'TimedActions/ISWaitWhileGettingUp', 'luautils',
     'ISUI/ISContextMenu', 'ISUI/ISPanelJoypad', 'ISUI/ISScrollingListBox', 'ISUI/ISTradingUI',
     'ISUI/ISWorldObjectContextMenu', 'ISUI/ISToolTip', 'ISUI/ISToolTipInv', 'ISUI/ISInventoryItem', 'ISUI/ISInventoryPage',
-    'ISUI/ISRichTextPanel',
+    'ISUI/ISRichTextPanel', 'ISUI/ISUIHandler',
     'ISUI/PlayerData/ISPlayerDataObject', 'ISUI/PlayerData/ISPlayerData',
     'BuildingObjects/ISMoveableCursor', 'RadioCom/ISRadioWindow',
+    'ISUI/ISResizeableButton', 'ISUI/ISScrollBar',
+    'Entity/ISEntityUI',
+    'Entity/ISUI/BuildRecipe/ISBuildPanel', 'Entity/ISUI/CraftRecipe/ISHandCraftPanel',
+    'Camping/CCampfireSystem',
 ];
 const FONT_DECLARATIONS = 'media/fonts/EN/fonts.txt';
 const FONT_NAMES = ['Small', 'Medium', 'Large'];
@@ -82,6 +86,7 @@ export async function seedOriginalWearables(engine, content) {
 
 /**
  * Resolve the actual selected original resource closure from the manifest inventory.
+ * The unchanged root stdlib.lua must execute before every original game module.
  * EN, 1x Small/Medium/Large and 32px moodles are explicit port choices, not native defaults.
  *
  * @param {object} content - Validated external content directory.
@@ -91,10 +96,16 @@ export async function seedOriginalWearables(engine, content) {
  * @returns {Promise<object>} Candidate equipment source closure and optional UI resources.
  */
 export async function loadNativeGameResources(content, descriptors, lockFPS, { requireUI = false, itemDefinitions = [] } = {}) {
-    const ui = requireUI || descriptors.some((entry) => entry.sources.some(({ source }) => /\bISUIElement\b|\bISContextMenu\b|\bUIFont\b|\bgetTextManager\s*\(|\bgetTexture\s*\(|PZAPI\.ModOptions/u.test(source)));
+    const ui = requireUI || descriptors.some((entry) => entry.sources.some(({ source }) => /\bISUIElement\b|\bISContextMenu\b|\bUIFont\b|\bgetTextManager\s*\(|\b(?:getTexture|getImageButtonControl)\s*\(|PZAPI\.ModOptions/u.test(source)));
 
     const paths = new Set(content.manifest.files.map((entry) => entry.path));
-    const startup = [];
+    const stdlib = content.manifest.files.filter(({ path }) => path === 'stdlib.lua');
+
+    if (stdlib.length !== 1) {
+        throw new Error(`Original startup stdlib.lua requires one exact manifest source; found ${stdlib.length}.`);
+    }
+
+    const startup = [{ path: 'stdlib.lua', source: await content.getFile('stdlib.lua').text(), execute: true }];
 
     for (const name of ['NPCs/BodyLocations', ...(ui ? UI_STARTUP : []), ...(requireUI ? SOURCE_UI_MODULES : [])]) {
         const matches = [...paths].filter((path) => /^media\/lua\/(shared|client|server)\//u.test(path)
@@ -156,15 +167,15 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
         }
     }
 
-    let itemPack;
-    const packedItemTextures = new Map();
-    const itemPageFiles = new Map();
-    const looseItemTextures = new Map();
-    const literalItemRequests = new Map();
+    let uiPack;
+    const packedTextures = new Map();
+    const uiPageFiles = new Map();
+    const looseTextures = new Map();
+    const literalTextureRequests = new Map();
 
     /**
-     * Resolve actual packed names, exact literal paths and canonical declared Icon fallbacks.
-     * Basename sharing applies only to a packed hit; loose resources retain request identity.
+     * Resolve literal UI/item requests and canonical declared Icon fallbacks through UI2.
+     * Native Texture.getSharedTextureInternal tries the packed basename before the loose path.
      *
      * @param {object[]} definitions - Current source-backed item definition metadata.
      * @returns {Promise<object[]>} Actual image files and source crop/trim metadata.
@@ -174,7 +185,7 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
             throw new TypeError('Item texture definitions must be an array');
         }
 
-        const names = new Set(literalItemRequests.keys());
+        const names = new Set(literalTextureRequests.keys());
         const requiredNames = new Set();
 
         for (const definition of definitions) {
@@ -193,8 +204,8 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
         const result = [];
 
         for (const name of names) {
-            if (packedItemTextures.has(name)) {
-                result.push(packedItemTextures.get(name));
+            if (packedTextures.has(name)) {
+                result.push(packedTextures.get(name));
                 continue;
             }
 
@@ -203,19 +214,19 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
             let pack;
 
             if (paths.has(packPath)) {
-                itemPack ??= openPack(content.getFile(packPath));
+                uiPack ??= openPack(content.getFile(packPath));
                 // eslint-disable-next-line no-await-in-loop
-                pack = await itemPack;
+                pack = await uiPack;
             }
 
             const matches = pack?.lookupAll(name) ?? [];
 
             if (matches.length > 1) {
-                throw new Error(`Required original item texture ${name} requires one UI2 sprite; found ${matches.length}`);
+                throw new Error(`Required original texture ${name} requires one UI2 sprite; found ${matches.length}`);
             }
 
             if (matches.length === 0) {
-                const requests = new Set(literalItemRequests.get(name) ?? []);
+                const requests = new Set(literalTextureRequests.get(name) ?? []);
 
                 if (requiredNames.has(name)) {
                     requests.add(canonical);
@@ -232,14 +243,14 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
                         continue;
                     }
 
-                    if (!looseItemTextures.has(requested)) {
+                    if (!looseTextures.has(requested)) {
                         // eslint-disable-next-line no-await-in-loop
                         const file = await content.getFile(source).toFile();
 
-                        looseItemTextures.set(requested, { path: requested, aliases: [], file });
+                        looseTextures.set(requested, { path: requested, aliases: [], file });
                     }
 
-                    result.push(looseItemTextures.get(requested));
+                    result.push(looseTextures.get(requested));
                 }
 
                 continue;
@@ -248,25 +259,25 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
             const sprite = matches[0];
 
             if (!sprite.w || !sprite.h) {
-                throw new Error(`Required original item texture ${name} has no drawable source rectangle`);
+                throw new Error(`Required original texture ${name} has no drawable source rectangle`);
             }
 
-            if (!itemPageFiles.has(sprite.pageIndex)) {
+            if (!uiPageFiles.has(sprite.pageIndex)) {
                 // eslint-disable-next-line no-await-in-loop
                 const blob = await pack.pageBlob(sprite.pageIndex);
 
-                itemPageFiles.set(sprite.pageIndex, new File([blob], `UI2_${sprite.pageIndex}.png`, { type: 'image/png' }));
+                uiPageFiles.set(sprite.pageIndex, new File([blob], `UI2_${sprite.pageIndex}.png`, { type: 'image/png' }));
             }
 
             const entry = {
                 path: name,
-                aliases: [...new Set([canonical, ...(literalItemRequests.get(name) ?? [])])].filter((value) => value !== name),
-                file: itemPageFiles.get(sprite.pageIndex),
+                aliases: [...new Set([...(name.startsWith('Item_') ? [canonical] : []), ...(literalTextureRequests.get(name) ?? [])])].filter((value) => value !== name),
+                file: uiPageFiles.get(sprite.pageIndex),
                 crop: { x: sprite.x, y: sprite.y, width: sprite.w, height: sprite.h },
                 widthOrig: sprite.totalW, heightOrig: sprite.totalH, offsetX: sprite.xoff, offsetY: sprite.yoff,
             };
 
-            packedItemTextures.set(name, entry);
+            packedTextures.set(name, entry);
             result.push(entry);
         }
 
@@ -274,16 +285,18 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
     }
 
     for (const { source } of [...sources, ...descriptors.flatMap((entry) => entry.sources)]) {
-        for (const match of source.matchAll(/\bgetTexture\s*\(\s*(["'])([^"'\r\n]+)\1\s*\)/gu)) {
+        // Original image-button controls forward their literal image path to getTexture.
+        for (const match of source.matchAll(/\b(?:getTexture|getImageButtonControl)\s*\(\s*(["'])([^"'\r\n]+)\1\s*\)/gu)) {
             const requested = match[2];
             const normalized = requested.replaceAll('\\', '/').replace(/\.png$/u, '');
             const name = normalized.slice(normalized.lastIndexOf('/') + 1);
 
-            if (name.startsWith('Item_') && !normalized.includes('/mods/') && !normalized.endsWith('.txt')) {
-                const requests = literalItemRequests.get(name) ?? new Set();
+            if ((name.startsWith('Item_') || /^media\/ui\/.+\.png$/u.test(requested))
+                && !normalized.includes('/mods/') && !normalized.endsWith('.txt')) {
+                const requests = literalTextureRequests.get(name) ?? new Set();
 
                 requests.add(requested);
-                literalItemRequests.set(name, requests);
+                literalTextureRequests.set(name, requests);
                 continue;
             }
 
@@ -409,9 +422,9 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
         }
     }
 
-    const itemTextures = await resolveItemTextures(itemDefinitions);
+    const resolvedTextures = await resolveItemTextures(itemDefinitions);
 
-    for (const entry of itemTextures) {
+    for (const entry of resolvedTextures) {
         for (const alias of [entry.path, ...entry.aliases]) {
             textures.delete(alias);
         }
@@ -424,7 +437,7 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
         loaded.push({ path, file: await content.getFile(source).toFile() });
     }
 
-    loaded.push(...itemTextures);
+    loaded.push(...resolvedTextures);
 
     return {
         ui: true,
@@ -432,12 +445,13 @@ export async function loadNativeGameResources(content, descriptors, lockFPS, { r
         sourceFboRenderChunk: true,
         engineSources: sources,
         textures: loaded,
-        indexedTextures: [...new Set([...inventory.keys(), ...itemTextures.flatMap((entry) => [entry.path, ...entry.aliases])])],
+        indexedTextures: [...new Set([...inventory.keys(), ...resolvedTextures.flatMap((entry) => [entry.path, ...entry.aliases])])],
         fonts, fontData, fontSize, fontLineHeight, fontAliases,
         translations,
         resolveItemTextures,
         settings: {
-            moodleSize: 1, fontSizeReal: 1, lockFPS,
+            // Explicit standalone UI presentation choices, not inferred source defaults.
+            moodleSize: 1, fontSizeReal: 1, inventoryFont: 'Medium', tooltipFont: 'Small', cycleContainerKey: 'shift', lockFPS,
             gray: { r: 1, g: 1, b: 1, a: 1 },
             goodHighlight: { r: 0, g: 1, b: 0, a: 1 },
             badHighlight: { r: 1, g: 0, b: 0, a: 1 },

@@ -67,7 +67,7 @@ method on that handle throws (`stage: 'api'`).
 | `api.hooks.beforeAction(callback, { priority = 0 })` | `() => boolean` | Registers a hook; returns unsubscribe (`false` if already withdrawn by unload). |
 | `api.world.getBounds()` | detached `ModWorldBounds` | Reads committed navigation cell extents, not a proposed import. Optional engine capability. |
 | `api.world.getNavFlags(tileX, tileY)` | unsigned number | Reads committed navigation bits at an absolute integer tile. Optional engine capability. |
-| `api.world.getSquare(x, y, z)` | detached `ModWorldSquare` or `null` | Reads actual source-square metadata and current native `canStand`; absent metadata is `null`, unsupported capability throws. Coordinates are signed int32 integers. |
+| `api.world.getSquare(x, y, z)` | detached `ModWorldSquare` or `null` | Native source-square metadata and current `canStand`. `haveRoof` is boolean when roof authority is known, otherwise `null`. Absent whole-square metadata returns `null` separately. Unsupported capability throws. Coordinates are signed int32 integers. |
 | `api.world.isBlockedTo(from, to)` | boolean | Native source relation between signed-int32 `{ x, y, z }` records. Missing caller errors; `null` or absent other square returns false. Capability/lifecycle failures are attributed `ModError/world`. |
 | `api.world.importNavigationCell(cx, cy, bytes)` | `ModWorldImportResult` | Validates complete navigation bytes, resolves precommit hooks, then imports once. Cancels movement on success; no automatic undo. |
 | `api.world.getDoors()` / `.toggleDoor(id)` | detached `ModDoor[]` / `ModQueueAcceptance` | Exact original stable identities; toggle requests queued work through shared precommit hooks and native reach/collision/lock rules. Mutation is forbidden during activation. |
@@ -184,7 +184,7 @@ multipliers, mode and supported traits. Manual pause/Escape, blur and hidden-tab
 safety cancellation stop the queue; automatic 30-second saving freezes without
 cancelling it.
 
-Current genuine Chromium/NVIDIA proof covers original grouped grab plus SDK
+Earlier genuine Chromium/NVIDIA checkpoints proved original grouped grab plus SDK
 append, exact positive-progress current/future-group autosave/reload/resume,
 source/SDK pickup veto and source grab → SDK door → SDK walk FIFO completion.
 The resolved Lua/DOM return-boundary fault no longer blocks source menus:
@@ -211,7 +211,9 @@ and detached source/appearance metadata. Bag fields include `isBag`, `capacity`,
 Omitted weight uses the original script-item constructor value 1. Registration is
 legal only inside
 synchronous `activate`, bound to that mod id. Duplicates require `{override:true}`.
-Failed activation restores first-touch numeric rows/owners and appended metadata.
+Failed activation restores first-touch native rows (including tooltip factory
+fields and ownership), restores overridden source metadata, and removes appended
+definitions. Items spawned afterward use the restored factory values.
 The application seeds missing original footwear/hands and bags on New/restore
 without replacing saved definitions or owners, then freezes registration before play;
 freezing is not a mod API.
@@ -400,14 +402,24 @@ General keys, vehicles and door damage remain unsupported.
 `world.getSquare(x, y, z)` reads native source-square metadata, not navigation
 bits or a synthesized tile. Its detached result contains `x`, `y`, `z`,
 `roomId`, `outside`, `solid`, `solidTrans`, `tree`, `vehicleObstructed`,
-`solidFloor` and current `canStand`. A missing source square returns `null`;
-a missing native capability throws an attributed `ModError/world`. Reads are
-allowed during activation and use the host's own session engine. Imported
-source elevations are currently `-32..31`; a valid integer query at an absent
-elevation still returns `null`.
+`solidFloor`, `haveRoof` and current `canStand`. A missing source square returns
+`null`. A missing native capability throws an attributed `ModError/world`.
+Reads are allowed during activation and use the host's own session engine.
+Imported source elevations are currently `-32..31`. A valid integer query at
+an absent elevation still returns `null`.
 `solidFloor` is the source cached `TreatAsSolidFloor()` result: raw
 `solidfloor` **or** stairs **or** a nonnull slope direction, not only the raw
 sprite property.
+
+`haveRoof` is `true` or `false` only when native roof authority is known.
+Its `null` value means unknown roof authority on an existing square, not an
+absent square. Room identity and `outside` do not establish roof state.
+Per-import roof wire version 1 is negotiated before any metadata rows.
+Old reserved-zero imports remain unknown, not known empty roof columns.
+Calculation scans source levels 31 down to 0 using source solid-floor and
+BlockRain0–3 properties. It applies the prior accumulator before each blocker.
+Only floors establish roofs below. Moving doors retain four current-source
+property snapshots. This query does not implement roof cutaway rendering.
 
 The importer replays initial object membership, constructor priority, attached
 overlays, floor/tree replacement and shared sprite-property mutations before
@@ -540,24 +552,47 @@ weight, weather/corpse/toxic dynamics or thermal chevrons/voices/wiggles.
 
 ### Browser save format and moodle continuity
 
-`src/saves.js` writes `pz-web-save` envelope format 3 with a version-1
-`inventoryGraph`, retaining engine ABI 1 and twelve-word actor format 2.
-Legacy v1 and flat v2 are authenticated against their original integrity before
+`src/saves.js` writes `pz-web-save` envelope format 6 with a version-2
+`inventoryGraph`, version-1 `worldClock` and integrity-covered native climate.
+Engine ABI 1 and twelve-word actor format 2 remain unchanged.
+Legacy v1–v5 records are authenticated against their original integrity before
 detached migration. V1 preserves its ten actor words, appends health 100/next-ID 1
-and creates an empty actor-root graph. V2 preserves item IDs/order and live weights
-(deriving missing weights from saved definitions), assigns actor/per-square floor
-roots and replaces flat placement with owner/internal/world-position records.
-World bytes, mod schemas/data and revision metadata survive; reading never rewrites
-storage. This is separate from mod namespace migration and native-save compatibility.
+and creates an empty actor-root graph. Flat v2 preserves item IDs/order and
+live weights, deriving missing weights from saved definitions. It assigns
+actor/per-square floor roots and replaces flat placement with owner/internal/
+world-position records. Graph version 1 gains constructor-default clothing wetness.
 
-Restore stages navigation cells → equipment registry → definitions → inventory
-graph → hands → actor → optional moodle/body state. Graph validation requires
-valid references, unique IDs/squares, acyclic paired bags, exact allocators and
-ordered worn membership; it does not reject structurally valid overcapacity saves.
-The graph is restored before source geometry/queue publication. Version-1
-`moodleState` retains exact named `inputs`, `painTimer`, `painLevel` and
-`cantSprintTimer`; missing legacy state uses fresh-engine defaults. Malformed
-present state refuses staged restore without replacing the live game.
+Formats 1–4 contain no clock history. Migration explicitly starts a new source
+timeline at 1993-07-23 09:00 with a 90-minute day, not inferred last-frame history.
+Weatherless formats 1–5 start a deterministic legacy-new-source-weather epoch
+derived from signed integrity. Genuine old-module climate absence in format 6
+also starts an explicit new epoch. Neither case recovers old weather history.
+World bytes, mod schemas/data and revision metadata survive. Reading never
+rewrites storage. Mod namespace migration and native-save compatibility remain separate.
+
+Native climate persists its exact state, last clocks and time zone.
+New worlds receive platform entropy. Existing precipitation restores without
+reseeding, and the persisted zone is not selected again during restoration.
+Missing climate authority remains absent, never invented dry weather.
+
+Restore stages navigation cells → actor core → native world clock → equipment
+registry → definitions → inventory graph → hands → optional moodle/body state.
+Source geometry/door and queue restoration follow. Weather initialization, when
+needed, follows geometry/queue restoration. Clothing wetness persists, but its
+runtime timestamp rebases to restored world age without offline catch-up.
+Graph validation requires valid references, unique IDs/squares, acyclic paired
+bags, exact allocators and ordered worn membership. Structurally valid
+overcapacity saves remain valid. Version-1 `moodleState` retains exact named
+`inputs`, `painTimer`, `painLevel` and `cantSprintTimer`. Missing legacy optional
+state uses fresh-engine defaults. Malformed present state refuses staged restore
+without replacing the live game.
+
+Actual Chromium/nonfallback NVIDIA pause-menu Save and immediate reload retained
+exactly manual revision 146 and all nine item owners. A read immediately after
+the real WASM restore commit matched the authenticated 2331-byte native climate
+state byte for byte. No application failure, Lua errors or timeouts were observed.
+This is save/rendering evidence, not genuine Take All or ownership-transfer
+acceptance. Those paths remain blocked by the missing FMOD HTML5 backend.
 
 Optional version-1 `doorState` is covered by the same integrity hash. It retains
 source identities, current panel positions, locks, per-identity `toggled`,
@@ -996,6 +1031,18 @@ ownership; require-only engine roots are not extra active/save owners.
 Dynamic engine require names currently fail honestly rather than synthesizing
 engine APIs. Provision the actual required engine files alongside the startup
 assets; `--startup-only` alone does not include those engine Lua classes.
+
+Source controls are user settings, not a new JavaScript input API. Escape →
+**Keyboard bindings** edits Interact, ToggleInventory and other already-configured
+source actions: primary/alternate keys and Shift/Ctrl/Alt requirements. **Apply live**
+replaces the validated session map without reloading and cancels held-key/gesture
+ownership; existing original `Core` key queries, Save and export see that current
+map. Original key-query and modifier-collision semantics are unchanged. **Clear**
+leaves an action unbound; Interact starts unbound until the user configures it.
+Menu **Save** persists preferences with the game. This editor does not remap
+WASD/arrows or touch movement, and browsers may reserve physical keys. Configured
+ordinary-door Interact, remapped original inventory visibility and Save/reload are
+browser-proven; broader source actions, accessibility and full-game parity are not.
 
 Each game session owns a fresh VM. New/load transitions restore each package's
 public save namespace before its Lua executes. `OnCreatePlayer` and `OnGameStart`

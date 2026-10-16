@@ -13,12 +13,12 @@ function validateText(text) {
     }
 
     if (text.length > MAX_FILE_BYTES || ENCODER.encode(text).byteLength > MAX_FILE_BYTES) {
-        throw new RangeError('Source layout.ini exceeds the 64 KiB UTF8 limit.');
+        throw new RangeError('Source client layout exceeds the 64 KiB UTF8 limit.');
     }
 }
 
 /**
- * Stage the original source owner's single client layout file, outside actor saves.
+ * Stage the original source owner's two client layout files, outside actor saves.
  * Storage is origin-local; the unchanged source version and owner identify its key.
  *
  * @param {object} options - Actual synchronous client storage and source identity.
@@ -36,10 +36,7 @@ export function createSourceFiles({ storage, sourceBuild, ownerId }) {
         throw new TypeError('Source build and owner must be nonempty strings.');
     }
 
-    const key = `pz-web-source-files:${JSON.stringify([sourceBuild, ownerId, 'layout.ini'])}`;
-    let loaded = false;
-    let text = null;
-    let dirty = false;
+    const files = new Map();
     let disposed = false;
 
     /**
@@ -54,7 +51,7 @@ export function createSourceFiles({ storage, sourceBuild, ownerId }) {
     }
 
     /**
-     * Admit only the source layout file, without path normalization.
+     * Admit only the two source layout files, without path normalization.
      *
      * @param {unknown} path - Requested client file path.
      * @returns {void} Throws on any other path or a disposed handle.
@@ -62,34 +59,40 @@ export function createSourceFiles({ storage, sourceBuild, ownerId }) {
     function requirePath(path) {
         requireActive();
 
-        if (path !== 'layout.ini') {
-            throw new RangeError('Only the source client file layout.ini is supported.');
+        if (path !== 'layout.ini' && path !== 'entityLayout.ini') {
+            throw new RangeError('Only the source client files layout.ini and entityLayout.ini are supported.');
         }
     }
 
     /**
      * Load once per candidate, retaining no cached value after a failed read.
      *
-     * @returns {void} Throws rather than resetting invalid durable content.
+     * @param {string} path - Validated exact layout file.
+     * @returns {{key:string,text:string|null,dirty:boolean}} Candidate-local file state.
      */
-    function load() {
-        if (!loaded) {
+    function load(path) {
+        let file = files.get(path);
+
+        if (!file) {
+            const key = `pz-web-source-files:${JSON.stringify([sourceBuild, ownerId, path])}`;
             const stored = storage.getItem(key);
 
             if (stored !== null) {
                 validateText(stored);
             }
 
-            text = stored;
-            loaded = true;
+            file = { key, text: stored, dirty: false };
+            files.set(path, file);
         }
+
+        return file;
     }
 
     return {
         /**
          * Read candidate content, optionally staging an actual empty file.
          *
-         * @param {string} path - Exactly layout.ini.
+         * @param {string} path - Exactly layout.ini or entityLayout.ini.
          * @param {boolean} [create=false] - Create a missing staged file.
          * @returns {string|null} Text or null for a missing file.
          */
@@ -100,19 +103,19 @@ export function createSourceFiles({ storage, sourceBuild, ownerId }) {
                 throw new TypeError('Source file create must be a boolean.');
             }
 
-            load();
+            const file = load(path);
 
-            if (text === null && create) {
-                text = '';
-                dirty = true;
+            if (file.text === null && create) {
+                file.text = '';
+                file.dirty = true;
             }
 
-            return text;
+            return file.text;
         },
         /**
          * Validate a complete replacement or append before staging it.
          *
-         * @param {string} path - Exactly layout.ini.
+         * @param {string} path - Exactly layout.ini or entityLayout.ini.
          * @param {string} value - Unchanged caller text.
          * @param {boolean} [append=false] - Append to existing or empty content.
          * @returns {void} No durable write until flush.
@@ -125,18 +128,18 @@ export function createSourceFiles({ storage, sourceBuild, ownerId }) {
             }
 
             validateText(value);
-            load();
-            const next = append ? (text ?? '') + value : value;
+            const file = load(path);
+            const next = append ? (file.text ?? '') + value : value;
 
             if (append) {
                 validateText(next);
             }
 
-            text = next;
-            dirty = true;
+            file.text = next;
+            file.dirty = true;
         },
         /**
-         * Commit once via synchronous atomic setItem; failures remain retryable.
+         * Commit each dirty file via synchronous atomic setItem; failed files remain retryable.
          * The Promise converts synchronous failures into rejections for callers.
          *
          * @returns {Promise<void>} Resolves after durable storage accepts the file.
@@ -145,9 +148,11 @@ export function createSourceFiles({ storage, sourceBuild, ownerId }) {
             return new Promise((resolve) => {
                 requireActive();
 
-                if (dirty) {
-                    storage.setItem(key, text);
-                    dirty = false;
+                for (const file of files.values()) {
+                    if (file.dirty) {
+                        storage.setItem(file.key, file.text);
+                        file.dirty = false;
+                    }
                 }
 
                 resolve();
@@ -160,8 +165,7 @@ export function createSourceFiles({ storage, sourceBuild, ownerId }) {
          */
         dispose() {
             disposed = true;
-            text = null;
-            dirty = false;
+            files.clear();
         },
     };
 }

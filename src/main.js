@@ -5,12 +5,16 @@ import { openMapCell } from './map-tiles.js';
 import { createModManager, parseModPackage, readPackageFile, resolveModOrder } from './mod-manager.js';
 import { createModHost } from './mods.js';
 import { loadNativeGameResources, seedOriginalWearables } from './native-game-resources.js';
+import { keyboardKey, keyName, normalizeInputBindings, sourceKeyCode } from './native-keyboard.js';
 import { bindNativeSession, closeNativeSession, discoverNativePackages, initializeOriginalEquipment, nativePackageFiles, prepareNativeSession } from './native-mod-loader.js';
+import { createSourceContextSelector } from './native-world-context.js';
 import { openPack } from './packs.js';
 import { canvasContentBox, createRenderer, worldFromCanvas } from './renderer.js';
 import { createSaveStore } from './saves.js';
 import { createSourceFiles } from './source-files.js';
+import { createTileDepthAssets } from './tile-depth.js';
 import { createTileLayer, tileScreenPosition } from './tile-renderer.js';
+import { createWorldItemAssets } from './world-item-assets.js';
 import { loadNativeTileRegistry, projectWorldObjects } from './world-objects.js';
 import { stageCells } from './world-session.js';
 
@@ -29,12 +33,22 @@ const packageList = document.querySelector('#package-list');
 const packageStatus = document.querySelector('#package-status');
 const packageError = document.querySelector('#package-error');
 const packageActivation = document.querySelector('#package-activation');
+const keyboardControls = document.querySelector('#keyboard-controls');
+const keyboardAction = document.querySelector('#keyboard-action');
+const keyboardPrimary = document.querySelector('#keyboard-primary');
+const keyboardAlternate = document.querySelector('#keyboard-alternate');
+const keyboardShift = document.querySelector('#keyboard-shift');
+const keyboardCtrl = document.querySelector('#keyboard-ctrl');
+const keyboardAlt = document.querySelector('#keyboard-alt');
+const keyboardStatus = document.querySelector('#keyboard-status');
+// Known source actions may be explicitly unbound without assigning physical defaults.
+const unboundSourceBindings = Object.freeze({ Interact: null, 'Toggle Inventory': null });
 const safeMods = new URL(globalThis.location.href).searchParams.has('safe-mods');
 const UI_LOCK_FPS = 60;
 const held = new Set();
 const keys = new Map([
-    ['w', [0, -1]], ['arrowup', [0, -1]], ['s', [0, 1]], ['arrowdown', [0, 1]],
-    ['a', [-1, 0]], ['arrowleft', [-1, 0]], ['d', [1, 0]], ['arrowright', [1, 0]],
+    ['KeyW', [0, -1]], ['ArrowUp', [0, -1]], ['KeyS', [0, 1]], ['ArrowDown', [0, 1]],
+    ['KeyA', [-1, 0]], ['ArrowLeft', [-1, 0]], ['KeyD', [1, 0]], ['ArrowRight', [1, 0]],
 ]);
 let engine;
 let renderer;
@@ -65,12 +79,17 @@ let sourcePointerX;
 let sourcePointerY;
 let sourcePointerUnconsumed = false;
 let liveModContext;
+let keyboardEditorSession;
 let packageBusy = false;
 let packagesActivated = false;
 let paused = true;
 let failed = false;
 let lastFrame;
-const pressedKeys = new Set();
+const sourceKeys = new Set();
+let sourceMouseButtons = 0;
+const sourceKeyOwners = new Set();
+const sourceKeyUpdates = new Set();
+let sourceContextKeyAllowed = true;
 let lastAnnouncement = '';
 let animation;
 let toggledDirection;
@@ -345,10 +364,42 @@ function sessionCommand(binding, action) {
 function sessionStep(binding, seconds, raw = false) {
     const before = binding.engine.snapshot();
 
+    binding.lua?.updateActorInput();
+
     if (raw) {
         binding.engine.frameStep(seconds);
     } else {
         binding.engine.step(seconds);
+    }
+
+    // Native frame acceptance owns both the source float duration and this input sample.
+    try {
+        if (binding === liveModContext && sessionReady && !sessionBusy && !packageBusy && !paused && !failed
+            && document.activeElement === canvas) {
+            for (const code of sourceKeyOwners) {
+                if (!sourceKeys.has(code)) {
+                    continue;
+                }
+
+                if (!sourceKeyUpdates.has(code)) {
+                    sourceKeyUpdates.add(code);
+
+                    continue;
+                }
+
+                if (gameUI?.keyInput('onKeyRepeat', code)) {
+                    sourceContextKeyAllowed = false;
+                } else {
+                    binding.lua?.dispatch('OnKeyKeepPressed', code);
+                }
+            }
+        }
+
+        binding.lua?.updateContextKey(binding === liveModContext && sourceContextKeyAllowed
+            && sessionReady && !sessionBusy && !packageBusy && !paused && !failed
+            && document.activeElement === canvas);
+    } finally {
+        sourceContextKeyAllowed = true;
     }
 
     binding.engine.sourceActions.dispatch((event) => {
@@ -416,6 +467,12 @@ function report(cause) {
         paused = true;
         pauseAudio();
         held.clear();
+        sourceKeys.clear();
+        sourceMouseButtons = 0;
+        sourceKeyOwners.clear();
+        sourceKeyUpdates.clear();
+        luaSession?.cancelContextKey();
+        sourceContextKeyAllowed = true;
         toggledDirection = undefined;
 
         if (pauseMenu.open) {
@@ -438,6 +495,8 @@ function refresh() {
     openPauseButton.disabled = failed;
     openPauseButton.setAttribute('aria-expanded', String(pauseMenu.open));
     pauseButton.disabled = !sessionReady || sessionBusy || failed;
+    keyboardControls.disabled = !sessionReady || sessionBusy || packageBusy || failed || !paused || !pauseMenu.open
+        || !liveModContext?.inputBindings || keyboardAction.options.length === 0;
 
     if (!engine) {
         return;
@@ -542,6 +601,12 @@ function takeover(action, direction) {
  */
 function stop() {
     held.clear();
+    sourceKeys.clear();
+    sourceMouseButtons = 0;
+    sourceKeyOwners.clear();
+    sourceKeyUpdates.clear();
+    luaSession?.cancelContextKey();
+    sourceContextKeyAllowed = true;
     toggledDirection = undefined;
     try {
         if (liveModContext) {
@@ -615,7 +680,22 @@ function frame(time) {
                 updateSourceViewport(width, height);
             }
 
-            renderer.render(snapshot);
+            const definitions = new Map();
+            const worldItems = engine.worldItemVisuals().map((item) => {
+                if (!definitions.has(item.fullType)) {
+                    const definition = engine.getItemDefinition(item.fullType);
+
+                    if (!definition) {
+                        throw new Error(`Ground item ${item.id} lost its source definition ${item.fullType}.`);
+                    }
+
+                    definitions.set(item.fullType, Object.freeze(definition));
+                }
+
+                return Object.freeze({ ...item, type: item.fullType, definition: definitions.get(item.fullType) });
+            });
+
+            renderer.render({ ...snapshot, worldItems: Object.freeze(worldItems), worldHighlights: gameUI?.worldHighlights() ?? Object.freeze([]) });
 
             if (Math.hypot(dx, dy) > 1e-6) {
                 presentedFacing = Math.atan2(dy, dx);
@@ -742,7 +822,13 @@ async function changePackage(change, message) {
     }
 
     packageBusy = true;
+    sourceMouseButtons = 0;
+    sourceKeys.clear();
+    sourceKeyOwners.clear();
+    sourceKeyUpdates.clear();
+    luaSession?.cancelContextKey();
     packageControls.disabled = true;
+    keyboardControls.disabled = true;
     try {
         await change();
         packageError.hidden = true;
@@ -755,6 +841,7 @@ async function changePackage(change, message) {
     } finally {
         packageBusy = false;
         packageControls.disabled = false;
+        refresh();
     }
 }
 
@@ -814,6 +901,23 @@ function updateSourceViewport(width, height) {
     sourceViewportWidth = nextWidth;
     sourceViewportHeight = nextHeight;
     luaSession?.dispatch('OnResolutionChange', oldWidth, oldHeight, nextWidth, nextHeight);
+}
+
+/**
+ * Record primary-pointer button bits before original canvas UI callbacks.
+ *
+ * @param {PointerEvent} event - Physical pointer state captured across the document.
+ * @returns {void} Discards canceled or inactive-session holds.
+ */
+function sourceMouseInput(event) {
+    if (!event.isPrimary) {
+        return;
+    }
+
+    sourceMouseButtons = event.type !== 'pointercancel' && sessionReady && !sessionBusy && !packageBusy
+        && !failed && !pauseMenu.open && !document.hidden && document.hasFocus()
+        ? event.buttons & 0xFF
+        : 0;
 }
 
 /**
@@ -1051,6 +1155,105 @@ function formDestination(event) {
 }
 
 /**
+ * Read the selected committed record without applying unsaved form choices.
+ *
+ * @returns {void} Updates the native controls and editing feedback.
+ */
+function readKeyboardBinding() {
+    const name = keyboardAction.value;
+    const record = liveModContext?.inputBindings?.[name];
+
+    keyboardPrimary.value = String(record?.keyValue ?? 0);
+    keyboardAlternate.value = String(record?.altKey ?? 0);
+    keyboardShift.checked = record?.shift ?? false;
+    keyboardCtrl.checked = record?.ctrl ?? false;
+    keyboardAlt.checked = record?.alt ?? false;
+    keyboardStatus.textContent = name
+        ? `Editing ${name}. Apply changes live; Save retains applied bindings after reload.`
+        : 'This session has no configured source keyboard actions.';
+}
+
+/**
+ * Rebuild action choices only when opening the menu or publishing a session.
+ *
+ * @returns {void} Reads the active session without inventing bindings.
+ */
+function refreshKeyboardBindings() {
+    if (keyboardPrimary.options.length === 0) {
+        for (let code = 0; code < 256; code += 1) {
+            const label = keyName(code);
+
+            if (label !== null) {
+                keyboardPrimary.add(new Option(code === 0 ? 'Unbound' : label, String(code)));
+                keyboardAlternate.add(new Option(code === 0 ? 'Unbound' : label, String(code)));
+            }
+        }
+    }
+
+    const selected = keyboardAction.value;
+    const bindings = liveModContext?.inputBindings ? { ...unboundSourceBindings, ...liveModContext.inputBindings } : {};
+
+    keyboardEditorSession = liveModContext;
+    keyboardAction.replaceChildren();
+
+    for (const name of Object.keys(bindings)) {
+        keyboardAction.add(new Option(name, name));
+    }
+
+    if (Object.hasOwn(bindings, selected)) {
+        keyboardAction.value = selected;
+    }
+
+    readKeyboardBinding();
+}
+
+/**
+ * Validate the complete replacement map before cancelling stale source input.
+ *
+ * @param {object|null} record - Exactly one configured record, or an empty binding.
+ * @returns {void} Publishes live settings or reports a recoverable refusal.
+ */
+function applyKeyboardBinding(record) {
+    try {
+        if (!sessionReady || sessionBusy || packageBusy || failed || !paused || !pauseMenu.open
+            || !liveModContext?.inputBindings || keyboardEditorSession !== liveModContext) {
+            throw new Error('Keyboard bindings require the ready active session and its open pause menu. Reopen the menu and try again.');
+        }
+
+        const name = keyboardAction.value;
+
+        if (!Object.hasOwn(unboundSourceBindings, name) && !Object.hasOwn(liveModContext.inputBindings, name)) {
+            throw new Error('Select an existing source action.');
+        }
+
+        const updatedBindings = { ...liveModContext.inputBindings, [name]: record };
+        const names = Object.keys(updatedBindings);
+
+        if (names.length > 256) {
+            throw new Error('This session already has 256 source keyboard actions. Edit an existing action instead.');
+        }
+
+        // Only this historical shape migrates to an inventory default on normalization or restore.
+        if (names.length === 1 && Object.hasOwn(updatedBindings, 'Interact') && updatedBindings.Interact === null) {
+            updatedBindings['Toggle Inventory'] = null;
+        }
+
+        const bindings = normalizeInputBindings(updatedBindings);
+
+        sourceKeys.clear();
+        sourceKeyOwners.clear();
+        sourceKeyUpdates.clear();
+        luaSession?.cancelContextKey();
+        sourceContextKeyAllowed = true;
+        liveModContext.inputBindings = bindings;
+        readKeyboardBinding();
+        keyboardStatus.textContent = `${name} binding ${record === null ? 'cleared' : 'applied'} live. Save retains applied bindings after reload.`;
+    } catch (cause) {
+        keyboardStatus.textContent = `Keyboard binding not changed: ${cause instanceof Error ? cause.message : String(cause)}`;
+    }
+}
+
+/**
  * Open the native modal menu and cancel all movement.
  *
  * @returns {void} Pauses without preserving input.
@@ -1067,6 +1270,7 @@ function openPauseMenu() {
         pauseAudio();
         lastFrame = undefined;
         pauseMenu.showModal();
+        refreshKeyboardBindings();
         refresh();
     }
 }
@@ -1103,27 +1307,38 @@ function resumeGame() {
  * @returns {void} Submits keyboard movement or safety cancellation.
  */
 function keyDown(event) {
-    const key = event.key.toLowerCase();
+    const key = event.code;
+    const nativeKey = sourceKeyCode(key);
+    const sourceInput = sessionReady && !sessionBusy && !packageBusy && !paused && !failed && document.activeElement === canvas;
 
-    pressedKeys.add(key);
+    // Repeats cannot revive a physical key lifetime cancelled by pause, blur or rebinding.
+    if (!event.repeat && sessionReady && !sessionBusy && !packageBusy && !paused && !failed && nativeKey !== null) {
+        sourceKeys.add(nativeKey);
+    }
 
-    if (sessionReady && !paused && !failed && document.activeElement === canvas) {
+    if (sourceInput && nativeKey !== null && !event.repeat) {
+        sourceKeyOwners.add(nativeKey);
         try {
-            if (gameUI?.keyInput(event.repeat ? 'onKeyRepeat' : 'onKeyPress', event.keyCode)) {
+            if (gameUI?.keyInput('onKeyPress', nativeKey)) {
+                sourceContextKeyAllowed = false;
                 event.preventDefault();
 
-                return;
+                if (key !== 'Escape' && key !== 'Space') {
+                    return;
+                }
+            } else {
+                luaSession?.dispatch('OnKeyStartPressed', nativeKey);
             }
-
-            luaSession?.dispatch(event.repeat ? 'OnKeyKeepPressed' : 'OnKeyPressed', event.keyCode);
         } catch (cause) {
             reportPackageError(cause);
 
-            return;
+            if (key !== 'Escape' && key !== 'Space') {
+                return;
+            }
         }
     }
 
-    if (key === 'escape') {
+    if (key === 'Escape') {
         event.preventDefault();
 
         if (!event.repeat) {
@@ -1137,14 +1352,14 @@ function keyDown(event) {
         return;
     }
 
-    if (key === ' ' && document.activeElement === canvas) {
+    if (key === 'Space' && document.activeElement === canvas) {
         event.preventDefault();
         stop();
 
         return;
     }
 
-    if (document.activeElement !== canvas || !keys.has(key)) {
+    if (!sourceInput || !keys.has(key)) {
         return;
     }
 
@@ -1163,13 +1378,18 @@ function keyDown(event) {
  * @returns {void} Recomputes the held direction.
  */
 function keyUp(event) {
-    const key = event.key.toLowerCase();
+    const key = event.code;
+    const nativeKey = sourceKeyCode(key);
 
-    pressedKeys.delete(key);
+    sourceKeys.delete(nativeKey);
+    const sourceOwned = nativeKey !== null && sourceKeyOwners.delete(nativeKey);
 
-    if (sessionReady && !paused && !failed && document.activeElement === canvas) {
+    sourceKeyUpdates.delete(nativeKey);
+
+    if (sourceOwned && sessionReady && !sessionBusy && !packageBusy && !paused && !failed) {
         try {
-            if (gameUI?.keyInput('onKeyRelease', event.keyCode)) {
+            if (gameUI?.keyInput('onKeyRelease', nativeKey)) {
+                sourceContextKeyAllowed = false;
                 event.preventDefault();
 
                 if (held.delete(key)) {
@@ -1179,7 +1399,7 @@ function keyUp(event) {
                 return;
             }
 
-            luaSession?.dispatch('OnKeyReleased', event.keyCode);
+            luaSession?.dispatch('OnKeyPressed', nativeKey);
         } catch (cause) {
             reportPackageError(cause);
 
@@ -1205,7 +1425,6 @@ function keyUp(event) {
  * @returns {void} Cancels travel on visibility transitions.
  */
 function visibilityChanged() {
-    pressedKeys.clear();
     try {
         stop();
     } finally {
@@ -1341,6 +1560,7 @@ function publishSession(staged) {
     }
 
     loading.hidden = true;
+    refreshKeyboardBindings();
     refresh();
 }
 
@@ -1439,6 +1659,13 @@ function createSessionModHost(binding) {
          * @returns {import('../types/mod-api').ModItemDefinition[]} Registered definitions in engine order.
          */
         itemDefinitions: () => binding.engine.itemDefinitions(),
+        /**
+         * Read one current definition without copying this session's catalog.
+         *
+         * @param {string} fullType - Exact qualified definition identity.
+         * @returns {import('../types/mod-api').ModItemDefinition|null} Detached authoritative definition, or absence.
+         */
+        getItemDefinition: (fullType) => binding.engine.getItemDefinition(fullType),
         /**
          * Begin an owner-bound registration transaction in this session.
          *
@@ -1803,16 +2030,12 @@ async function activateSession(staged, namespaces, required) {
 
     selectedNative = activationOrder.filter((id) => nativeById.has(id)).map((id) => nativeById.get(id));
 
-    const inputBindings = staged.settings?.inputBindings ?? { Interact: null };
-
-    if (!inputBindings || Object.keys(inputBindings).length !== 1
-        || !Object.hasOwn(inputBindings, 'Interact') || inputBindings.Interact !== null) {
-        throw new Error('This session supports only the actual unbound Interact input state.');
-    }
+    const inputBindings = normalizeInputBindings(staged.settings?.inputBindings);
 
     const targetContext = { engine: staged.engine, cells: staged.cells, namespaces: Object.assign(Object.create(null), namespaces) };
 
-    targetContext.inputBindings = Object.freeze({ Interact: null });
+    targetContext.inputBindings = inputBindings;
+    targetContext.climateEpoch = staged.climateEpoch;
     const targetMods = createSessionModHost(targetContext);
     /* After boot the committed manager is configuration/reporting only; later transitions load targetMods directly.
        Handles only; playback/lifetime authority remains the actual AudioContext voice registry. */
@@ -1842,12 +2065,20 @@ async function activateSession(staged, namespaces, required) {
             queueRestore = { state: staged.engine.actions.getState(), sourceOwners: staged.sourceOwners, declaredOwners };
         }
 
+        // Weather admission follows clock and any restored queue timing, before original UI work.
+        if (!staged.engine.isClimateInitialized()) {
+            const entropy = new Uint8Array(4);
+            const seed = staged.climateSeed ?? new DataView(crypto.getRandomValues(entropy).buffer).getUint32(0, true);
+
+            staged.engine.initializeClimate(seed, staged.climateEpoch?.timeZone);
+        }
+
         const resources = await loadNativeGameResources(content, selectedNative, UI_LOCK_FPS, {
             requireUI: true, itemDefinitions: instantiatedItemDefinitions(staged.engine),
         });
 
         if (resources?.ui) {
-            targetUI = renderer.createGameUI();
+            targetUI = renderer.createGameUI({ storage: globalThis.localStorage });
             await renderer.initializeGameUI({ ...resources, ui: targetUI });
             const { width, height } = canvasContentBox(canvas);
 
@@ -1871,7 +2102,41 @@ async function activateSession(staged, namespaces, required) {
             sourceTiming: staged.engine.sourceTiming,
             sourceWorldContext: {
                 engine: staged.engine,
-                inputBindings: targetContext.inputBindings,
+                /**
+                 * Read one configured original key binding.
+                 *
+                 * @param {string} name - Source binding identifier.
+                 * @returns {object|null} Immutable native binding or empty binding.
+                 */
+                keyBinding: (name) => targetContext.inputBindings[name] ?? null,
+                /**
+                 * Read configured records for original modifier-collision resolution.
+                 *
+                 * @returns {object} Immutable binding-name map.
+                 */
+                keyBindings: () => targetContext.inputBindings,
+                /**
+                 * Query physical source-key state only for the committed session.
+                 *
+                 * @param {number} code - Canonical native key enum.
+                 * @returns {boolean} Whether the source key remains held.
+                 */
+                isSourceKeyDown: (code) => targetContext === liveModContext && sourceKeys.has(code),
+                /**
+                 * Query physical mouse-button state only for the committed session.
+                 *
+                 * @param {number} index - Validated native button index; left/right/middle are 0/1/2.
+                 * @returns {boolean} Whether the corresponding DOM buttons bit remains held.
+                 */
+                isMouseButtonDown: (index) => targetContext === liveModContext && (sourceMouseButtons & (1 << index)) !== 0,
+                keyboardKey,
+                keyName,
+                /**
+                 * Report this standalone host's actual keyboard/mouse controller assignment.
+                 *
+                 * @returns {number} No assigned joypad (-1); this host has no controller activation path.
+                 */
+                joypadBind: () => -1,
                 /**
                  * Read authenticated floor and stair metadata for a source square.
                  *
@@ -2035,13 +2300,19 @@ async function activateSession(staged, namespaces, required) {
                  */
                 setHandItem: (slot, itemId, ownerId) => targetMods.sourceSetHandItem(slot, itemId, ownerId),
                 /**
-                 * Resolve the original translated unbound interaction key label.
+                 * Resolve the configured original interaction key label.
                  *
-                 * @returns {string} Source NONE label or its literal fallback.
+                 * @returns {string} Native key label, or translated NONE for an empty binding.
                  */
-                interactKeyName: () => resources.translations.IGUI_Key_NONE ?? 'NONE',
+                interactKeyName: () => {
+                    const binding = targetContext.inputBindings.Interact;
+                    const code = binding?.keyValue || binding?.altKey || 0;
+
+                    return code === 0 ? resources.translations.IGUI_Key_NONE ?? 'NONE' : keyName(code);
+                },
                 rooms: sourceWorldMetadata.get(staged.engine)?.rooms,
                 buildings: sourceWorldMetadata.get(staged.engine)?.buildings,
+                contextSelection: sourceWorldMetadata.get(staged.engine)?.contextSelection,
                 /**
                  * Project border-excluding logical content coordinates onto ground tiles.
                  *
@@ -2115,7 +2386,7 @@ async function activateSession(staged, namespaces, required) {
                     }
 
                     if (kind === 'cancel') {
-                        return pressedKeys.has('escape');
+                        return sourceKeys.has(1);
                     }
 
                     throw new Error(`Unsupported source input: ${kind}.`);
@@ -2185,7 +2456,7 @@ async function activateSession(staged, namespaces, required) {
         targetLua?.dispatch('OnCreatePlayer', 0);
         targetLua?.dispatch('OnGameStart');
         targetLua?.completeSourceRestore();
-        await targetLua?.flushSourceFiles();
+        await sourceFileOperation(targetLua, () => targetLua.initializeInventoryPages());
 
         staged.engine.freezeItemDefinitions();
         // Flush can refuse; retain the committed VM/UI until every candidate operation succeeds.
@@ -2213,6 +2484,12 @@ async function activateSession(staged, namespaces, required) {
 
     // No callbacks run between UI publication and these synchronous session-owned bindings.
     pauseAudio();
+    sourceKeys.clear();
+    sourceMouseButtons = 0;
+    sourceKeyOwners.clear();
+    sourceKeyUpdates.clear();
+    luaSession?.cancelContextKey();
+    sourceContextKeyAllowed = true;
     liveModContext = targetContext;
     engine = targetContext.engine;
     worldCells = targetContext.cells;
@@ -2248,12 +2525,18 @@ async function sessionOperation(action) {
     }
 
     sessionBusy = true;
+    sourceMouseButtons = 0;
+    sourceKeys.clear();
+    sourceKeyOwners.clear();
+    sourceKeyUpdates.clear();
+    luaSession?.cancelContextKey();
     const wasPaused = paused;
 
     paused = true;
     pauseAudio();
     document.querySelector('#session-controls').disabled = true;
     packageControls.disabled = true;
+    keyboardControls.disabled = true;
     try {
         await action();
     } catch (cause) {
@@ -2290,6 +2573,7 @@ async function saveSession() {
         mods: mods.diagnostics().mods.map(({ id, version, apiVersion }) => ({ id, version, apiVersion })),
         modState: savedModState,
         settings: { inputBindings: liveModContext.inputBindings },
+        ...(liveModContext.climateEpoch ? { climateEpoch: liveModContext.climateEpoch } : {}),
     });
 
     savedRevision = record.revision;
@@ -2301,6 +2585,13 @@ async function saveSession() {
     } catch (cause) {
         // Preserve native owner/path fields and the original fault; the committed record remains valid.
         throw Object.assign(new Error(`Saved revision ${record.revision}, but OnPostSave failed: ${cause.message}. The committed save has been retained.`, { cause }), cause);
+    }
+
+    try {
+        // Original OnPostSave destroys its player pages. Reopen the flushed layout for continued play.
+        await sourceFileOperation(luaSession, () => luaSession.initializeInventoryPages());
+    } catch (cause) {
+        throw Object.assign(new Error(`Saved revision ${record.revision}, but original inventory UI reinitialization failed: ${cause.message}. The committed save has been retained.`, { cause }), cause);
     }
 }
 
@@ -2328,8 +2619,9 @@ async function loadSession(id, prepared) {
 
     try {
         await activateSession({
-            engine: staged.engine, cells, queueState: staged.queueState,
+            engine: staged.engine, cells, queueState: staged.queueState, climateSeed: staged.climateSeed,
             sourceOwners: staged.sourceOwners, settings: staged.record.settings,
+            climateEpoch: staged.record.climateEpoch,
         }, staged.record.modState, staged.record.mods);
         publishSession({ engine: staged.engine, cells: worldCells, geometry });
     } catch (cause) {
@@ -2359,6 +2651,7 @@ async function exportSession() {
                 mods: mods.diagnostics().mods.map(({ id, version, apiVersion }) => ({ id, version, apiVersion })),
                 modState: savedModState,
                 settings: { inputBindings: liveModContext.inputBindings },
+                ...(liveModContext.climateEpoch ? { climateEpoch: liveModContext.climateEpoch } : {}),
             })
         : await saves.exportSave();
     const url = URL.createObjectURL(blob);
@@ -2404,10 +2697,91 @@ async function rebuildTileLayer(cells, candidateEngine, doorState) {
         candidateEngine.loadDoorState(doorState);
     }
 
+    const worldItemAssets = await createWorldItemAssets(content);
+    const tileDepthAssets = await createTileDepthAssets(content, tileRegistry);
+
     const layer = createTileLayer({
         ...renderer.gpuResources(),
         packs: importedPacks,
         cells,
+        tileDepth: {
+            /**
+             * Resolve depth against the original placement owner, including moved door panels.
+             *
+             * @param {string} spriteName - Current renderer sprite.
+             * @param {object} tile - Original or authoritative door placement.
+             * @returns {Promise<object>} Native depth and additional seam draws.
+             */
+            resolve(spriteName, tile) {
+                const key = `${tile.sourceX ?? tile.x},${tile.sourceY ?? tile.y},${tile.z},${tile.order}`;
+                const context = projection.depthContexts[key];
+
+                if (!context) {
+                    throw new Error(`Missing native tile depth ownership for ${key}`);
+                }
+
+                if (!context.doorId) {
+                    return tileDepthAssets.resolve(spriteName, context);
+                }
+
+                let parentSpriteName = spriteName;
+                let renderPosition;
+
+                if (!context.isMainSprite) {
+                    const door = candidateEngine.doors().find(({ id }) => id === context.doorId);
+                    const visual = projection.doorVisuals.find(({ id }) => id === context.doorId);
+
+                    if (!door || !visual) {
+                        throw new Error(`Missing native attachment door owner ${context.doorId}`);
+                    }
+
+                    if (door.toggled) {
+                        parentSpriteName = door.open ? visual.toggledOpenSpriteName : visual.toggledClosedSpriteName;
+                    } else {
+                        parentSpriteName = door.open ? visual.openSpriteName : visual.closedSpriteName;
+                    }
+
+                    renderPosition = { x: door.x, y: door.y, z: door.z };
+                }
+
+                const parent = context.doorSprites[parentSpriteName];
+                const currentSpriteName = context.isMainSprite ? spriteName : context.currentSpriteName;
+
+                if (!parent) {
+                    throw new Error(`Missing native door sprite context ${context.doorId}:${parentSpriteName}`);
+                }
+
+                return tileDepthAssets.resolve(spriteName, {
+                    ...context, currentSpriteName, parentSpriteName,
+                    parentSpriteProperties: parent.spriteProperties,
+                    spriteProperties: context.isMainSprite ? parent.spriteProperties : context.spriteProperties,
+                    wallDirection: parent.wallDirection,
+                    isParentSprite: currentSpriteName === parentSpriteName,
+                    ...(renderPosition && { renderPosition }),
+                });
+            },
+        },
+        worldItems: {
+            /**
+             * Resolve ready original metadata before the explicit native first use.
+             * A disposed/replaced GPU record cannot initialize a stale session.
+             *
+             * @param {object} item - Native draw snapshot and original definition.
+             * @param {() => boolean} isCurrent - Owned GPU-load lifetime guard.
+             * @returns {Promise<object|undefined>} Actual source representation, or stale cancellation.
+             */
+            async resolve(item, isCurrent) {
+                const rules = await worldItemAssets.visualRules(item.definition);
+
+                if (!isCurrent()) {
+                    return undefined;
+                }
+
+                const visual = rules ? candidateEngine.initializeItemVisual(item.id, rules) : item.visual;
+
+                return worldItemAssets.resolve({ ...item, visual });
+            },
+        },
         doors: {
             visuals: projection.doorVisuals,
             /**
@@ -2433,7 +2807,10 @@ async function rebuildTileLayer(cells, candidateEngine, doorState) {
             throw new Error(`Original tile startup failed: ${evidence.errors.map((entry) => entry.message).join('; ') || 'no original sprites loaded for this saved position'}. Provision matching geometry and texture packs.`);
         }
 
-        sourceWorldMetadata.set(candidateEngine, { rooms: projection.rooms, buildings: projection.buildings });
+        sourceWorldMetadata.set(candidateEngine, {
+            rooms: projection.rooms, buildings: projection.buildings,
+            contextSelection: createSourceContextSelector(candidateEngine, projection.squares),
+        });
 
         return { layer, cells };
     } catch (cause) {
@@ -2860,7 +3237,13 @@ safeUrl.searchParams.set('safe-mods', '1');
 normalUrl.searchParams.delete('safe-mods');
 document.querySelector('#package-safe-mode').href = safeUrl.href;
 document.querySelector('#package-normal-mode').href = normalUrl.href;
+
+for (const name of ['pointerdown', 'pointerup', 'pointermove', 'pointercancel']) {
+    document.addEventListener(name, sourceMouseInput, { capture: true });
+}
+
 canvas.addEventListener('pointerdown', pointDestination);
+canvas.addEventListener('blur', stop);
 canvas.addEventListener('pointerleave', () => {
     sourcePointerUnconsumed = false;
 });
@@ -2951,6 +3334,20 @@ for (const button of directionButtons) {
 }
 
 document.querySelector('#destination').addEventListener('submit', formDestination);
+keyboardAction.addEventListener('change', readKeyboardBinding);
+document.querySelector('#keyboard-bindings').addEventListener('submit', (event) => {
+    event.preventDefault();
+    applyKeyboardBinding({
+        keyValue: Number(keyboardPrimary.value),
+        altKey: Number(keyboardAlternate.value),
+        shift: keyboardShift.checked,
+        ctrl: keyboardCtrl.checked,
+        alt: keyboardAlt.checked,
+    });
+});
+document.querySelector('#keyboard-clear').addEventListener('click', () => {
+    applyKeyboardBinding(null);
+});
 document.querySelector('#stop').addEventListener('click', stop);
 pauseButton.addEventListener('click', resumeGame);
 openPauseButton.addEventListener('click', openPauseMenu);

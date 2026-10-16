@@ -177,6 +177,10 @@ export interface ModItemDefinitionInput {
   category?: string | null;
   /** Original getCategory spelling for unchanged Lua/UI consumers; native category above is case-folded. */
   sourceCategory?: string;
+  /** Original ScriptItem hidden; omitted uses the JVM constructor default false. */
+  hidden?: boolean;
+  /** Factory-initialized mutable instance category; original item saves do not serialize overrides. */
+  displayCategory?: string | null;
   onlyAcceptCategory?: string | null;
   acceptItemFunction?: string | null;
   lightWhenAttached?: boolean;
@@ -256,13 +260,15 @@ export interface ModItemWeights {
   hotbarEquippedWeight: number;
   wrapperEffectiveCapacity: number;
 }
-/** Native ordered graph payload, used inside authenticated game-save format3.
+/** Native ordered graph payload, used inside authenticated game-save format4.
  * The actor-state envelope remains version2; queue envelopes use version2.
+ * Graph1 imports migrate Clothing constructor wetness0; exports always use graph2.
  * Imports validate the whole graph atomically, not admission capacity. */
 export interface ModInventoryGraph {
-  version: 1;
+  version: 2;
   containers: ModContainer[];
-  items: ModItem[];
+  /** Clothing requires finite wetness [0,100]; every other subtype omits it. */
+  items: (ModItem & { wetness?: number })[];
   /** Exact f64 allocator, including exhausted uint32+1. */
   nextContainerId: number;
   organized: boolean;
@@ -271,6 +277,11 @@ export interface ModInventoryGraph {
   dropItemsOnSquareCenter: boolean;
   wornOrder?: number[];
 }
+/** Explicit pre-wetness graph migration input; never emitted by current exports. */
+export type ModLegacyInventoryGraph = Omit<ModInventoryGraph, 'version' | 'items'> & {
+  version: 1;
+  items: ModItem[];
+};
 /** Ordered worn/render traversal, not inventory insertion order. */
 export interface ModWornItem {
   id: number;
@@ -357,6 +368,8 @@ export interface ModWorldSquare {
   vehicleObstructed: boolean;
   /** Source cached TreatAsSolidFloor result: raw solidfloor, stairs, or a nonnull slope direction. */
   solidFloor: boolean;
+  /** Original rain-blocker column coverage; null means the native roof authority is unknown. */
+  haveRoof: boolean | null;
   /** Native source predicate using current square flags and actual adjacent window/hoppable edges. */
   canStand: boolean;
 }
@@ -374,6 +387,8 @@ export interface ModSquareSourceMetadata extends ModWorldCoordinates {
   tree: boolean;
   vehicleObstructed: boolean;
   solidFloor?: boolean;
+  /** Original flag presence: bit 0 solidfloor, bit 1 BlockRain. Omission means unknown. */
+  rainBlockers?: 0 | 1 | 2 | 3;
   independentWalls: number;
   windows?: number;
   doorWalls?: number;
@@ -391,6 +406,8 @@ export type ModDoorSourceMetadata = Omit<ModDoor, 'revision' | 'toggled' | 'hopp
   interactionProperties?: readonly Readonly<Record<string, boolean>>[];
   reachWalls?: readonly ModSourceReachWalls[];
   curtainCapabilities?: readonly boolean[];
+  /** Initial closed/open then toggled closed/open blocker bits; omission means unknown. */
+  rainBlockers?: readonly (0 | 1 | 2 | 3)[];
 };
 
 /** Opaque original source IDs in real engine order; no guessed neutral registry. */
@@ -900,6 +917,8 @@ export interface ModEngine {
   toggleDoor?(id: string): ModQueueAcceptance;
   /** Optional authoritative item/character extensions; never required for movement activation. */
   itemDefinitions?(): ModItemDefinition[];
+  /** Detached current definition; unknown valid identities return null without enumerating the catalog. */
+  getItemDefinition?(fullType: string): ModItemDefinition | null;
   registerItemDefinition?(input: ModItemDefinitionInput, options: { owner: string; override?: boolean }): ModItemDefinition;
   beginItemDefinitionRegistration?(owner: string): void;
   commitItemDefinitionRegistration?(owner: string): void;
@@ -910,7 +929,7 @@ export interface ModEngine {
   /** Detached live stable-ID read; unknown valid uint32 identities return null. */
   getItem?(id: number): ModItem | null;
   exportInventoryGraph?(): ModInventoryGraph;
-  importInventoryGraph?(graph: ModInventoryGraph): void;
+  importInventoryGraph?(graph: ModInventoryGraph | ModLegacyInventoryGraph): void;
   containers?(): ModContainer[];
   getContainer?(id: number): ModContainer | null;
   containerItems?(id: number): ModItem[];

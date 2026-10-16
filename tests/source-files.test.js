@@ -80,6 +80,45 @@ test('layout creation and replacement stay staged until a flush and reopen', asy
     await reopened.flush();
 });
 
+test('entity layout is independently staged, bounded, persisted and isolated from the inventory layout', async () => {
+    const storage = storageFixture();
+    const files = open(storage);
+    const entity = 'player:0\nwindowKey:BuildWindow\nx=12\n';
+
+    files.write('layout.ini', 'inventory0 x=40\n');
+    assert.equal(files.read('entityLayout.ini'), null);
+    assert.equal(files.read('entityLayout.ini', true), '');
+    files.write('entityLayout.ini', entity);
+    files.write('entityLayout.ini', 'y=34\n', true);
+    assert.equal(files.read('entityLayout.ini'), `${entity}y=34\n`);
+    assert.equal(open(storage).read('entityLayout.ini'), null);
+    assert.equal(open(storage).read('layout.ini'), null);
+    await files.flush();
+    assert.equal(open(storage).read('entityLayout.ini'), `${entity}y=34\n`);
+    assert.equal(open(storage).read('layout.ini'), 'inventory0 x=40\n');
+    assert.equal(open(storage, '42.22.0').read('entityLayout.ini'), null);
+    assert.equal(open(storage, '42.21.0', 'other-owner').read('entityLayout.ini'), null);
+    assert.equal(open(storageFixture()).read('entityLayout.ini'), null);
+
+    assert.throws(() => files.write('entityLayout.ini', 'é'.repeat(32_769)), RangeError);
+    assert.throws(() => files.write('entityLayout.ini', '\uD800'), TypeError);
+    assert.equal(files.read('entityLayout.ini'), `${entity}y=34\n`);
+    files.write('entityLayout.ini', 'player:0\nwindowKey:BuildWindow\nx=80\n');
+    const failure = new DOMException('storage is full', 'QuotaExceededError');
+
+    storage.writeError = failure;
+    await assert.rejects(files.flush(), (error) => error === failure);
+    assert.equal(open(storage).read('entityLayout.ini'), `${entity}y=34\n`);
+    assert.equal(open(storage).read('layout.ini'), 'inventory0 x=40\n');
+    storage.writeError = null;
+    await files.flush();
+    assert.equal(open(storage).read('entityLayout.ini'), 'player:0\nwindowKey:BuildWindow\nx=80\n');
+    files.write('entityLayout.ini', 'uncommitted');
+    files.dispose();
+    assert.throws(() => files.read('entityLayout.ini'), /disposed/u);
+    assert.equal(open(storage).read('entityLayout.ini'), 'player:0\nwindowKey:BuildWindow\nx=80\n');
+});
+
 test('a failed atomic commit retains durable content and dirty staging for retry', async () => {
     const storage = storageFixture();
     const files = open(storage);
@@ -203,7 +242,8 @@ test('only exact layout paths, primitive strings, and strict boolean flags reach
 
     const files = open(storage);
 
-    for (const path of ['../layout.ini', '/layout.ini', 'layout.ini/extra', 'Layout.ini', 'options.ini', null]) {
+    for (const path of ['../layout.ini', '/layout.ini', 'layout.ini/extra', 'Layout.ini', '../entityLayout.ini',
+        '/entityLayout.ini', 'entitylayout.ini', 'entityLayout.ini/extra', 'options.ini', null]) {
         assert.throws(() => files.read(path));
         assert.throws(() => files.write(path, ''));
     }

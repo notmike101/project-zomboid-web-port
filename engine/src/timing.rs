@@ -36,6 +36,13 @@ impl TimingContext {
         }
     }
 
+    fn record_frame(&mut self, elapsed_seconds: f64) {
+        self.elapsed = elapsed_seconds as f32;
+        if elapsed_seconds > 0.0 {
+            self.fps = ((60.0 / (1.0 / elapsed_seconds)) as f32).min(5.0);
+        }
+    }
+
     fn slow_multiplier(&self) -> f32 {
         let ordinal =
             (u32::from(self.slow[0]) + 2 * u32::from(self.slow[1]) + 3 * u32::from(self.slow[2]))
@@ -73,18 +80,35 @@ pub(super) fn reset() {
     restore_validated(TimingContext::initial());
 }
 
+#[cfg(test)]
 pub(super) fn frame(elapsed_seconds: f64) {
-    TIMING.with(|state| {
-        let mut state = state.borrow_mut();
-        state.elapsed = elapsed_seconds as f32;
-        if elapsed_seconds > 0.0 {
-            state.fps = ((60.0 / (1.0 / elapsed_seconds)) as f32).min(5.0);
-        }
-    });
+    TIMING.with(|state| state.borrow_mut().record_frame(elapsed_seconds));
 }
 
 pub(super) fn multiplier() -> f32 {
     TIMING.with(|state| state.borrow().game_multiplier())
+}
+pub(super) fn with_game_mode<T>(read: impl FnOnce(&[u8]) -> T) -> T {
+    TIMING.with(|state| read(&state.borrow().game_mode))
+}
+
+/// The admitted source-default Core.lastStand=false clock branch is independent
+/// of GameMode strings; no true-Core-flag scenario/debug producer is admitted.
+pub(super) fn world_clock_frame(elapsed_seconds: f64) -> i32 {
+    let (previous, multiplier) = TIMING.with(|state| {
+        let mut state = state.borrow_mut();
+        let previous = (state.elapsed, state.fps);
+        state.record_frame(elapsed_seconds);
+        (previous, state.game_multiplier())
+    });
+    let result = crate::world_clock::advance_frame(multiplier);
+    if result != OK {
+        TIMING.with(|state| {
+            let mut state = state.borrow_mut();
+            (state.elapsed, state.fps) = previous;
+        });
+    }
+    result
 }
 
 #[cfg(test)]

@@ -67,7 +67,7 @@ function registry(tiles) {
  * @param {number} [options.cellY] - Cell y.
  * @returns {Promise<import('../src/map-tiles.js').MapCell>} Real lazy map cell.
  */
-function cell({ names = ['synthetic_0'], records = [2, -1, 0], rooms = [], buildings = [], cellX = 0, cellY = 0 } = {}) {
+function cell({ names = ['synthetic_0'], records = [2, -1, 0, -1, 63], rooms = [], buildings = [], cellX = 0, cellY = 0 } = {}) {
     const header = Buffer.concat([
         Buffer.from('LOTH'), int(1), int(names.length), ...names.map(line), int(8), int(8), int(0), int(0), int(rooms.length),
         ...rooms.flatMap(({ z = 0, rects }) => [line('synthetic room'), int(z), int(rects.length), ...rects.flatMap((rect) => rect.map(int)), int(0)]),
@@ -773,6 +773,13 @@ test('projects ordinary, double and garage partner identities and initially open
         ['synthetic_0', 'synthetic_2', 0, 0], ['synthetic_4', 'synthetic_8', 0, 1], ['synthetic_11', 'synthetic_19', 0, 2],
     ]);
     assert.equal(result.doorVisuals[1].toggledClosedSpriteName, 'synthetic_5');
+    const moved = result.depthContexts['0,1,0,0'];
+
+    assert.equal(moved.doorId, result.doors[1].id);
+    assert.equal(moved.ownerId, '0,1,0,0');
+    assert.equal(moved.sourceX, 0);
+    assert.equal(moved.sourceY, 1);
+    assert.equal(result.depthContexts['1,0,0,0'], undefined, 'canonical closed coordinates are not a placement lookup key');
     assert.equal(result.doorVisuals[1].toggledOpenSpriteName, 'synthetic_8');
 });
 
@@ -1254,4 +1261,433 @@ test('reach walls retain cached cuts across later shared window mutation and rea
         { north: false, west: false }, { north: false, west: false },
         { north: false, west: false }, { north: false, west: false },
     ], 'all four door snapshots use cached cuts rather than copied cut properties');
+    const states = doorProjection.depthContexts['0,0,0,0'].doorSprites;
+
+    assert.equal(states.synthetic_2.spriteProperties.windowN, 'true', 'dynamic door snapshots preserve later shared constructor mutations');
+    assert.equal(states.synthetic_2.wallDirection, undefined, 'copied flags are not cached cuts on the substituted sprite');
+    assert.equal(states.synthetic_0.wallDirection, 'N');
+    assert.equal(Object.isFrozen(states.synthetic_2.spriteProperties), true);
+});
+
+// Class metadata comes from the ordered CellLoader constructor, not a property-name heuristic.
+test('depth contexts preserve exact source constructors and excluded campfire names', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const fixtures = [
+        { props: [['container', 'barbecue']], expected: 'IsoBarbecue' },
+        { props: [['container', 'barbecuepropane']], expected: 'IsoBarbecue' },
+        { props: [['container', 'Barbecue']], expected: 'IsoObject' },
+        { props: [['container', 'fireplace'], ['tree', '1']], expected: 'IsoFireplace' },
+        { props: [['container', 'woodstove']], expected: 'IsoFireplace' },
+        { props: [['container', 'brazier']], expected: 'IsoFireplace' },
+        { props: [['container', 'campfire']], expected: 'IsoFireplace' },
+        { props: [['container', 'campfire']], name: 'camping_01_04', expected: 'IsoObject' },
+        { props: [['container', 'campfire']], name: 'camping_01_05', expected: 'IsoObject' },
+        { props: [['container', 'campfire']], name: 'camping_01_06', expected: 'IsoObject' },
+        { props: [['container', 'campfire']], name: 'camping_01_4', expected: 'IsoFireplace' },
+        { props: [['tree', '1']], expected: 'IsoTree' },
+        { props: [['tree', '1'], ['CustomName', 'Mannequin']], expected: 'IsoMannequin' },
+        { props: [['IsoType', 'IsoFire']], expected: 'IsoObject' },
+        { props: [['lightswitch', 'true'], ['container', 'barbecue']], expected: 'IsoLightSwitch' },
+        { props: [['windowN', 'true'], ['container', 'fireplace']], expected: 'IsoWindow' },
+    ];
+
+    await Promise.all(fixtures.map(async ({ props, name = 'synthetic_0', expected }) => {
+        const tiles = registry([props]);
+
+        if (name !== 'synthetic_0') {
+            tiles.set(name, { ...tiles.get('synthetic_0'), name });
+        }
+
+        const projection = await projectWorldObjects([await cell({ names: [name] })], tiles);
+        const context = projection.depthContexts['0,0,0,0'];
+
+        assert.equal(context.objectClass, expected, name);
+        assert.equal(context.sourceObjectClass, expected);
+        assert.equal(context.isParentSprite, true);
+        assert.equal(context.parentSpriteName, name);
+        assert.equal(context.rendered, true);
+        assert.deepEqual([context.scaleX, context.scaleY, context.soffX, context.soffY], [1, 1, 0, 0]);
+        assert.equal(Object.isFrozen(context), true);
+    }));
+});
+
+// Flattening by sprite name loses both attachment ownership and replaced placement identity.
+test('depth contexts retain attachment hosts and retire replaced floors, attachments, and trees', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([
+        [['solidfloor', 'true'], ['diamondFloor', 'true'], ['container', 'fireplace']],
+        [['FloorOverlay', 'true']],
+        [['solidfloor', 'true'], ['diamondFloor', 'true']],
+        [['FloorOverlay', 'true']],
+        [['tree', '1']],
+        [['tree', '1']],
+        [['WallW', 'true']],
+        [['WallOverlay', 'true'], ['attachedW', 'true']],
+        [['WallOverlay', 'true'], ['attachedN', 'true']],
+    ]);
+    const map = await cell({
+        names: [...tiles.keys()],
+        records: [10, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, -1, 63],
+    });
+    const { depthContexts } = await projectWorldObjects([map], tiles);
+    /**
+     * Look up an original placement's final depth context.
+     *
+     * @param {number} order - Original placement order on the square.
+     * @returns {object} Frozen projected depth context.
+     */
+    const context = (order) => depthContexts[`0,0,0,${order}`];
+
+    assert.equal(Object.isFrozen(depthContexts), true);
+    assert.equal(context(0).rendered, false, 'replaced floor placement is not independently drawn');
+    assert.equal(context(1).rendered, false, 'setSprite clears old attached sprites');
+    assert.equal(context(2).ownerId, context(0).ownerId, 'diamond replacement preserves the original owner class and identity');
+    assert.equal(context(2).objectClass, 'IsoFireplace', 'replacement never reconstructs a generic owner from the new sprite');
+    assert.equal(context(2).isParentSprite, true);
+    assert.equal(context(3).rendered, true);
+    assert.equal(context(3).isParentSprite, false);
+    assert.equal(context(3).ownerId, context(2).ownerId);
+    assert.equal(context(3).parentSpriteName, 'synthetic_2');
+    assert.equal(context(4).rendered, false, 'second tree removes first actual tree');
+    assert.equal(context(5).objectClass, 'IsoTree');
+    assert.equal(context(7).ownerId, context(6).ownerId);
+    assert.equal(context(7).isParentSprite, false);
+    assert.equal(context(8).isParentSprite, true, 'unmatched wall overlay creates its own IsoObject');
+    assert.equal(context(8).objectClass, 'IsoObject');
+});
+
+test('depth contexts use original placement identity for initially open door visuals', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([[['doorN', 'true']], [], [['attachedS', 'true']]]);
+    const map = await cell({ names: ['synthetic_2'] });
+    const projection = await projectWorldObjects([map], tiles);
+    const visual = projection.doorVisuals[0];
+    const context = projection.depthContexts[`${visual.sourceX},${visual.sourceY},0,${visual.order}`];
+
+    assert.equal(context.objectClass, 'IsoDoor');
+    assert.equal(context.doorId, visual.id);
+    assert.equal(context.isMainSprite, true);
+    assert.equal(Object.isFrozen(context.doorSprites), true);
+    assert.equal(context.doorSprites.synthetic_2.wallDirection, 'N');
+    assert.equal(context.sourceSpriteName, visual.sourceSpriteName);
+    assert.equal(context.ownerId, '0,0,0,0');
+});
+
+// A tree flag surviving a later object type is not an IsoTree; natural trees require a real natural floor.
+test('depth class selection distinguishes tree types, natural-floor gates, and unattached floor overlays', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([[['tree', '1'], ['wall', 'true']], [['FloorOverlay', 'true']]]);
+    const map = await cell({ names: ['synthetic_0', 'synthetic_1'], records: [3, -1, 0, 1, -1, 63] });
+    const projection = await projectWorldObjects([map], tiles);
+
+    assert.equal(projection.depthContexts['0,0,0,0'].objectClass, 'IsoObject');
+    assert.equal(projection.depthContexts['0,0,0,1'].rendered, false);
+    assert.equal(Object.hasOwn(projection.depthContexts['0,0,0,1'], 'objectClass'), false);
+    const natural = createTileRegistry([
+        { path: 'floor.tiles', fileId: 1, buffer: definitions([[['solidfloor', 'true']]], 'blends_natural_01') },
+        { path: 'tree.tiles', fileId: 2, buffer: definitions([[['tree', '1']]], 'vegetation_trees_01') },
+    ]);
+
+    await Promise.all([false, true].map(async (hasFloor) => {
+        const names = hasFloor ? ['blends_natural_01_0', 'vegetation_trees_01_0'] : ['vegetation_trees_01_0'];
+        const result = await projectWorldObjects([await cell({
+            names, records: [names.length + 1, -1, ...names.map((_, index) => index), -1, 63],
+        })], natural);
+
+        assert.equal(result.depthContexts[`0,0,0,${names.length - 1}`].rendered, hasFloor);
+    }));
+});
+
+// Chunk boundaries create extra native draws, never a replacement depth mode on every floor.
+test('depth contexts select ordered floor and wall seam draws from actual neighbor objects', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([
+        [['solidfloor', 'true'], ['FloorHeightOneThird', 'true'], ['FloorHeightTwoThirds', 'true']],
+        [['FloorOverlay', 'true']],
+        [['WallNW', 'true']],
+        [['solidfloor', 'true'], ['WallW', 'true']],
+        [['solidfloor', 'true'], ['WallN', 'true']],
+    ]);
+    const base = await cell();
+    const rows = [
+        { x: 7, y: 7, z: 0, order: 0, spriteName: 'synthetic_0' },
+        { x: 7, y: 7, z: 0, order: 1, spriteName: 'synthetic_1' },
+        { x: 7, y: 7, z: 0, order: 2, spriteName: 'synthetic_2' },
+        { x: 7, y: 8, z: 0, order: 0, spriteName: 'synthetic_3' },
+        { x: 8, y: 7, z: 0, order: 0, spriteName: 'synthetic_4' },
+    ];
+    const scene = {
+        ...base,
+        chunks: [[0, 0], [0, 1], [1, 0]].map(([chunkX, chunkY]) => ({ chunkX, chunkY, present: true })),
+        /**
+         * Return the authored placements belonging to this native-size chunk.
+         *
+         * @param {number} x - Local chunk x coordinate.
+         * @param {number} y - Local chunk y coordinate.
+         * @returns {Promise<object[]>} Matching original placements.
+         */
+        readChunk: (x, y) => Promise.resolve(rows.filter((row) => Math.floor(row.x / 8) === x && Math.floor(row.y / 8) === y)),
+    };
+    const { depthContexts } = await projectWorldObjects([scene], tiles);
+
+    assert.deepEqual(depthContexts['7,7,0,0'].seams, [
+        { name: 'FloorSouthTwoThirds', screenOffset: { x: -6, y: 3 } },
+        { name: 'FloorEastTwoThirds', screenOffset: { x: 6, y: 3 } },
+    ]);
+    assert.deepEqual(depthContexts['7,7,0,1'].seams, [], 'attached floor sprite is not getFloor()');
+    assert.deepEqual(depthContexts['7,7,0,2'].seams, [
+        { name: 'WallEast', screenOffset: { x: 6, y: 3 }, direction: 'NW' },
+        { name: 'WallSouth', screenOffset: { x: -6, y: 3 }, direction: 'NW' },
+    ]);
+    assert.equal(depthContexts['7,7,0,2'].wallDirection, 'NW');
+    assert.equal(Object.isFrozen(depthContexts['7,7,0,0'].seams[0].screenOffset), true);
+});
+
+test('depth seams reject orphan overlays as actual floor or wall neighbors', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const base = await cell();
+
+    await Promise.all([[['WallW', 'true'], ['HoppableW', 'true']], [['WallW', 'true']]].map(async (props) => {
+        const tiles = registry([props, [['FloorOverlay', 'true']]]);
+        const scene = {
+            ...base,
+            chunks: [{ chunkX: 0, chunkY: 0, present: true }, { chunkX: 0, chunkY: 1, present: true }],
+            /**
+             * Return the authored wall or orphan overlay for this chunk.
+             *
+             * @param {number} x - Local chunk x coordinate.
+             * @param {number} y - Local chunk y coordinate.
+             * @returns {Promise<object[]>} Original chunk placements.
+             */
+            readChunk: (x, y) => Promise.resolve(y === 0
+                ? [{ x: 0, y: 7, z: 0, order: 0, spriteName: 'synthetic_0' }]
+                : [{ x: 0, y: 8, z: 0, order: 0, spriteName: 'synthetic_1' }]),
+        };
+        const projection = await projectWorldObjects([scene], tiles);
+
+        assert.deepEqual(projection.depthContexts['0,7,0,0'].seams, [], 'an orphan overlay is neither a wall nor a floor');
+    }));
+});
+
+test('depth wall seams honor exact hoppable and original sheet exclusions without prefix guesses', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const base = await cell();
+    const cases = [
+        { name: 'synthetic', index: 0, extra: [], expected: 1 },
+        { name: 'synthetic', index: 0, extra: [['HoppableW', 'false']], expected: 0 },
+        { name: 'walls_logs', index: 0, extra: [], expected: 0 },
+        { name: 'walls_logs_extra', index: 0, extra: [], expected: 1 },
+        { name: 'carpentry_02', index: 79, extra: [], expected: 1 },
+        { name: 'carpentry_02', index: 80, extra: [], expected: 0 },
+        { name: 'carpentry_02', index: 82, extra: [], expected: 0 },
+        { name: 'carpentry_02', index: 83, extra: [], expected: 1 },
+    ];
+
+    await Promise.all(cases.map(async ({ name, index, extra, expected }) => {
+        const rows = Array.from({ length: index + 1 }, () => []);
+
+        rows[index] = [['WallW', 'true'], ...extra];
+        const tiles = createTileRegistry([
+            { path: 'subject.tiles', fileId: 1, buffer: definitions(rows, name) },
+            { path: 'neighbor.tiles', fileId: 2, buffer: definitions([[['WallW', 'true']]], 'neighbor') },
+        ]);
+        const scene = {
+            ...base,
+            chunks: [{ chunkX: 0, chunkY: 0, present: true }, { chunkX: 0, chunkY: 1, present: true }],
+            /**
+             * Return the exact subject or neighboring wall sprite.
+             *
+             * @param {number} x - Local chunk x coordinate.
+             * @param {number} y - Local chunk y coordinate.
+             * @returns {Promise<object[]>} Original chunk placements.
+             */
+            readChunk: (x, y) => Promise.resolve([{
+                x: 0, y: y === 0 ? 7 : 8, z: 0, order: 0, spriteName: y === 0 ? `${name}_${index}` : 'neighbor_0',
+            }]),
+        };
+        const projection = await projectWorldObjects([scene], tiles);
+
+        assert.equal(projection.depthContexts['0,7,0,0'].seams.length, expected, `${name}_${index}`);
+    }));
+});
+
+test('future shoreline and water-neighbor scenes require actual native policy rather than guessing false', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const base = await cell();
+    const tiles = createTileRegistry([
+        { path: 'natural.tiles', fileId: 1, buffer: definitions([[['solidfloor', 'true']]], 'blends_natural_01') },
+        { path: 'water.tiles', fileId: 2, buffer: definitions([[['solidfloor', 'true'], ['water', 'true']]], 'water') },
+    ]);
+    const scene = {
+        ...base,
+        chunks: [{ chunkX: 0, chunkY: 0, present: true }, { chunkX: 0, chunkY: 1, present: true }],
+        /**
+         * Return original natural-floor or neighboring water placements.
+         *
+         * @param {number} x - Local chunk x coordinate.
+         * @param {number} y - Local chunk y coordinate.
+         * @returns {Promise<object[]>} Original chunk placements.
+         */
+        readChunk: (x, y) => Promise.resolve([{
+            x: 0, y: y === 0 ? 7 : 8, z: 0, order: 0, spriteName: y === 0 ? 'blends_natural_01_0' : 'water_0',
+        }]),
+    };
+
+    await assert.rejects(projectWorldObjects([scene], tiles), /shoreline.*IsoWaterFlow.*shader policy/iu);
+    const nonNatural = registry([[['solidfloor', 'true']], [['solidfloor', 'true'], ['water', 'true']]]);
+    const waterNeighbor = {
+        ...scene,
+        /**
+         * Return non-natural floor or neighboring water placements.
+         *
+         * @param {number} x - Local chunk x coordinate.
+         * @param {number} y - Local chunk y coordinate.
+         * @returns {Promise<object[]>} Original chunk placements.
+         */
+        readChunk: (x, y) => Promise.resolve([{
+            x: 0, y: y === 0 ? 7 : 8, z: 0, order: 0, spriteName: y === 0 ? 'synthetic_0' : 'synthetic_1',
+        }]),
+    };
+
+    await assert.rejects(projectWorldObjects([waterNeighbor], nonNatural), /water-neighbor.*waterQuality/iu);
+});
+
+test('attached overlays preserve garage and moving double-door owners with exact current partner geometry', async () => {
+    const { projectWorldObjects } = await projectionModule();
+
+    await Promise.all([false, true].map(async (double) => {
+        const rows = Array.from({ length: 9 }, () => []);
+        const openIndex = double ? 4 : 8;
+
+        rows[0] = double
+            ? [['doorW', 'true'], ['DoubleDoor', '1'], ['cutW', 'true']]
+            : [['doorW', 'true'], ['GarageDoor', '1']];
+        rows[1] = [['WallOverlay', 'true'], ['attachedW', 'true']];
+        rows[openIndex] = double
+            ? [['doorN', 'true'], ['DoubleDoor', '5']]
+            : [['doorW', 'true'], ['GarageDoor', '4']];
+        const projection = await projectWorldObjects([await cell({
+            names: ['synthetic_0', 'synthetic_1'], records: [3, -1, 0, 1, -1, 63],
+        })], registry(rows));
+        const base = projection.depthContexts['0,0,0,0'];
+        const attached = projection.depthContexts['0,0,0,1'];
+        const open = attached.doorSprites[`synthetic_${openIndex}`];
+
+        assert.equal(attached.objectClass, 'IsoDoor');
+        assert.equal(attached.doorId, base.doorId);
+        assert.equal(attached.isMainSprite, false);
+        assert.equal(attached.isParentSprite, false);
+        assert.equal(attached.wallDirection, 'W');
+        assert.equal(attached.doorSprites, base.doorSprites);
+        assert.equal(open.spriteProperties.open, 'true');
+        assert.equal(open.wallDirection, double ? 'N' : 'W', 'current parent geometry is not the original closed orientation');
+        assert.equal(attached.currentSpriteName, 'synthetic_1');
+        assert.deepEqual(attached.seams, []);
+    }));
+});
+
+test('rain blockers use final surviving non-blueprint flag presence rather than floor predicates or attachments', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const cases = [
+        { rows: [[['solidfloor', 'false'], ['BlockRain', 'false']]], expected: 3 },
+        { rows: [[['BlockRain', '']]], expected: 2 },
+        { rows: [[['stairsTN', 'false']]], expected: 0 },
+        { rows: [[['SlopedSurfaceDirection', 'N']]], expected: 0 },
+        { rows: [[['blueprint', 'false'], ['solidfloor', 'false'], ['BlockRain', 'false']]], expected: 0 },
+        { rows: [[['tree', '1'], ['BlockRain', 'false']], [['tree', '1']]], expected: 0 },
+        { rows: [[['wall', 'false'], ['cutW', 'false']], [['WallOverlay', 'false'], ['attachedW', 'false'], ['BlockRain', 'false']]], expected: 0 },
+        { rows: [[['solidfloor', 'false'], ['diamondFloor', 'false'], ['BlockRain', 'false']], [['solidfloor', 'false'], ['diamondFloor', 'false']]], expected: 1 },
+    ];
+
+    await Promise.all(cases.map(async ({ rows, expected }) => {
+        const map = await cell({
+            names: rows.map((_, index) => `synthetic_${index}`),
+            records: [rows.length + 1, -1, ...rows.map((_, index) => index), -1, 63],
+        });
+        const projected = await projectWorldObjects([map], registry(rows));
+
+        assert.equal(projected.squares[0].rainBlockers, expected, JSON.stringify(rows));
+        assert.equal(projected.squares[1].rainBlockers, 0, 'present empty squares have known no blockers');
+    }));
+});
+
+test('rain snapshots preserve all final constructor partners and moving attached door context', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = Array.from({ length: 11 }, () => []);
+
+    tiles[0] = [['doorN', 'false'], ['DoubleDoor', '1'], ['solidfloor', 'false'], ['cutN', 'false']];
+    tiles[4] = [['doorW', 'false'], ['DoubleDoor', '6'], ['BlockRain', 'false']];
+    tiles[5] = [['doorW', 'false'], ['DoubleDoor', '5'], ['solidfloor', 'false'], ['BlockRain', 'false']];
+    tiles[6] = [['doorN', 'false'], ['DoubleDoor', '2'], ['BlockRain', 'false']];
+    tiles[7] = [['doorN', 'false'], ['DoubleDoor', '2'], ['solidfloor', 'false'], ['blueprint', 'false']];
+    tiles[10] = [['doorN', 'false'], ['DoubleDoor', '6'], ['solidfloor', 'false']];
+    tiles[1] = [['WallOverlay', 'false'], ['attachedN', 'false'], ['BlockRain', 'false']];
+    const projected = await projectWorldObjects([await cell({
+        names: ['synthetic_0', 'synthetic_1', 'synthetic_10'],
+        records: [3, -1, 0, 1, 2, -1, 2, -1, 62],
+    })], registry(tiles));
+
+    assert.deepEqual(projected.doors.map((door) => door.rainBlockers), [[1, 2, 1, 3], [2, 1, 0, 1]]);
+    assert.deepEqual(projected.squares.slice(0, 2).map((square) => square.rainBlockers), [0, 0],
+        'base squares exclude actual doors and their visual-only attachments');
+    const attached = projected.depthContexts['0,0,0,1'];
+
+    assert.equal(attached.doorId, projected.depthContexts['0,0,0,0'].doorId);
+    assert.equal(attached.isParentSprite, false);
+    assert.equal(attached.doorSprites.synthetic_4.spriteProperties.BlockRain, 'false');
+});
+
+test('rain aggregation observes shared constructor mutations on objects created in earlier cells', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const tiles = registry([[['windowW', 'false'], ['solidfloor', 'false'], ['BlockRain', 'false'], ['OpenTileOffset', '1']], []]);
+    const earlier = await cell({ names: ['synthetic_1'], records: [2, -1, 0, -1, 63] });
+    const later = await cell({ cellX: 1, records: [2, -1, 0, -1, 63] });
+    const projected = await projectWorldObjects([earlier, later], tiles);
+
+    assert.equal(projected.squares.find(({ x, y }) => x === 0 && y === 0).rainBlockers, 3);
+    assert.equal(projected.squares.find(({ x, y }) => x === 256 && y === 0).rainBlockers, 3);
+});
+
+test('native roofs consume projected moving door snapshots and rebuild from restored current geometry', async () => {
+    const { projectWorldObjects } = await projectionModule();
+    const subject = await createEngine(await readFile(new URL(
+        '../engine/target/wasm32-unknown-unknown/release/pz_engine.wasm', import.meta.url,
+    )));
+    const tiles = Array.from({ length: 11 }, () => []);
+
+    tiles[6] = [['doorN', 'false'], ['DoubleDoor', '2'], ['BlockRain', 'false']];
+    tiles[7] = [['doorN', 'false'], ['DoubleDoor', '2'], ['solidfloor', 'false'], ['blueprint', 'false']];
+    tiles[10] = [['doorN', 'false'], ['DoubleDoor', '6'], ['solidfloor', 'false']];
+    const scene = {
+        ...await cell(), minLevel: 0, maxLevel: 1,
+        /**
+         * Read the synthetic upper-floor panel placement.
+         *
+         * @returns {Promise<object[]>} Original-format records.
+         */
+        readChunk: () => Promise.resolve([{ x: 1, y: 2, z: 1, order: 0, spriteName: 'synthetic_10' }]),
+    };
+    const projected = await projectWorldObjects([scene], registry(tiles));
+
+    subject.importDoors(projected.doors, { squares: projected.squares });
+    assert.equal(subject.getSquare(1, 2, 1).haveRoof, false, 'blocker never roofs itself');
+    assert.equal(subject.getSquare(1, 2, 0).haveRoof, true);
+    assert.equal(subject.getSquare(2, 1, 0).haveRoof, false);
+    const initial = subject.saveDoorState();
+    const closed = {
+        ...initial,
+        doors: initial.doors.map((door) => ({ ...door, open: false, toggled: false, x: 2, y: 1 })),
+    };
+
+    subject.loadDoorState(closed);
+    assert.equal(subject.getSquare(1, 2, 0).haveRoof, false, 'old column loses moved panel');
+    assert.equal(subject.getSquare(2, 1, 0).haveRoof, true, 'new column receives current closed BlockRain');
+    subject.loadDoorState({
+        ...closed, doors: closed.doors.map((door) => ({ ...door, toggled: true })),
+    });
+    assert.equal(subject.getSquare(2, 1, 0).haveRoof, false, 'toggled closed blueprint contributes no blocker');
+    assert.equal(subject.getSquare(1, 2, 0).haveRoof, false);
+    subject.loadDoorState(initial);
+    assert.equal(subject.getSquare(1, 2, 0).haveRoof, true, 'saved current open geometry restores its roof');
+    assert.equal(subject.getSquare(2, 1, 0).haveRoof, false, 'restoring removes the moved closed column roof');
 });

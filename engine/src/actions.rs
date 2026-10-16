@@ -147,12 +147,16 @@ mod tests {
         reply(1);
         let token = event().token;
         assert_eq!(event().kind, 5);
+        assert_eq!(container_draw_dirty_set(source, 0), OK);
+        assert_eq!(container_draw_dirty_set(PLAYER_INVENTORY, 0), OK);
         assert_eq!(queue_transfer_begin(action, group, ids[0], token, 1), OK);
         assert_eq!(
             queue_transfer_operation(action, ids[0], token, 1, source, 0.0, 0.0, 0),
             OK
         );
         assert_eq!(container_item_count(source), 1);
+        assert_eq!(container_draw_dirty_get(source), 1);
+        assert_eq!(container_draw_dirty_get(PLAYER_INVENTORY), 0);
         assert_eq!(source_world_item_count(5, 5, 0), 2);
         assert_eq!(source_world_item_get(5, 5, 0, 0), ids[0] as f64);
         assert_eq!(
@@ -165,13 +169,91 @@ mod tests {
         );
         assert_eq!(source_world_item_count(5, 5, 0), 1);
         assert_eq!(source_world_item_get(5, 5, 0, 0), ids[1] as f64);
+        assert_eq!(
+            queue_transfer_operation(action, ids[0], token, 2, PLAYER_INVENTORY, 0.0, 0.0, 0),
+            OK
+        );
+        assert_eq!(container_draw_dirty_get(PLAYER_INVENTORY), 1);
         assert_eq!(queue_transfer_finish(action, ids[0], token, 0), OK);
         assert_eq!(container_item_get(source, 0), ids[0] as f64);
         assert_eq!(source_world_item_count(5, 5, 0), 2);
+        assert_eq!(container_draw_dirty_get(source), 0);
+        assert_eq!(container_draw_dirty_get(PLAYER_INVENTORY), 0);
         assert_eq!(
             queue_transfer_begin(action, group, ids[0], token, 1),
             OUT_OF_RANGE
         );
+    }
+
+    #[test]
+    fn source_drop_constructor_owns_offsets_rotation_and_rollback_rng() {
+        for commit in [false, true] {
+            let ids = items_fixture(1.0, 1);
+            let id = ids[0];
+            let floor = item(id).unwrap().owner_container;
+            assert_eq!(transfer(id, floor, PLAYER_INVENTORY), OK);
+            ITEMS.with(|items| {
+                let mut items = items.borrow_mut();
+                items.live[0].world_visual.rotation = [12.0, 34.0, -1.0];
+                items.live[0].world_visual.scale = 0.75;
+            });
+            let before = item(id).unwrap().world_visual;
+            let action = queue_action_new(5, 1, id, 5, 5, 0, 0.0) as u32;
+            assert_eq!(
+                queue_action_bind_transfer(action, PLAYER_INVENTORY, floor),
+                OK
+            );
+            let group = queue_group_new(action, 0.0) as u32;
+            assert_eq!(queue_group_item_insert(group, 0, id), OK);
+            assert_eq!(queue_group_insert(action, 0, group), OK);
+            assert_eq!(queue_insert(0, action), OK);
+            begin_source(action);
+            assert_eq!(queue_action_set(action, 3, 1.0), OK);
+            assert_eq!(step(0.0), OK);
+            reply(1);
+            let token = event().token;
+            assert_eq!(event().kind, 5);
+            let rng = doors::rng_state();
+            let rotation = doors::random(360) as f32;
+            let xoff = (doors::random(1000) as f32 / 1000.0) as f64;
+            let yoff = (doors::random(1000) as f32 / 1000.0) as f64;
+            let after_rng = doors::rng_state();
+            doors::restore_rng(rng);
+            assert_eq!(queue_transfer_begin(action, group, id, token, 1), OK);
+            assert_eq!(
+                queue_transfer_operation(action, id, token, 1, PLAYER_INVENTORY, 0.0, 0.0, 0),
+                OK
+            );
+            assert_eq!(
+                queue_transfer_operation(action, id, token, 2, floor, 0.0, 0.0, 0),
+                OK
+            );
+            assert_eq!(
+                queue_transfer_operation(action, id, token, 4, floor, 5.0, 5.0, 0),
+                OK
+            );
+            let placed = item(id).unwrap();
+            assert_eq!(placed.world_visual.rotation, [0.0, 0.0, rotation]);
+            assert_eq!(placed.world_visual.scale, 0.75);
+            assert_eq!(
+                (placed.world_visual.xoff, placed.world_visual.yoff),
+                (xoff, yoff)
+            );
+            assert_eq!((placed.x, placed.y), (5.0 + xoff, 5.0 + yoff));
+            assert_eq!(doors::rng_state(), after_rng);
+            assert_eq!(
+                queue_transfer_finish(action, id, token, u32::from(commit)),
+                OK
+            );
+            if commit {
+                assert_eq!(item(id).unwrap().world_visual, placed.world_visual);
+                assert_eq!(item(id).unwrap().owner_container, floor);
+            } else {
+                assert_eq!(item(id).unwrap().world_visual, before);
+                assert_eq!(item(id).unwrap().owner_container, PLAYER_INVENTORY);
+                assert_eq!(doors::rng_state(), rng);
+            }
+        }
     }
     #[test]
     fn detached_bag_keeps_its_real_outermost_container_during_transfer_callback() {
@@ -1762,6 +1844,7 @@ struct TransferTransaction {
     attached_index: Option<usize>,
     rng_state: u64,
     container_flags: [u32; 2],
+    container_draw_dirty: [bool; 2],
 }
 struct Store {
     actions: Vec<Action>,
@@ -1834,6 +1917,8 @@ impl Store {
             ] {
                 if let Some(row) = state.containers.iter_mut().find(|row| row.id == id) {
                     row.flags = flags;
+                    row.draw_dirty = transaction.container_draw_dirty
+                        [usize::from(id == transaction.destination)];
                 }
             }
             state.source_transfer = false;
@@ -2288,8 +2373,7 @@ fn transfer(id: u32, source: u32, destination: u32) -> i32 {
         item.world_object = state.container(destination).unwrap().kind == 2;
         if item.world_object {
             let xyz = state.container(destination).unwrap().xyz;
-            item.x = xyz.0 as f64 + 0.5;
-            item.y = xyz.1 as f64 + 0.5;
+            item.place_world(xyz.0 as f64 + 0.5, xyz.1 as f64 + 0.5, false);
         }
         if destination != PLAYER_INVENTORY {
             item.slot = 0;
@@ -2297,6 +2381,8 @@ fn transfer(id: u32, source: u32, destination: u32) -> i32 {
             state.remove_worn(id);
         }
         state.live.push(item);
+        state.dirty_container(source);
+        state.dirty_container(destination);
         OK
     })
 }
@@ -3212,6 +3298,10 @@ pub extern "C" fn queue_transfer_begin(
                     items.container(source).unwrap().flags,
                     items.container(destination).unwrap().flags,
                 ],
+                container_draw_dirty: [
+                    items.container(source).unwrap().draw_dirty,
+                    items.container(destination).unwrap().draw_dirty,
+                ],
                 actor_overlay: items.actor_overlay,
                 source,
                 destination,
@@ -3321,6 +3411,7 @@ pub extern "C" fn queue_transfer_operation(
                         return OUT_OF_RANGE;
                     }
                     items.live[index].owner_container = 0;
+                    items.dirty_container(container);
                     transaction.detached = true;
                 }
                 2 => {
@@ -3334,6 +3425,7 @@ pub extern "C" fn queue_transfer_operation(
                     let mut row = items.live.remove(index);
                     row.owner_container = container;
                     items.live.push(row);
+                    items.dirty_container(container);
                     transaction.added = true;
                 }
                 3 => {
@@ -3370,8 +3462,7 @@ pub extern "C" fn queue_transfer_operation(
                         return OUT_OF_RANGE;
                     }
                     items.live[index].world_object = true;
-                    items.live[index].x = x;
-                    items.live[index].y = y;
+                    items.live[index].place_world(x, y, true);
                 }
                 5 => {
                     if !transaction.detached || container != transaction.source {

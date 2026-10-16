@@ -10,6 +10,174 @@
  * originate as 32-bit floats; actor saves transfer twelve 64-bit float words.
  */
 
+const WORLD_CLOCK_FIELDS = Object.freeze([
+    'year', 'month', 'day', 'timeOfDay', 'lastTimeOfDay', 'nightsSurvived', 'minutesPerDay',
+]);
+
+/**
+ * @typedef {object} WorldClockState
+ * @property {1} version Clock schema.
+ * @property {number} year Direct signed int32 year.
+ * @property {number} month Direct signed int32 zero-based month.
+ * @property {number} day Direct signed int32 zero-based day.
+ * @property {number} timeOfDay Source f32 hours.
+ * @property {number} lastTimeOfDay Source f32 previous-time field.
+ * @property {number} nightsSurvived Direct signed int32 seven-AM count.
+ * @property {number} minutesPerDay Source f32 day-length setting.
+ */
+
+/** Source unmodified Sandbox startup; legacy saves explicitly begin a new port timeline. */
+const WORLD_CLOCK_DEFAULT_STATE = Object.freeze({
+    version: 1, year: 1_993, month: 6, day: 22, timeOfDay: 9,
+    lastTimeOfDay: 9, nightsSurvived: 0, minutesPerDay: 90,
+});
+
+/**
+ * Validate source storage, not calendar validity: source setters assign directly.
+ *
+ * @param {unknown} value - Candidate clock record.
+ * @returns {WorldClockState} Detached canonical f32/int32 state.
+ */
+function normalizeWorldClockState(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)
+        || !Object.hasOwn(value, 'version') || value.version !== 1) {
+        throw new TypeError('World clock must be a version1 record.');
+    }
+
+    /** @type {WorldClockState} */
+    const result = { ...WORLD_CLOCK_DEFAULT_STATE };
+
+    for (const name of WORLD_CLOCK_FIELDS) {
+        if (!Object.hasOwn(value, name)) {
+            throw new TypeError(`World clock ${name} is required.`);
+        }
+
+        result[name] = worldClockScalar(name, value[name]);
+    }
+
+    return result;
+}
+
+/**
+ * Validate a clock scalar against its source storage type.
+ *
+ * @param {string} name - Source scalar name.
+ * @param {unknown} value - Candidate value.
+ * @returns {number} Canonical source scalar.
+ */
+function worldClockScalar(name, value) {
+    if (['year', 'month', 'day', 'nightsSurvived'].includes(name)) {
+        return requireInteger(value, `World clock ${name}`, -2_147_483_648, 2_147_483_647);
+    }
+
+    requireCoordinate(value, `World clock ${name}`);
+
+    if (Math.abs(value) > 3.402_823_466_385_288_6e38) {
+        throw new RangeError(`World clock ${name} must fit finite f32.`);
+    }
+
+    return Math.fround(value);
+}
+
+const WORLD_ITEM_VISUAL_FIELDS = Object.freeze([
+    'xoff', 'yoff', 'zoff', 'worldXRotation', 'worldYRotation', 'worldZRotation', 'worldScale',
+]);
+
+/**
+ * Validate saved source placement/rotation scalars without losing legacy f64 positions.
+ *
+ * @param {object} value - Complete native visual state.
+ * @param {object|null} worldPosition - Existing absolute port placement, if on the floor.
+ * @returns {object} Detached validated visual state.
+ */
+function normalizeWorldItemVisual(value, worldPosition) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)
+        || Object.keys(value).length !== WORLD_ITEM_VISUAL_FIELDS.length) {
+        throw new TypeError('World item visual must contain exactly seven native fields.');
+    }
+
+    const result = {};
+
+    for (const [index, name] of WORLD_ITEM_VISUAL_FIELDS.entries()) {
+        const scalar = value[name];
+
+        if (!Object.hasOwn(value, name) || !Number.isFinite(scalar)
+            || (index < 2 ? scalar < 0 || scalar >= 1 : Math.fround(scalar) !== scalar)) {
+            throw new TypeError(`Invalid native world item visual ${name}.`);
+        }
+
+        result[name] = scalar;
+    }
+
+    if (worldPosition !== null && (result.xoff !== worldPosition.x - Math.floor(worldPosition.x)
+        || result.yoff !== worldPosition.y - Math.floor(worldPosition.y))) {
+        throw new TypeError('World item offsets conflict with absolute native placement.');
+    }
+
+    return result;
+}
+
+/**
+ * Capture the exact original XML selection domain without retaining asset handles.
+ *
+ * @param {object} value - Ready ClothingItem metadata.
+ * @returns {object} Canonical persistable selection rules.
+ */
+function normalizeItemVisualRules(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || typeof value.allowRandomTint !== 'boolean' || typeof value.allowRandomHue !== 'boolean') {
+        throw new TypeError('ItemVisual source randomization flags must be booleans.');
+    }
+
+    return {
+        baseTextureCount: requireInteger(value.baseTextureCount, 'ItemVisual base texture count', 0, 4_096),
+        textureChoiceCount: requireInteger(value.textureChoiceCount, 'ItemVisual texture choice count', 0, 4_096),
+        allowRandomTint: value.allowRandomTint, allowRandomHue: value.allowRandomHue,
+    };
+}
+
+/**
+ * Validate actual initialized ItemVisual state; absent legacy state stays absent.
+ *
+ * @param {object} value - Source-selected texture indices, hue and RGBA tint.
+ * @param {object} [rules] - Captured original XML selection domain, when available.
+ * @returns {object} Detached exact native state.
+ */
+function normalizeItemVisual(value, rules) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)
+        || Object.keys(value).length !== 4
+        || !['baseTexture', 'textureChoice', 'tint', 'hue'].every((name) => Object.hasOwn(value, name))
+        || !Array.isArray(value.tint) || value.tint.length !== 4 || value.tint[3] !== 1
+        || !value.tint.every((scalar) => Number.isFinite(scalar) && scalar >= 0 && scalar <= 1 && Math.fround(scalar) === scalar)
+        || !Number.isFinite(value.hue) || value.hue < -1 || value.hue > 1 || Math.fround(value.hue) !== value.hue) {
+        throw new TypeError('Invalid initialized native ItemVisual state.');
+    }
+
+    if (rules !== undefined) {
+        const domain = normalizeItemVisualRules(rules);
+        /**
+         * Check a selected index against its source texture domain.
+         *
+         * @param {number} index - Selected index, or -1 for an empty domain.
+         * @param {number} count - Number of source texture choices.
+         * @returns {boolean} Whether the selection is in bounds.
+         */
+        const validIndex = (index, count) => count === 0 ? index === -1 : index >= 0 && index < count;
+
+        if (!validIndex(value.baseTexture, domain.baseTextureCount) || !validIndex(value.textureChoice, domain.textureChoiceCount)
+            || (!domain.allowRandomHue && value.hue !== 0)
+            || (!domain.allowRandomTint && value.tint.some((scalar) => scalar !== 1))) {
+            throw new TypeError('ItemVisual selection conflicts with captured source XML bounds.');
+        }
+    }
+
+    return {
+        baseTexture: requireInteger(value.baseTexture, 'ItemVisual base texture', -1, 4_095),
+        textureChoice: requireInteger(value.textureChoice, 'ItemVisual texture choice', -1, 4_095),
+        tint: [...value.tint], hue: value.hue,
+    };
+}
+
 /**
  * Detached engine state. Values are copies, so mutating a snapshot cannot
  * change the simulation.
@@ -97,6 +265,7 @@
  * @property {boolean} vehicleObstructed Source vehicle-obstruction flag.
  * @property {boolean} solidFloor Source solidfloor flag.
  * @property {boolean} canStand Native source floor/adjacent-edge predicate.
+ * @property {boolean|null} haveRoof Native source roof fact, or null when authority is unknown.
  */
 
 /**
@@ -113,7 +282,16 @@
  * @property {function(number): void} frameStep Advances one frame using uncapped source elapsed time.
  * @property {import('../types/mod-api').ModQueuedActions} actions Native timed FIFO.
  * @property {import('../types/mod-api').ModSourceTiming} sourceTiming Native clock and supported traits.
+ * @property {function(): object} worldClockState Reads the native canonical clock.
+ * @property {function(object): void} importWorldClockState Atomically restores source fields.
+ * @property {function(number, string=): void} initializeClimate Initializes the native source producer once with a local calendar zone.
+ * @property {function(): boolean} isClimateInitialized Reads native producer admission.
+ * @property {function(): boolean} canSaveClimateState Probes actual optional native exports.
+ * @property {function(): Uint8Array} saveClimateState Captures exact native weather including absence.
+ * @property {function(Uint8Array): void} loadClimateState Restores exact native weather atomically.
  * @property {object} sourceActions Private source callback adapter; never exposed to mods.
+ *   squareStaticMovingObjectCount(x, y, z) returns the admitted model's count for a loaded
+ *   native source square; absent metadata refuses. Static-mover admission remains unsupported.
  * @property {function(): boolean} canSaveQueueState Actual native portable queue capability.
  * @property {function(): Uint8Array} saveQueueState Portable native queue bytes.
  * @property {function(Uint8Array): void} loadQueueState Atomic native queue restore.
@@ -129,6 +307,7 @@
  *   movement, preserving actor position, speed and tick.
  * @property {function(object, object): object} registerItemDefinition Registers a numeric WASM row with source metadata.
  * @property {function(): object[]} itemDefinitions Reads ordered detached definitions.
+ * @property {function(string): object|null} getItemDefinition Reads one detached current definition.
  * @property {function(string): void} beginItemDefinitionRegistration Begins one owner's activation.
  * @property {function(string): void} commitItemDefinitionRegistration Publishes that activation.
  * @property {function(string): void} rollbackItemDefinitionRegistration Restores first-touch rows and metadata.
@@ -1214,6 +1393,9 @@ async function createEngine(source) {
         const interactionRows = [];
         const reachRows = [];
         const curtainRows = [];
+        const rainBlockerRows = [];
+        const rainBlockerWire = typeof api.door_import_rain_blockers_version === 'function'
+            && typeof api.door_import_rain_blockers === 'function';
         const numeric = rows.map((row, index) => {
             requireMoodleObject(row, 'Door row');
             const x = requireInteger(row.x, 'door x', -25_600, 25_855);
@@ -1235,6 +1417,14 @@ async function createEngine(source) {
             if (doubleDoor !== 0 && garageDoor !== 0) {
                 throw new TypeError('Door cannot be both double and garage.');
             }
+
+            if (row.rainBlockers !== undefined && (!Array.isArray(row.rainBlockers) || row.rainBlockers.length !== 4)) {
+                throw new TypeError('door rainBlockers requires four source flag masks.');
+            }
+
+            rainBlockerRows.push(row.rainBlockers === undefined
+                ? null
+                : Array.from({ length: 4 }, (_, state) => requireInteger(row.rainBlockers[state], 'door rainBlockers', 0, 3)));
 
             if (row.interactionProperties !== undefined
                 && (!Array.isArray(row.interactionProperties) || row.interactionProperties.length !== 4)) {
@@ -1313,6 +1503,8 @@ async function createEngine(source) {
         const squareIds = new Set();
         const squareReachRows = [];
         const squareFloorRows = [];
+        const unknownRainBlockers = rainBlockerWire ? 4 : 0;
+
         const squareRows = squares.map((row) => {
             requireMoodleObject(row, 'Door square');
             const x = requireInteger(row.x, 'square x', -25_600, 25_855);
@@ -1348,7 +1540,10 @@ async function createEngine(source) {
                 doorMask(row.windows ?? 0, 'square windows'), doorMask(row.doorWalls ?? 0, 'square doorWalls'),
                 doorMask(row.hoppableEdges === undefined ? 0 : row.hoppableEdges, 'square hoppableEdges'),
                 doorMask(row.windowEdges === undefined ? row.windows ?? 0 : row.windowEdges, 'square windowEdges'),
-                row.interactionProperties === undefined ? 0 : interactionMask(row.interactionProperties, 'square interactionProperties')];
+                row.interactionProperties === undefined ? 0 : interactionMask(row.interactionProperties, 'square interactionProperties'),
+                row.rainBlockers === undefined
+                    ? unknownRainBlockers
+                    : requireInteger(row.rainBlockers, 'square rainBlockers', 0, 3)];
         });
 
         if (reachRows.some((row) => row !== null) || squareReachRows.some((row) => row !== null)) {
@@ -1363,9 +1558,17 @@ async function createEngine(source) {
             requireOptional('importDoors floor metadata', ['door_square_floor_stage']);
         }
 
+        if (rainBlockerRows.some((row) => row !== null) || squares.some((row) => row.rainBlockers !== undefined)) {
+            requireOptional('importDoors rainBlockers', ['door_import_rain_blockers_version', 'door_import_rain_blockers']);
+        }
+
         scratch('importDoors');
         requireAccepted(api.door_import_begin(seed, lockedHouses, Number(initializeLocks)), 'importDoors');
         try {
+            if (rainBlockerWire) {
+                requireAccepted(api.door_import_rain_blockers_version(1), 'importDoors rainBlockers version');
+            }
+
             for (const [index, row] of numeric.entries()) {
                 doorWords(row, 'importDoors');
                 requireAccepted(api.door_import_stage(), 'importDoors row');
@@ -1378,6 +1581,10 @@ async function createEngine(source) {
 
                 if (curtainRows[index] !== null) {
                     requireAccepted(api.door_import_curtain_eligibility(row[0], curtainRows[index]), 'importDoors curtainCapabilities');
+                }
+
+                if (rainBlockerRows[index] !== null) {
+                    requireAccepted(api.door_import_rain_blockers(row[0], ...rainBlockerRows[index]), 'importDoors rainBlockers');
                 }
             }
 
@@ -1428,6 +1635,7 @@ async function createEngine(source) {
         const row = {
             x: view.getFloat64(0, true), y: view.getFloat64(8, true), z: view.getFloat64(16, true),
             roomId: view.getFloat64(24, true), canStand: view.getFloat64(40, true) !== 0,
+            haveRoof: (flags & 64) !== 0 ? (flags & 128) !== 0 : null,
         };
 
         for (const [bit, name] of squareBooleanNames.entries()) {
@@ -1650,11 +1858,29 @@ async function createEngine(source) {
             return null;
         }
 
-        if (!policyNames[token]) {
+        if (policyNames[token] === undefined) {
             throw new Error('Native container policy metadata is unavailable.');
         }
 
         return policyNames[token];
+    }
+
+    /**
+     * Original instance categories allow both null and the empty Java string.
+     *
+     * @param {string|null|undefined} value - Exact source category or Lua nil.
+     * @returns {number} Native nullable string token.
+     */
+    function displayCategoryToken(value) {
+        if (value === null || value === undefined) {
+            return 0;
+        }
+
+        if (typeof value !== 'string') {
+            throw new TypeError('displayCategory must be a string or null.');
+        }
+
+        return intern(value, policyIds, policyNames);
     }
 
     let definitionTransaction = null;
@@ -2052,6 +2278,47 @@ async function createEngine(source) {
         return ordinal;
     }
 
+    // Exact ScriptItem fields copied by InstanceItem; order is the private native ABI.
+    const tooltipFields = [
+        ['insulation', 0], ['windResistance', 0], ['waterResistance', 0],
+        ['biteDefense', 0], ['scratchDefense', 0], ['bulletDefense', 0],
+        ['runSpeedModifier', 1], ['combatSpeedModifier', 1], ['cosmetic', false],
+        ['visionModifier', 1], ['hearingModifier', 1], ['discomfortModifier', 0],
+        ['fatigueChange', 0], ['maxAmmo', 0], ['maxCapacity', -1], ['itemCapacity', -1],
+        ['mechanicType', 0], ['wetCooldown', 0], ['wet', false],
+        ['equippedNoSprint', false], ['conditionAffectsCapacity', false],
+    ];
+
+    /**
+     * Read a complete bounded native tooltip page before another scratch operation.
+     *
+     * @param {string} name - Native reader.
+     * @param {number} id - Native definition ordinal or item ID.
+     * @param {number} page - Private page index.
+     * @returns {number[]} Detached numeric words.
+     */
+    function tooltipPage(name, id, page) {
+        requireOptional('item tooltip', [name]);
+        requireAccepted(api[name](id, page), 'item tooltip');
+        const view = scratch('item tooltip');
+
+        return Array.from({ length: 12 }, (_, index) => view.getFloat64(index * 8, true));
+    }
+
+    /**
+     * Capture exact factory instance values, never condition-gated presentation values.
+     *
+     * @param {number} id - Stable item ID.
+     * @returns {object} Portable native instance state.
+     */
+    function itemTooltipRecord(id) {
+        const values = [...tooltipPage('item_tooltip_read', id, 0), ...tooltipPage('item_tooltip_read', id, 1)].slice(0, 22);
+        const live = tooltipPage('item_tooltip_read', id, 2);
+        const holes = [...tooltipPage('item_tooltip_read', id, 3), ...tooltipPage('item_tooltip_read', id, 4)].slice(0, 18);
+
+        return { values, bloodLevel: live[0], dirtyness: live[1], holes };
+    }
+
     /**
      * Combines detached source metadata with authoritative numeric fields.
      *
@@ -2073,9 +2340,13 @@ async function createEngine(source) {
         requireAccepted(api.item_definition_container_read(ordinal), 'itemDefinitions container');
         const bagView = scratch('itemDefinitions container');
         const bag = Array.from({ length: 9 }, (_, index) => bagView.getFloat64(index * 8, true));
+        const tooltip = [...tooltipPage('item_definition_tooltip_read', ordinal, 0),
+            ...tooltipPage('item_definition_tooltip_read', ordinal, 1)].slice(0, 22);
 
         return {
             ...structuredClone(metadata),
+            ...Object.fromEntries(tooltipFields.slice(0, 12).map(([name], index) => [name,
+                index === 8 ? tooltip[index] !== 0 : tooltip[index]])),
             owner: ownerNames[values[0]],
             conditionMax: values[1],
             bodyLocation: bodyLocationName(values[2]),
@@ -2103,7 +2374,8 @@ async function createEngine(source) {
      */
     function registerItemDefinition(definition, { owner, override = false } = {}) {
         requireOptional('registerItemDefinition', ['item_definition_register', 'item_definition_read', 'inventory_state_read',
-            'item_definition_equip_set', 'item_definition_container_set', 'item_definition_container_read']);
+            'item_definition_equip_set', 'item_definition_container_set', 'item_definition_container_read',
+            'item_definition_presentation_set', 'item_definition_tooltip_set', 'item_definition_tooltip_read']);
         scratch('registerItemDefinition');
 
         if (definition === null || typeof definition !== 'object' || Array.isArray(definition)) {
@@ -2136,6 +2408,19 @@ async function createEngine(source) {
         const ordinal = previous ?? definitionMetadata.length;
         // Clone before dispatch: an uncloneable source field cannot strand a numeric row.
         const metadata = structuredClone(definition);
+        const previousRules = previous === undefined ? undefined : definitionMetadata[previous].itemVisualRules;
+        const visualRules = Object.hasOwn(metadata, 'itemVisualRules') ? normalizeItemVisualRules(metadata.itemVisualRules) : previousRules;
+
+        if (visualRules !== undefined) {
+            if (!metadata.clothingItem || (previousRules !== undefined && JSON.stringify(previousRules) !== JSON.stringify(visualRules))
+                || (definitionTransaction && previousRules === undefined)) {
+                throw new TypeError('ItemVisual source rules require stable original metadata outside activation transactions.');
+            }
+
+            metadata.itemVisualRules = visualRules;
+            requireOptional('registerItemDefinition ItemVisual rules', ['item_visual_rules_register']);
+        }
+
         const tags = Object.hasOwn(metadata, 'tags') ? metadata.tags : [];
 
         if (!Array.isArray(tags)) {
@@ -2176,6 +2461,44 @@ async function createEngine(source) {
         const categoryToken = policyToken(sourceCategory, 'category', true);
         const onlyCategory = policyToken(definition.onlyAcceptCategory, 'onlyAcceptCategory', true);
         const acceptFunction = policyToken(definition.acceptItemFunction, 'acceptItemFunction');
+        const displayCategory = displayCategoryToken(definition.displayCategory);
+        /*
+        MediaCategory describes a script, not its instance recordedMediaIndex.
+        Keep potentially media-bearing instances unresolved until real index/registry producers exist.
+        */
+        const unresolvedRecordedMedia = Boolean(definition.recordedMedia || definition.mediaData
+            || (definition.mediaCategory !== null && definition.mediaCategory !== undefined)
+            || (definition.recordedMediaCat !== null && definition.recordedMediaCat !== undefined)
+            || (definition.recordedMediaIndex !== null && definition.recordedMediaIndex !== undefined)
+            || metadata.rawFields?.some((field) => /^(?:mediaCategory|recordedMedia|mediaData|recordedMediaIndex)$/iu.test(field.name)));
+        /*
+        No generic item modData or creation callback state is represented by this ABI.
+        This marks unresolved authority, not an itemNoRecipes preference.
+        */
+        const unresolvedNoRecipes = ['modData', 'defaultModData', 'itemNoRecipes', 'onCreate', 'luaCreate', 'itemConfig', 'itemConfigKey']
+            .some((key) => metadata[key] !== null && metadata[key] !== undefined)
+            || Boolean(metadata.rawFields?.some((field) => field.name.trim() === 'itemNoRecipes'
+                || /^(?:modData|defaultModData|onCreate|luaCreate|itemConfig)$/iu.test(field.name.trim())));
+        const presentationFlags = doorFlags({
+            hidden: definition.hidden ?? false,
+            food: itemType === 'food',
+            keyRingType: itemType === 'keyring',
+            keyRingTag: metadata.tags.includes('base:keyring'),
+            specialUnwanted: unresolvedRecordedMedia
+                || ['literatureTitle', 'printMedia', 'collectibleKey'].some((key) => definition.modData?.[key] !== null && definition.modData?.[key] !== undefined)
+                || Boolean(metadata.rawFields?.some((field) => /^(?:literatureTitle|printMedia|collectibleKey)$/iu.test(field.name))),
+            clothing: itemType === 'clothing',
+            bloodClothingType: metadata.rawFields?.some((field) => /^BloodLocation$/iu.test(field.name)) ?? false,
+            onBreak: Boolean(definition.onBreak || metadata.rawFields?.some((field) => /^OnBreak$/iu.test(field.name) && field.value)),
+            breakWhenWet: metadata.tags.includes('base:breakwhenwet'),
+            noDetect: metadata.tags.includes('base:nodetect'),
+            showPoison: metadata.tags.includes('base:showpoison'),
+            literature: itemType === 'literature',
+            unresolvedRecordedMedia,
+            mapClass: itemType === 'map',
+            unresolvedNoRecipes,
+            drainableClass: itemType === 'drainable',
+        }, ['hidden', 'food', 'keyRingType', 'keyRingTag', 'specialUnwanted', 'clothing', 'bloodClothingType', 'onBreak', 'breakWhenWet', 'noDetect', 'showPoison', 'literature', 'unresolvedRecordedMedia', 'mapClass', 'unresolvedNoRecipes', 'drainableClass']);
         const declaredUnsupported = definition.unsupportedSubtype ?? false;
 
         if (typeof declaredUnsupported !== 'boolean') {
@@ -2199,9 +2522,79 @@ async function createEngine(source) {
                 || Boolean(definition.ammoType) || unsupportedFields(metadata.rawFields)
                 || ['CandleLit', 'Lantern_HurricaneLit'].includes(definition.fullType.slice(definition.fullType.lastIndexOf('.') + 1)),
         }, ['lightWhenAttached', 'fakeEquipped', 'unsupportedSubtype']);
+        const tooltip = tooltipFields.map(([name, initial], index) => {
+            let sourceName = name.toLowerCase();
+
+            if (name === 'wet') {
+                sourceName = 'iswet';
+            } else if (name === 'mechanicType') {
+                sourceName = 'vehicletype';
+            }
+
+            const field = metadata.rawFields?.findLast((entry) => entry.name.trim().toLowerCase() === sourceName && !entry.children);
+            let value = definition[name] ?? (name === 'mechanicType' ? definition.vehicleType : undefined)
+                ?? (field ? field.value : initial);
+
+            if ([8, 18, 19, 20].includes(index)) {
+                if (field && !Object.hasOwn(definition, name)) {
+                    value = String(value).toLowerCase() === 'true';
+                }
+
+                if (typeof value !== 'boolean') {
+                    throw new TypeError(`${name} must be boolean.`);
+                }
+
+                return Number(value);
+            }
+
+            if (field && !Object.hasOwn(definition, name)) {
+                value = Number(value);
+            }
+
+            if ([13, 14, 15, 16].includes(index)) {
+                const integer = requireInteger(value, name, -0x80_00_00_00, 0x7F_FF_FF_FF);
+
+                return index === 15 ? Math.fround(integer) : integer;
+            }
+
+            requireCoordinate(value, name);
+
+            if (Math.abs(value) > 3.402_823_466_385_288_6e38) {
+                throw new RangeError(`${name} must fit finite f32.`);
+            }
+
+            value = Math.fround(value);
+
+            return index === 12 ? Math.fround(value / 100) : value;
+        });
+        /* GameEntity starts with no components. Only actual script component/attribute
+           declarations or creation callbacks invalidate that constructor authority. */
+        const attributeNames = /^(?:TestQuality|TestUses|TestCondition|TestBool|TestString2?|TestItemType|TestCategories|TestTags|Sharpness|HeadCondition|HeadConditionMax|TimesHeadRepaired|Quality|Origin[XYZ])$/iu;
+        const unresolvedTooltip = unresolvedNoRecipes || declaredUnsupported
+            || ['attributes', 'fluidContainer', 'durabilityComponent', 'extraItems', 'spices',
+                'researchableRecipes', 'forageFocusCategories', 'gunType'].some((name) => definition[name] !== null
+                    && definition[name] !== undefined)
+                || Boolean(metadata.rawFields?.some((field) => field.children
+                    || attributeNames.test(field.name.trim())
+                    || /^(?:EntityTemplate|GameEntityScript|Component|FluidContainer|DurabilityComponent|ExtraItems|Spices|ResearchableRecipes|ClothingItemExtra|ItemAfterCleaning|ForageFocusCategories|GunType)$/iu.test(field.name.trim())))
+                || metadata.tags.some((tag) => ['base:gasmask', 'base:respirator', 'base:improvisedgasmask',
+                    'base:gasmasknofilter', 'base:respiratornofilter', 'base:scba'].includes(tag));
+
+        const fishingLure = definition.fishingLure
+            ?? metadata.rawFields?.findLast((field) => field.name.trim().toLowerCase() === 'fishinglure')?.value
+            ?? false;
+
+        tooltip.push(Number(unresolvedTooltip) | (metadata.tags.includes('base:showcondition') ? 2 : 0)
+            | (String(fishingLure).toLowerCase() === 'true' ? 4 : 0));
 
         for (const key of ['owner', 'conditionMax', 'stackLimit', 'removeOnBroken', 'conditionLowerChanceOneIn', 'weight']) {
             delete metadata[key];
+        }
+
+        if (previous !== undefined) {
+            requireOptional('registerItemDefinition instance authority', ['item_definition_class_check']);
+            requireAccepted(api.item_definition_class_check(ordinal, presentationFlags),
+                'registerItemDefinition instance authority');
         }
 
         const ownerId = intern(owner, ownerIds, ownerNames);
@@ -2213,6 +2606,18 @@ async function createEngine(source) {
         requireAccepted(api.item_definition_equip_set(ordinal, ownerId, equipSlot), 'registerItemDefinition CanBeEquipped');
         requireAccepted(api.item_definition_container_set(ordinal, ownerId, Number(isBag), capacity, reduction,
             maxItemSize, typeToken, categoryToken, onlyCategory, acceptFunction, flags), 'registerItemDefinition container');
+        requireAccepted(api.item_definition_presentation_set(ordinal, ownerId, presentationFlags, displayCategory),
+            'registerItemDefinition presentation');
+        requireOptional('registerItemDefinition tooltip', ['item_definition_tooltip_set']);
+
+        for (const [field, value] of tooltip.entries()) {
+            requireAccepted(api.item_definition_tooltip_set(ordinal, ownerId, field, value), 'registerItemDefinition tooltip');
+        }
+
+        if (visualRules !== undefined && previousRules === undefined) {
+            requireAccepted(api.item_visual_rules_register(ordinal, visualRules.baseTextureCount, visualRules.textureChoiceCount,
+                Number(visualRules.allowRandomTint) | (Number(visualRules.allowRandomHue) << 1)), 'registerItemDefinition ItemVisual rules');
+        }
 
         if (definitionTransaction && ordinal < definitionTransaction.start
             && !definitionTransaction.journal.has(ordinal)) {
@@ -2235,6 +2640,20 @@ async function createEngine(source) {
 
         return Array.from({ length: api.item_definition_count() >>> 0 },
             (_, ordinal) => resolvedDefinition(ordinal));
+    }
+
+    /**
+     * Reads one definition without copying the registered catalog.
+     *
+     * @param {string} fullType - Exact qualified definition identity.
+     * @returns {object|null} Detached authoritative definition, or absence.
+     */
+    function getItemDefinition(fullType) {
+        requireName(fullType, 'fullType');
+        requireOptional('getItemDefinition', ['item_definition_read', 'item_definition_container_read']);
+        const ordinal = definitionOrdinals.get(fullType);
+
+        return ordinal === undefined ? null : resolvedDefinition(ordinal);
     }
 
     /**
@@ -2354,6 +2773,95 @@ async function createEngine(source) {
         requireAccepted(status, 'getItem');
 
         return readItemRecord();
+    }
+
+    /**
+     * Read item-owned visual state even while carried; ownership is not inferred here.
+     *
+     * @param {number} id - Native stable item identity.
+     * @returns {object} Detached source offsets, rotations and scale.
+     */
+    function itemWorldVisual(id) {
+        requireOptional('itemWorldVisual', ['item_world_visual_read']);
+        requireAccepted(api.item_world_visual_read(id), 'itemWorldVisual');
+        const view = scratch('itemWorldVisual');
+
+        return Object.fromEntries(WORLD_ITEM_VISUAL_FIELDS.map((name, index) => [name, view.getFloat64(index * 8, true)]));
+    }
+
+    /**
+     * Read initialized native ItemVisual without creating it or drawing RNG.
+     *
+     * @param {number} id - Stable native item identity.
+     * @returns {object} Optional actual visual field, omitted when never initialized.
+     */
+    function itemVisualRecord(id) {
+        requireOptional('itemVisual', ['item_visual_read']);
+        const status = api.item_visual_read(id);
+
+        if (status === 1) {
+            return {};
+        }
+
+        requireAccepted(status, 'itemVisual');
+        const view = scratch('itemVisual');
+
+        return {
+            visual: {
+                baseTexture: view.getFloat64(0, true), textureChoice: view.getFloat64(8, true), hue: view.getFloat64(16, true),
+                tint: Array.from({ length: 4 }, (_, index) => view.getFloat64((index + 3) * 8, true)),
+            },
+        };
+    }
+
+    /**
+     * Explicit source first use after the original ClothingItem XML becomes ready.
+     * Native mutation refuses activation/import/source-transfer transactions.
+     *
+     * @param {number} id - Stable item identity.
+     * @param {object} rules - Original XML counts and randomization flags.
+     * @returns {object} Persisted source selection, never a renderer-generated fallback.
+     */
+    function initializeItemVisual(id, rules) {
+        requireOptional('initializeItemVisual', ['item_visual_initialize', 'item_visual_read']);
+        const domain = normalizeItemVisualRules(rules);
+
+        const item = getItem(id);
+
+        if (!item || !definitionMetadata[item.definitionOrdinal].clothingItem) {
+            throw new TypeError('ItemVisual initialization requires an actual ClothingItem definition.');
+        }
+
+        requireAccepted(api.item_visual_initialize(id, domain.baseTextureCount, domain.textureChoiceCount,
+            Number(domain.allowRandomTint) | (Number(domain.allowRandomHue) << 1)), 'initializeItemVisual');
+        definitionMetadata[item.definitionOrdinal].itemVisualRules = domain;
+
+        return itemVisualRecord(id).visual;
+    }
+
+    /**
+     * Private renderer snapshot: square base plus offsets, never absolute position plus offsets.
+     *
+     * @returns {object[]} Immutable native-floor-owned draw records.
+     */
+    function worldItemVisuals() {
+        const floors = new Set(containers().filter((row) => row.kind === 'floor').map((row) => row.id));
+
+        return Object.freeze(items().filter((row) => row.worldPosition !== null && floors.has(row.ownerContainerId))
+            .map((row) => {
+                const actual = itemVisualRecord(row.id);
+
+                if (actual.visual) {
+                    Object.freeze(actual.visual.tint);
+                    Object.freeze(actual.visual);
+                }
+
+                return Object.freeze({
+                    id: row.id, fullType: row.fullType, definitionOrdinal: row.definitionOrdinal,
+                    x: Math.floor(row.worldPosition.x), y: Math.floor(row.worldPosition.y), z: row.worldPosition.z,
+                    ...itemWorldVisual(row.id), ...actual,
+                });
+            }));
     }
 
     /**
@@ -2645,13 +3153,16 @@ async function createEngine(source) {
     function exportInventoryGraph() {
         requireOptional('exportInventoryGraph', ['container_next_id', 'container_config_read']);
         const containerRows = containers();
-        const itemRows = items();
+        const itemRows = items().map((row) => ({
+            ...row, worldVisual: itemWorldVisual(row.id), ...itemVisualRecord(row.id), tooltipState: itemTooltipRecord(row.id),
+            ...(sourceActions.itemIsClothing(row.id) ? { wetness: sourceActions.itemWetness(row.id) } : {}),
+        }));
 
         api.container_config_read();
         const view = scratch('container configuration');
 
         return {
-            version: 1, containers: containerRows, items: itemRows,
+            version: 2, containers: containerRows, items: itemRows,
             nextContainerId: requireResult(api.container_next_id(), 'next container ID', 2, 0x1_00_00_00_00),
             organized: view.getFloat64(0, true) !== 0, disorganized: view.getFloat64(8, true) !== 0,
             equippedMultiplier: view.getFloat64(16, true), dropItemsOnSquareCenter: view.getFloat64(24, true) !== 0,
@@ -2668,14 +3179,28 @@ async function createEngine(source) {
     function importInventoryGraph(graph) {
         requireOptional('importInventoryGraph', ['item_import_begin', 'item_import_stage', 'item_import_commit',
             'item_import_abort', 'container_import_stage', 'container_import_policy_stage', 'container_import_allocator',
-            'item_import_source_state']);
+            'item_import_source_state', 'item_import_wetness', 'item_import_tooltip', 'item_import_world_visual', 'item_import_visual']);
         requireMoodleObject(graph, 'Inventory graph');
 
-        if (graph.version !== 1 || !Array.isArray(graph.containers) || graph.containers.length < 1
+        if (![1, 2].includes(graph.version) || !Array.isArray(graph.containers) || graph.containers.length < 1
             || graph.containers.length > 8_193 || !Array.isArray(graph.items) || graph.items.length > 4_096
             || typeof graph.organized !== 'boolean' || typeof graph.disorganized !== 'boolean'
             || typeof graph.dropItemsOnSquareCenter !== 'boolean') {
             throw new TypeError('Invalid inventory graph shape.');
+        }
+
+        if (graph.version === 1) {
+            graph = {
+                ...graph, version: 2, items: graph.items.map((record) => {
+                    if (Object.hasOwn(record, 'wetness')) {
+                        throw new TypeError('Version-one inventory graphs cannot contain wetness.');
+                    }
+
+                    const type = definitionMetadata[definitionOrdinal(record.fullType)].type?.toLowerCase().replace(/^base:/u, '') ?? 'normal';
+
+                    return type === 'clothing' ? { ...record, wetness: 0 } : record;
+                }),
+            };
         }
 
         const next = requireInteger(graph.nextContainerId, 'next container ID', 2, 0x1_00_00_00_00);
@@ -2719,7 +3244,47 @@ async function createEngine(source) {
         });
         const numeric = graph.items.map((record) => {
             requireMoodleObject(record, 'Imported item');
+
+            if (['modData', 'defaultModData', 'itemNoRecipes'].some((key) => Object.hasOwn(record, key))) {
+                throw new TypeError('Unsupported original item modData persistence.');
+            }
+
+            if (['attributes', 'fluidContainer', 'durabilityComponent', 'currentAmmoCount',
+                'remoteControlId', 'haveBeenRepaired', 'attachedSlot'].some((key) => Object.hasOwn(record, key))) {
+                throw new TypeError('Unprojected original item instance persistence.');
+            }
+
+            if (Object.hasOwn(record, 'visual')) {
+                normalizeItemVisual(record.visual);
+            }
+
+            if (Object.hasOwn(record, 'tooltipState')) {
+                const state = record.tooltipState;
+
+                requireMoodleObject(state, 'Item tooltip state');
+
+                if (Object.keys(state).some((name) => !['values', 'bloodLevel', 'dirtyness', 'holes'].includes(name))
+                    || !Array.isArray(state.values) || state.values.length !== 22
+                    || !state.values.every(Number.isFinite)
+                    || !Array.isArray(state.holes) || state.holes.length !== 18
+                    || !state.holes.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
+                    || ![state.bloodLevel, state.dirtyness].every((value) => Number.isFinite(value)
+                        && value >= 0 && value <= 100 && Math.fround(value) === value)) {
+                    throw new TypeError('Invalid native item tooltip state.');
+                }
+            }
+
             const ordinal = definitionOrdinal(record.fullType);
+
+            if (Object.hasOwn(record, 'visual')) {
+                const definition = definitionMetadata[ordinal];
+
+                if (!definition.clothingItem || !definition.itemVisualRules) {
+                    throw new TypeError('Saved ItemVisual needs its captured original XML selection bounds.');
+                }
+
+                normalizeItemVisual(record.visual, definition.itemVisualRules);
+            }
 
             if (record.definitionOrdinal !== undefined && record.definitionOrdinal !== ordinal) {
                 throw new TypeError('Item definition ordinal conflicts with fullType.');
@@ -2727,6 +3292,13 @@ async function createEngine(source) {
 
             if (typeof record.favorite !== 'boolean' || typeof record.consumed !== 'boolean') {
                 throw new TypeError('Item favorite and consumed flags must be booleans.');
+            }
+
+            const clothing = definitionMetadata[ordinal].type?.toLowerCase().replace(/^base:/u, '') === 'clothing';
+
+            if ((clothing && (!Object.hasOwn(record, 'wetness') || !Number.isFinite(record.wetness) || record.wetness < 0 || record.wetness > 100))
+                || (!clothing && Object.hasOwn(record, 'wetness'))) {
+                throw new TypeError('Inventory graph wetness requires finite [0,100] Clothing state only.');
             }
 
             const world = record.worldPosition;
@@ -2761,6 +3333,14 @@ async function createEngine(source) {
                 Number(world !== null),
             ];
         });
+        const visuals = graph.items.map((record) => normalizeWorldItemVisual(
+            Object.hasOwn(record, 'worldVisual')
+                ? record.worldVisual
+                : {
+                        xoff: record.worldPosition === null ? 0 : record.worldPosition.x - Math.floor(record.worldPosition.x),
+                        yoff: record.worldPosition === null ? 0 : record.worldPosition.y - Math.floor(record.worldPosition.y),
+                        zoff: 0, worldXRotation: 0, worldYRotation: 0, worldZRotation: -1, worldScale: 1,
+                    }, record.worldPosition));
 
         if (graph.wornOrder !== undefined && (!Array.isArray(graph.wornOrder) || graph.wornOrder.length > 4_096)) {
             throw new TypeError('Worn order must be a bounded array.');
@@ -2792,8 +3372,39 @@ async function createEngine(source) {
 
             for (const [index, row] of numeric.entries()) {
                 requireAccepted(api.item_import_stage(...row), 'importInventoryGraph item');
+                const visualView = scratch('importInventoryGraph world visual');
+
+                for (const [field, name] of WORLD_ITEM_VISUAL_FIELDS.entries()) {
+                    visualView.setFloat64(field * 8, visuals[index][name], true);
+                }
+
+                requireAccepted(api.item_import_world_visual(row[0]), 'importInventoryGraph world visual');
+
+                if (Object.hasOwn(graph.items[index], 'visual')) {
+                    const state = graph.items[index].visual;
+                    const stateView = scratch('importInventoryGraph ItemVisual');
+
+                    for (const [field, value] of [state.baseTexture, state.textureChoice, state.hue, ...state.tint].entries()) {
+                        stateView.setFloat64(field * 8, value, true);
+                    }
+
+                    requireAccepted(api.item_import_visual(row[0]), 'importInventoryGraph ItemVisual');
+                }
+
                 requireAccepted(api.item_import_source_state(row[0], Number(graph.items[index].favorite)
                 | (Number(graph.items[index].consumed) << 1)), 'importInventoryGraph item source state');
+
+                if (Object.hasOwn(graph.items[index], 'wetness')) {
+                    requireAccepted(api.item_import_wetness(row[0], graph.items[index].wetness), 'importInventoryGraph wetness');
+                }
+
+                if (Object.hasOwn(graph.items[index], 'tooltipState')) {
+                    const state = graph.items[index].tooltipState;
+
+                    for (const [field, value] of [...state.values, state.bloodLevel, state.dirtyness, ...state.holes].entries()) {
+                        requireAccepted(api.item_import_tooltip(row[0], field, value), 'importInventoryGraph tooltip');
+                    }
+                }
             }
 
             if (order !== undefined) {
@@ -3251,6 +3862,7 @@ async function createEngine(source) {
         ['source_door_could_be_open', [0, 1]],
         ['source_world_item_count', [0, 4_096]], ['source_world_item_get', [1, 4_294_967_295]],
         ['source_square_door_count', [0, 65_536]], ['source_square_door_get', [1, 4_294_967_295]],
+        ['source_square_static_moving_object_count', [0, 0]],
     ]);
 
     /**
@@ -3668,12 +4280,29 @@ async function createEngine(source) {
      * @param {string} name - Native export name.
      * @param {number[]} args - Native scalar arguments.
      * @param {number} [max=1] - Maximum accepted native result.
+     * @param {boolean} [integral=true] - Whether the original native value is an integer.
      * @returns {number} Validated native query value.
      */
-    function containerQuery(label, name, args, max = 1) {
+    function containerQuery(label, name, args, max = 1, integral = true) {
         requireOptional(label, [name]);
 
-        return requireResult(api[name](...args), label, 0, max);
+        const value = api[name](...args);
+
+        if (integral) {
+            return requireResult(value, label, 0, max);
+        }
+
+        if (value < 0) {
+            requireAccepted(value, label);
+        }
+
+        requireCoordinate(value, label);
+
+        if (value > max) {
+            throw new RangeError(`${label}: native result outside the accepted range.`);
+        }
+
+        return value;
     }
 
     /**
@@ -3907,9 +4536,538 @@ async function createEngine(source) {
         return f(f(coords.z) + Math.max(0, height));
     }
 
+    /**
+     * Validate private current-player input calls before crossing the integer ABI.
+     *
+     * @param {string} method - Private source operation.
+     * @param {string} name - Optional native export.
+     * @param {number} count - Exact accepted argument count.
+     * @param {Array<unknown>} args - Player index followed by strict booleans.
+     * @returns {Array<number>} Validated native scalar arguments.
+     */
+    function actorInputArgs(method, name, count, args) {
+        requireOptional(method, [name]);
+
+        if (args.length !== count) {
+            throw new TypeError(`${method} requires ${count} arguments.`);
+        }
+
+        const player = requireInteger(args[0], 'source player index', 0, 0xFF_FF_FF_FF);
+
+        for (const value of args.slice(1)) {
+            if (typeof value !== 'boolean') {
+                throw new TypeError(`${method} input flags must be boolean.`);
+            }
+        }
+
+        return [player, ...args.slice(1).map(Number)];
+    }
+
     const sourceActions = {
         actionRead, groupRead,
+        /**
+         * Read a native source clock field.
+         *
+         * @param {string} name - Source field name.
+         * @returns {number} Current native scalar.
+         */
+        worldClockGet: (name) => {
+            const field = [...WORLD_CLOCK_FIELDS, 'worldAgeHours', 'hour', 'minutes'].indexOf(name);
+
+            if (field === -1) {
+                throw new RangeError(`Unsupported source world clock getter: ${name}`);
+            }
+
+            requireOptional('worldClockGet', ['world_clock_get']);
+
+            return requireCoordinate(api.world_clock_get(field), `World clock ${name}`);
+        },
+        /**
+         * Assign a native source clock field.
+         *
+         * @param {string} name - Source field name.
+         * @param {number} value - Candidate scalar.
+         * @returns {void}
+         */
+        worldClockSet: (name, value) => {
+            const field = WORLD_CLOCK_FIELDS.indexOf(name);
+
+            if (field === -1) {
+                throw new RangeError(`Unsupported source world clock setter: ${name}`);
+            }
+
+            requireOptional('worldClockSet', ['world_clock_set']);
+            requireAccepted(api.world_clock_set(field, worldClockScalar(name, value)), 'worldClockSet');
+        },
+        /**
+         * Read the source calendar month length.
+         *
+         * @param {number} year - Source signed year.
+         * @param {number} month - Source zero-based month.
+         * @returns {number} Number of days in the month.
+         */
+        worldClockDaysInMonth: (year, month) => {
+            requireOptional('worldClockDaysInMonth', ['world_clock_days_in_month']);
+
+            return requireResult(api.world_clock_days_in_month(
+                requireInteger(year, 'clock year', -2_147_483_648, 2_147_483_647),
+                requireInteger(month, 'clock month', -2_147_483_648, 2_147_483_647)),
+            'worldClockDaysInMonth', 28, 31);
+        },
+        /**
+         * Apply the source clock hour transition check.
+         *
+         * @param {number} last - Previous source time.
+         * @param {number} now - Current source time.
+         * @returns {number} Source transition result.
+         */
+        worldClockCheckHours: (last, now) => {
+            requireOptional('worldClockCheckHours', ['world_clock_check_hours']);
+
+            return requireCoordinate(api.world_clock_check_hours(
+                worldClockScalar('timeOfDay', last), worldClockScalar('timeOfDay', now)), 'clock checkHours');
+        },
         getMetabolicTarget, setMetabolicTarget,
+        /**
+         * Read detached native transient input; no movement/save/SDK schema changes.
+         *
+         * @param {...unknown} args - Exactly the current player index (zero).
+         * @returns {object} Current and cached native aiming fields.
+         */
+        actorInputState: (...args) => {
+            const nativeArgs = actorInputArgs('actorInputState', 'source_actor_input_read', 1, args);
+
+            requireAccepted(api.source_actor_input_read(...nativeArgs), 'actorInputState');
+            const view = scratch('actorInputState');
+
+            return Object.fromEntries(['forceAim', 'charging', 'rawAiming', 'aiming', 'cachedAiming', 'cachedCharging', 'aimDown']
+                .map((name, index) => [name, view.getFloat64(index * 8, true) !== 0]));
+        },
+        /**
+         * Read the effective getter for the admitted local on-foot actor.
+         * Combat timers, hostile animation and NPC overrides are not admitted.
+         *
+         * @param {...unknown} args - Exactly the current player index (zero).
+         * @returns {boolean} Live native effective aiming.
+         */
+        actorIsAiming: (...args) => {
+            const [player] = actorInputArgs('actorIsAiming', 'source_actor_input_get', 1, args);
+
+            return requireResult(api.source_actor_input_get(player, 3), 'actorIsAiming', 0, 1) !== 0;
+        },
+        /**
+         * Execute the source's ordered force-aim, charging, raw-aim clear.
+         *
+         * @param {...unknown} args - Exactly the current player index (zero).
+         * @returns {void} Does not clear physical/cached input or cancel work.
+         */
+        nullifyAiming: (...args) => {
+            requireAccepted(api.source_actor_nullify_aiming(...actorInputArgs(
+                'nullifyAiming', 'source_actor_nullify_aiming', 1, args)), 'nullifyAiming');
+        },
+        /**
+         * Set the genuine native raw isAiming field, not a Lua mirror.
+         *
+         * @param {...unknown} args - Current player index and strict boolean.
+         * @returns {void} Sets only raw aiming.
+         */
+        setIsAiming: (...args) => {
+            const [player, value] = actorInputArgs('setIsAiming', 'source_actor_input_set', 2, args);
+
+            requireAccepted(api.source_actor_input_set(player, 0, value), 'setIsAiming');
+        },
+        /**
+         * Set the current actor's native ECS force-aim flag.
+         *
+         * @param {...unknown} args - Current player index and strict boolean.
+         * @returns {void} Sets only force aim.
+         */
+        setForceAim: (...args) => {
+            const [player, value] = actorInputArgs('setForceAim', 'source_actor_input_set', 2, args);
+
+            requireAccepted(api.source_actor_input_set(player, 1, value), 'setForceAim');
+        },
+        /**
+         * Toggle through the same native force-aim owner used by nullifyAiming.
+         *
+         * @param {...unknown} args - Exactly the current player index (zero).
+         * @returns {boolean} New native force-aim state.
+         */
+        toggleForceAim: (...args) => requireResult(api.source_actor_toggle_force_aim(...actorInputArgs(
+            'toggleForceAim', 'source_actor_toggle_force_aim', 1, args)), 'toggleForceAim', 0, 1) !== 0,
+        /**
+         * Refresh supported keyboard/mouse input from real resolved world bindings.
+         *
+         * @param {...unknown} args - Player, aim-in-world, running, sprinting.
+         * @returns {void} Samples cached input and copies it to the native actor.
+         */
+        refreshActorInput: (...args) => {
+            requireAccepted(api.source_actor_input_refresh(...actorInputArgs(
+                'refreshActorInput', 'source_actor_input_refresh', 4, args)), 'refreshActorInput');
+        },
+        /**
+         * Match current native floor ownership and the exact getItem world-position stamp.
+         *
+         * @param {number} id - Positive uint32 item identity; valid missing items return false.
+         * @param {number} ownerContainerId - Positive uint32 expected floor container identity.
+         * @param {number} x - Captured finite f64 world x.
+         * @param {number} y - Captured finite f64 world y.
+         * @param {number} z - Captured finite f64 elevation (the current model exposes zero).
+         * @returns {boolean} Whether the live item still has that floor placement.
+         */
+        itemMatchesFloorPlacement(id, ownerContainerId, x, y, z) {
+            requireOptional('itemMatchesFloorPlacement', ['source_item_matches_floor_placement']);
+
+            if (arguments.length !== 5) {
+                throw new TypeError('itemMatchesFloorPlacement requires 5 arguments.');
+            }
+
+            const result = api.source_item_matches_floor_placement(itemId(id), containerId(ownerContainerId),
+                requireCoordinate(x, 'floor placement x'), requireCoordinate(y, 'floor placement y'),
+                requireCoordinate(z, 'floor placement z'));
+
+            return requireResult(result, 'itemMatchesFloorPlacement', 0, 1) === 1;
+        },
+        /**
+         * Determine whether an item has the exact native Clothing subtype.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {boolean} Whether the item is Clothing.
+         */
+        itemIsClothing: (id) => containerQuery('itemIsClothing', 'item_leaf_query', [itemId(id), 3]) !== 0,
+        /**
+         * Read the original independent broken field.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {boolean} Whether the item is broken.
+         */
+        itemIsBroken: (id) => containerQuery('itemIsBroken', 'item_leaf_query', [itemId(id), 0]) !== 0,
+        /**
+         * Read the original mutable itemHeat value.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {number} The item's heat.
+         */
+        itemHeat: (id) => containerQuery('itemHeat', 'item_leaf_query', [itemId(id), 1], 3, false),
+        /**
+         * Read the original mutable wetness value.
+         *
+         * @param {number} id - Clothing identity.
+         * @returns {number} The item's wetness.
+         */
+        itemWetness: (id) => containerQuery('itemWetness', 'item_leaf_query', [itemId(id), 2], 100, false),
+        /**
+         * Read only the live fields used by Clothing.getName, independently of tooltip components.
+         *
+         * @param {number} id - Live clothing identity.
+         * @returns {object} Current naming fields, without definition or equipment snapshots.
+         */
+        itemNameState: (id) => {
+            id = itemId(id);
+            const live = tooltipPage('item_tooltip_read', id, 2);
+
+            return {
+                bloodLevel: live[0], dirtyness: live[1], wetness: live[2],
+                condition: live[7], conditionMax: live[8], broken: sourceActions.itemIsBroken(id),
+            };
+        },
+        /**
+         * Read source-backed generic and Clothing tooltip data. Unsupported component
+         * producers refuse explicitly; absent components come from native factory state.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {object} Detached authoritative tooltip state.
+         */
+        itemTooltipState: (id) => {
+            id = itemId(id);
+            const saved = itemTooltipRecord(id);
+            const live = tooltipPage('item_tooltip_read', id, 2);
+            const script = tooltipPage('item_tooltip_read', id, 5);
+
+            if (script[7] !== 0 || (saved.values[21] & 1) !== 0) {
+                throw new Error('Original item tooltip has unresolved component or creation-state authority.');
+            }
+
+            if (sourceActions.itemEquipmentState(id).attached) {
+                throw new Error('Original attached-item tooltip requires authoritative attachedSlot state.');
+            }
+
+            const values = saved.values;
+            const item = getItem(id);
+            const definition = definitionMetadata[definitionOrdinal(item.fullType)];
+
+            /**
+             * Read the last authored script value for a field.
+             *
+             * @param {string} name - Case-insensitive script field name.
+             * @returns {string|null} Authored value, or null when absent.
+             */
+            const raw = (name) => definition.rawFields?.findLast((field) => field.name.trim().toLowerCase() === name.toLowerCase())?.value ?? null;
+
+            return {
+                visionModifier: script[1], hearingModifier: script[2], discomfortModifier: script[3],
+                fatigueChange: values[12], maxAmmo: values[13], currentAmmoCount: script[11],
+                remoteControlId: live[9], haveBeenRepaired: live[10], attachedSlot: live[11],
+                maxCapacity: values[14], itemCapacity: values[15], conditionAffectsCapacity: script[6] !== 0,
+                mechanicType: script[4], wet: values[18] !== 0, wetCooldown: values[17],
+                equippedNoSprint: script[5] !== 0, hasSharpness: false, sharpness: 0,
+                fakeEquipped: script[8] !== 0, showCondition: script[9] !== 0, fishingLure: script[10] !== 0,
+                attributes: null, fluidContainer: null, worldFluidContainer: null, durability: null,
+                extraItems: [], spices: [], researchableRecipes: [], forageFocusCategories: [], gunType: null,
+                ammoType: definition.ammoType ?? raw('AmmoType'), tooltip: definition.tooltip ?? raw('Tooltip'),
+                clothing: sourceActions.itemIsClothing(id)
+                    ? {
+                            cosmetic: script[0] !== 0, insulation: values[0], windResistance: values[1], waterResistance: values[2],
+                            biteDefense: live[4], scratchDefense: live[5], bulletDefense: live[6],
+                            runSpeedModifier: values[6], combatSpeedModifier: values[7],
+                            bloodLevel: live[0], dirtyness: live[1], wetness: live[2], holeCount: live[3],
+                            bodyLocation: getItemDefinition(item.fullType).bodyLocation,
+                        }
+                    : null,
+            };
+        },
+        /**
+         * Set the original independent broken flag.
+         *
+         * @param {number} id - Live item identity.
+         * @param {boolean} value - New broken flag.
+         * @returns {void}
+         */
+        itemSetBroken: (id, value) => {
+            if (typeof value !== 'boolean') {
+                throw new TypeError('Item broken must be boolean.');
+            }
+
+            requireOptional('itemSetBroken', ['item_leaf_set']);
+            requireAccepted(api.item_leaf_set(itemId(id), 0, Number(value)), 'itemSetBroken (original OnBreak callback)');
+        },
+        /**
+         * Set the original heat value, clamped to [0, 3].
+         *
+         * @param {number} id - Live item identity.
+         * @param {number} value - New item heat.
+         * @returns {void}
+         */
+        itemSetHeat: (id, value) => {
+            requireOptional('itemSetHeat', ['item_leaf_set']);
+            requireAccepted(api.item_leaf_set(itemId(id), 1, requireCoordinate(value, 'item heat')), 'itemSetHeat');
+        },
+        /**
+         * Set the original wetness value, clamped to [0, 100].
+         *
+         * @param {number} id - Clothing identity.
+         * @param {number} value - New wetness.
+         * @returns {void}
+         */
+        itemSetWetness: (id, value) => {
+            requireOptional('itemSetWetness', ['item_leaf_set']);
+            requireAccepted(api.item_leaf_set(itemId(id), 2, requireCoordinate(value, 'item wetness')), 'itemSetWetness');
+        },
+        /**
+         * Apply the genuine base no-op updateAge callback.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {void}
+         */
+        itemUpdateAge: (id) => {
+            requireOptional('itemUpdateAge', ['item_update_age']);
+            requireAccepted(api.item_update_age(itemId(id)), 'itemUpdateAge (Food freezing, world-age clock, temperature and rot policy)');
+        },
+        /**
+         * Update Clothing wetness using native world-age and climate state.
+         *
+         * @param {number} id - Clothing identity.
+         * @param {boolean} [force=false] - Original equipped override.
+         * @returns {void}
+         */
+        itemUpdateWetness: (id, force = false) => {
+            if (typeof force !== 'boolean') {
+                throw new TypeError('Clothing wetness force must be boolean.');
+            }
+
+            requireOptional('itemUpdateWetness', ['item_update_wetness']);
+            requireAccepted(api.item_update_wetness(itemId(id), Number(force)), 'itemUpdateWetness (roof and climate authority)');
+        },
+        /**
+         * Flush the native Clothing wetness timestamp.
+         *
+         * @param {number} id - Clothing identity.
+         * @returns {void}
+         */
+        itemFlushWetness: (id) => {
+            requireOptional('itemFlushWetness', ['item_flush_wetness']);
+            requireAccepted(api.item_flush_wetness(itemId(id)), 'itemFlushWetness (roof and climate authority)');
+        },
+        /**
+         * Determine whether the original ScriptItem hidden flag is set.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {boolean} Whether the item is hidden.
+         */
+        itemIsHidden: (id) => containerQuery('itemIsHidden', 'item_presentation_query', [itemId(id), 0]) !== 0,
+        /**
+         * Apply the InventoryItem poison predicate in original tag/class order.
+         * Untagged Food refuses until its live poison and actor knowledge producers exist.
+         *
+         * @param {number} id - Live inventory item identity.
+         * @returns {boolean} Whether this player knows the poison.
+         */
+        playerIsKnownPoison: (id) => containerQuery('playerIsKnownPoison (Food poison and actor knowledge authority)',
+            'player_is_known_poison', [itemId(id)]) !== 0,
+        /**
+         * Determine whether an item is an original Food subtype.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {boolean} Whether the item is Food.
+         */
+        itemIsFood: (id) => containerQuery('itemIsFood', 'item_presentation_query', [itemId(id), 1]) !== 0,
+        /**
+         * Read original Literature subclass identity, independent of mutable category/name metadata.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {boolean} Whether the factory constructed a Literature instance.
+         */
+        itemIsLiterature: (id) => containerQuery('itemIsLiterature', 'item_presentation_query', [itemId(id), 6]) !== 0,
+        /**
+         * Read concrete DrainableComboItem identity, not usage fields or the separate Food subclass.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {boolean} Whether the factory constructed a DrainableComboItem.
+         */
+        itemIsDrainableComboItem: (id) => containerQuery('itemIsDrainableComboItem', 'item_presentation_query', [itemId(id), 7]) !== 0,
+        /**
+         * Apply the source non-recorded-media seen predicate; unresolved media progress refuses.
+         *
+         * @param {number} id - Live item identity.
+         * @param {number} player - Native current-player index, zero.
+         * @returns {boolean} Whether the player has seen the media.
+         */
+        itemHasBeenSeen: (id, player) => containerQuery('itemHasBeenSeen (recorded media and player progress authority)',
+            'item_media_progress', [itemId(id), requireInteger(player, 'source player index', 0, 0xFF_FF_FF_FF)]) !== 0,
+        /**
+         * Apply the source non-recorded-media heard predicate; unresolved media progress refuses.
+         *
+         * @param {number} id - Live item identity.
+         * @param {number} player - Native current-player index, zero.
+         * @returns {boolean} Whether the player has heard the media.
+         */
+        itemHasBeenHeard: (id, player) => containerQuery('itemHasBeenHeard (recorded media and player progress authority)',
+            'item_media_progress', [itemId(id), requireInteger(player, 'source player index', 0, 0xFF_FF_FF_FF)]) !== 0,
+        /**
+         * Apply the concrete non-MapItem prefix without fabricating persistent print-media history.
+         *
+         * @param {number|null|undefined} id - Live item identity or source null.
+         * @param {number} player - Native current-player index, zero.
+         * @returns {boolean} Whether the player has read the map; real MapItem authority refuses.
+         */
+        playerHasReadMap: (id, player) => containerQuery('playerHasReadMap (MapItem identity and persisted print-media history)',
+            'player_has_read_map', [id === null || id === undefined ? 0 : itemId(id),
+                requireInteger(player, 'source player index', 0, 0xFF_FF_FF_FF)]) !== 0,
+        /**
+         * Read only the source null-player/absent-key prefix; unresolved item modData refuses.
+         *
+         * @param {number} id - Live item identity.
+         * @param {number|null|undefined} player - Native current-player index or source null.
+         * @returns {boolean} Whether the item's marker equals this player's full name.
+         */
+        itemIsNoRecipes: (id, player) => {
+            const present = player !== null && player !== undefined;
+
+            return containerQuery('itemIsNoRecipes (item modData and player full-name authority)',
+                'item_no_recipes', [itemId(id), present ? requireInteger(player, 'source player index', 0, 0xFF_FF_FF_FF) : 0,
+                    Number(present)]) !== 0;
+        },
+        /**
+         * Validate native identities only; this deliberately returns no recipe predicate or preference proof.
+         * Only the private Lua playerData owner may prove that all recipe preferences are inactive.
+         *
+         * @param {number} id - Live item identity.
+         * @param {number} player - Native current-player index, zero.
+         * @returns {void} No recipe membership or preference result.
+         */
+        itemFavouriteRecipeInputIdentity: (id, player) => {
+            requireOptional('itemFavouriteRecipeInputIdentity', ['item_favourite_recipe_input_identity']);
+            requireAccepted(api.item_favourite_recipe_input_identity(itemId(id),
+                requireInteger(player, 'source player index', 0, 0xFF_FF_FF_FF)), 'itemFavouriteRecipeInputIdentity');
+        },
+        /**
+         * Determine whether an item has exact ItemType.KEY_RING identity.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {boolean} Whether the item is a key ring type.
+         */
+        itemIsKeyRingType: (id) => containerQuery('itemIsKeyRingType', 'item_presentation_query', [itemId(id), 2]) !== 0,
+        /**
+         * Determine whether an item has ItemTag.KEY_RING membership.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {boolean} Whether the item has the key ring tag.
+         */
+        itemHasKeyRingTag: (id) => containerQuery('itemHasKeyRingTag', 'item_presentation_query', [itemId(id), 3]) !== 0,
+        /**
+         * Read the mutable instance display category.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {string|null} The display category, or null.
+         */
+        itemDisplayCategory: (id) => policyName(containerQuery('itemDisplayCategory', 'item_presentation_query',
+            [itemId(id), 4], 0xFF_FF_FF_FF)),
+        /**
+         * Read the exact original player modData key for an unwanted item.
+         *
+         * @param {number} id - Live item identity.
+         * @returns {string} The item's modData key.
+         */
+        itemUnwantedKey: (id) => {
+            const ordinal = containerQuery('itemUnwantedKey', 'item_presentation_query', [itemId(id), 5], 0xFF_FF_FF_FF);
+            const metadata = definitionMetadata[ordinal];
+
+            if (!metadata) {
+                throw new Error('Native item definition metadata is unavailable.');
+            }
+
+            return `itemUnwanted:${metadata.fullType}`;
+        },
+        /**
+         * Set the exact category, or clear it with the original nil value.
+         *
+         * @param {number} id - Live item identity.
+         * @param {string|null} [value] - Display category, or null.
+         * @returns {void}
+         */
+        itemSetDisplayCategory: (id, value) => {
+            requireOptional('itemSetDisplayCategory', ['item_display_category_set']);
+            requireAccepted(api.item_display_category_set(itemId(id), displayCategoryToken(value)), 'itemSetDisplayCategory');
+        },
+        /**
+         * Read the original eight-way native player facing.
+         *
+         * @returns {'N'|'NW'|'W'|'SW'|'S'|'SE'|'E'|'NE'} The player direction.
+         */
+        playerDirection: () => ['N', 'NW', 'W', 'SW', 'S', 'SE', 'E', 'NE'][
+            containerQuery('playerDirection', 'source_player_direction', [], 7)],
+        /**
+         * Read native container presentation invalidation.
+         *
+         * @param {number} id - Real container identity.
+         * @returns {boolean} Whether drawing is dirty.
+         */
+        containerDrawDirty: (id) => containerQuery('containerDrawDirty', 'container_draw_dirty_get', [itemId(id)]) !== 0,
+        /**
+         * Set native container presentation invalidation.
+         *
+         * @param {number} id - Real container identity.
+         * @param {boolean} value - New invalidation flag.
+         * @returns {void}
+         */
+        containerSetDrawDirty: (id, value) => {
+            if (typeof value !== 'boolean') {
+                throw new TypeError('Container drawDirty must be boolean.');
+            }
+
+            requireOptional('containerSetDrawDirty', ['container_draw_dirty_set']);
+            requireAccepted(api.container_draw_dirty_set(itemId(id), Number(value)), 'containerSetDrawDirty');
+        },
         /**
          * Read native actor transfer posture and drop-position options.
          *
@@ -4035,6 +5193,17 @@ async function createEngine(source) {
                 worn: view.getFloat64(0, true) !== 0, held: view.getFloat64(8, true) !== 0,
                 attached: view.getFloat64(16, true) !== 0,
             };
+        },
+        /**
+         * Remove an actual actor attachment before source queue admission.
+         *
+         * @param {number} id - Positive uint32 live item identity.
+         * @returns {boolean} Whether attachment membership changed; only true notifies clothing updates.
+         */
+        removeAttachedItem: (id) => {
+            requireOptional('removeAttachedItem', ['source_actor_remove_attached_item']);
+
+            return requireResult(api.source_actor_remove_attached_item(itemId(id)), 'removeAttachedItem', 0, 1) === 1;
         },
         /**
          * Read an item's original source flag, optionally setting it first.
@@ -4448,6 +5617,24 @@ async function createEngine(source) {
             return id;
         },
         /**
+         * Execute original direct context ToggleDoor, independently of timed-action replies.
+         *
+         * @param {string} id - Stable door identity.
+         * @returns {boolean} Whether the native door toggled (false means blocked).
+         */
+        contextToggleDoor: (id) => {
+            requireOptional('contextToggleDoor', ['source_context_toggle_door']);
+            const result = api.source_context_toggle_door(sourceActions.doorOrdinal(requireName(id, 'door id')));
+
+            if (result === -3) {
+                return false;
+            }
+
+            requireAccepted(result, 'contextToggleDoor');
+
+            return true;
+        },
+        /**
          * Read native curtain state without inventing unavailable eligibility.
          *
          * @param {string} id - Stable door identity.
@@ -4595,6 +5782,53 @@ async function createEngine(source) {
             return result === 1;
         },
         /**
+         * Read original DistToProper between two resident native square centers.
+         *
+         * @param {number} fromX - Signed int32 source x.
+         * @param {number} fromY - Signed int32 source y.
+         * @param {number} fromZ - Signed int32 source elevation.
+         * @param {number} toX - Signed int32 destination x.
+         * @param {number} toY - Signed int32 destination y.
+         * @param {number} toZ - Signed int32 destination elevation.
+         * @returns {number} Native f32 planar distance; elevation does not affect the result.
+         */
+        squareDistanceToProper: (fromX, fromY, fromZ, toX, toY, toZ) => containerQuery(
+            'squareDistanceToProper', 'source_square_distance_to_proper', [
+                requireInteger(fromX, 'source square x', -2_147_483_648, 2_147_483_647),
+                requireInteger(fromY, 'source square y', -2_147_483_648, 2_147_483_647),
+                requireInteger(fromZ, 'source square z', -2_147_483_648, 2_147_483_647),
+                requireInteger(toX, 'destination square x', -2_147_483_648, 2_147_483_647),
+                requireInteger(toY, 'destination square y', -2_147_483_648, 2_147_483_647),
+                requireInteger(toZ, 'destination square z', -2_147_483_648, 2_147_483_647),
+            ], Number.MAX_VALUE, false),
+        /**
+         * Read a resident square's native chunk coordinates and residency generation.
+         *
+         * @param {number} x - Signed int32 square x.
+         * @param {number} y - Signed int32 square y.
+         * @param {number} z - Signed int32 square elevation.
+         * @returns {{x:number,y:number,generation:number}|null} Native chunk identity, or null when unloaded.
+         */
+        squareChunk: (x, y, z) => {
+            requireOptional('squareChunk', ['source_square_chunk_read']);
+            const result = api.source_square_chunk_read(
+                requireInteger(x, 'square x', -2_147_483_648, 2_147_483_647),
+                requireInteger(y, 'square y', -2_147_483_648, 2_147_483_647),
+                requireInteger(z, 'square z', -2_147_483_648, 2_147_483_647));
+
+            if (result === -2) {
+                return null;
+            }
+
+            requireAccepted(result, 'squareChunk');
+            const view = scratch('squareChunk');
+
+            return {
+                x: view.getFloat64(0, true), y: view.getFloat64(8, true),
+                generation: requireInteger(view.getFloat64(16, true), 'native chunk generation', 1, 4_294_967_295),
+            };
+        },
+        /**
          * Read one supported native source-square property.
          *
          * @param {number} x - Signed int32 square x.
@@ -4692,8 +5926,9 @@ async function createEngine(source) {
         commitItem: 'queue_commit_item', commitDoor: 'queue_commit_door',
         worldItemCount: 'source_world_item_count', worldItemGet: 'source_world_item_get',
         squareDoorCount: 'source_square_door_count', squareDoorGet: 'source_square_door_get',
+        squareStaticMovingObjectCount: 'source_square_static_moving_object_count',
     })) {
-        const squareQuery = name.startsWith('source_world_item_') || name.startsWith('source_square_door_');
+        const squareQuery = name.startsWith('source_world_item_') || name.startsWith('source_square_');
 
         /**
          * Validate exact numeric ABI arguments before invoking a private queue operation.
@@ -4752,6 +5987,142 @@ async function createEngine(source) {
     }
 
     Object.freeze(sourceActions);
+
+    /**
+     * Probe the actual native weather transport, not the always-present JS wrappers.
+     *
+     * @returns {boolean} Whether this ABI1 module supports exact climate state.
+     */
+    function canSaveClimateState() {
+        if (typeof api.climate_save_size !== 'function') {
+            return false;
+        }
+
+        requireOptional('climate state', ['climate_initialize', 'climate_is_initialized', 'climate_save_read',
+            'climate_scratch_ptr', 'climate_scratch_size', 'climate_restore_begin', 'climate_restore_write',
+            'climate_restore_commit', 'climate_restore_abort']);
+
+        return true;
+    }
+
+    /**
+     * Admit the source weather producer exactly once with four source entropy bytes.
+     *
+     * @param {number} seed - All u32 values, including zero, are valid seeds.
+     * @param {string} [timeZone] - Actual platform IANA zone; restored native state retains its own zone.
+     */
+    function initializeClimate(seed, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone) {
+        requireOptional('initializeClimate', ['climate_initialize']);
+        requireInteger(seed, 'climate seed', 0, 0xFF_FF_FF_FF);
+
+        if (typeof timeZone !== 'string' || !timeZone || timeZone.includes('\0')) {
+            throw new TypeError('Climate time zone must be a nonempty UTF-8 zone name.');
+        }
+
+        const bytes = new TextEncoder().encode(timeZone);
+
+        if (bytes.length > 128) {
+            throw new RangeError('Climate time zone exceeds 128 UTF-8 bytes.');
+        }
+
+        const view = extensionScratch('climate', 4_096);
+
+        new Uint8Array(view.buffer, view.byteOffset, bytes.length).set(bytes);
+        requireAccepted(api.climate_initialize(seed, bytes.length), 'initializeClimate');
+    }
+
+    /**
+     * Read producer admission without treating constructor zeroes as weather.
+     *
+     * @returns {boolean} Native initialization state.
+     */
+    function isClimateInitialized() {
+        requireOptional('isClimateInitialized', ['climate_is_initialized']);
+
+        return requireResult(api.climate_is_initialized(), 'isClimateInitialized', 0, 1) !== 0;
+    }
+
+    /**
+     * Capture exact portable weather bytes, including the native unconfigured tag.
+     *
+     * @returns {Uint8Array} Detached native bytes.
+     */
+    function saveClimateState() {
+        if (!canSaveClimateState()) {
+            throw new Error('saveClimateState is unsupported by this engine module.');
+        }
+
+        const size = requireResult(api.climate_save_size(), 'saveClimateState', 1, 1_048_576);
+        const bytes = new Uint8Array(size);
+
+        for (let offset = 0; offset < size; offset += 4_096) {
+            const count = api.climate_save_read(offset);
+
+            if (count !== Math.min(4_096, size - offset)) {
+                throw new Error('Invalid native climate save chunk.');
+            }
+
+            const view = extensionScratch('climate', 4_096);
+
+            bytes.set(new Uint8Array(view.buffer, view.byteOffset, count), offset);
+        }
+
+        return bytes;
+    }
+
+    /**
+     * Stage complete weather state before the native atomic commit.
+     *
+     * @param {Uint8Array} bytes - Exact portable state.
+     */
+    function loadClimateState(bytes) {
+        if (!canSaveClimateState()) {
+            throw new Error('loadClimateState is unsupported by this engine module.');
+        }
+
+        if (!(bytes instanceof Uint8Array) || bytes.length < 1 || bytes.length > 1_048_576) {
+            throw new TypeError('Climate restore requires 1..1048576 bytes.');
+        }
+
+        requireAccepted(api.climate_restore_begin(bytes.length), 'loadClimateState begin');
+        try {
+            for (let offset = 0; offset < bytes.length; offset += 4_096) {
+                const count = Math.min(4_096, bytes.length - offset);
+                const view = extensionScratch('climate', 4_096);
+
+                new Uint8Array(view.buffer, view.byteOffset, count).set(bytes.subarray(offset, offset + count));
+                requireAccepted(api.climate_restore_write(offset, count), 'loadClimateState write');
+            }
+
+            requireAccepted(api.climate_restore_commit(), 'loadClimateState commit');
+        } finally {
+            requireAccepted(api.climate_restore_abort(), 'loadClimateState abort');
+        }
+    }
+
+    /**
+     * Read the authoritative source clock.
+     *
+     * @returns {object} Detached native source clock snapshot.
+     */
+    function worldClockState() {
+        return normalizeWorldClockState({
+            version: 1,
+            ...Object.fromEntries(WORLD_CLOCK_FIELDS.map((name) => [name, sourceActions.worldClockGet(name)])),
+        });
+    }
+
+    /**
+     * Import source clock fields atomically.
+     *
+     * @param {object} value - Validated atomically before any native mutation.
+     */
+    function importWorldClockState(value) {
+        const state = normalizeWorldClockState(value);
+
+        requireOptional('importWorldClockState', ['world_clock_import']);
+        requireAccepted(api.world_clock_import(...WORLD_CLOCK_FIELDS.map((name) => state[name])), 'importWorldClockState');
+    }
 
     /**
      * Probe actual native portable queue capability rather than wrapper presence.
@@ -4850,12 +6221,14 @@ async function createEngine(source) {
 
     return Object.freeze({
         snapshot, command, setSpeed, step, frameStep, reset, actions, sourceActions, sourceTiming,
+        worldClockState, importWorldClockState,
+        initializeClimate, isClimateInitialized, canSaveClimateState, saveClimateState, loadClimateState,
         canSaveQueueState, saveQueueState, loadQueueState,
         equipmentOperation, wornItems, setWornItem, canSaveEquipmentState, saveEquipmentState, loadEquipmentState,
         worldImportCell, navFlags, worldBounds, saveState, loadState, worldReset,
-        registerItemDefinition, itemDefinitions, beginItemDefinitionRegistration,
+        registerItemDefinition, itemDefinitions, getItemDefinition, beginItemDefinitionRegistration,
         commitItemDefinitionRegistration, rollbackItemDefinitionRegistration, freezeItemDefinitions,
-        items, getItem, inventoryState, exportInventoryGraph, importInventoryGraph,
+        items, getItem, inventoryState, worldItemVisuals, initializeItemVisual, exportInventoryGraph, importInventoryGraph,
         containers, getContainer, containerItems, playerInventoryId, containerState, itemWeights,
         wornItem, isWearingAwkwardGloves, getHealth, isDead,
         getHandItems, setHandItem, observeHandItems, canSaveHandState, saveHandState, loadHandState,
@@ -4865,4 +6238,7 @@ async function createEngine(source) {
     });
 }
 
-export { ENGINE_API_VERSION, MOODLE_TYPES, createEngine, validateNavigationCell };
+export {
+    ENGINE_API_VERSION, MOODLE_TYPES, WORLD_CLOCK_DEFAULT_STATE, createEngine, normalizeWorldClockState,
+    normalizeWorldItemVisual, normalizeItemVisual, validateNavigationCell,
+};

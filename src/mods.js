@@ -1195,7 +1195,7 @@ export function createModHost(engine, options = {}) {
                     get: (fullType) => access('items', () => {
                         identity(fullType, 'fullType');
 
-                        return capability('itemDefinitions')().find((definition) => definition.fullType === fullType) ?? null;
+                        return capability('getItemDefinition')(fullType);
                     }),
                     /**
                      * Registration is owner-bound and only legal inside synchronous activate.

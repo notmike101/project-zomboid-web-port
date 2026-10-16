@@ -1,14 +1,15 @@
 /** @file Native Lua checks against both real WASM VMs. Run npm run build first. */
 import assert from 'node:assert/strict';
+import { openAsBlob } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createEngine } from '../src/engine.js';
-import { createGameUI, parseBitmapFont } from '../src/game-ui.js';
+import { createGameUI } from '../src/game-ui.js';
 import { parseItemDefinitions } from '../src/item-definitions.js';
 import { createLuaSession } from '../src/lua-runtime.js';
 import { createModHost } from '../src/mods.js';
-import { engineSources } from '../src/native-mod-loader.js';
-import { canvasContentBox } from '../src/renderer.js';
+import { loadNativeGameResources } from '../src/native-game-resources.js';
+import { canvasContentBox, parsePngHeader } from '../src/renderer.js';
 import { createSourceFiles } from '../src/source-files.js';
 import { tileScreenPosition } from '../src/tile-renderer.js';
 import { completeActions, importPickupSquares, menuDocument } from './queue-test-helpers.js';
@@ -45,6 +46,110 @@ async function fixture(options = {}) {
     });
 
     return { engine, host, session, saved };
+}
+
+/**
+ * Read the genuine private resource fixture without copying original bytes into the repository.
+ *
+ * @param {object} t - Native test context for absent private content.
+ * @returns {Promise<object|undefined>} Original content host, or an explicit private-content skip.
+ */
+async function privateOriginalContent(t) {
+    let manifest;
+
+    try {
+        manifest = JSON.parse(await readFile(new URL('../content/manifest.json', import.meta.url), 'utf8'));
+    } catch (error) {
+        if (error.code !== 'ENOENT') {
+            throw error;
+        }
+
+        t.skip('Requires privately provisioned original Lua; no original bytes are committed.');
+
+        return;
+    }
+
+    return {
+        manifest,
+        /**
+         * Read untouched original text from the private content directory.
+         *
+         * @param {string} path - Manifest-owned original resource.
+         * @returns {object} Manifest-sized private file with genuine text and binary slices.
+         */
+        getFile: (path) => {
+            const entry = manifest.files.find((item) => item.path === path);
+            const url = new URL(`../content/${path}`, import.meta.url);
+
+            return {
+                size: entry.size,
+                /**
+                 * Read the selected private original file.
+                 *
+                 * @returns {Promise<string>} Unchanged source text.
+                 */
+                text: () => readFile(url, 'utf8'),
+                /**
+                 * Expose bounded file-backed bytes without retaining an entire original pack.
+                 *
+                 * @param {number} start - First byte.
+                 * @param {number} end - Exclusive end byte.
+                 * @returns {{arrayBuffer:()=>Promise<ArrayBuffer>}} Genuine original slice.
+                 */
+                slice: (start, end) => ({
+                    /**
+                     * Read only the selected original byte range.
+                     *
+                     * @returns {Promise<ArrayBuffer>} Original bytes.
+                     */
+                    arrayBuffer: async () => (await openAsBlob(url)).slice(start, end).arrayBuffer(),
+                }),
+                /**
+                 * Retain the actual selected original image for the resource loader.
+                 *
+                 * @returns {Promise<File>} File-backed original bytes.
+                 */
+                toFile: async () => new File([await openAsBlob(url)], path.slice(path.lastIndexOf('/') + 1)),
+            };
+        },
+    };
+}
+
+/**
+ * Count actual native UI lifetime operations without substituting their implementation.
+ *
+ * @param {object} ui - Initialized real UI host.
+ * @returns {{ui:object, counts:object}} Delegating UI host and observed allocation/release counts.
+ */
+function observeUiLifetime(ui) {
+    const counts = { new: 0, release: 0, transitionNew: 0, transitionRelease: 0 };
+
+    return {
+        counts,
+        ui: {
+            ...ui,
+            bindings: {
+                ...ui.bindings,
+                /**
+                 * Delegate every operation before recording successful lifetime calls.
+                 *
+                 * @param {string} operation - Native UI operation.
+                 * @param {string} owner - Actual source owner.
+                 * @param {...unknown} args - Native operation arguments.
+                 * @returns {unknown} The unchanged native result.
+                 */
+                call(operation, owner, ...args) {
+                    const result = ui.bindings.call(operation, owner, ...args);
+
+                    if (Object.hasOwn(counts, operation)) {
+                        counts[operation] += 1;
+                    }
+
+                    return result;
+                },
+            },
+        },
+    };
 }
 
 /**
@@ -100,6 +205,507 @@ function loadSource(session, host, source, id) {
     });
 }
 
+test('original timSort preserves resident values and the native boolean comparator contract', async () => {
+    const { host, session } = await fixture();
+
+    try {
+        await loadSource(session, host, `
+            assert(type(timSort)=='function','LuaManager exposes timSort before original consumers run')
+            local calls=0
+            local function counted() calls=calls+1; return true end
+            assert(timSort({},counted)==nil)
+            local single={{}}
+            assert(timSort(single,counted)==nil and calls==0)
+            local untouched={2,1}
+            timSort(untouched,nil)
+            assert(untouched[1]==2 and untouched[2]==1)
+            local snapshot={3,1,2}
+            timSort(snapshot,function(a,b)
+                assert(snapshot[1]==3 and snapshot[2]==1 and snapshot[3]==2,
+                    'native sorting must not mutate the caller table during comparisons')
+                return a<b
+            end)
+            assert(snapshot[1]==1 and snapshot[2]==2 and snapshot[3]==3)
+            local named={3,1,label=2}
+            timSort(named,function(a,b) return a<b end)
+            assert(named[1]==1 and named[2]==2 and named[3]==3 and named.label==2,
+                'native delegate values include named entries without clearing their original keys')
+            local values={}
+            for i=1,96 do
+                local value={key=(97-i)%7,ordinal=i}
+                value.self=value
+                values[i]=value
+            end
+            local originalSort=table.sort
+            table.sort=function() error('timSort must not use unstable Lua table.sort') end
+            timSort(values,function(a,b)
+                assert(a.self==a and b.self==b,'comparator operands must retain Lua identity')
+                return a.key<b.key
+            end)
+            table.sort=originalSort
+            for i=2,#values do
+                assert(values[i-1].key<=values[i].key)
+                if values[i-1].key==values[i].key then
+                    assert(values[i-1].ordinal<values[i].ordinal,'equivalent items must keep their original order')
+                end
+            end
+            local same={}
+            timSort({same,same},function() calls=calls+1; error('Objects.equals bypasses the Lua comparator') end)
+            assert(calls==0,'identical resident objects must bypass the Lua comparator')
+            local falseOrder={3,2,1}
+            timSort(falseOrder,function() return 1 end)
+            assert(falseOrder[1]==3 and falseOrder[2]==2 and falseOrder[3]==1,
+                'pcallBoolean accepts only Boolean.TRUE, not truthy Lua numbers')
+            local failed={3,2,1}
+            local failedCalls=0
+            timSort(failed,function() failedCalls=failedCalls+1; error('original pcallBoolean failure') end)
+            assert(failedCalls>0,'failed comparisons must exercise the original protected-call path')
+            assert(failed[1]==3 and failed[2]==2 and failed[3]==1,
+                'original pcallBoolean turns a failed comparison into non-TRUE')
+        `, 'native-timsort-contract');
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('original string sort drives case-sensitive Java UTF-16 inventory-name ordering', async () => {
+    const { host, session, saved } = await fixture();
+
+    try {
+        await loadSource(session, host, `
+            local names={'alpha','Zed','\u{10000}','\u{E000}','Äther'}
+            table.sort(names,function(a,b) return string.sort(a,b) end)
+            getModData().SortedNames=names
+            assert(not string.sort('same','same'))
+            assert(string.sort('alpha','Zed') and not string.sort('Zed','alpha'))
+            assert(not string.sort('\u{10000}','\u{E000}'),'Java compares UTF-16 units, not Lua UTF-8 bytes')
+            assert(not pcall(function() string.sort(nil,'name') end))
+            assert(not pcall(function() string.sort('name') end))
+            assert(not pcall(function() string.sort({},'name') end))
+            assert(not pcall(function() string.sort(1,'name') end),'unimplemented Java numeric formatting must remain unsupported')
+        `, 'inventory-name-sort');
+        session.flushSaveData();
+        assert.deepEqual(saved.get('inventory-name-sort').data.nativePlayerData.SortedNames, ['\u{E000}', '\u{10000}', 'Äther', 'alpha', 'Zed']);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+});
+
+test('native actor aim clearing preserves held input and reasserts through the live binding resolver', async () => {
+    const pressed = new Set();
+    const bindings = Object.fromEntries([['Aim', 30], ['Run', 19], ['Sprint', 31]].map(([name, keyValue]) => [
+        name, { keyValue, altKey: 0, shift: false, ctrl: false, alt: false },
+    ]));
+    const { engine, host, session } = await fixture({
+        sourceWorldContext: {
+            /**
+             * Report the fixture's actual controller assignment.
+             *
+             * @returns {number} Unassigned controller identity.
+             */
+            joypadBind: () => -1,
+            /**
+             * Read a configured native keyboard binding.
+             *
+             * @param {string} name - Original binding identity.
+             * @returns {object|null} Current configured record.
+             */
+            keyBinding: (name) => bindings[name] ?? null,
+            /**
+             * Read the configured primary-key collision records.
+             *
+             * @returns {object} Current binding records.
+             */
+            keyBindings: () => bindings,
+            /**
+             * Read the current physical native keyboard state.
+             *
+             * @param {number} code - Original native key code.
+             * @returns {boolean} Whether the key is currently held.
+             */
+            isSourceKeyDown: (code) => pressed.has(code),
+        },
+    });
+
+    try {
+        session.activatePackage({ id: 'pz-base-game', nativeId: 'ProjectZomboid', api: host.coreApi, sources: [] });
+        pressed.add(30);
+        session.updateActorInput();
+        activate(session, host, `
+            assert(getPlayer():isAiming())
+            getPlayer():setForceAim(true)
+            assert(getPlayer():isForceAim())
+            assert(select('#',getPlayer():nullifyAiming())==0,'the genuine mutation is void')
+            assert(not getPlayer():isAiming() and not getPlayer():isForceAim())
+            assert(not pcall(function() getPlayer():setIsAiming(1) end))
+            assert(not pcall(function() getPlayer():setForceAim('true') end))
+        `, 'native-actor-clear');
+        assert.deepEqual(engine.sourceActions.actorInputState(0), {
+            forceAim: false, charging: false, rawAiming: false, aiming: false,
+            cachedAiming: true, cachedCharging: true, aimDown: true,
+        }, 'clearing current actor fields must not erase cached or physical input');
+        session.updateActorInput();
+        activate(session, host, `
+            assert(getPlayer():isAiming(),'held physical aim must reassert on the next real ingress')
+            getPlayer():setForceAim(true)
+        `, 'native-actor-reassert');
+        pressed.clear();
+        session.updateActorInput();
+        activate(session, host, `
+            assert(getPlayer():isAiming() and getPlayer():isForceAim(),'force aim is a genuine independent input producer')
+            assert(getPlayer():toggleForceAim()==false)
+            assert(getPlayer():isAiming(),'toggling force alone does not rewrite the current actor field')
+        `, 'native-actor-force');
+        session.updateActorInput();
+        activate(session, host, `
+            assert(not getPlayer():isAiming())
+            getPlayer():setIsAiming(true)
+            assert(getPlayer():isAiming(),'the public raw setter must reach the native owner')
+            getPlayer():nullifyAiming()
+            assert(not getPlayer():isAiming())
+        `, 'native-actor-raw');
+
+        for (const code of [19, 31]) {
+            pressed.add(code);
+            activate(session, host, 'getPlayer():setForceAim(true)', `native-actor-run-${code}`);
+            session.updateActorInput();
+            assert.equal(engine.sourceActions.actorInputState(0).forceAim, false);
+            assert.equal(engine.sourceActions.actorIsAiming(0), true, 'original input caches aim before run/sprint clears force');
+            session.updateActorInput();
+            assert.equal(engine.sourceActions.actorIsAiming(0), false);
+            pressed.delete(code);
+        }
+
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+});
+
+test('Lua known poison honors source tags on non-Food and rejects forged player, item and world identities', async () => {
+    const { engine, host, session } = await fixture();
+    const definitions = parseItemDefinitions(`module PoisonFixture {
+        item Ordinary { ItemType = base:clothing, }
+        item Visible { ItemType = Normal, Tags = ShowPoison, }
+        item Hidden { ItemType = Normal, Tags = ShowPoison;NoDetect, }
+    }`, { path: 'poison-consumer.txt' });
+
+    importPickupSquares(engine);
+
+    for (const definition of definitions) {
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, ...definition }, { owner: 'fixture' });
+        host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
+    }
+
+    try {
+        activate(session, host, `
+            local player=getPlayer()
+            local world=getCell():getGridSquare(5,5,0):getWorldObjects()
+            PoisonOrdinary=world:get(0):getItem()
+            local visible=world:get(1):getItem()
+            local hidden=world:get(2):getItem()
+            assert(not player:isKnownPoison(PoisonOrdinary))
+            assert(player:isKnownPoison(visible), 'tag must precede actual non-Food class rejection')
+            assert(not player:isKnownPoison(hidden), 'NoDetect wins even with ShowPoison')
+            assert(not pcall(function() player:isKnownPoison(nil) end))
+            assert(not pcall(function() player:isKnownPoison({getID=function() return visible:getID() end}) end))
+            assert(not pcall(function() player:isKnownPoison(world:get(1)) end))
+            assert(not pcall(function() player.isKnownPoison({},visible) end))
+            local forgedPlayer=setmetatable({}, {__eq=function() return true end})
+            assert(not pcall(function() player.isKnownPoison(forgedPlayer,visible) end))
+            setmetatable(world:get(1), {__eq=function() return true end})
+            assert(not pcall(function() player:isKnownPoison(world:get(1)) end), 'equality metamethod cannot forge an InventoryItem')
+            PoisonOrdinary.IsFood=function() return true end
+            assert(not player:isKnownPoison(PoisonOrdinary), 'mutable Lua method cannot forge concrete native class')
+        `, 'known-poison-consumer');
+        engine.registerItemDefinition({ ...engine.getItemDefinition(definitions[0].fullType), tags: ['ShowPoison'] },
+            { owner: 'fixture', override: true });
+        activate(session, host, `
+            assert(getPlayer():isKnownPoison(PoisonOrdinary), 'all callers observe live definition tag authority')
+        `, 'known-poison-live-tags');
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('Lua literature predicate uses native class and rejects forged inventory receivers', async () => {
+    const { engine, host, session } = await fixture();
+    const definition = parseItemDefinitions(`module LiteratureFixture {
+        item Literature { ItemType = Normal, DisplayCategory = Literature, Tags = Literature, }
+    }`, { path: 'literature-consumer.txt' })[0];
+
+    importPickupSquares(engine);
+    engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, ...definition, sourceCategory: 'Literature' }, { owner: 'fixture' });
+    host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
+    try {
+        activate(session, host, `
+            local world=getCell():getGridSquare(5,5,0):getWorldObjects():get(0)
+            LiteratureOrdinary=world:getItem()
+            local predicate=LiteratureOrdinary.IsLiterature
+            assert(not predicate(LiteratureOrdinary), 'name, tag and category cannot forge Literature class')
+            assert(not pcall(function() predicate(nil) end))
+            assert(not pcall(function() predicate({getID=function() return LiteratureOrdinary:getID() end}) end))
+            assert(not pcall(function() predicate(world) end), 'world item identity is not an InventoryItem receiver')
+            setmetatable(world, {__eq=function() return true end})
+            assert(not pcall(function() predicate(world) end), 'equality metamethod cannot forge native identity')
+            LiteratureOrdinary:setDisplayCategory('Books')
+            assert(not predicate(LiteratureOrdinary))
+        `, 'literature-class-consumer');
+        const before = engine.getItemDefinition(definition.fullType);
+
+        assert.throws(() => engine.registerItemDefinition({ ...before, type: 'base:literature', weight: 9 },
+            { owner: 'fixture', override: true }), /unsupported/i);
+        activate(session, host, `
+            assert(not LiteratureOrdinary:IsLiterature(), 'refused override preserves the resident native class')
+        `, 'literature-class-refused-override');
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('Lua media progress validates genuine player and item identities and refuses unresolved recorded media', async () => {
+    const { engine, host, session } = await fixture();
+    const definitions = parseItemDefinitions(`module MediaFixture {
+        item Ordinary { ItemType = base:normal, }
+        item VHS { ItemType = base:normal, MediaCategory = Retail-VHS, }
+    }`, { path: 'media-progress-consumer.txt' });
+
+    importPickupSquares(engine);
+
+    for (const definition of definitions) {
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, ...definition }, { owner: 'fixture' });
+        host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
+    }
+
+    try {
+        activate(session, host, `
+            local player=getPlayer()
+            local world=getCell():getGridSquare(5,5,0):getWorldObjects()
+            local ordinary=world:get(0):getItem()
+            local media=world:get(1):getItem()
+            local forged=setmetatable({}, {__eq=function() return true end})
+            setmetatable(world:get(0), {__eq=function() return true end})
+            for _,method in ipairs({'hasBeenSeen','hasBeenHeard'}) do
+                local predicate=ordinary[method]
+                assert(not predicate(ordinary,player), 'non-recorded source instances have no media progress')
+                assert(not pcall(function() predicate(ordinary,nil) end))
+                assert(not pcall(function() predicate(ordinary,forged) end))
+                assert(not pcall(function() predicate(nil,player) end))
+                assert(not pcall(function() predicate({getID=function() return ordinary:getID() end},player) end))
+                assert(not pcall(function() predicate(world:get(0),player) end), 'world object cannot forge InventoryItem identity')
+                assert(not pcall(function() predicate(media,player) end), 'unresolved recorded media must not become a false unseen flag')
+            end
+        `, 'media-progress-consumer');
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('Lua map-read predicate preserves source null behavior and validates native player and item identity', async () => {
+    const { engine, host, session } = await fixture();
+
+    importPickupSquares(engine);
+    engine.registerItemDefinition({
+        ...SOURCE_ITEM_FIELDS, fullType: 'MapFixture.Map', type: 'Normal',
+        sourceCategory: 'Map', rawFields: [{ name: 'Map', value: 'LouisvilleMap1' }],
+    }, { owner: 'fixture' });
+    host.api.items.spawn({ fullType: 'MapFixture.Map', x: 5, y: 5 });
+    try {
+        activate(session, host, `
+            local player=getPlayer()
+            local world=getCell():getGridSquare(5,5,0):getWorldObjects():get(0)
+            local item=world:getItem()
+            assert(not player:hasReadMap(nil), 'Java instanceof null is false')
+            assert(not player:hasReadMap(item), 'Map fields/category/name do not make a MapItem')
+            item.IsMap=function() return true end
+            assert(not player:hasReadMap(item), 'Lua methods cannot forge concrete class')
+            assert(not pcall(function() player.hasReadMap({},item) end))
+            local forged=setmetatable({}, {__eq=function() return true end})
+            assert(not pcall(function() player.hasReadMap(forged,nil) end))
+            assert(not pcall(function() player:hasReadMap({getID=function() return item:getID() end}) end))
+            setmetatable(world, {__eq=function() return true end})
+            assert(not pcall(function() player:hasReadMap(world) end))
+        `, 'map-read-consumer');
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('Lua no-recipes admits only absent item modData, keeps null-player semantics and refuses unsupported writers', async () => {
+    const { engine, host, session } = await fixture();
+    const definitions = parseItemDefinitions(`module NoRecipesFixture {
+        item Ordinary { ItemType = base:normal, }
+        item Marker { ItemType = base:normal, itemNoRecipes = Original Name, }
+    }`, { path: 'no-recipes-consumer.txt' });
+
+    importPickupSquares(engine);
+
+    for (const definition of definitions) {
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, ...definition }, { owner: 'fixture' });
+        host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
+    }
+
+    try {
+        activate(session, host, `
+            local player=getPlayer()
+            local world=getCell():getGridSquare(5,5,0):getWorldObjects()
+            local ordinary=world:get(0):getItem()
+            local unresolved=world:get(1):getItem()
+            player:getModData().itemNoRecipes='Player table is not item state'
+            assert(not ordinary:isNoRecipes(player))
+            assert(not ordinary:isNoRecipes(nil) and not unresolved:isNoRecipes(nil))
+            assert(not pcall(function() unresolved:isNoRecipes(player) end))
+            local predicate=ordinary.isNoRecipes
+            local forged=setmetatable({}, {__eq=function() return true end})
+            assert(not pcall(function() predicate(ordinary,forged) end))
+            assert(not pcall(function() predicate(forged,player) end))
+            assert(not pcall(function() predicate(world:get(0),nil) end))
+            assert(not pcall(function() ordinary:setNoRecipes(player,true) end))
+            assert(not pcall(function() ordinary:getModData().itemNoRecipes='Forged' end))
+            assert(not ordinary:isNoRecipes(player), 'unsupported writers cannot create hidden state')
+        `, 'no-recipes-absent-consumer');
+        const errors = session.diagnostics().errors;
+
+        assert.equal(errors.length, 2, 'unsupported writers remain explicitly diagnosed even when Lua catches their errors');
+        assert.match(errors[0].message, /unsupported native facility: InventoryItem:setNoRecipes$/u);
+        assert.match(errors[1].message, /unsupported native facility: InventoryItem:getModData$/u);
+        assert.ok(errors.every(({ modId }) => modId === 'no-recipes-absent-consumer'));
+        assert.deepEqual(host.diagnostics().errors, []);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
+test('Lua favourite recipe input proves only inactive live preferences and preserves active restored preference refusal', async () => {
+    const original = await fixture();
+    const restored = await fixture();
+    const owner = 'recipe-input-preferences';
+    const definition = { ...SOURCE_ITEM_FIELDS, fullType: 'RecipeFixture.Input', type: 'Normal' };
+
+    for (const value of [original, restored]) {
+        importPickupSquares(value.engine);
+        value.engine.registerItemDefinition(definition, { owner: 'fixture' });
+    }
+
+    original.host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
+    try {
+        await loadSource(original.session, original.host, `
+            local player=getPlayer()
+            local world=getCell():getGridSquare(5,5,0):getWorldObjects():get(0)
+            local item=world:getItem()
+            local data=player:getModData()
+            assert(not item:isFavouriteRecipeInput(player))
+            item:setFavorite(true)
+            assert(not item:isFavouriteRecipeInput(player), 'item favorite is independent of recipe preference')
+            data['RecipeFavourite:WrongCase']=true
+            data['recipeFavourite:Fixture.Craft']=false
+            assert(not item:isFavouriteRecipeInput(player), 'source key prefix is exact and Boolean false is inactive')
+            data['recipeFavourite:Fixture.Craft']=true
+            assert(not pcall(function() item:isFavouriteRecipeInput(player) end), 'active preference needs actual membership/knowledge')
+            local previousPairs,previousSub=pairs,string.sub
+            pairs=function() return function() return nil end end
+            string.sub=function() return '' end
+            assert(not pcall(function() item:isFavouriteRecipeInput(player) end), 'public globals cannot forge the private proof')
+            pairs,string.sub=previousPairs,previousSub
+            data['recipeFavourite:Fixture.Craft']='not a Java Boolean'
+            assert(not pcall(function() item:isFavouriteRecipeInput(player) end), 'malformed preference cannot count as false')
+            data['recipeFavourite:Fixture.Craft']=nil
+            assert(not item:isFavouriteRecipeInput(player), 'live preference removal is observed without a cache')
+            local predicate=item.isFavouriteRecipeInput
+            local forged=setmetatable({}, {__eq=function() return true end})
+            assert(not pcall(function() predicate(item,nil) end), 'null actor is unresolved, not an assumed empty recipe list')
+            assert(not pcall(function() predicate(item,forged) end))
+            assert(not pcall(function() predicate(forged,player) end))
+            assert(not pcall(function() predicate(world,player) end))
+            data['recipeFavourite:Fixture.Craft']=true
+        `, owner);
+        original.session.flushSaveData();
+        const record = original.saved.get(owner);
+
+        assert.equal(record.data.nativePlayerData['recipeFavourite:Fixture.Craft'], true);
+        restored.saved.set(owner, structuredClone(record));
+        restored.engine.importInventoryGraph(original.engine.exportInventoryGraph());
+        await loadSource(restored.session, restored.host, `
+            local player=getPlayer()
+            local item=getCell():getGridSquare(5,5,0):getWorldObjects():get(0):getItem()
+            local data=player:getModData()
+            assert(data['recipeFavourite:Fixture.Craft']==true, 'actual saved player preference must be restored')
+            assert(not pcall(function() item:isFavouriteRecipeInput(player) end), 'restored preference cannot become false')
+            data['recipeFavourite:Fixture.Craft']=false
+            assert(not item:isFavouriteRecipeInput(player))
+        `, owner);
+
+        for (const [value, count] of [[original, 3], [restored, 1]]) {
+            const errors = value.session.diagnostics().errors;
+
+            assert.equal(errors.length, count);
+            assert.ok(errors.every(({ modId, message }) => modId === owner
+                && /unsupported native facility: original recipe membership and player recipe knowledge$/u.test(message)));
+            assert.deepEqual(value.host.diagnostics().errors, []);
+        }
+    } finally {
+        for (const value of [original, restored]) {
+            value.session.close();
+            value.host.dispose();
+        }
+    }
+});
+
+test('Lua DrainableComboItem instanceof uses native class and rejects forged or mutable item metadata', async () => {
+    const { engine, host, session } = await fixture();
+    const definitions = parseItemDefinitions(`module DrainableFixture {
+        item DrainableComboItem { ItemType = Normal, DisplayCategory = DrainableComboItem, UseDelta = 0.1, }
+        item Clothing { ItemType = base:clothing, }
+        item Bag { ItemType = base:container, }
+    }`, { path: 'drainable-class-consumer.txt' });
+
+    importPickupSquares(engine);
+
+    for (const definition of definitions) {
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, ...definition }, { owner: 'fixture' });
+        host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
+    }
+
+    try {
+        activate(session, host, `
+            local world=getCell():getGridSquare(5,5,0):getWorldObjects()
+            for i=0,2 do assert(not instanceof(world:get(i):getItem(),'DrainableComboItem')) end
+            local item=world:get(0):getItem()
+            local original=item.getFullType
+            item.getFullType=function() error('mutable getter must not determine concrete class') end
+            item.IsDrainable=function() return true end
+            assert(not instanceof(item,'DrainableComboItem'))
+            item.getFullType=original
+            assert(not instanceof(nil,'DrainableComboItem'))
+            assert(not instanceof({getFullType=function() return item:getFullType() end},'DrainableComboItem'))
+            setmetatable(world:get(0), {__eq=function() return true end})
+            assert(not instanceof(world:get(0),'DrainableComboItem'), 'world object identity is not the underlying item')
+        `, 'drainable-class-consumer');
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
 test('native graph Lua wrappers preserve recursive ownership, bag identity and all three room overloads', async () => {
     const { engine, host, session } = await fixture();
 
@@ -148,8 +754,13 @@ test('native graph Lua wrappers preserve recursive ownership, bag identity and a
             assert(leaf:getContainer()==inner:getInventory() and bag:getContainer()==root)
             assert(leaf:getOwner()==nil and leaf:getPlayer()==getPlayer())
             assert(root:contains(bag) and not root:contains(leaf) and root:contains(leaf,true))
+            GraphCategorySnapshot=root:getItemsFromCategory('Container')
+            assert(GraphCategorySnapshot:size()==1 and GraphCategorySnapshot:get(0)==bag,'category lookup must not recurse into bags')
+            assert(root:getItemsFromCategory('container'):isEmpty(),'category matching is case-sensitive')
+            assert(not pcall(function() root:getItemsFromCategory(nil) end))
             assert(root:containsTypeRecurse("GraphLeaf"))
             assert(inside:getOutermostContainer()==root and inside:isInCharacterInventory(getPlayer()))
+            assert(root:getVehiclePart()==nil and inside:getVehiclePart()==nil,'admitted actor and bag containers have no VehiclePart')
             assert(inside:isInside(bag) and not root:isInside(bag))
             assert(bag:getContentsWeight()==4 and bag:getUnequippedWeight()==5)
             assert(bag:getInventoryWeight()==4)
@@ -172,6 +783,8 @@ test('native graph Lua wrappers preserve recursive ownership, bag identity and a
             local square=getPlayer():getCurrentSquare()
             assert(GraphOuterBag:getOutermostContainer()==nil)
             assert(GraphLeaf:getOutermostContainer()==GraphOuterBag:getInventory())
+            assert(GraphCategorySnapshot:size()==1 and GraphCategorySnapshot:get(0)==GraphOuterBag,'category results retain original item identities')
+            assert(getPlayer():getInventory():getItemsFromCategory('Container'):isEmpty(),'a fresh category result reflects native movement')
             assert(GraphLeaf:isInsideBagOnSquare(square) and GraphLeaf:getWorldItem()==nil)
             assert(GraphOuterBag:getInventory():getOutermostContainer()~=GraphLeaf:getOutermostContainer())
             assert(GraphLeaf:getPlayer()==nil)
@@ -226,6 +839,22 @@ test('original floor presentation keeps adjacent world roots and filters native 
     importPickupSquares(engine);
     const first = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.FloorView', x: 5, y: 5 }).snapshot.id);
     const adjacent = engine.getItem(host.api.items.spawn({ fullType: 'Fixture.FloorView', x: 6, y: 5 }).snapshot.id);
+    let placementQueries = 0;
+
+    session.attachSourceActions({
+        ...engine.sourceActions,
+        /**
+         * Count placement reads while retaining the real native ownership check.
+         *
+         * @param {...number} args - Item identity and exact native placement.
+         * @returns {boolean} Actual current native placement match.
+         */
+        itemMatchesFloorPlacement(...args) {
+            placementQueries += 1;
+
+            return engine.sourceActions.itemMatchesFloorPlacement(...args);
+        },
+    }, engine.sourceTiming);
 
     try {
         activate(session, host, `
@@ -236,25 +865,65 @@ test('original floor presentation keeps adjacent world roots and filters native 
             FloorViewCheck:AddItem(a)
             FloorViewCheck:AddItem(b)
             FloorViewCheck:AddItem(a)
+            FloorCategorySnapshot=FloorViewCheck:getItemsFromCategory('Item')
+            assert(FloorCategorySnapshot:size()==2 and FloorCategorySnapshot:get(0)==a and FloorCategorySnapshot:get(1)==b)
+            assert(FloorViewCheck:getItemsFromCategory('item'):isEmpty())
             assert(FloorViewCheck:getItems():size()==2 and FloorViewCheck:getItems():get(0)==a)
+            FloorItems=FloorViewCheck:getItems()
+            FloorFirst,FloorAdjacent=a,b
+            assert(FloorItems:indexOf(a)==0 and FloorItems:indexOf(b)==1)
+            assert(FloorItems:indexOf(nil)==-1 and FloorItems:indexOf({})==-1)
+            local impostor=setmetatable({},{__eq=function() return true end})
+            assert(FloorItems:indexOf(impostor)==-1,'floor lookup requires raw resident identity')
+            assert(not pcall(function() FloorViewCheck:getItems():get(-1) end))
+            assert(not pcall(function() FloorViewCheck:getItems():get(0.5) end))
+            assert(not pcall(function() FloorViewCheck:getItems():get(2) end))
             assert(FloorViewCheck:getMaxWeight()==50 and FloorViewCheck:getCapacityWeight()==2)
+            assert(FloorViewCheck:getVehiclePart()==nil,'the original floor projection has no vehicle-part owner')
             assert(a:getContainer()~=b:getContainer() and a:getContainer()~=FloorViewCheck)
             assert(a:getOutermostContainer()==nil and a:getOwner()==nil)
             assert(not pcall(function() FloorViewCheck:DoRemoveItem(a) end))
             FloorViewCheck:clear()
             assert(FloorViewCheck:getItems():isEmpty() and a:getWorldItem()~=nil)
-            FloorViewCheck:AddItem(a)
             FloorViewCheck:AddItem(b)
+            FloorViewCheck:AddItem(a)
+            assert(FloorViewCheck:getItems()==FloorItems and FloorItems:indexOf(b)==0 and FloorItems:indexOf(a)==1)
         `, 'floor-view-check');
         assert.equal(host.api.items.get(first.id).ownerContainerId, first.ownerContainerId);
         assert.equal(host.api.items.get(adjacent.id).ownerContainerId, adjacent.ownerContainerId);
+        placementQueries = 0;
+        activate(session, host, `
+            assert(FloorItems:indexOf(FloorFirst)==1 and FloorItems:contains(FloorFirst))
+        `, 'floor-view-linear-lookup');
+        assert.equal(placementQueries, 3,
+            'index lookup must scan each live placement at most once; contains queries only its target');
         host.api.items.pickup(adjacent.id);
         completeActions(engine);
         activate(session, host, `
             assert(FloorViewCheck:getItems():size()==1)
             assert(FloorViewCheck:getItems():get(0):getID()==${first.id})
+            assert(FloorItems:indexOf(FloorFirst)==0 and FloorItems:indexOf(FloorAdjacent)==-1,
+                'retained lookup must compact zero-based indices after native queue removal')
+            assert(not pcall(function() FloorViewCheck:getItems():get(1) end),'live ordinal bounds must exclude the moved item')
             assert(FloorViewCheck:getCapacityWeight()==1)
+            assert(FloorCategorySnapshot:size()==2,'the original ArrayList category result is a snapshot, not a live filter')
+            assert(FloorViewCheck:getItemsFromCategory('Item'):size()==1,'a fresh projection category result filters moved items')
         `, 'floor-view-after-move');
+        host.api.items.drop(adjacent.id, 6.25, 5.5);
+        assert.equal(host.api.items.get(adjacent.id).ownerContainerId, adjacent.ownerContainerId,
+            're-dropping within the same floor square retains its actual root');
+        activate(session, host, `
+            local moved=getCell():getGridSquare(6,5,0):getWorldObjects():get(0):getItem()
+            assert(moved:getID()==${adjacent.id})
+            assert(not FloorViewCheck:contains(moved),'same floor owner with a different exact placement must invalidate the old stamp')
+            assert(FloorItems:indexOf(moved)==-1,'same-square native re-drop must not revive the old placement stamp')
+            assert(FloorViewCheck:getItems():size()==1 and FloorViewCheck:getItems():get(0):getID()==${first.id})
+            FloorViewCheck:clear()
+            FloorViewCheck:AddItem(moved)
+            assert(FloorViewCheck:contains(moved) and FloorViewCheck:getItems():get(0)==moved,'a fresh projection admits the actual new placement')
+            assert(FloorItems:indexOf(moved)==0 and FloorItems:indexOf(FloorFirst)==-1,
+                'clearing and repopulating must update the retained collection rather than cache its prior indices')
+        `, 'floor-view-after-same-square-redrop');
     } finally {
         session.close();
         host.dispose();
@@ -597,6 +1266,151 @@ test('void equipment bridge discards host object graphs after the real native mu
     }
 });
 
+test('scalar item metadata stays native-live without serializing unused item or script graphs', async () => {
+    const { engine, host, session } = await fixture();
+    const api = {
+        ...host.api,
+        items: {
+            ...host.api.items,
+            /**
+             * Keep actual native records while detecting unused graph serialization.
+             *
+             * @param {number} id - Native item identity.
+             * @returns {object|null} Current native record or absence.
+             */
+            get(id) {
+                const row = host.api.items.get(id);
+
+                if (row) {
+                    Object.defineProperty(row, 'worldPosition', {
+                        enumerable: true,
+                        /** Reject graph reads from an unrelated scalar getter. */
+                        get() {
+                            throw new Error('unused native item graph was traversed');
+                        },
+                    });
+                }
+
+                return row;
+            },
+            definitions: {
+                ...host.api.items.definitions,
+                /**
+                 * Preserve the real definition while making unused script state opaque.
+                 *
+                 * @param {string} fullType - Current native full type.
+                 * @returns {object|null} Current detached native definition or absence.
+                 */
+                get(fullType) {
+                    const definition = host.api.items.definitions.get(fullType);
+
+                    if (definition) {
+                        Object.defineProperty(definition, 'rawFields', {
+                            enumerable: true,
+                            /** Reject unused script traversal by a scalar consumer. */
+                            get() {
+                                throw new Error('unused native definition graph was traversed');
+                            },
+                        });
+                    }
+
+                    return definition;
+                },
+            },
+        },
+    };
+
+    engine.registerItemDefinition({
+        ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.ScalarMetadata', type: 'Clothing',
+        sourceCategory: 'Clothing', bodyLocation: 'Shoes', canBeEquipped: 'Hat',
+    }, { owner: 'fixture' });
+    importPickupSquares(engine);
+    const id = host.api.items.spawn({ fullType: 'Fixture.ScalarMetadata', x: 5, y: 5 }).snapshot.id;
+    const graph = engine.exportInventoryGraph();
+    const floorOwner = graph.items[0].ownerContainerId;
+
+    graph.items[0] = { ...graph.items[0], ownerContainerId: host.api.items.playerInventoryId(), worldPosition: null };
+    engine.importInventoryGraph(graph);
+
+    try {
+        activate(session, { api }, `
+            ScalarMetadataItem=getPlayer():getInventory():getItems():get(0)
+            assert(ScalarMetadataItem:getID()==${id})
+        `, 'scalar-metadata-wrapper');
+        activate(session, { api }, `
+            local item=ScalarMetadataItem
+            assert(select('#',item:getFullType())==1 and item:getFullType()=='Fixture.ScalarMetadata')
+            assert(item:getCategory()=='Clothing' and item:getConditionMax()==10 and item:getWeightReduction()==0)
+            assert(item:getCondition()==10 and item:getContainer()==getPlayer():getInventory() and item:getInventory()==nil)
+            assert(item:getBodyLocation()==ItemBodyLocation.SHOES and item:canBeEquipped()==ItemBodyLocation.HAT)
+            assert(instanceof(item,'Clothing') and not instanceof(item,'Food') and not instanceof(item,'Radio'))
+            for _,class in ipairs({'Moveable','HandWeapon','Key','AnimalInventoryItem','AlarmClock','AlarmClockClothing','Literature','MapItem','WeaponPart'}) do
+                assert(not instanceof(item,class),'the inventory class fallback must preserve ordinary item negatives: '..class)
+            end
+            local originalFullType=item.getFullType
+            item.getFullType=function() error('class identity must not use a mutable Lua getter') end
+            assert(not instanceof(item,'Moveable') and instanceof(item,'Clothing'))
+            item.getFullType=originalFullType
+            local player=getPlayer()
+            assert(not player:isHandItem(item) and not player:isPrimaryHandItem(item) and not player:isSecondaryHandItem(item))
+            assert(player:isHandItem(nil) and player:isPrimaryHandItem(nil) and player:isSecondaryHandItem(nil))
+            assert(not pcall(function() player:isHandItem({getID=function() return item:getID() end}) end))
+        `, 'scalar-metadata-original');
+
+        for (const [slot, value, primary, secondary] of [
+            ['primary', id, true, false], ['secondary', id, true, true],
+            ['primary', null, false, true], ['secondary', null, false, false],
+        ]) {
+            host.coreApi.character.setHandItem(slot, value);
+            activate(session, { api }, `
+                local player,item=getPlayer(),ScalarMetadataItem
+                assert(player:isPrimaryHandItem(item)==${primary} and player:isSecondaryHandItem(item)==${secondary})
+                assert(player:isHandItem(item)==${primary || secondary})
+                assert(player:isPrimaryHandItem(nil)==${!primary} and player:isSecondaryHandItem(nil)==${!secondary})
+                assert(player:isHandItem(nil)==${!primary || !secondary})
+            `, `scalar-metadata-hand-${slot}-${value ?? 'empty'}`);
+        }
+
+        engine.beginItemDefinitionRegistration('fixture');
+        try {
+            engine.registerItemDefinition({
+                ...engine.getItemDefinition('Fixture.ScalarMetadata'), type: 'Normal',
+                sourceCategory: 'Updated', conditionMax: 20, bodyLocation: null, canBeEquipped: null,
+            }, { owner: 'fixture', override: true });
+            activate(session, { api }, `
+                local item=ScalarMetadataItem
+                assert(item:getFullType()=='Fixture.ScalarMetadata' and item:getCategory()=='Updated')
+                assert(item:getConditionMax()==20 and item:getBodyLocation()==nil and item:canBeEquipped()==nil)
+                assert(not instanceof(item,'Clothing') and not instanceof(item,'Food') and not instanceof(item,'Radio'))
+            `, 'scalar-metadata-override');
+        } finally {
+            engine.rollbackItemDefinitionRegistration('fixture');
+        }
+
+        activate(session, { api }, `
+            local item=ScalarMetadataItem
+            assert(item:getCategory()=='Clothing' and item:getConditionMax()==10)
+            assert(item:getBodyLocation()==ItemBodyLocation.SHOES and item:canBeEquipped()==ItemBodyLocation.HAT)
+            assert(instanceof(item,'Clothing'))
+        `, 'scalar-metadata-rollback');
+        const restoredGraph = engine.exportInventoryGraph();
+
+        restoredGraph.items[0] = {
+            ...restoredGraph.items[0], ownerContainerId: floorOwner, worldPosition: { x: 5, y: 5, z: 0 }, condition: 3,
+        };
+        engine.importInventoryGraph(restoredGraph);
+        activate(session, { api }, `
+            local item=ScalarMetadataItem
+            assert(item:getFullType()=='Fixture.ScalarMetadata' and item:getCategory()=='Clothing')
+            assert(item:getCondition()==3 and item:getContainer():getID()==${floorOwner} and item:getInventory()==nil,
+                'retained native identities must observe ownership and condition loaded from the current graph')
+        `, 'scalar-metadata-load');
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
 test('original MoodleType constants resolve the authoritative registry without legacy aliases or neutral fallbacks', async () => {
     const { engine, host, session } = await fixture();
 
@@ -741,6 +1555,32 @@ test('native Grapple logging uses authenticated enums, severity policy and the n
     }
 });
 
+test('fresh client global-system registration owns resident metadata without inventing global-world data', async () => {
+    const { host, session } = await fixture();
+
+    try {
+        activate(session, host, `
+            assert(CGlobalObjects.getSystemCount()==0)
+            local system=CGlobalObjects.registerSystem('campfire')
+            assert(CGlobalObjects.getSystemCount()==1 and CGlobalObjects.getSystemByIndex(0)==system)
+            assert(CGlobalObjects.getSystemByIndex(-1)==nil and CGlobalObjects.getSystemByIndex(1)==nil)
+            assert(CGlobalObjects.getSystemByName('campfire')==system and CGlobalObjects.registerSystem('campfire')==system)
+            local data=system:getModData()
+            local nested={marker=27}
+            data.consumer=nested
+            assert(system:getModData()==data and system:getModData().consumer==nested)
+            assert(system:getName()=='campfire' and system:getObjectCount()==0,
+                'only this fresh client registration list is empty, not a claim about the original world')
+            assert(not pcall(function() system:getObjectAt(5,5,0) end),'unknown world-global data must not become nil')
+            assert(not pcall(function() system:newObject(5,5,0) end),'unsupported global producers must not create fake campfires')
+            assert(not pcall(function() CGlobalObjects.registerSystem('unknown-system') end))
+        `, 'client-global-registration');
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});
+
 test('corpse context consumers exclude flat world items and player inventory and reject invented containers', async () => {
     const { engine, host, session } = await fixture();
 
@@ -756,12 +1596,31 @@ test('corpse context consumers exclude flat world items and player inventory and
         await loadSource(session, host, `
             local player=getPlayer()
             local square=getCell():getGridSquare(6,5,0)
+            local corpse=square:getWorldObjects():get(0):getItem()
+            assert(corpse:isHumanCorpse(),'the original predicate recognizes the native CorpseMale type name')
+            local originalType,originalFullType=corpse.getType,corpse.getFullType
+            corpse.getType=function() return 'BoxingGloves' end
+            corpse.getFullType=function() return 'Base.BoxingGloves' end
+            assert(corpse:isHumanCorpse(),'Lua getter overrides must not change the native type-name predicate')
+            assert(not pcall(function() corpse.isHumanCorpse({getType=function() return 'CorpseMale' end}) end))
+            corpse.getType,corpse.getFullType=originalType,originalFullType
             local native=square:getObjects()
             assert(native==square:getObjects())
             RetainedNativeObjects=native
             local clicked={}
             for i=0,native:size()-1 do clicked[#clicked+1]=native:get(i) end
             assert(#clicked==2)
+            for _,object in ipairs(clicked) do
+                assert(object:getChunk()==square:getChunk(),
+                    'native doors and world items must share inherited IsoObject chunk ownership')
+            end
+            RetainedStaticMovingObjects=square:getStaticMovingObjects()
+            assert(type(RetainedStaticMovingObjects)=='userdata' and RetainedStaticMovingObjects==square:getStaticMovingObjects())
+            assert(RetainedStaticMovingObjects:isEmpty() and RetainedStaticMovingObjects:size()==0,
+                'admitted doors and flat world items are not original static-moving actors')
+            assert(not RetainedStaticMovingObjects:contains(player))
+            assert(not pcall(function() RetainedStaticMovingObjects:get(0) end))
+            assert(square:getVehicleContainer()==nil,'the admitted vehicle-free world has no intersecting BaseVehicle')
             local function corpseOptions(objects,clickedSquare)
                 local options={}
                 local lists={player:getContextWorldContainersWithHumanCorpse(objects),
@@ -795,9 +1654,25 @@ test('corpse context consumers exclude flat world items and player inventory and
             assert(getPlayer():getSuitableContainersWithHumanCorpseInSquare(RetainedCorpseSquare):isEmpty())
             assert(RetainedNativeObjects:isEmpty())
             assert(not pcall(function() RetainedNativeObjects:get(0) end))
+            assert(RetainedStaticMovingObjects:isEmpty(),'retained static-moving view must re-read the admitted current square')
+            assert(RetainedCorpseSquare:getVehicleContainer()==nil)
         `, 'corpse-context-after-removal');
         assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
         assert.equal(host.api.items.containerItems(host.api.items.playerInventoryId()).length, 2);
+        engine.importDoors([], {
+            squares: sourceDoorSquares(true).map((square) => ({ ...square, vehicleObstructed: square.x === 6 && square.y === 5 })),
+        });
+        await loadSource(session, host, `
+            assert(not pcall(function() RetainedCorpseSquare:getVehicleContainer() end),
+                'vehicle obstruction metadata needs an actual supported vehicle representation, not a fabricated nil')
+        `, 'vehicle-container-unsupported');
+        engine.importDoors([], { squares: [] });
+        await loadSource(session, host, `
+            assert(not pcall(function() RetainedStaticMovingObjects:size() end),
+                'missing source-square admission must not become a fabricated empty actor collection')
+            assert(not pcall(function() RetainedCorpseSquare:getVehicleContainer() end),
+                'an absent source square must not become a fabricated no-vehicle result')
+        `, 'static-moving-square-unloaded');
     } finally {
         session.close();
         host.dispose();
@@ -894,7 +1769,16 @@ test('cross-package require preserves source names, native recursive nil, and ev
 });
 
 test('source cursor key identities resolve the actual empty binding without aborting key dispatch', async () => {
-    const { host, session, saved } = await fixture({ sourceWorldContext: { inputBindings: { Interact: null } } });
+    const { host, session, saved } = await fixture({
+        sourceWorldContext: {
+            /**
+             * Resolve the fixture's empty native binding.
+             *
+             * @returns {null} An actual empty native binding.
+             */
+            keyBinding: () => null,
+        },
+    });
 
     try {
         activate(session, host, `
@@ -906,8 +1790,8 @@ test('source cursor key identities resolve the actual empty binding without abor
             end
             getModData().CursorKeys={calls=0}
             Events.OnKeyPressed.Add(function(key)
-                for _,binding in ipairs(bindings) do assert(getCore():isKey(binding,key)==(key==0)) end
-                assert(getCore():isKey('Interact',key)==(key==0))
+                for _,binding in ipairs(bindings) do assert(not getCore():isKey(binding,key)) end
+                assert(not getCore():isKey('Interact',key))
                 getModData().CursorKeys.calls=getModData().CursorKeys.calls+1
             end)
         `, 'cursor-keys');
@@ -918,6 +1802,107 @@ test('source cursor key identities resolve the actual empty binding without abor
         assert.equal(saved.get('host').data.nativePlayerData.CursorKeys.calls, 3);
     } finally {
         session.close();
+        host.dispose();
+    }
+});
+
+test('Lua GameTime setters mutate the native source clock without calendar normalization', async () => {
+    const { engine, host, session } = await fixture();
+
+    try {
+        activate(session, host, `
+            local clock=getGameTime()
+            assert(type(clock)=='userdata' and clock==getGameTime())
+            assert(clock:getYear()==1993 and clock:getMonth()==6 and clock:getDay()==22)
+            assert(clock:getTimeOfDay()==9 and clock:getLastTimeOfDay()==9)
+            assert(clock:getNightsSurvived()==0 and clock:getMinutesPerDay()==90)
+            assert(clock:getWorldAgeHours()==2 and clock:getHour()==9 and clock:getMinutes()==0)
+            assert(clock:setYear(-44)==nil)
+            assert(clock:setMonth(13)==nil)
+            assert(clock:setDay(40)==nil)
+            assert(clock:setNightsSurvived(2)==nil)
+            assert(clock:setTimeOfDay(9.1)==nil)
+            assert(clock:setLastTimeOfDay(-1.1)==nil)
+            assert(clock:setMinutesPerDay(-30.1)==nil)
+            assert(clock:getYear()==-44 and clock:getMonth()==13 and clock:getDay()==40)
+            assert(clock:getNightsSurvived()==2)
+            assert(clock:getTimeOfDay()==9.100000381469727)
+            assert(clock:getLastTimeOfDay()==-1.100000023841858)
+            assert(clock:getMinutesPerDay()==-30.100000381469727)
+            assert(clock:getWorldAgeHours()==50.099998474121094)
+            assert(clock:getHour()==9 and clock:getMinutes()==6)
+            assert(not pcall(function() clock:setYear(1.5) end))
+            assert(not pcall(function() clock:setMonth(2147483648) end))
+            assert(not pcall(function() clock:setDay(nil) end))
+            assert(not pcall(function() clock:setTimeOfDay(math.huge) end))
+            assert(not pcall(function() clock:setLastTimeOfDay(0/0) end))
+            assert(not pcall(function() clock:setMinutesPerDay('90') end))
+            assert(clock:getYear()==-44 and clock:getMonth()==13 and clock:getDay()==40)
+            assert(clock:getTimeOfDay()==9.100000381469727)
+            assert(clock:getLastTimeOfDay()==-1.100000023841858)
+            assert(clock:getMinutesPerDay()==-30.100000381469727)
+            clock:setTimeOfDay(-1.25)
+            assert(clock:getHour()==-2 and clock:getMinutes()==-15)
+            assert(clock:getWorldAgeHours()==63.75)
+        `, 'source-clock-setters');
+        assert.deepEqual(engine.worldClockState(), {
+            version: 1, year: -44, month: 13, day: 40, timeOfDay: -1.25,
+            lastTimeOfDay: -1.100_000_023_841_858, nightsSurvived: 2, minutesPerDay: -30.100_000_381_469_727,
+        });
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+});
+
+test('retained Lua GameTime observes native clock import and simulation advances with existing timing', async () => {
+    const { engine, host, session, saved } = await fixture();
+
+    try {
+        activate(session, host, `
+            local clock=getGameTime()
+            getModData().Clock={initialAge=clock:getWorldAgeHours()}
+            clock:setMultiplier(2)
+            assert(clock:getTrueMultiplier()==2)
+            Events.OnTick.Add(function()
+                assert(clock==getGameTime())
+                getModData().Clock={
+                    initialAge=getModData().Clock.initialAge,
+                    year=clock:getYear(),month=clock:getMonth(),day=clock:getDay(),
+                    timeOfDay=clock:getTimeOfDay(),lastTimeOfDay=clock:getLastTimeOfDay(),
+                    nightsSurvived=clock:getNightsSurvived(),minutesPerDay=clock:getMinutesPerDay(),
+                    worldAgeHours=clock:getWorldAgeHours(),hour=clock:getHour(),minutes=clock:getMinutes(),
+                    elapsed=clock:getRealworldSecondsSinceLastUpdate(),multiplier=clock:getTrueMultiplier()
+                }
+            end)
+        `, 'source-clock-live');
+        engine.importWorldClockState({
+            version: 1, year: 2_000, month: 1, day: 28, timeOfDay: 23.5,
+            lastTimeOfDay: 23, nightsSurvived: 3, minutesPerDay: 90,
+        });
+        host.step(1 / 60);
+        session.flushSaveData();
+        const observed = saved.get('host').data.nativePlayerData.Clock;
+        const native = engine.worldClockState();
+
+        assert.equal(observed.initialAge, 2);
+        assert.equal(observed.year, 2_000);
+        assert.equal(observed.month, 1);
+        assert.equal(observed.day, 28);
+        assert.ok(observed.timeOfDay > 23.5 && observed.timeOfDay < 24);
+        // ModData JSON uses Lua tostring; compare the underlying source f32, not its shortened decimal spelling.
+        assert.equal(Math.fround(observed.timeOfDay), native.timeOfDay);
+        assert.equal(Math.fround(observed.lastTimeOfDay), native.lastTimeOfDay);
+        assert.equal(observed.nightsSurvived, 3);
+        assert.equal(observed.minutesPerDay, 90);
+        assert.ok(observed.worldAgeHours > 88.5 && observed.worldAgeHours < 89);
+        assert.equal(observed.hour, 23);
+        assert.equal(observed.minutes, 30);
+        assert.equal(Math.fround(observed.elapsed), Math.fround(1 / 60));
+        assert.equal(observed.multiplier, 2);
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
         host.dispose();
     }
 });
@@ -973,6 +1958,11 @@ test('Lua cell and square userdata retain identity while native replacement chan
             assert(square:canStand() == true)
             local negative = cell:getGridSquare(-0.25, -1.25, 0)
             assert(negative:getX() == -1 and negative:getY() == -2)
+            local chunk = square:getChunk()
+            assert(type(chunk)=='userdata' and chunk==square:getChunk())
+            assert(chunk==cell:getGridSquare(0,0,0):getChunk(),'loaded squares in the same native 8x8 chunk share identity')
+            assert(chunk~=negative:getChunk(),'negative chunk coordinates must not alias the origin chunk')
+            getModData().squareState = {}
             assert(cell:getGridSquare(5, 5, 1) == nil)
             assert(cell:getGridSquare(5, 5, 32) == nil)
             assert(cell:getGridSquare(100, 100, 0) == nil)
@@ -983,16 +1973,19 @@ test('Lua cell and square userdata retain identity while native replacement chan
             assert(not pcall(function() return square:getRoom() end))
             assert(not pcall(function() return square:getBuilding() end))
             assert(not pcall(function() return square:getRoomID() end))
-            getModData().squareState = {}
+            local initialChunk=chunk
             Events.OnTick.Add(function()
                 assert(cell == getCell())
                 local current = cell:getGridSquare(5, 5, 0)
                 local result = getModData().squareState
                 if current ~= nil then
                     assert(current == square and current == player:getCurrentSquare())
+                    assert(type(current:getChunk())=='userdata' and current:getChunk()~=initialChunk,
+                        'atomic native square replacement must retire the old chunk identity')
                     result.canStand = square:canStand()
                 else
                     assert(player:getCurrentSquare() == nil)
+                    assert(square:getChunk()==nil,'an unloaded square must not manufacture a chunk')
                     local ok, message = pcall(function() return square:canStand() end)
                     assert(not ok and tostring(message):find('square disappeared', 1, true))
                     assert(not pcall(function() return square:getX() end))
@@ -1333,6 +2326,9 @@ test('unsupported native facilities, bytecode and infinite loops report native c
         assert.throws(() => activate(session, host, 'getCore():getVersion()', 'ui'), (error) => error.nativeModId === 'ui' && /unsupported/.test(error.message));
         assert.throws(() => activate(session, host, '\x1BLua', 'bytecode'), /bytecode/);
         assert.throws(() => activate(session, host, 'while true do end', 'timeout'), /timeout/);
+        assert.throws(() => session.preload({
+            id: 'untrusted-stdlib', sources: [{ path: 'stdlib.lua', source: 'getModData().RootHijack=true' }],
+        }), /unsupported native Lua source path/u);
         assert.ok(session.diagnostics().errors.some((error) => error.nativeModId === 'ui' && error.path.endsWith('main.lua')));
         assert.ok(session.diagnostics().timeouts >= 1);
     } finally {
@@ -1638,16 +2634,17 @@ test('real input event dispatch changes engine actions and rejects unimplemented
 
     try {
         activate(session, host, `
-            Events.OnKeyPressed.Add(function(key) if key == 65 then getPlayer():walk(-1, 0) end end)
-            Events.OnKeyReleased.Add(function(key) if key == 65 then getPlayer():cancelAction() end end)
+            Events.OnKeyStartPressed.Add(function(key) if key == 65 then getPlayer():walk(-1, 0) end end)
+            Events.OnKeyPressed.Add(function(key) if key == 65 then getPlayer():cancelAction() end end)
         `);
-        session.dispatch('OnKeyPressed', 65);
+        session.dispatch('OnKeyStartPressed', 65);
         assert.equal(engine.snapshot().action, 2);
         host.step(1 / 60);
         assert.ok(engine.snapshot().x < 5);
-        session.dispatch('OnKeyReleased', 65);
+        session.dispatch('OnKeyPressed', 65);
         assert.equal(engine.snapshot().action, 0);
         assert.throws(() => session.dispatch('OnEnterVehicle'), /unsupported/);
+        assert.throws(() => session.dispatch('OnKeyReleased', 65), /unsupported externally dispatched event/u);
         assert.throws(() => session.dispatch('OnKeyPressed', -1), /key code/);
     } finally {
         session.close();
@@ -1760,6 +2757,49 @@ test('resident source action identity follows the native FIFO and rejects unsupp
 const SOURCE_ITEM_FIELDS = {
     conditionMax: 10, stackLimit: 1, bodyLocation: null, removeOnBroken: false, conditionLowerChanceOneIn: 1,
 };
+
+test('source prequeue drop primitives use real tags and do not emit clothing events for unattached items', async () => {
+    const { engine, host, session } = await fixture();
+
+    try {
+        importPickupSquares(engine);
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.Tagged', tags: ['base:litlantern'] }, { owner: 'fixture' });
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.Untagged' }, { owner: 'fixture' });
+
+        for (const fullType of ['Fixture.Tagged', 'Fixture.Untagged']) {
+            const id = host.api.items.spawn({ fullType, x: 5, y: 5 }).snapshot.id;
+
+            host.api.items.pickup(id);
+            completeActions(engine);
+        }
+
+        const before = engine.exportInventoryGraph();
+
+        activate(session, host, `
+            local values=getPlayer():getInventory():getItems()
+            assert(values:size()==2)
+            local tagged,ordinary=values:get(0),values:get(1)
+            assert(type(ItemTag.LIT_LANTERN)=='userdata')
+            assert(tagged:hasTag(ItemTag.LIT_LANTERN) and not ordinary:hasTag(ItemTag.LIT_LANTERN))
+            assert(not tagged:hasTag(ItemTag.KEY_RING) and not ordinary:hasTag(ItemTag.KEY_RING))
+            assert(not pcall(function() ordinary:hasTag('base:litlantern') end))
+            Events.OnClothingUpdated.Add(function() error('unattached item removal emitted a clothing event') end)
+            getPlayer():removeAttachedItem(tagged)
+            getPlayer():removeAttachedItem(ordinary)
+            getPlayer():removeAttachedItem(ordinary)
+            local square=getPlayer():getCurrentSquare()
+            local diagonal=getCell():getGridSquare(6,6,0)
+            assert(square:DistToProper(square)==0)
+            assert(square:DistToProper(diagonal)==(string.unpack('f',string.pack('f',math.sqrt(2)))))
+            assert(not pcall(function() square:DistToProper({getX=function() return 6 end,getY=function() return 6 end}) end))
+        `, 'source-prequeue-drop-primitives');
+        assert.deepEqual(engine.exportInventoryGraph(), before, 'unattached source calls must preserve actual item and equipment state');
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+});
 
 // Own-authored lifecycle model: real Lua tables and real native queue/commit operations, no game source.
 const SOURCE_GROUP_FIXTURE = `
@@ -2149,66 +3189,297 @@ test('source hydration uses declared owners before activation and preserves late
     }
 });
 
-test('private original queued grabs restore before lifecycle without eagerly registering the full inventory HUD', async (t) => {
-    let manifest;
+test('private original inventory UI survives SDK walks and one hundred genuine post-save rebuilds with bounded native lifetime', async (t) => {
+    const content = await privateOriginalContent(t);
 
-    try {
-        manifest = JSON.parse(await readFile(new URL('../content/manifest.json', import.meta.url), 'utf8'));
-    } catch (error) {
-        if (error.code !== 'ENOENT') {
-            throw error;
-        }
-
-        t.skip('Requires privately provisioned original Lua; no original bytes are committed.');
-
+    if (!content) {
         return;
     }
 
-    const content = {
-        manifest,
-        /**
-         * Read untouched original text from the private content directory.
-         *
-         * @param {string} path - Manifest-owned original resource.
-         * @returns {{text:()=>Promise<string>}} Private text reader.
-         */
-        getFile: (path) => ({
-            /**
-             * Read the selected private original file.
-             *
-             * @returns {Promise<string>} Unchanged source text.
-             */
-            text: () => readFile(new URL(`../content/${path}`, import.meta.url), 'utf8'),
-        }),
+    const definition = {
+        ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.UiLifetime', type: 'Normal', weight: 0.01,
+        rawFields: [{ name: 'Icon', value: 'Paperclip' }],
     };
-    const eager = ['env', 'ISBaseObject', 'ISUI/ISUIElement', 'ISUI/Layout/ISDock', 'ISUI/Style/UIHorizontalAlignment', 'ISUI/ISUITextureGetter'];
-    const seeds = [
-        ...eager, 'TimedActions/ISTimedActionQueue', 'TimedActions/ISGrabItemAction',
-        'TimedActions/ISInventoryTransferAction', 'TimedActions/ISTransferAction',
-        'TimedActions/ISOpenCloseDoor', 'TimedActions/WalkToTimedAction', 'TimedActions/ISWaitWhileGettingUp',
-        'luautils', 'ISUI/ISContextMenu', 'ISUI/ISPanelJoypad', 'ISUI/ISRichTextPanel',
-        'ISUI/ISToolTip', 'ISUI/ISToolTipInv', 'ISUI/ISInventoryItem', 'ISUI/ISInventoryPage',
-        'ISUI/PlayerData/ISPlayerDataObject', 'ISUI/PlayerData/ISPlayerData',
-        'BuildingObjects/ISMoveableCursor', 'RadioCom/ISRadioWindow', 'ISUI/ISScrollingListBox',
-        'ISUI/ISTradingUI', 'ISUI/ISWorldObjectContextMenu',
-    ];
-    const startup = await Promise.all(seeds.map(async (name) => {
-        const { path } = manifest.files.find((item) => item.path.replace(/^media\/lua\/(shared|client|server)\//u, '').replace(/\.lua$/u, '') === name);
+    const resources = await loadNativeGameResources(content, [], 60, { requireUI: true, itemDefinitions: [definition] });
+    const textures = await Promise.all(resources.textures.map(async ({ file, ...texture }) => ({
+        ...texture,
+        ...(texture.crop
+            ? { width: texture.crop.width, height: texture.crop.height }
+            : parsePngHeader(new Uint8Array(await file.slice(0, 33).arrayBuffer()))),
+    })));
+    const records = new Map();
+    const sourceFiles = createSourceFiles({
+        sourceBuild: content.manifest.sourceBuild.version, ownerId: 'pz-base-game',
+        storage: {
+            /**
+             * Read this fixture's isolated original-file namespace.
+             *
+             * @param {string} key - Namespaced source-file key.
+             * @returns {string|null} Genuine saved text or absence.
+             */
+            getItem: (key) => records.get(key) ?? null,
+            /**
+             * Commit actual original writer output to isolated storage.
+             *
+             * @param {string} key - Namespaced source-file key.
+             * @param {string} value - Original writer text.
+             */
+            setItem: (key, value) => {
+                records.set(key, value);
+            },
+        },
+    });
+    const dom = menuDocument();
+    const ui = createGameUI({ document: dom.document, focusTarget: dom.canvas });
 
-        return { path, source: await content.getFile(path).text(), execute: eager.includes(name) };
-    }));
-    const sources = await engineSources([], content, startup);
-    const fontDescriptors = await Promise.all(['Small', 'Medium', 'Large'].map(async (name) => {
-        const descriptor = await content.getFile(`media/fonts/zomboid${name}.fnt`).text();
-        const { width, height } = parseBitmapFont(descriptor);
+    resources.translations[definition.fullType] = 'UI lifetime fixture item';
+    ui.setViewport(640, 640);
+    ui.initialize({ ...resources, textures });
+    const observed = observeUiLifetime(ui);
+    const feedback = [];
+    const bindings = {
+        'Toggle Inventory': { keyValue: 23, altKey: 0, shift: false, ctrl: false, alt: false },
+        Aim: { keyValue: 30, altKey: 29, shift: false, ctrl: false, alt: false },
+    };
+    const { engine, host, session } = await fixture({
+        ui: observed.ui, sourceFiles,
+        engineStartup: resources.engineSources.filter(({ execute }) => execute).map(({ path }) => ({ id: 'engine-lua', path })),
+        sourceWorldContext: {
+            rooms: [], buildings: [],
+            /**
+             * Retain original callback failures rather than replacing failed behavior.
+             *
+             * @param {unknown} cause - Original callback failure.
+             * @returns {number} Updated feedback count.
+             */
+            onError: (cause) => feedback.push(cause),
+            /**
+             * The fixture actively steps the real simulation.
+             *
+             * @returns {boolean} Whether simulation stepping is paused.
+             */
+            paused: () => false,
+            /**
+             * The fixture uses an unscaled logical viewport.
+             *
+             * @returns {number} Logical viewport zoom.
+             */
+            getZoom: () => 1,
+            /**
+             * Project the actual fixture square into the logical viewport.
+             *
+             * @returns {{x:number,y:number}} Logical screen coordinates.
+             */
+            objectScreenPosition: () => ({ x: 320, y: 320 }),
+            /**
+             * Select the fixture's real native square for original pointer consumers.
+             *
+             * @returns {{x:number,y:number}} Native square coordinates.
+             */
+            screenToIso: () => ({ x: 5, y: 5 }),
+            /**
+             * Read actual native imported world bounds.
+             *
+             * @param {number} x - Native world x coordinate.
+             * @param {number} y - Native world y coordinate.
+             * @param {number} z - Native world floor.
+             * @returns {boolean} Whether the real engine owns the square's chunk.
+             */
+            isValidSquare: (x, y, z) => {
+                const bounds = engine.worldBounds();
+                const cx = Math.floor(x / 256);
+                const cy = Math.floor(y / 256);
 
-        return { name, descriptor, width, height };
-    }));
-    const translationFiles = manifest.files.filter(({ path }) => /^media\/lua\/shared\/Translate\/EN\/[^/]+\.json$/u.test(path));
-    const translations = Object.assign(Object.create(null), ...await Promise.all(translationFiles
-        .map(async ({ path }) => JSON.parse(await content.getFile(path).text()))));
+                return z === 0 && bounds.active && cx >= bounds.minCx && cx <= bounds.maxCx && cy >= bounds.minCy && cy <= bounds.maxCy;
+            },
+            /**
+             * No joypad is bound in this keyboard/mouse fixture.
+             *
+             * @returns {number} Unbound joypad identifier.
+             */
+            joypadBind: () => -1,
+            /**
+             * Read the fixture's real configured key binding.
+             *
+             * @param {string} name - Original binding name.
+             * @returns {object|null} Configured binding or absence.
+             */
+            keyBinding: (name) => bindings[name] ?? null,
+            /**
+             * Expose the same configured binding records to original collision queries.
+             *
+             * @returns {object} Configured key bindings.
+             */
+            keyBindings: () => bindings,
+            /**
+             * No physical key is held during idle save/rebuild cycles.
+             *
+             * @returns {boolean} Whether a physical key is held.
+             */
+            isSourceKeyDown: () => false,
+            /**
+             * No physical mouse button is held during idle save/rebuild cycles.
+             *
+             * @returns {boolean} Whether a physical mouse button is held.
+             */
+            isMouseButtonDown: () => false,
+        },
+    });
 
-    translations['Fixture.OriginalRestore'] = 'Restored fixture item';
+    try {
+        importPickupSquares(engine);
+        engine.registerItemDefinition(definition, { owner: 'fixture' });
+        host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
+        session.preload({ id: 'engine-lua', nativeId: 'ProjectZomboid', engineSource: true, sources: resources.engineSources });
+        session.activatePackage({
+            id: 'pz-base-game', nativeId: 'ProjectZomboid', api: host.coreApi,
+            sources: [{
+                path: 'media/lua/client/pz-base-game/bootstrap.lua',
+                source: 'require "TimedActions/ISTimedActionQueue"; require "TimedActions/ISGrabItemAction"',
+            }],
+        });
+        session.dispatch('OnCreatePlayer', 0);
+        session.dispatch('OnGameStart');
+        await loadSource(session, host, `
+            assert(rawget(_G,'ISWalkToTimedAction')==nil,
+                'a native SDK walk must work before the original world-context constructor is required')
+            assert(getPlayer():getCharacterActions():isEmpty())
+        `, 'sdk-walk-before-context');
+        const walk = host.api.actions.requestWalk({ x: 6, y: 5, z: 0 });
+
+        assert.equal(walk.accepted, true);
+        host.frameStep(1 / 60);
+        assert.equal(engine.actions.getState().current.id, walk.actionId);
+        assert.equal(engine.actions.getState().current.origin, 'sdk');
+        await loadSource(session, host, `
+            local actions=getPlayer():getCharacterActions()
+            assert(not actions:isEmpty())
+            SDKWalkHandle=actions:get(0)
+            local value=SDKWalkHandle:getTable()
+            assert(value.Type=='ISWalkToTimedAction' and value.character==getPlayer())
+            assert(value.location:getX()==6 and value.location:getY()==5 and value.location:getZ()==0)
+            assert(value.additionalTest==nil and value.additionalContext==nil,
+                'the location assertion must not expand an error string into optional constructor arguments')
+            assert(actions:get(0)==SDKWalkHandle and SDKWalkHandle:getTable()==value,
+                'native SDK walk reads must retain one original action and handle identity')
+        `, 'sdk-walk-resident-identity');
+        assert.equal(engine.actions.getState().current.id, walk.actionId);
+        host.api.actions.cancel();
+        host.frameStep(1 / 60);
+        assert.deepEqual(engine.actions.getState(), { current: null, pending: [] });
+        const stopped = engine.snapshot();
+
+        for (let tick = 0; tick < 4; tick += 1) {
+            host.frameStep(1 / 60);
+        }
+
+        assert.equal(engine.snapshot().x, stopped.x);
+        assert.equal(engine.snapshot().y, stopped.y);
+        await loadSource(session, host, `
+            assert(getPlayer():getCharacterActions():isEmpty())
+            SDKWalkHandle=nil
+        `, 'sdk-walk-stopped');
+        session.initializeInventoryPages();
+        let peakMemory = session.diagnostics().memoryBytes;
+
+        /**
+         * Finish each genuine save flush before beginning the next hundred-frame cycle.
+         *
+         * @param {number} remaining - Sequential rebuild cycles still required.
+         * @returns {Promise<void>} Completion of all remaining genuine rebuilds.
+         */
+        async function rebuildInventoryPages(remaining) {
+            for (let frame = 0; frame < 100; frame += 1) {
+                session.updateActorInput();
+                host.frameStep(1 / 60);
+                ui.render();
+                session.updateWorldPointer(5, 5);
+                session.renderWorldPhase('opaque', 0);
+                session.renderWorldPhase('building', 0);
+            }
+
+            const oldRoots = ui.bindings.call('getUI', 'pz-base-game');
+
+            session.prepareSourceSave();
+            session.flushSaveData();
+            session.dispatch('OnPostSave');
+            await session.flushSourceFiles();
+            session.initializeInventoryPages();
+            const newRoots = ui.bindings.call('getUI', 'pz-base-game');
+
+            assert.equal(newRoots.length, 3);
+            assert.notDeepEqual(newRoots, oldRoots, 'genuine post-save teardown must recreate the original inventory UI');
+            peakMemory = Math.max(peakMemory, session.diagnostics().memoryBytes);
+
+            if (remaining > 1) {
+                await rebuildInventoryPages(remaining - 1);
+            }
+        }
+
+        await rebuildInventoryPages(100);
+
+        assert.ok(observed.counts.new > 4_000, 'the original callbacks must actually rebuild their native elements');
+        assert.ok(observed.counts.release > observed.counts.new / 2, 'abandoned original page wrappers must release native elements');
+        assert.ok(observed.counts.transitionRelease > observed.counts.transitionNew / 2,
+            'original page transitions must not accumulate across genuine saves');
+        assert.ok(peakMemory < 16 * 1_024 * 1_024, `original UI heap must remain bounded, observed ${peakMemory} bytes`);
+        assert.equal(session.diagnostics().memoryLimitBytes, 32 * 1_024 * 1_024);
+        assert.equal(session.diagnostics().timeouts, 0);
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+        assert.deepEqual(feedback, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+        ui.dispose();
+        sourceFiles.dispose();
+    }
+});
+
+test('private original queued grabs restore headlessly before explicit resident inventory-page activation', async (t) => {
+    const content = await privateOriginalContent(t);
+
+    if (!content) {
+        return;
+    }
+
+    const { manifest } = content;
+    const definition = {
+        ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.OriginalRestore', weight: 0.01,
+        rawFields: [{ name: 'Icon', value: 'Paperclip' }],
+    };
+    const resources = await loadNativeGameResources(content, [], 60, { requireUI: true, itemDefinitions: [definition] });
+    const sources = resources.engineSources;
+    const textures = await Promise.all(resources.textures.map(async ({ file, ...texture }) => ({
+        ...texture,
+        ...(texture.crop
+            ? { width: texture.crop.width, height: texture.crop.height }
+            : parsePngHeader(new Uint8Array(await file.slice(0, 33).arrayBuffer()))),
+    })));
+    const floorImagePath = 'media/ui/inventoryPanes/TakeSameTypeOneContainer.png';
+    const floorImage = parsePngHeader(new Uint8Array(await content.getFile(floorImagePath).slice(0, 33).arrayBuffer()));
+
+    resources.translations['Fixture.OriginalRestore'] = 'Restored fixture item';
+    resources.translations['Fixture.OutlineBag'] = 'Outline fixture bag';
+    const coreOptions = new Map();
+    const coreStorage = {
+        /**
+         * Read persisted original Core presentation options.
+         *
+         * @param {string} key - Origin-owned options key.
+         * @returns {string|null} The saved document, if present.
+         */
+        getItem: (key) => coreOptions.get(key) ?? null,
+        /**
+         * Store the actual Core options document for a fresh UI session.
+         *
+         * @param {string} key - Origin-owned options key.
+         * @param {string} value - Serialized Core options.
+         */
+        setItem: (key, value) => {
+            coreOptions.set(key, value);
+        },
+    };
     const originalDOM = menuDocument();
     const candidateDOM = menuDocument();
 
@@ -2219,19 +3490,24 @@ test('private original queued grabs restore before lifecycle without eagerly reg
             throw new Error('Native Lua must not enumerate the host DOM graph');
         },
     });
-    const originalUI = sourceMenuUI(640, { document: originalDOM.document, focusTarget: originalDOM.canvas });
-    const candidateUI = sourceMenuUI(640, { document: candidateDOM.document, focusTarget: candidateDOM.canvas });
+    const originalUI = createGameUI({ document: originalDOM.document, focusTarget: originalDOM.canvas, storage: coreStorage });
+    const candidateUI = createGameUI({ document: candidateDOM.document, focusTarget: candidateDOM.canvas });
 
     for (const ui of [originalUI, candidateUI]) {
+        ui.setViewport(640, 640);
         ui.initialize({
-            textures: fontDescriptors.map(({ name, width, height }) => ({ path: name, width, height })),
-            fonts: Object.fromEntries(fontDescriptors.map(({ name, descriptor }) => [name, { descriptor, atlasPath: name }])),
-            fontAliases: { NewSmall: 'Small' },
-            translations, settings: ui.bindings.call('settings'),
+            ...resources, textures,
         });
     }
 
     const sourceFeedback = [];
+    const physicalKeys = new Set();
+    const inputBindings = {
+        'Toggle Inventory': { keyValue: 23, altKey: 0, shift: false, ctrl: false, alt: false },
+        Aim: { keyValue: 30, altKey: 29, shift: false, ctrl: false, alt: false },
+    };
+    let physicalMouseButtons = 0;
+    let joypadBinding = -1;
     const options = {
         engineStartup: sources.filter(({ execute }) => execute).map(({ path }) => ({ id: 'engine-lua', path })),
         sourceWorldContext: {
@@ -2268,6 +3544,56 @@ test('private original queued grabs restore before lifecycle without eagerly reg
              * @returns {{x:number,y:number}} Fixture pointer's native ground location.
              */
             screenToIso: () => ({ x: 5, y: 5 }),
+            /**
+             * Report the fixture's keyboard-only controller binding.
+             *
+             * @returns {number} Keyboard-only native controller binding.
+             */
+            joypadBind: () => joypadBinding,
+            /**
+             * Resolve an original source binding.
+             *
+             * @param {string} name - Original source binding.
+             * @returns {object|null} Configured native key record.
+             */
+            keyBinding: (name) => inputBindings[name] ?? null,
+            /**
+             * Read the fixture's primary-key collisions.
+             *
+             * @returns {object} Actual configured primary-key collision records.
+             */
+            keyBindings: () => inputBindings,
+            /**
+             * Read the fixture's current physical native keyboard state.
+             *
+             * @param {number} code - Original native key code.
+             * @returns {boolean} Whether the key is physically down.
+             */
+            isSourceKeyDown: (code) => physicalKeys.has(code),
+            /**
+             * Read the same fixture-owned physical controls for original timed actions.
+             *
+             * @param {'movement'|'cancel'} kind - Original input query.
+             * @returns {boolean} Current physical movement or cancellation request.
+             */
+            input: (kind) => {
+                if (kind === 'movement') {
+                    return physicalKeys.has(17) || physicalKeys.has(31) || physicalKeys.has(30) || physicalKeys.has(32);
+                }
+
+                if (kind === 'cancel') {
+                    return physicalKeys.has(1);
+                }
+
+                throw new Error(`Unsupported source input: ${kind}.`);
+            },
+            /**
+             * Read the fixture's current native-indexed physical mouse state.
+             *
+             * @param {number} index - Original left/right/middle indices 0/1/2, through native button 7.
+             * @returns {boolean} Actual current fixture input state.
+             */
+            isMouseButtonDown: (index) => (physicalMouseButtons & (1 << index)) !== 0,
         },
     };
 
@@ -2302,11 +3628,169 @@ test('private original queued grabs restore before lifecycle without eagerly reg
         });
     }
 
+    const headlessDOM = menuDocument();
+    const headlessUI = createGameUI({ document: headlessDOM.document, focusTarget: headlessDOM.canvas });
+    const headlessFiles = privateFiles();
+
+    headlessUI.setViewport(640, 640);
+    headlessUI.initialize({ ...resources, textures });
+    const bootstrapRecords = new Map();
+    const bootstrapPreferences = 'player:0\r\nwindowKey:BuildWindow\r\nx=12\r\ny=34\r\nwidth=320\r\nheight=200\r\nlocked=false\r\n';
+    let rejectEntityRead = false;
+    const bootstrapFileOptions = {
+        sourceBuild: manifest.sourceBuild.version, ownerId: 'pz-base-game',
+        storage: {
+            /**
+             * Preserve real durable preferences while injecting one candidate's initial read failure.
+             *
+             * @param {string} key - Exact namespaced Core file key.
+             * @returns {string|null} Durable text or absence.
+             */
+            getItem(key) {
+                if (rejectEntityRead && key.includes('"entityLayout.ini"')) {
+                    throw new DOMException('entity layout bootstrap read denied', 'SecurityError');
+                }
+
+                return bootstrapRecords.get(key) ?? null;
+            },
+            /**
+             * Commit the actual original file writer's text.
+             *
+             * @param {string} key - Exact namespaced Core file key.
+             * @param {string} value - Complete source-authored text.
+             * @returns {void} Nothing.
+             */
+            setItem(key, value) {
+                bootstrapRecords.set(key, value);
+            },
+        },
+    };
+    const seededBootstrapFiles = createSourceFiles(bootstrapFileOptions);
+
+    seededBootstrapFiles.write('entityLayout.ini', bootstrapPreferences);
+    await seededBootstrapFiles.flush();
+    seededBootstrapFiles.dispose();
+    rejectEntityRead = true;
+    const failedBootstrap = await fixture({ ...options, ui: headlessUI, sourceFiles: createSourceFiles(bootstrapFileOptions) });
+
+    try {
+        failedBootstrap.session.preload({ id: 'engine-lua', nativeId: 'ProjectZomboid', engineSource: true, sources });
+        assert.throws(() => failedBootstrap.session.activatePackage({
+            id: 'pz-base-game', nativeId: 'ProjectZomboid', api: failedBootstrap.host.coreApi, sources: [],
+        }), /entity layout bootstrap read denied/u);
+        assert.throws(() => failedBootstrap.session.dispatch('OnGameStart'), /closed/u,
+            'a partially initialized original entity registry must not remain publishable');
+        assert.deepEqual([...bootstrapRecords.values()], [bootstrapPreferences]);
+    } finally {
+        failedBootstrap.session.close({ discardSaveData: true });
+        failedBootstrap.host.dispose();
+        rejectEntityRead = false;
+    }
+
+    const retriedBootstrapFiles = createSourceFiles(bootstrapFileOptions);
+    const retriedBootstrap = await fixture({ ...options, ui: headlessUI, sourceFiles: retriedBootstrapFiles });
+
+    try {
+        retriedBootstrap.session.preload({ id: 'engine-lua', nativeId: 'ProjectZomboid', engineSource: true, sources });
+        retriedBootstrap.session.activatePackage({ id: 'pz-base-game', nativeId: 'ProjectZomboid', api: retriedBootstrap.host.coreApi, sources: [] });
+        await loadSource(retriedBootstrap.session, retriedBootstrap.host, `
+            assert(not ISEntityUI.IsWindowOpen(0,'BuildWindow'))
+            local preferences=ISEntityUI.players[0].windows.BuildWindow
+            assert(preferences.x==12 and preferences.y==34 and preferences.width==320 and preferences.height==200,
+                'a fresh candidate must retry the genuine read rather than inherit a poisoned empty registry')
+        `, 'original-entity-bootstrap-retry');
+        retriedBootstrap.session.dispatch('OnPostSave');
+        await retriedBootstrap.session.flushSourceFiles();
+        assert.match(retriedBootstrapFiles.read('entityLayout.ini'), /^windowKey:BuildWindow\r?$/mu,
+            'a genuine post-save callback after retry must not erase durable window preferences');
+        assert.match(retriedBootstrapFiles.read('entityLayout.ini'), /^x=12\r?$/mu);
+    } finally {
+        retriedBootstrap.session.close({ discardSaveData: true });
+        retriedBootstrap.host.dispose();
+    }
+
+    const headless = await fixture({ ...options, ui: headlessUI, sourceFiles: headlessFiles });
+
+    try {
+        importPickupSquares(headless.engine);
+        headless.session.preload({ id: 'engine-lua', nativeId: 'ProjectZomboid', engineSource: true, sources });
+        headless.session.activatePackage({ id: 'pz-base-game', nativeId: 'ProjectZomboid', api: headless.host.coreApi, sources: [] });
+        activate(headless.session, headless.host, `
+            local instance=assert(CCampfireSystem.instance,'original client init must precede player and game startup')
+            local system=CGlobalObjects.getSystemByName('campfire')
+            assert(instance.system==system and system:getModData()==instance and system:getModData()==system:getModData(),
+                'the unchanged CGlobalObjectSystem constructor must own its actual resident metadata table')
+            assert(instance.systemName=='campfire' and CGlobalObjects.getSystemCount()==1)
+        `, 'original-client-global-bootstrap');
+        headless.session.dispatch('OnCreatePlayer', 0);
+        assert.equal(headless.session.openWorldContextMenu({ screenX: 320, screenY: 320, worldX: 5, worldY: 5 }), true);
+        activate(headless.session, headless.host, `
+            assert(getPlayerInventory(0).inventoryPane==nil and getPlayerLoot(0).inventoryPane==nil)
+        `, 'original-early-headless-pages');
+        headless.session.dispatch('OnGameStart');
+        const startupTypes = ['Base.Gloves_BoxingRed', 'Base.Shoes_ArmyBoots', 'Base.Shoes_WorkBoots'];
+        const startupDefinitions = parseItemDefinitions(
+            await content.getFile('media/scripts/generated/items/clothing.txt').text(),
+            { path: 'media/scripts/generated/items/clothing.txt' },
+        ).filter(({ fullType }) => startupTypes.includes(fullType));
+
+        assert.equal(startupDefinitions.length, startupTypes.length);
+
+        for (const entry of startupDefinitions) {
+            headless.engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, ...entry }, { owner: 'fixture' });
+
+            for (let index = 0; index < (entry.fullType === startupTypes[0] ? 55 : 2); index += 1) {
+                headless.host.api.items.spawn({ fullType: entry.fullType, x: 5, y: 5 });
+            }
+        }
+
+        headless.session.initializeInventoryPages();
+        headless.session.dispatch('OnKeyPressed', 23);
+        activate(headless.session, headless.host, `
+            assert(not getPlayerInventory(0):getIsVisible() and not getPlayerLoot(0):getIsVisible(),
+                'headless startup must not prematurely install unrelated global UI key handlers')
+            assert(getPlayerLoot(0).inventoryPane.inventory:getItems():size()==59,
+                'resident activation must populate the retained all-clothing workload under the unchanged VM timeout')
+            local pane=getPlayerLoot(0).inventoryPane
+            local nativeItems=pane.inventory:getItems()
+            ISMouseDrag.dragging={}
+            for i=nativeItems:size()-1,0,-1 do
+                table.insert(ISMouseDrag.dragging,nativeItems:get(i))
+            end
+            pane.draggedItems:reset()
+            pane.draggedItems:update()
+            local sorted=pane.draggedItems.items
+            assert(#sorted==59,'unchanged drag update must sort every actual native item')
+            for i=2,#sorted do
+                local previous,current=sorted[i-1],sorted[i]
+                assert(previous:getUnequippedWeight()<=current:getUnequippedWeight(),
+                    'unchanged inventory drag must order name groups by weight')
+                if previous:getDisplayName()==current:getDisplayName() then
+                    assert(nativeItems:indexOf(previous)<nativeItems:indexOf(current),
+                        'unchanged inventory comparator must restore native container order')
+                end
+            end
+            ISMouseDrag.dragging=nil
+            pane.draggedItems:reset()
+        `, 'original-early-headless-hidden');
+        headless.session.dispatch('OnKeyPressed', 23);
+        activate(headless.session, headless.host, `
+            assert(getPlayerInventory(0):getIsVisible() and getPlayerLoot(0):getIsVisible())
+        `, 'original-early-headless-shown');
+        assert.deepEqual(headless.session.diagnostics().errors, []);
+    } finally {
+        headless.session.close({ discardSaveData: true });
+        headless.host.dispose();
+        headlessUI.dispose();
+        headlessFiles.dispose();
+    }
+
     const originalFiles = privateFiles();
     const candidateFiles = privateFiles();
+
+    originalFiles.write('entityLayout.ini', 'player:0\r\nwindowKey:BuildWindow\r\nx=12\r\ny=34\r\nwidth=320\r\nheight=200\r\nlocked=false\r\n');
     const original = await fixture({ ...options, ui: originalUI, sourceFiles: originalFiles });
     const candidate = await fixture({ ...options, ui: candidateUI, sourceFiles: candidateFiles });
-    const definition = { ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.OriginalRestore', weight: 0.01 };
 
     try {
         for (const value of [original, candidate]) {
@@ -2325,6 +3809,203 @@ test('private original queued grabs restore before lifecycle without eagerly reg
 
         original.session.dispatch('OnCreatePlayer', 0);
         original.session.dispatch('OnGameStart');
+        original.session.initializeInventoryPages();
+        await loadSource(original.session, original.host, `
+            assert(ISToolTipInv and ISToolTipInv.Type=='ISToolTipInv',
+                'inventory activation must load the original hover tooltip before any world context menu')
+            local tip=ISToolTipInv:new(nil)
+            assert(type(tip.tooltip)=='userdata')
+            assert(tip.tooltip:getX()==0 and tip.tooltip:getY()==0)
+            assert(tip.tooltip:getWidth()==130 and tip.tooltip:getHeight()==130)
+            assert(tip.tooltip.padLeft==5 and tip.tooltip.padRight==5 and tip.tooltip.padTop==5 and tip.tooltip.padBottom==5)
+            assert(tip.tooltip:getFont()=='Small' and tip.tooltip:getLineSpacing()==getTextManager():getFontHeight(UIFont.Small))
+            assert(tip.tooltip:getCharacter()==nil and not tip.tooltip:isMeasureOnly())
+            assert(tip.tooltip:getWeightOfStack()==0)
+            tip:setCharacter(getPlayer())
+            tip.tooltip:setMeasureOnly(true)
+            tip.tooltip:setWeightOfStack(0.1)
+            assert(tip.tooltip:getCharacter()==getPlayer() and tip.tooltip:isMeasureOnly())
+            assert(tip.tooltip:getWeightOfStack()==(string.unpack('f',string.pack('f',0.1))))
+            local pane=getPlayerLoot(0).inventoryPane
+            local entry=assert(pane.inventory:getItems():get(0))
+            local dragItems={entry}
+            pane:sortItemsByTypeAndWeight(dragItems)
+            assert(#dragItems==1 and dragItems[1]==entry,
+                'unchanged drag sorting must group native items by their stored display name')
+            local world=assert(entry:getWorldItem())
+            assert(world:getChunk()==world:getSquare():getChunk())
+            assert(pane:doWorldObjectHighlight(entry) and world:isHighlighted(0),
+                'the unchanged drag highlight consumer must use the native loaded chunk')
+            local tint=world:getHighlightColor(0)
+            assert(tint:getR()==0.5 and tint:getG()==1 and tint:getB()==1 and tint:getA()==1
+                and world:isOutlineHighlight(0) and world:getOutlineHighlightCol(0)==-129,
+                'the original world-item override applies its cyan tint and outline before publication')
+            pane:clearWorldObjectHighlights()
+            assert(not world:isHighlighted(0))
+            tip:initialise()
+            tip:instantiate()
+            tip:setItem(entry)
+            tip:render()
+            assert(tip:getWidth()>=150 and tip:getHeight()>tip.tooltip:getLineSpacing(),
+                'unchanged ISToolTipInv must finish both native measure-only and draw passes')
+            assert(not tip.tooltip:isMeasureOnly())
+        `, 'original-inventory-hover-construction-and-drag-highlight');
+        original.engine.registerItemDefinition({
+            ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.OutlineBag', type: 'Container', weight: 1,
+            isBag: true, capacity: 20, weightReduction: 50, maxItemSize: 10,
+            rawFields: [{ name: 'Icon', value: 'Paperclip' }],
+        }, { owner: 'fixture' });
+        const outlineBag = original.host.api.items.spawn({ fullType: 'Fixture.OutlineBag', x: 5, y: 5 }).snapshot.id;
+
+        await loadSource(original.session, original.host, `
+            local core=getCore()
+            assert(core:getOptionDoContainerOutline()==true,'the original Core outline default is enabled')
+            local color=core:getObjectHighlitedColor()
+            assert(math.abs(color:getR()-0.98)<0.000001 and math.abs(color:getG()-0.56)<0.000001
+                and math.abs(color:getB()-0.11)<0.000001,'Core must expose the genuine object highlight default')
+            core:setObjectHighlitedColor(ColorInfo.new(0.25,0.5,0.75,1))
+            local worldColor=core:getWorldItemHighlightColor()
+            assert(worldColor:getR()==0.5 and worldColor:getG()==1 and worldColor:getB()==1,
+                'world-item hover tint is independent of the selected object option')
+            local page=getPlayerLoot(0)
+            page:refreshBackpacks()
+            for _,button in ipairs(page.backpacks) do
+                local item=button.inventory:getContainingItem()
+                if item and item:getID()==${outlineBag} then OutlineBagButton=button end
+                if button.inventory:getType()=='floor' then OutlineFloorButton=button end
+            end
+            assert(OutlineBagButton and OutlineFloorButton,'the unchanged page must discover the actual ground bag')
+            local bag=OutlineBagButton.inventory:getContainingItem()
+            OutlineBagWorld=assert(bag:getWorldItem())
+            local inventoryName=bag.getName
+            bag.getName=function() return 'Campfire' end
+            assert(OutlineBagWorld:getName()==nil and not CCampfireSystem.instance:isValidIsoObject(OutlineBagWorld),
+                'an item display name must not become the independent native IsoObject name used by the original campfire predicate')
+            bag.getName=inventoryName
+            assert(bag:getClothingItem()==nil and bag:getVisual()==nil,
+                'the original no-ClothingItem asset branch must stay nil rather than invent an ItemVisual')
+            assert(not OutlineBagWorld:isPropaneBBQ() and not OutlineBagWorld:isFireInteractionObject(),
+                'a real world bag is neither an IsoBarbecue nor an IsoFireplace')
+            assert(page:getContainerParent(OutlineBagButton.inventory)==OutlineBagWorld)
+            OutlineBagButton.inventory:setExplored(true)
+            page:selectContainer(OutlineBagButton)
+            page:setPinned()
+            assert(page.isCollapsed,'the original pin operation must not bypass the next update expansion phase')
+            ISMouseDrag.dragging={bag}
+        `, 'original-container-outline-selected');
+        originalUI.update();
+        await loadSource(original.session, original.host, `
+            local page=getPlayerLoot(0)
+            assert(page.pin and not page.isCollapsed,
+                'the first unchanged update expands the pinned page after its highlight phase')
+            assert(not OutlineBagWorld:isHighlighted(0) and not OutlineBagWorld:isOutlineHighlight(0),
+                'a page that was collapsed at update entry must not acquire the selected-container highlight early')
+        `, 'original-container-outline-expands');
+        assert.ok(originalUI.render().length > 0);
+        originalUI.update();
+        originalUI.render();
+        await loadSource(original.session, original.host, `
+            assert(ISMouseDrag.dragging~=nil,'the real page frame must tolerate resident drag state')
+            assert(OutlineBagWorld:isHighlighted(0) and OutlineBagWorld:isOutlineHighlight(0),
+                'the unchanged selected-container update must highlight and outline its actual world bag')
+            local color=OutlineBagWorld:getHighlightColor(0)
+            assert(color:getR()==0.25 and color:getG()==0.5 and color:getB()==0.75)
+            assert(OutlineBagWorld:getOutlineHighlightCol(0)==-4227265,
+                'original outline colors truncate f32 components into signed packed ABGR 0xFFBF7F3F')
+            getPlayerLoot(0):selectContainer(OutlineFloorButton)
+        `, 'original-container-outline-enabled');
+        originalUI.update();
+        originalUI.render();
+        await loadSource(original.session, original.host, `
+            assert(not OutlineBagWorld:isHighlighted(0) and not OutlineBagWorld:isOutlineHighlight(0),
+                'selecting the real floor container must clear the previous bag outline')
+            local page=getPlayerLoot(0)
+            page:onMouseOverButton(OutlineBagButton,0,0)
+            assert(OutlineBagWorld:isOutlineHighlight(0) and OutlineBagWorld:getOutlineHighlightCol(0)==-129,
+                'unchanged unselected-button hover must apply the separate world-item color')
+            page:onMouseOutButton(OutlineBagButton,0,0)
+            assert(not OutlineBagWorld:isOutlineHighlight(0))
+            getCore():setOptionDoContainerOutline(false)
+            getCore():saveOptions()
+            assert(not getCore():getOptionDoContainerOutline())
+            getPlayerLoot(0):selectContainer(OutlineBagButton)
+        `, 'original-container-outline-disabled');
+        originalUI.update();
+        originalUI.render();
+        await loadSource(original.session, original.host, `
+            assert(OutlineBagWorld:isHighlighted(0) and OutlineBagWorld:isOutlineHighlight(0),
+                'the world-item subclass still enables its outline when the generic container option is disabled')
+            assert(OutlineBagWorld:getOutlineHighlightCol(0)==-129,
+                'without the generic outline override the world-item outline keeps its own color')
+            ISMouseDrag.dragging=nil
+            local page=getPlayerLoot(0)
+            page:collapse()
+            page:collapseNow()
+        `, 'original-container-outline-collapse');
+        originalUI.update();
+        originalUI.render();
+        await loadSource(original.session, original.host, `
+            assert(not OutlineBagWorld:isHighlighted(0) and not OutlineBagWorld:isOutlineHighlight(0),
+                'a genuine collapsed page must clear the selected world container')
+            getPlayerLoot(0):selectContainer(OutlineFloorButton)
+            getPlayerLoot(0):setPinned()
+        `, 'original-container-outline-cleared');
+        const reloadedUI = createGameUI({ storage: coreStorage });
+
+        reloadedUI.setViewport(640, 640);
+        reloadedUI.initialize({ ...resources, textures });
+        const reloadedCore = await fixture({ ui: reloadedUI });
+
+        try {
+            activate(reloadedCore.session, reloadedCore.host, `
+                local core=getCore()
+                assert(not core:getOptionDoContainerOutline(),'saveOptions must survive a fresh UI and native session')
+                local color=core:getObjectHighlitedColor()
+                assert(color:getR()==0.25 and color:getG()==0.5 and color:getB()==0.75)
+            `, 'original-core-options-reloaded');
+            assert.deepEqual(reloadedCore.session.diagnostics().errors, []);
+        } finally {
+            reloadedCore.session.close({ discardSaveData: true });
+            reloadedCore.host.dispose();
+            reloadedUI.dispose();
+        }
+
+        await loadSource(original.session, original.host, `
+            InventoryPagesBeforeFirstSave={getPlayerInventory(0),getPlayerLoot(0)}
+            assert(InventoryPagesBeforeFirstSave[1].inventoryPane and InventoryPagesBeforeFirstSave[2].inventoryPane)
+            InventoryPagesBeforeFirstSave[1]:setX(17)
+            InventoryPagesBeforeFirstSave[1]:setY(19)
+            InventoryPagesBeforeFirstSave[2]:setVisible(false)
+        `, 'original-inventory-before-first-save');
+        original.session.dispatch('OnPostSave');
+        await loadSource(original.session, original.host, `
+            assert(getPlayerInventory(0)==nil and getPlayerLoot(0)==nil,'genuine post-save teardown must complete before any world menu was opened')
+            assert(ISEntityUI and not ISEntityUI.IsWindowOpen(0,'BuildWindow'),
+                'the genuine entity registry must distinguish saved window preferences from an open instance')
+            local entityPlayers=ISEntityUI.players
+            local preferences=entityPlayers[0].windows.BuildWindow
+            assert(preferences.x==12 and preferences.y==34 and preferences.width==320 and preferences.height==200)
+            assert(ISEntityUI.GetWindowInstance(0,'BuildWindow')==nil and ISEntityUI.players==entityPlayers,
+                'the original no-open-window query must preserve its resident Lua registry')
+        `, 'original-inventory-first-save-teardown');
+        await original.session.flushSourceFiles();
+        assert.match(originalFiles.read('layout.ini'), /\[640x640\]/u);
+        assert.match(originalFiles.read('layout.ini'), /^inventory0 [^\r\n]*\bvisible=true\b/mu);
+        assert.match(originalFiles.read('layout.ini'), /^loot0 [^\r\n]*\bvisible=false\b/mu);
+        assert.match(originalFiles.read('entityLayout.ini'), /^windowKey:BuildWindow\r?$/mu);
+        assert.match(originalFiles.read('entityLayout.ini'), /^x=12\r?$/mu);
+        original.session.initializeInventoryPages();
+        await loadSource(original.session, original.host, `
+            assert(getPlayerInventory(0)~=InventoryPagesBeforeFirstSave[1] and getPlayerLoot(0)~=InventoryPagesBeforeFirstSave[2])
+            assert(getPlayerInventory(0):getUIName()=='inventory0' and getPlayerLoot(0):getUIName()=='loot0')
+            assert(getPlayerInventory(0):getX()==17 and getPlayerInventory(0):getY()==19,
+                'keyboard-only inventory must save and restore its genuine window layout')
+            assert(getPlayerInventory(0):getIsVisible() and not getPlayerLoot(0):getIsVisible(),
+                'genuine layout saving must preserve actual per-window visibility rather than global defaults')
+        `, 'original-inventory-first-save-recreate');
+        originalUI.update();
+        assert.ok(originalUI.render().length > 0, 'genuine post-save replacement pages must execute their original frame callbacks');
+        assert.deepEqual(original.session.diagnostics().errors, []);
         assert.equal(original.session.openWorldContextMenu({ screenX: 320, screenY: 320, worldX: 5, worldY: 5 }), true);
 
         await loadSource(original.session, original.host, `
@@ -2355,8 +4036,34 @@ test('private original queued grabs restore before lifecycle without eagerly reg
         candidate.session.dispatch('OnGameStart');
         candidate.session.completeSourceRestore();
         assert.deepEqual(candidate.engine.actions.getState(), restored, 'bootstrap must not tick, clear or rebuild saved native rows');
+        activate(candidate.session, candidate.host, `
+            RetainedPickupWorld=assert(ISTimedActionQueue.getTimedActionQueue(getPlayer()).queue[1].item)
+            assert(RetainedPickupWorld:getChunk()==RetainedPickupWorld:getSquare():getChunk())
+        `, 'original-resident-chunk-before-pickup');
         completeLuaActions(candidate.engine, candidate.host, candidate.session);
         assert.equal(candidate.host.api.items.get(1).ownerContainerId, candidate.host.api.items.playerInventoryId(), 'restored original perform must complete before any first context-menu bootstrap');
+        activate(candidate.session, candidate.host, `
+            assert(RetainedPickupWorld:getSquare()==nil and RetainedPickupWorld:getChunk()==nil,
+                'completed original pickup must detach its retained world object from the native chunk')
+        `, 'original-detached-chunk-after-pickup');
+        await loadSource(candidate.session, candidate.host, `
+            local rows={}
+            for index=1,64 do rows[index]={name='Same original inventory name',id=index} end
+            assert(table.sort(rows,function(a,b) return not string.sort(a.name,b.name) end)==rows)
+            for index=1,63 do assert(rows[index].id==index+1,'original duplicate partition order must retain item identities') end
+            assert(rows[64].id==1)
+            local numbers={3,1,2,1}
+            assert(table.sort(numbers,false)==numbers and table.concat(numbers,',')=='1,1,2,3')
+            local empty,one={},{1}
+            assert(table.sort(empty,42)==empty and table.sort(one,42)==one,'unused comparators are not invoked')
+            local broken={3,1,2}
+            local ok,err=pcall(table.sort,broken,function() error('original sort consumer fault') end)
+            assert(not ok and tostring(err):find('original sort consumer fault',1,true))
+            assert(broken[1]==2 and broken[2]==1 and broken[3]==3,'source sort errors retain prior in-place pivot mutation')
+            local queue=ISTimedActionQueue.getTimedActionQueue(getPlayer()).queue
+            for _ in ipairs(queue) do error('completed original queue must be empty') end
+            for _ in pairs(queue) do error('completed original queue must be empty') end
+        `, 'original-stdlib-sort-consumer');
         candidate.host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
         assert.equal(candidate.session.openWorldContextMenu({ screenX: 320, screenY: 320, worldX: 5, worldY: 5 }), true);
         await loadSource(candidate.session, candidate.host, `
@@ -2365,7 +4072,245 @@ test('private original queued grabs restore before lifecycle without eagerly reg
             assert(getmetatable(data.playerInventory)==ISInventoryPage)
             assert(getmetatable(data.lootInventory)==ISInventoryPage)
             assert(getPlayerContextMenu(0)==data.contextMenu and getmetatable(data.contextMenu)==ISContextMenu)
+            InventoryHeadlessPages={data.playerInventory,data.lootInventory}
+            assert(InventoryHeadlessPages[1].inventoryPane==nil and InventoryHeadlessPages[2].inventoryPane==nil)
         `, 'original-restored-ui-consumer');
+        candidate.session.initializeInventoryPages();
+        candidate.session.initializeInventoryPages();
+        await loadSource(candidate.session, candidate.host, `
+            local data=getPlayerData(0)
+            assert(getPlayerInventory(0)==data.playerInventory and getPlayerLoot(0)==data.lootInventory)
+            assert(data.playerInventory==InventoryHeadlessPages[1] and data.lootInventory==InventoryHeadlessPages[2],
+                'resident activation must preserve the same genuine headless page objects')
+            assert(data.playerInventory:getUIName()=='inventory0' and data.lootInventory:getUIName()=='loot0')
+            assert(getmetatable(data.playerInventory.inventoryPane)==ISInventoryPane)
+            local controls=data.lootInventory.controlsUI
+            local floorHandler=assert(controls.handlers[ISLootWindowFloorControlHandler_TakeSameType])
+            assert(floorHandler:shouldBeVisible(),'real inventory and ground items must exercise the original floor control')
+            local button=assert(floorHandler.control,'the original page must construct its visible handler button')
+            assert(getmetatable(button)==ISButton and button.image==getTexture('${floorImagePath}'))
+            assert(button.image:getWidth()==${floorImage.width} and button.image:getHeight()==${floorImage.height},
+                'the genuine helper image must retain the privately provisioned PNG dimensions')
+            assert(button:getWidth()==${floorImage.width / floorImage.height * resources.fontLineHeight.Small + 4}
+                and button:getHeight()==${resources.fontLineHeight.Small + 4},'the original control must size itself from the real image and font')
+            assert(getmetatable(data.lootInventory.inventoryPane)==ISInventoryPane)
+            assert(ISResizableButton.minimumWidth==4,'original class-side nil title measurement must remain zero')
+            assert(data.playerInventory.inventoryPane.nameHeader.title==getText('IGUI_invpanel_Type'))
+            assert(data.playerInventory.controller==-1 and data.lootInventory.controller==-1)
+            assert(data.playerInventory:getIsVisible() and data.lootInventory:getIsVisible())
+            InventoryPagesBeforeToggle={data.playerInventory,data.lootInventory}
+            local pane=data.playerInventory.inventoryPane
+            local item=assert(pane.inventory:getItems():get(0))
+            assert(not item:IsLiterature())
+            assert(not item:hasBeenSeen(getPlayer()) and not item:hasBeenHeard(getPlayer()))
+            assert(not getPlayer():hasReadMap(item))
+            assert(not item:isNoRecipes(getPlayer()))
+            assert(not item:isFavouriteRecipeInput(getPlayer()))
+            assert(not instanceof(item,'DrainableComboItem'))
+            assert(not pane:isLiteratureRead(getPlayer(),item),
+                'the unchanged original pane must reject non-Literature before reading unavailable Literature state')
+            local category=item:getDisplayCategory()
+            item:setDisplayCategory('Native category changed')
+            pane:refreshContainer()
+            local found=false
+            for _,row in ipairs(pane.itemslist) do
+                if row.items[1]==item then assert(row.cat=='Native category changed');found=true end
+            end
+            assert(found,'original pane must consume the current native display category')
+            item:setDisplayCategory(category)
+            pane:refreshContainer()
+            assert(not getCore():isSelectingAll() and not getPlayer():isInvPageDirty())
+            getPlayer():getInventory():setDrawDirty(false)
+            getPlayer():setInvPageDirty(true)
+            assert(getPlayer():isInvPageDirty() and not getPlayer():getInventory():isDrawDirty(),
+                'player page invalidation is independent from container draw dirtiness')
+            getCore():setIsSelectingAll(true)
+            assert(getCore():isSelectingAll())
+        `, 'original-inventory-pages');
+        candidateUI.update();
+        assert.ok(candidateUI.render().length > 0, 'the actual original registered pages must execute update and draw callbacks');
+        await loadSource(candidate.session, candidate.host, `
+            assert(not getCore():isSelectingAll(),'the original pane update must clear select-all when Ctrl is not held')
+            assert(not getPlayer():isInvPageDirty(),'the original page prerender must consume the player dirty flag')
+        `, 'original-inventory-frame');
+        await loadSource(candidate.session, candidate.host, `
+            assert(getPlayerInventory(0):getAbsoluteX()<200 and getPlayerInventory(0):getAbsoluteX()+getPlayerInventory(0):getWidth()>200)
+            assert(getPlayerInventory(0):getAbsoluteY()==0)
+            assert(not pcall(function() isMouseButtonDown(-1) end))
+            assert(not pcall(function() isMouseButtonDown(8) end))
+            assert(not pcall(function() isMouseButtonDown(0.5) end))
+            assert(not pcall(function() isMouseButtonDown('0') end))
+        `, 'original-inventory-hover-input');
+
+        for (const index of [0, 1, 2]) {
+            physicalMouseButtons = 1 << index;
+            candidateUI.input('onMouseMove', 200, 2, 0, 0);
+            activate(candidate.session, candidate.host, `
+                assert(getPlayerInventory(0).isCollapsed,'a held original mouse button must prevent title-bar hover expansion')
+            `, `original-inventory-hover-held-${index}`);
+        }
+
+        physicalMouseButtons = 1 << 7;
+        candidateUI.input('onMouseMove', 200, 2, 0, 0);
+        await loadSource(candidate.session, candidate.host, `
+            assert(isMouseButtonDown(7),'the native highest button reads its own physical bit')
+            assert(not getPlayerInventory(0).isCollapsed,'the original hover guard checks only its three primary mouse buttons')
+        `, 'original-inventory-hover-other-button');
+        candidateUI.update();
+        assert.ok(candidateUI.render().length > 0, 'the genuinely hover-expanded inventory must paint its real original item rows');
+        await loadSource(candidate.session, candidate.host, `
+            getPlayerInventory(0).isCollapsed=true
+            getPlayerInventory(0):setMaxDrawHeight(15)
+        `, 'original-inventory-hover-other-button-collapse');
+        physicalMouseButtons = 0;
+        candidateUI.input('onMouseMove', 200, 2, 0, 0);
+        await loadSource(candidate.session, candidate.host, `
+            assert(not getPlayerInventory(0).isCollapsed,'releasing the held buttons must permit genuine title-bar expansion')
+        `, 'original-inventory-hover-released');
+        candidateUI.update();
+        assert.ok(candidateUI.render().length > 0, 'the released-pointer expansion must paint before the fixture collapses it');
+        await loadSource(candidate.session, candidate.host, `
+            assert(UIManager.isMouseOverInventory(),'the genuine expanded page must own the inventory hover region')
+        `, 'original-inventory-world-input-region');
+        physicalKeys.add(29);
+        candidate.session.updateActorInput();
+        assert.equal(candidate.engine.sourceActions.actorIsAiming(0), false, 'alternate Ctrl aim is suppressed over the genuine expanded inventory');
+        physicalKeys.add(30);
+        candidate.session.updateActorInput();
+        assert.equal(candidate.engine.sourceActions.actorIsAiming(0), true, 'a held ordinary primary wins over the Ctrl alternate and is not inventory-suppressed');
+        physicalKeys.clear();
+        candidate.session.updateActorInput();
+        await loadSource(candidate.session, candidate.host, `
+            getPlayerInventory(0).isCollapsed=true
+            getPlayerInventory(0):setMaxDrawHeight(15)
+        `, 'original-inventory-hover-released-collapse');
+        physicalKeys.add(30);
+        candidate.session.updateActorInput();
+        await loadSource(candidate.session, candidate.host, `
+            InventoryHeaderDragOrigin={getPlayerInventory(0):getX(),getPlayerInventory(0):getY()}
+            getPlayer():setForceAim(true)
+            assert(getPlayer():isAiming() and getPlayer():isForceAim())
+        `, 'original-inventory-header-before-drag');
+        physicalMouseButtons = 1;
+        candidateUI.input('onMouseDown', 200, 2);
+        const clearedAim = candidate.engine.sourceActions.actorInputState(0);
+
+        assert.equal(clearedAim.forceAim, false);
+        assert.equal(clearedAim.rawAiming, false);
+        assert.equal(clearedAim.charging, false);
+        assert.equal(clearedAim.cachedAiming, true, 'original header nullification must preserve cached held input');
+        assert.equal(clearedAim.aimDown, true);
+        candidateUI.input('onMouseMove', 212, 11, 12, 9);
+        physicalMouseButtons = 0;
+        candidateUI.input('onMouseUp', 212, 11);
+        await loadSource(candidate.session, candidate.host, `
+            local page=getPlayerInventory(0)
+            assert(page:getX()==InventoryHeaderDragOrigin[1]+12 and page:getY()==InventoryHeaderDragOrigin[2]+9,
+                'the genuine captured header must move by the actual pointer deltas')
+            assert(not page.moving and not page:isCapture(),'genuine mouse-up must release the header capture')
+        `, 'original-inventory-header-after-drag');
+        candidate.session.updateActorInput();
+        assert.equal(candidate.engine.sourceActions.actorIsAiming(0), true, 'the still-held real key must reassert after the genuine header clears current aim');
+        physicalKeys.clear();
+        candidate.session.updateActorInput();
+        joypadBinding = 0;
+        await loadSource(candidate.session, candidate.host, `
+            assert(not pcall(function() getJoypadData(0) end),'an assigned controller needs a real supported registry, not fabricated absence')
+        `, 'original-inventory-assigned-controller');
+        joypadBinding = -1;
+        await loadSource(candidate.session, candidate.host, `
+            getPlayerContextMenu(0):hideAndChildren()
+            local inventory,loot=getPlayerInventory(0),getPlayerLoot(0)
+            inventory:setX(0);inventory:setY(0);inventory:setPinned()
+            loot:setX(0);loot:setY(300);loot:setPinned()
+        `, 'original-drag-window-layout');
+        candidateUI.setMouse(630, 630);
+        candidateUI.update();
+        assert.ok(candidateUI.render().length > 0);
+        physicalMouseButtons = 1;
+        await loadSource(candidate.session, candidate.host, `
+            local pane=getPlayerInventory(0).inventoryPane
+            pane.mouseOverOption=1
+            pane:onMouseDown(pane.column2+8,pane.headerHgt+pane.itemHgt/2)
+            pane:onMouseMoveOutside(10,10)
+            assert(ISMouseDrag.draggingFocus==pane and pane.dragStarted and #ISMouseDrag.dragging==1,
+                'the unchanged mouse handlers must create genuine native-item drag state')
+            pane.draggedItems:update()
+            local container,what=pane.draggedItems:getDropContainer()
+            assert(container==ISInventoryPage.GetFloorContainer(0) and what=='floor')
+            assert(not pane.draggedItems:cannotDropAnyItem())
+            DragStackBlocker=ISPanel:new(600,600,40,40)
+            DragStackBlocker:initialise()
+            DragStackBlocker:addToUIManager()
+            DragStackBlocker:setUIName('actual drag blocker')
+            local stack=UIManager.getUI()
+            assert(stack:contains(DragStackBlocker.javaObject))
+            assert(DragStackBlocker.javaObject:getTable()==DragStackBlocker)
+            pane.draggedItems:update()
+            assert(pane.draggedItems:getDropContainer()==nil,
+                'a genuinely registered source root must block dropping through the UI')
+            DragStackBlocker:setVisible(false)
+            assert(stack:contains(DragStackBlocker.javaObject),'hidden roots remain in the native stack')
+            pane.draggedItems:update()
+            container,what=pane.draggedItems:getDropContainer()
+            assert(container==ISInventoryPage.GetFloorContainer(0) and what=='floor',
+                'invisible source roots must not block floor drops')
+            DragStackBlocker:removeFromUIManager()
+            assert(not stack:contains(DragStackBlocker.javaObject))
+            DragStackBlocker=nil
+            pane:update()
+        `, 'original-drag-live-stack-and-drop-container');
+        assert.ok(candidateUI.render().some((command) => command.type === 'stencil' && command.operation === 'suspend'),
+            'the original renderdetails(true) must draw selected dragged rows outside their stencil');
+        physicalMouseButtons = 0;
+        candidateUI.update();
+        await loadSource(candidate.session, candidate.host, `
+            assert(ISMouseDrag.dragging==nil and ISMouseDrag.draggingFocus==nil,
+                'the original released-outside update must consume the drag')
+            assert(#ISTimedActionQueue.getTimedActionQueue(getPlayer()).queue>0,
+                'the unchanged drop path must admit a real original transfer action')
+        `, 'original-drag-floor-drop-admitted');
+        completeLuaActions(candidate.engine, candidate.host, candidate.session);
+        assert.notEqual(candidate.host.api.items.get(1).ownerContainerId, candidate.host.api.items.playerInventoryId(),
+            'the original floor drop must commit native item ownership, not just clear the UI drag');
+        assert.ok(candidate.host.api.items.get(1).worldPosition, 'the completed drop must create the actual native ground placement');
+        await loadSource(candidate.session, candidate.host, `
+            local pane=getPlayerLoot(0).inventoryPane
+            pane:prerender()
+            pane.mouseOverOption=1
+            pane:onMouseDown(pane.column2+8,pane.headerHgt+pane.itemHgt/2)
+            pane:onMouseMoveOutside(10,10)
+            assert(ISMouseDrag.draggingFocus==pane and pane.dragStarted)
+        `, 'original-drag-ground-pickup-start');
+        physicalMouseButtons = 1;
+        candidateUI.setMouse(80, 80);
+        await loadSource(candidate.session, candidate.host, `
+            local pane=getPlayerLoot(0).inventoryPane
+            pane.draggedItems:update()
+            local container,what=pane.draggedItems:getDropContainer()
+            assert(container==getPlayer():getInventory() and what=='inventory',
+                'the unchanged destination hit test must resolve the actual player inventory pane')
+            assert(not pane.draggedItems:cannotDropAnyItem())
+            pane:update()
+            pane:render()
+        `, 'original-drag-ground-to-native-inventory');
+        physicalMouseButtons = 0;
+        assert.equal(candidateUI.input('onMouseUp', 80, 80), true,
+            'the genuine registered inventory pane must receive the release');
+        candidateUI.update();
+        completeLuaActions(candidate.engine, candidate.host, candidate.session);
+        assert.equal(candidate.host.api.items.get(1).ownerContainerId, candidate.host.api.items.playerInventoryId(),
+            'the original inventory release must restore real native ownership');
+        await loadSource(candidate.session, candidate.host, `
+            assert(ISMouseDrag.dragging==nil and ISMouseDrag.draggingFocus==nil)
+            assert(getPlayerInventory(0).inventoryPane.dragging==nil and getPlayerLoot(0).inventoryPane.dragging==nil)
+        `, 'original-drag-complete');
+        candidate.session.dispatch('OnKeyPressed', 23);
+        await loadSource(candidate.session, candidate.host, `
+            assert(not getPlayerInventory(0):getIsVisible() and not getPlayerLoot(0):getIsVisible())
+            assert(getPlayerInventory(0)==InventoryPagesBeforeToggle[1] and getPlayerLoot(0)==InventoryPagesBeforeToggle[2])
+        `, 'original-inventory-hidden');
+        candidate.session.dispatch('OnKeyPressed', 23);
         await loadSource(candidate.session, candidate.host, `
             SourceMenuShape=0
             Events.OnFillWorldObjectContextMenu.Add(function(playerIndex,context,objects,test)
@@ -2397,8 +4342,33 @@ test('private original queued grabs restore before lifecycle without eagerly reg
         assert.deepEqual(ordered.children.map((row) => row.children[0].getAttribute('aria-label')), ['First', 'Second']);
         ordered.children[1].children[0].dispatchEvent(new Event('click', { cancelable: true }));
         await loadSource(candidate.session, candidate.host, 'assert(getModData().MirrorPicked==2)', 'source-menu-selected-index');
+        await loadSource(candidate.session, candidate.host, `
+            InventoryStackBeforeRemoval=UIManager.getUI()
+            assert(InventoryStackBeforeRemoval:contains(InventoryPagesBeforeToggle[1].javaObject))
+            assert(InventoryStackBeforeRemoval:contains(InventoryPagesBeforeToggle[2].javaObject))
+            removeInventoryUI(0)
+            assert(getPlayerInventory(0)==nil and getPlayerLoot(0)==nil)
+            assert(not InventoryStackBeforeRemoval:contains(InventoryPagesBeforeToggle[1].javaObject))
+            assert(not InventoryStackBeforeRemoval:contains(InventoryPagesBeforeToggle[2].javaObject))
+            assert(InventoryPagesBeforeToggle[1]:getUIName()=='inventory0')
+        `, 'original-inventory-remove');
+        candidate.session.initializeInventoryPages();
+        await loadSource(candidate.session, candidate.host, `
+            assert(getPlayerInventory(0)~=InventoryPagesBeforeToggle[1])
+            assert(getPlayerLoot(0)~=InventoryPagesBeforeToggle[2])
+            assert(getPlayerInventory(0):getUIName()=='inventory0')
+            assert(getPlayerLoot(0):getUIName()=='loot0')
+            assert(UIManager.getUI()==InventoryStackBeforeRemoval)
+            assert(InventoryStackBeforeRemoval:contains(getPlayerInventory(0).javaObject))
+            assert(InventoryStackBeforeRemoval:contains(getPlayerLoot(0).javaObject))
+        `, 'original-inventory-recreate');
         assert.deepEqual(candidate.session.diagnostics().errors, []);
         assert.deepEqual(sourceFeedback, []);
+
+        const timeouts = candidate.session.diagnostics().timeouts;
+
+        assert.throws(() => activate(candidate.session, candidate.host, 'table.sort({2,1},function() while true do end end)', 'original-sort-budget'), /timeout/u);
+        assert.equal(candidate.session.diagnostics().timeouts, timeouts + 1, 'genuine source sorting must retain the existing hostile-mod deadline');
     } finally {
         original.session.close({ discardSaveData: true });
         original.host.dispose();
@@ -2502,8 +4472,30 @@ test('highlight consumer recognizes the real player as not an IsoDeadBody withou
         engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.Highlight', weight: 0.1 }, { owner: 'fixture' });
         const id = host.api.items.spawn({ fullType: 'Fixture.Highlight', x: 5, y: 5 }).snapshot.id;
 
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.HighlightKey', type: 'Key', weight: 0.1 }, { owner: 'fixture' });
+        assert.throws(() => host.api.items.spawn({ fullType: 'Fixture.HighlightKey', x: 5, y: 5 }),
+            /unsupported original facility/u, 'unsupported Key instances must not enter the native graph');
+
+        engine.importDoors([{
+            id: 'door:5:5:0:0', x: 5, y: 5, z: 0, north: true,
+            open: false, locked: false, lockedByKey: false, forceLocked: false,
+            keyId: -1, roomId: -1, oppositeRoomId: -1, attachedE: false,
+            attachedS: false, barricaded: false, independentWalls: 0,
+            doubleDoor: 0, garageDoor: 0, interiorSide: false,
+        }], {
+            squares: [4, 5].map((y) => ({
+                x: 5, y, z: 0, roomId: -1, outside: true, solid: false,
+                solidTrans: false, tree: false, independentWalls: 0,
+                vehicleObstructed: false, solidFloor: true,
+                reachWalls: { north: false, west: false },
+            })),
+        });
+
         session.attachSourceActions(engine.sourceActions, engine.sourceTiming);
         activate(session, host, `${SOURCE_GROUP_FIXTURE}
+            local nativeWorldColor=getCore():getWorldItemHighlightColor()
+            assert(nativeWorldColor:getR()==0.5 and nativeWorldColor:getG()==1 and nativeWorldColor:getB()==1,
+                'headless Core still owns the genuine constructor default')
             getModData().HighlightModel={calls=0,playerChecks=0}
             ISInventoryPage={}
             ISInventoryPage.__index=ISInventoryPage
@@ -2527,10 +4519,61 @@ test('highlight consumer recognizes the real player as not an IsoDeadBody withou
                 getModData().HighlightModel.calls=getModData().HighlightModel.calls+1
             end
             local value=QueueModelWorld(${id})
+            assert(instanceof(value,'IsoObject') and not value:isPropaneBBQ() and not value:isFireInteractionObject())
+            for _,class in ipairs({'IsoStove','IsoClothingWasher','IsoClothingDryer','IsoCombinationWasherDryer'}) do
+                assert(not instanceof(value,class),'a resident world inventory object cannot be a loot appliance')
+            end
+            assert(not pcall(function() instanceof({},'IsoStove') end),'unknown objects must not become classified appliance negatives')
+            assert(not instanceof(nil,'IsoThumpable') and not instanceof(value,'IsoThumpable'),
+                'nil and actual world inventory objects are not the separate IsoThumpable concrete class')
+            assert(not pcall(function() instanceof({},'IsoThumpable') end),
+                'supporting a known class must not classify unknown Lua tables as native negatives')
             ISInventoryPage.OnObjectHighlighted(0,value,true)
             assert(value:isHighlighted(0))
             ISInventoryPage.OnObjectHighlighted(0,value,false)
             assert(not value:isHighlighted(0))
+            local tracked=Key.highlightDoor[0]
+            local doors=tracked.doors
+            local door=getPlayer():getSquare():getObjects():get(0)
+            assert(instanceof(door,'IsoDoor'))
+            assert(not instanceof(door,'IsoThumpable'),
+                'IsoDoor implements the Thumpable interface but does not extend the IsoThumpable class')
+            assert(door:getName()==nil,'the represented door constructor retains its independent unnamed IsoObject field')
+            value:setHighlighted(0,true,true)
+            door:setHighlighted(0,true,true)
+            value:setHighlighted(0,false,false)
+            assert(door:isHighlighted(0),'an item highlight must not overwrite a door highlight')
+            door:setHighlighted(0,false,false)
+            value:setHighlighted(0,true,true)
+            assert(not door:isHighlighted(0),'numeric item identity must remain separate from stable door identity')
+            door:setHighlighted(0,true,true)
+            assert(doors:add(value) and doors:add(door))
+            tracked.key=value:getItem()
+            assert(doors:size()==2 and doors:contains(value) and doors:contains(door))
+            assert(not pcall(function() doors:add({__doorId='door:5:5:0:0'}) end))
+            assert(not pcall(function() Key.setHighlightDoors(1,nil) end))
+            assert(not pcall(function() door.setHighlighted(value,0,false,false) end))
+            assert(value:isHighlighted(0) and door:isHighlighted(0) and doors:size()==2)
+            Key.setHighlightDoors(0,value:getItem())
+            assert(not value:isHighlighted(0) and not door:isHighlighted(0),
+                'a native non-Key selection follows the original tracked-clear branch')
+            assert(tracked.key==nil and doors:isEmpty() and tracked.doors==doors)
+            value:setHighlighted(0,true,true)
+            door:setHighlighted(0,true,true)
+            assert(doors:add(value) and doors:add(door))
+            tracked.key=value:getItem()
+            local accepted=pcall(function()
+                Key.setHighlightDoors(0,{getFullType=function() return 'Fixture.Highlight' end})
+            end)
+            assert(not accepted,'an ID-shaped or getter-shaped table must not become a proven non-Key selection')
+            assert(value:isHighlighted(0) and door:isHighlighted(0) and doors:size()==2 and tracked.key==value:getItem())
+            Key.setHighlightDoors(0,nil)
+            assert(not value:isHighlighted(0) and not door:isHighlighted(0))
+            assert(tracked.key==nil and doors:isEmpty() and tracked.doors==doors)
+            value:setHighlighted(0,true,false)
+            Key.setHighlightDoors(0,nil)
+            assert(value:isHighlighted(0),'nil clear must not clear unrelated untracked highlights')
+            value:setHighlighted(0,false,false)
             local ok,err=pcall(function() instanceof({},'IsoDeadBody') end)
             assert(not ok and tostring(err):find('unsupported native class'))
         `, 'source-highlight');
@@ -2539,6 +4582,48 @@ test('highlight consumer recognizes the real player as not an IsoDeadBody withou
     } finally {
         session.close();
         host.dispose();
+    }
+});
+
+test('closing a Lua session withdraws only its own world highlights from retained UI resources', async () => {
+    const ui = sourceMenuUI(640);
+    const { engine, host, session } = await fixture({ ui });
+    let replacement;
+
+    try {
+        importPickupSquares(engine);
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.HighlightLifetime', weight: 0.1 }, { owner: 'fixture' });
+        const first = host.api.items.spawn({ fullType: 'Fixture.HighlightLifetime', x: 5, y: 5 }).snapshot.id;
+        const second = host.api.items.spawn({ fullType: 'Fixture.HighlightLifetime', x: 5, y: 5 }).snapshot.id;
+
+        activate(session, host, `
+            local objects=getPlayer():getSquare():getWorldObjects()
+            for i=0,objects:size()-1 do objects:get(i):setHighlighted(0,true,false) end
+        `, 'source-highlight-lifetime');
+        assert.deepEqual(ui.worldHighlights().map(({ id }) => id), [first, second]);
+        assert.deepEqual(ui.worldHighlights()[0].color, { r: 0.5, g: 1, b: 1, a: 1 });
+        assert.equal(ui.worldHighlights()[0].outline, true);
+        ui.setWorldHighlight('door', 'retained-external', { enabled: true, blink: false });
+        ui.setWorldHighlight('item', second, { enabled: false, blink: false });
+        const submitted = ui.worldHighlights();
+
+        session.close({ discardSaveData: true });
+        assert.deepEqual(ui.worldHighlights().map(({ kind, id }) => [kind, id]), [['item', second], ['door', 'retained-external']]);
+        assert.equal(submitted[0].enabled, true, 'withdrawal must not mutate already submitted frame records');
+        assert.deepEqual(ui.render(), [], 'closing the VM must preserve usable UI resources');
+        replacement = await fixture({ ui });
+        activate(replacement.session, replacement.host, `
+            UIManager.AddUI(UIElement.new({}))
+            assert(UIManager.getUI():size()==1)
+        `, 'replacement-highlight-lifetime');
+        assert.equal(ui.worldHighlights().some(({ id }) => id === first), false, 'replacement session must not inherit the old world tint');
+        assert.deepEqual(replacement.session.diagnostics().errors, []);
+    } finally {
+        replacement?.session.close({ discardSaveData: true });
+        replacement?.host.dispose();
+        session.close({ discardSaveData: true });
+        host.dispose();
+        ui.dispose();
     }
 });
 
@@ -2676,8 +4761,8 @@ function sourceMenuUI(size, options = {}) {
     const descriptor = `info face="SourceConsumer" size=4
 common lineHeight=4 base=3 scaleW=4 scaleH=4 pages=1 packed=0
 page id=0 file="authored.png"
-chars count=1
-char id=63 x=0 y=0 width=2 height=3 xoffset=0 yoffset=0 xadvance=2 page=0 chnl=15`;
+chars count=95
+${Array.from({ length: 95 }, (_, index) => `char id=${index + 32} x=0 y=0 width=2 height=3 xoffset=0 yoffset=0 xadvance=2 page=0 chnl=15`).join('\n')}`;
 
     ui.setViewport(size, size);
     ui.initialize({
@@ -2687,15 +4772,284 @@ char id=63 x=0 y=0 width=2 height=3 xoffset=0 yoffset=0 xadvance=2 page=0 chnl=1
             ContextMenu_Grab_all: 'All', 'Fixture.Screen': 'Screen item', ContextMenu_Door_option: 'Door',
             ContextMenu_Open_door: 'Open', ContextMenu_Close_door: 'Close', ContextMenu_Info: 'Info',
             Tooltip_OpenClose: 'Press %1', Tooltip_DoorIsLocked: 'Locked',
+            Tooltip_item_Weight: 'Weight', Tooltip_item_Equipped: 'Equipped', Tooltip_item_Unequipped: 'Unequipped',
+            Tooltip_weapon_Condition: 'Condition', Tooltip_item_Insulation: 'Insulation', Tooltip_item_Windresist: 'Wind',
+            Tooltip_ScratchDefense: 'Scratch defense', Tooltip_clothing_wet: 'Wet',
+            Tooltip_item_AwkwardGloves: 'Awkward gloves',
+            Tooltip_SourceBreaks: 'aa<br>b<BR>c',
+            IGUI_ClothingName_Dirty: 'Dirty', IGUI_ClothingName_Bloody: 'Bloody',
+            IGUI_ClothingName_Wet: 'Wet', IGUI_ClothingName_Soaked: 'Soaked',
+            IGUI_ClothingName_Worn: 'Worn', Tooltip_Clothing_broken: 'Broken', IGUI_ClothingNaming: '%2 (%1)',
         },
         settings: {
-            moodleSize: 1, fontSizeReal: 1, lockFPS: 60, gray: { r: 0.5, g: 0.5, b: 0.5, a: 1 },
+            moodleSize: 1, fontSizeReal: 1, tooltipFont: 'Small', lockFPS: 60, gray: { r: 0.5, g: 0.5, b: 0.5, a: 1 },
             goodHighlight: { r: 0, g: 1, b: 0, a: 1 }, badHighlight: { r: 1, g: 0, b: 0, a: 1 },
         },
     });
 
     return ui;
 }
+
+test('source key consumers reject empty bindings and apply native alternate and modifier collision rules', async () => {
+    const pressed = new Set();
+    const bindings = {
+        Interact: null,
+        'Toggle Inventory': { keyValue: 23, altKey: 24, shift: false, ctrl: false, alt: false },
+        Run: { keyValue: 23, altKey: 0, shift: true, ctrl: false, alt: false },
+    };
+    const { host, session } = await fixture({
+        sourceWorldContext: {
+            /**
+             * Resolve a configured source binding.
+             *
+             * @param {string} name - Source binding identity.
+             * @returns {object|null} Actual fixture binding.
+             */
+            keyBinding: (name) => bindings[name] ?? null,
+            /**
+             * Read the fixture's configured binding records.
+             *
+             * @returns {object} Current configured binding records.
+             */
+            keyBindings: () => bindings,
+            /**
+             * Read a physical source key state.
+             *
+             * @param {number} code - Native key identity.
+             * @returns {boolean} Physical source state.
+             */
+            isSourceKeyDown: (code) => pressed.has(code),
+        },
+    });
+
+    try {
+        activate(session, host, `
+            assert(not getCore():isKey(KeybindId.INTERACT,0))
+            assert(getCore():isKey(KeybindId.TOGGLE_INVENTORY,23))
+            assert(getCore():isKey(KeybindId.TOGGLE_INVENTORY,24))
+            assert(not getCore():isKey(KeybindId.RUN,23))
+            Events.OnKeyPressed.Add(function(key)
+                assert(not getCore():isKey(KeybindId.TOGGLE_INVENTORY,key))
+                assert(getCore():isKey(KeybindId.RUN,key))
+            end)
+        `);
+        pressed.add(54);
+        session.dispatch('OnKeyPressed', 23);
+        bindings.Run = { keyValue: 54, altKey: 23, shift: false, ctrl: true, alt: true };
+        await loadSource(session, host, `
+            assert(getCore():isKey(KeybindId.RUN,23),'primary modifier key uses its physical state')
+            assert(not getCore():isKey(KeybindId.INTERACT,0))
+        `, 'source-modifier-key');
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+});
+
+test('ObjectTooltip layout measures multiline rows without drawing and draws source progress boundaries', async () => {
+    const ui = sourceMenuUI(640);
+    const { host, session } = await fixture({ ui });
+
+    try {
+        activate(session, host, `
+            local tip=ObjectTooltip.new()
+            local widget={render=function()
+                tip:setWidth(0)
+                local layout=tip:beginLayout()
+                layout:setMinLabelWidth(10)
+                layout:setMinValueWidth(80)
+                local row=layout:addItem()
+                row:setLabel(getText('Tooltip_SourceBreaks'),1,1,0.8,1)
+                row:setValue('123',1,1,1,1)
+                local progress=layout:addItem()
+                progress:setLabel('c',1,1,0.8,1)
+                progress:setProgress(0.25,0,1,0,1)
+                assert(layout:render(5,7,tip)==23)
+                assert(tip:getWidth()==105)
+                assert(row.label=='aa\\nb\\nc' and row.labelWidth==4 and row.height==12 and progress.progressWidth==80,
+                    'native translation breaks must reach sizing as newlines with font line spacing')
+                tip:endLayout(layout)
+                tip:DrawProgressBar(5,25,80,5,-1,0,1,0,1)
+                tip:DrawProgressBar(5,35,80,5,2,0,1,0,1)
+            end}
+            widget.javaObject=UIElement.new(widget)
+            UIManager.AddUI(widget.javaObject)
+            tip:setMeasureOnly(true)
+            TooltipLayoutMeasure=tip
+        `, 'tooltip-layout-consumer');
+        assert.deepEqual(ui.render(), [], 'measure-only must execute sizing but enqueue no quads');
+        await loadSource(session, host, 'TooltipLayoutMeasure:setMeasureOnly(false)', 'tooltip-layout-draw');
+        const draw = ui.render();
+        const rectangles = draw.filter(({ texture }) => !texture);
+
+        assert.deepEqual(draw.filter(({ texture, x }) => texture && x === 5).map(({ y }) => y), [7, 11, 15, 19],
+            'translated label lines and the next row must draw at their measured native baselines');
+
+        assert.ok(rectangles.some(({ width, height }) => width === 20 && height === 3), 'quarter progress uses floor(width*fraction)');
+        assert.ok(rectangles.some(({ width, height }) => width === 80 && height === 3), 'fractions above one clamp at full width');
+        assert.equal(rectangles.filter(({ width }) => width === 82).length, 3, 'all progress bars retain their native border');
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+        ui.dispose();
+    }
+});
+
+test('ObjectTooltip signed values follow the original positive-is-good flag in every sign branch', async () => {
+    const ui = sourceMenuUI(640);
+    const { host, session } = await fixture({ ui });
+
+    try {
+        activate(session, host, `
+            local tip=ObjectTooltip.new()
+            local layout=tip:beginLayout()
+            for _,case in ipairs({
+                {5,true,'+5',true},{-5,true,'-5',false},
+                {5,false,'+5',false},{-5,false,'-5',true},
+                {0,true,'0',true},{0,false,'0',true},
+            }) do
+                local row=layout:addItem()
+                row:setValueRight(case[1],case[2])
+                local tint=case[4] and getCore():getGoodHighlitedColor() or getCore():getBadHighlitedColor()
+                assert(row.value==case[3] and row.r1==tint:getR() and row.g1==tint:getG()
+                    and row.b1==tint:getB() and row.a1==1 and row.hasValue and row.rightJustify,
+                    'signed tooltip value must use the native flag polarity')
+            end
+            tip:endLayout(layout)
+        `, 'tooltip-signed-value-consumer');
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+        ui.dispose();
+    }
+});
+
+test('native live UI lists index resident identities from zero and observe root removal', async () => {
+    const ui = sourceMenuUI(640);
+    const { host, session } = await fixture({ ui });
+
+    try {
+        activate(session, host, `
+            local first,second=UIElement.new({}),UIElement.new({})
+            local stack=UIManager.getUI()
+            assert(stack:size()==0 and stack:indexOf(first)==-1 and stack:indexOf(nil)==-1)
+            UIManager.AddUI(first)
+            UIManager.AddUI(second)
+            assert(UIManager.getUI()==stack and stack:indexOf(first)==0 and stack:indexOf(second)==1)
+            assert(stack:get(0)==first and stack:get(1)==second)
+            local impostor=setmetatable({__ui=first.__ui},{__eq=function() return true end})
+            assert(stack:indexOf(impostor)==-1,'native list lookup requires identity, not an ID-shaped table or Lua equality')
+            first:setVisible(false)
+            assert(stack:indexOf(first)==0,'hidden roots retain their native stack position')
+            UIManager.RemoveElement(first)
+            assert(stack:indexOf(first)==-1 and stack:indexOf(second)==0,'retained lists must observe current root order')
+            UIManager.RemoveElement(second)
+            assert(stack:isEmpty() and stack:indexOf(second)==-1)
+        `, 'live-ui-list-index');
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+        ui.dispose();
+    }
+});
+
+test('native clothing names read live naming fields without requiring tooltip component support', async () => {
+    const ui = sourceMenuUI(640);
+    const { engine, host, session } = await fixture({ ui });
+    const [definition] = parseItemDefinitions(`module Fixture { item Screen {
+        ItemType = base:clothing, Weight = 0.1, ConditionMax = 10, BodyLocation = base:hands,
+    } }`, 'clothing-name-consumer');
+
+    try {
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, ...definition, extraItems: [] }, { owner: 'fixture' });
+        importPickupSquares(engine);
+        const spawned = host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
+
+        assert.throws(() => engine.sourceActions.itemTooltipState(spawned.snapshot.id), /unresolved component/u);
+        activate(session, host, `
+            local entry=getPlayer():getSquare():getWorldObjects():get(0):getItem()
+            assert(entry:getCondition()==10 and entry:getConditionMax()==10)
+            assert(entry:getName()=='Screen item','ordinary names do not inspect tooltip components')
+            entry:setWetness(50)
+            assert(entry:getName()=='Screen item (Wet)','names must still observe current native wetness')
+            assert(entry:getDisplayName()=='Screen item','stored display name must not acquire dynamic wet clothing descriptors')
+            entry:setWetness(0)
+            assert(entry:getName()=='Screen item','names must not retain a stale presentation snapshot')
+            entry:setCondition(2)
+            assert(entry:getName()=='Screen item (Worn)','worn naming must use native condition, not a defense slot')
+            entry:setWetness(100)
+            assert(entry:getName()=='Screen item (Soaked, Worn)','source descriptors retain their original order')
+            entry:setBroken(true)
+            assert(entry:getName()=='Screen item (Soaked, Broken)','broken clothing replaces the worn descriptor')
+            entry:setBroken(false)
+            entry:setCondition(10)
+            entry:setWetness(0)
+            assert(entry:getName()=='Screen item','restored native fields remove all dynamic descriptors')
+        `, 'clothing-name-consumer');
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+        ui.dispose();
+    }
+});
+
+test('native clothing tooltip uses live condition and wetness in both real measure and draw passes', async () => {
+    const ui = sourceMenuUI(640);
+    const { engine, host, session } = await fixture({ ui });
+    const [definition] = parseItemDefinitions(`module Fixture { item Screen {
+        ItemType = base:clothing, Weight = 0.1, ConditionMax = 10, BodyLocation = base:hands,
+        ScratchDefense = 30, Insulation = 0.25, WindResistance = 0.3, Tooltip = Tooltip_item_AwkwardGloves,
+    } }`, 'tooltip-clothing-consumer');
+
+    try {
+        engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, ...definition }, { owner: 'fixture' });
+        importPickupSquares(engine);
+        host.api.items.spawn({ fullType: definition.fullType, x: 5, y: 5 });
+        activate(session, host, `
+            local entry=getPlayer():getSquare():getWorldObjects():get(0):getItem()
+            local tip=ObjectTooltip.new()
+            tip:setCharacter(getPlayer())
+            local rows=tip:beginLayout()
+            entry:DoTooltip(tip,rows)
+            assert(rows.items:size()==4,'condition, insulation, wind and scratch comparison rows are source-owned')
+            assert(rows.items:get(0).progressFraction==1 and rows.items:get(1).progressFraction==0.25)
+            assert(rows.items:get(3).value=='30 (+30)')
+            tip:endLayout(rows)
+            local widget={render=function()
+                tip:setWidth(50)
+                entry:DoTooltip(tip)
+                assert(tip:getWidth()>=150 and tip:getHeight()>20)
+            end}
+            widget.javaObject=UIElement.new(widget)
+            UIManager.AddUI(widget.javaObject)
+            TooltipClothingEntry,TooltipClothingMeasure=entry,tip
+            tip:setMeasureOnly(true)
+        `, 'tooltip-clothing-consumer');
+        assert.deepEqual(ui.render(), []);
+        await loadSource(session, host, `
+            TooltipClothingMeasure:setMeasureOnly(false)
+            TooltipClothingEntry:setCondition(5)
+            TooltipClothingEntry:setWetness(50)
+            local rows=TooltipClothingMeasure:beginLayout()
+            TooltipClothingEntry:DoTooltip(TooltipClothingMeasure,rows)
+            assert(rows.items:get(0).progressFraction==0.5)
+            assert(rows.items:get(3).progressFraction==0.5,'wet row precedes defenses')
+            assert(rows.items:get(4).value=='30 (+30)','positive condition does not scale clothing defenses')
+            TooltipClothingMeasure:endLayout(rows)
+        `, 'tooltip-clothing-live-state');
+        assert.ok(ui.render().length > 0, 'drawing pass must emit real UI quads');
+        assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+        ui.dispose();
+    }
+});
 
 test('native Lua item icons render script normal textures from Icon or IconsForTexture through the real UI bindings', async () => {
     const ui = sourceMenuUI(64);
@@ -2734,6 +5088,133 @@ test('native Lua item icons render script normal textures from Icon or IconsForT
             [1, 0, 9, 12], [17, 0, 10, 12],
         ]);
         assert.deepEqual(session.diagnostics().errors, []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+        ui.dispose();
+    }
+});
+
+test('native Lua UI lifetime retains detached trees and releases abandoned targets without forced collection', async () => {
+    const ui = sourceMenuUI(640);
+    const observed = observeUiLifetime(ui);
+    const { host, session } = await fixture({ ui: observed.ui });
+
+    try {
+        await loadSource(session, host, `
+            LifetimeWeak=setmetatable({}, {__mode='v'})
+            LifetimePressureTicks=0
+            local function node(label,x,y)
+                local target={}
+                function target:render()
+                    self.javaObject:DrawText(UIFont.Small,label,0,0,1,1,1,1)
+                end
+                local value=UIElement.new(target)
+                target.javaObject=value
+                value:setX(x);value:setY(y);value:setWidth(100);value:setHeight(100)
+                return value
+            end
+            LifetimeRoot=node('parent',5,0)
+            local child=node('child',3,16)
+            LifetimeWeak[1]=child
+            LifetimeRoot:AddChild(child)
+            LifetimeRoot.getTable=function() error('callbacks must not follow a mutable public getter') end
+            UIManager.AddUI(LifetimeRoot)
+
+            local ancestor=node('ancestor',11,0)
+            LifetimeRetainedChild=node('retained',3,0)
+            LifetimeWeak[2]=ancestor
+            ancestor:AddChild(LifetimeRetainedChild)
+
+            LifetimePreviousParent=node('previous',11,0)
+            local nextParent=node('next',23,0)
+            local moved=node('moved',3,0)
+            LifetimePreviousParent:AddChild(moved)
+            nextParent:AddChild(moved)
+            assert(moved:getAbsoluteX()==26)
+            nextParent:RemoveChild(moved)
+            LifetimeWeak[3]=moved
+            LifetimeWeak[4]=nextParent
+
+            Events.OnTick.Add(function()
+                for index=1,50 do
+                    local target={}
+                    target.javaObject=UIElement.new(target)
+                    target.transition=UITransition.new()
+                end
+                LifetimePressureTicks=LifetimePressureTicks+1
+            end)
+        `, 'ui-lifetime-tree');
+        assert.equal(ui.render().length, 'parentchild'.length);
+        await loadSource(session, host, `
+            UIManager.RemoveElement(LifetimeRoot)
+            LifetimeExpiredParent=UIElement.new({})
+            LifetimeExpiredParent:setX(19)
+            LifetimeExpiredParent:setWidth(100);LifetimeExpiredParent:setHeight(100)
+            LifetimeRetainedOwnedBridge=UIElement.new({})
+            LifetimeRetainedOwnedBridge:setX(7)
+            LifetimeRetainedOwnedBridge:setWidth(100);LifetimeRetainedOwnedBridge:setHeight(100)
+            LifetimeExpiredParent:AddChild(LifetimeRetainedOwnedBridge)
+            LifetimeWeak[5]=LifetimeExpiredParent
+        `, 'ui-lifetime-expiring');
+        await loadSource(session, host, `
+            local target={}
+            function target:render()
+                self.javaObject:DrawText(UIFont.Small,'foreign',0,0,1,1,1,1)
+            end
+            LifetimeForeignChild=UIElement.new(target)
+            target.javaObject=LifetimeForeignChild
+            LifetimeForeignChild:setX(2)
+            LifetimeForeignChild:setWidth(100);LifetimeForeignChild:setHeight(100)
+            LifetimeRetainedOwnedBridge:AddChild(LifetimeForeignChild)
+            local siblingTarget={}
+            function siblingTarget:render()
+                self.javaObject:DrawText(UIFont.Small,'sibling',0,0,1,1,1,1)
+            end
+            local sibling=UIElement.new(siblingTarget)
+            siblingTarget.javaObject=sibling
+            sibling:setX(3);sibling:setWidth(100);sibling:setHeight(100)
+            LifetimeExpiredParent:AddChild(sibling)
+            LifetimeWeak[8]=sibling
+            LifetimeWeak[6]=LifetimeForeignChild
+            LifetimeForeignChild=nil
+            LifetimeExpiredParent=nil
+        `, 'ui-lifetime-foreign');
+
+        for (let tick = 0; tick < 50; tick += 1) {
+            host.frameStep(1 / 60);
+        }
+
+        ui.bindings.cleanup('ui-lifetime-expiring');
+        assert.equal(ui.render().length, 'foreignsibling'.length);
+
+        for (let tick = 0; tick < 50; tick += 1) {
+            host.frameStep(1 / 60);
+        }
+
+        await loadSource(session, host, `
+            assert(LifetimePressureTicks==100)
+            assert(LifetimeWeak[1]~=nil,'a retained detached native parent must retain its child')
+            assert(LifetimeWeak[2]~=nil and LifetimeRetainedChild:getAbsoluteX()==14,
+                'a retained native child must retain its detached parent')
+            assert(LifetimeWeak[3]==nil and LifetimeWeak[4]==nil,
+                'reparenting and removal must clear both old and new native ownership edges')
+            assert(LifetimeWeak[5]==nil,
+                'native owner cleanup must not retain a deleted parent through a promoted foreign child')
+            assert(LifetimeWeak[6]~=nil and LifetimeWeak[6]:getAbsoluteX()==28,
+                'foreign promotion must atomically transfer the only native ownership into a root pin')
+            assert(LifetimeWeak[8]~=nil and LifetimeWeak[8]:getAbsoluteX()==22,
+                'all foreign siblings must be pinned before detaching their only retained owned bridge')
+            UIManager.AddUI(LifetimeRoot)
+        `, 'ui-lifetime-verify');
+        assert.equal(ui.render().length, 'foreignsiblingparentchild'.length);
+        assert.ok(observed.counts.new >= 5_000);
+        assert.ok(observed.counts.release > observed.counts.new / 2, 'actual native elements must be released during normal allocation');
+        assert.ok(observed.counts.transitionRelease > observed.counts.transitionNew / 2,
+            'actual transitions must be released with their abandoned Lua owners');
+        assert.deepEqual(session.diagnostics().errors, []);
+        assert.deepEqual(host.diagnostics().errors, []);
+        assert.equal(session.diagnostics().timeouts, 0);
     } finally {
         session.close({ discardSaveData: true });
         host.dispose();
@@ -3025,6 +5506,102 @@ test('real held transitions invoke source consumers after commit without same-va
         assert.equal(host.api.items.get(second).actualWeight, 1, 'native hydration must not replay Lua equip callbacks');
         assert.throws(() => session.dispatch('OnDestroyIsoThumpable', first), /no authenticated IsoThumpable/u);
         assert.deepEqual(session.diagnostics().errors.filter((cause) => /HandConsumer/u.test(cause.message)), []);
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+});
+
+test('source drag events observe prior state and same identity before owned deactivation and player binding', async () => {
+    const { host, session, saved } = await fixture();
+
+    try {
+        await loadSource(session, host, `
+            DragFirst={player=88}
+            function DragFirst:deactivate()
+                assert(self==DragFirst and getCell():getDrag(0)==self)
+                local previous=getModData().DragDeactivated
+                getModData().DragDeactivated={player=self.player,calls=previous and previous.calls+1 or 1}
+            end
+            getCell():setDrag(DragFirst,0)
+            assert(DragFirst.player==0)
+        `, 'drag-first');
+        await loadSource(session, host, `
+            getModData().DragObserved={}
+            Events.SetDragItem.Add(function(...)
+                assert(select('#',...)==2)
+                local nextDrag,index=...
+                local rows=getModData().DragObserved
+                rows[#rows+1]={index=index,oldIsFirst=getCell():getDrag(0)==DragFirst,
+                    nextIsFirst=nextDrag==DragFirst,nextPlayer=nextDrag and rawget(nextDrag,'player') or -1}
+            end)
+            Events.OnKeyPressed.Add(function() getCell():setDrag(DragFirst,0) end)
+        `, 'drag-observer');
+        assert.throws(() => session.dispatch('SetDragItem'), /unsupported externally dispatched/u);
+        const externalFaults = session.diagnostics().errors;
+
+        assert.equal(externalFaults.length, 1);
+        assert.match(externalFaults[0].message, /unsupported externally dispatched event: SetDragItem/u);
+        session.dispatch('OnKeyPressed', 1);
+        await loadSource(session, host, `
+            DragSecond=setmetatable({},{__newindex=function() error('player binding must use rawset') end})
+            getCell():setDrag(DragSecond,0)
+            assert(getCell():getDrag(0)==DragSecond and rawget(DragSecond,'player')==0)
+            getCell():setDrag(DragFirst,4)
+            assert(getCell():getDrag(0)==DragSecond,'out-of-range player must not replace the active drag')
+        `, 'drag-second');
+        session.flushSaveData();
+        assert.deepEqual(saved.get('drag-observer').data.nativePlayerData.DragObserved, [
+            { index: 0, oldIsFirst: true, nextIsFirst: true, nextPlayer: 0 },
+            { index: 0, oldIsFirst: true, nextIsFirst: false, nextPlayer: -1 },
+            { index: 4, oldIsFirst: false, nextIsFirst: true, nextPlayer: 0 },
+        ]);
+        assert.deepEqual(saved.get('drag-first').data.nativePlayerData.DragDeactivated, { player: 0, calls: 1 });
+        assert.equal(saved.get('drag-second')?.data.nativePlayerData?.DragDeactivated, undefined);
+        assert.deepEqual(session.diagnostics().errors, externalFaults, 'authorized drag changes must not add errors after the explicit boundary rejection');
+    } finally {
+        session.close({ discardSaveData: true });
+        host.dispose();
+    }
+});
+
+test('protected original drag deactivation records its actual owner fault but still commits replacement and nil', async () => {
+    const { host, session, saved } = await fixture();
+    const path = 'media/lua/client/drag-fault/main.lua';
+
+    try {
+        await loadPackage(session, host, {
+            id: 'drag-fault', nativeId: 'DragFault', sources: [{
+                path, source: `
+                    DragFault={player=-1}
+                    function DragFault:deactivate()
+                        assert(getCell():getDrag(0)==self)
+                        getModData().DragFaultReached=true
+                        error('actual protected drag deactivation fault')
+                    end
+                    getCell():setDrag(DragFault,0)
+                `,
+            }],
+        });
+        await loadSource(session, host, `
+            local replacement=setmetatable({},{__index={deactivate=function() error('inherited deactivation must not run') end}})
+            getCell():setDrag(replacement,0)
+            assert(getCell():getDrag(0)==replacement and rawget(replacement,'player')==0)
+            getCell():setDrag(nil,0)
+            assert(getCell():getDrag(0)==nil)
+            getModData().DragReplacementCommitted=true
+        `, 'drag-replacement');
+        session.flushSaveData();
+        const faults = session.diagnostics().errors;
+
+        assert.equal(faults.length, 1);
+        assert.equal(faults[0].modId, 'drag-fault');
+        assert.equal(faults[0].nativeModId, 'DragFault');
+        assert.equal(faults[0].apiModId, 'drag-fault');
+        assert.equal(faults[0].path, path);
+        assert.match(faults[0].message, /actual protected drag deactivation fault/u);
+        assert.equal(saved.get('drag-fault').data.nativePlayerData.DragFaultReached, true);
+        assert.equal(saved.get('drag-replacement').data.nativePlayerData.DragReplacementCommitted, true);
     } finally {
         session.close({ discardSaveData: true });
         host.dispose();
@@ -4117,3 +6694,65 @@ for (const force of ['forceComplete', 'forceStop']) {
         }
     });
 }
+
+test('source inventory rows use native mutable broken heat and clothing wetness methods', async () => {
+    const { engine, host, session } = await fixture();
+
+    engine.registerItemDefinition({ ...SOURCE_ITEM_FIELDS, fullType: 'Fixture.RowClothing', type: 'Clothing' }, { owner: 'fixture' });
+    const id = engine.command({ type: 'spawnItem', fullType: 'Fixture.RowClothing', x: 5, y: 5 }).id;
+    const graph = engine.exportInventoryGraph();
+
+    graph.items[0] = { ...graph.items[0], ownerContainerId: 1, worldPosition: null };
+    engine.importInventoryGraph(graph);
+    try {
+        activate(session, host, `
+            local row=getPlayer():getInventory():getItems():get(0)
+            RetainedRowLeaf=row
+            assert(not row:isHumanCorpse(),'ordinary Clothing is not a human corpse')
+            local originalType=row.getType
+            row.getType=function() return 'CorpseMale' end
+            assert(not row:isHumanCorpse(),'a Lua type-name override must not turn Clothing into a corpse')
+            row.getType=originalType
+            assert(row:getID()==${id})
+            assert(row:updateAge()==nil)
+            row:setBroken(true)
+            assert(row:isBroken() and row:getCondition()==10)
+            row:setBroken(false)
+            row:setItemHeat(2.5)
+            assert(row:getItemHeat()==2.5)
+            row:setWetness(47.5)
+            assert(row:getWetness()==47.5)
+            assert(row:updateWetness()==nil)
+            assert(row:getWetness()==0)
+            row:setWetness(22.5)
+            local again=getPlayer():getInventory():getItems():get(0)
+            assert(again==row and again:getWetness()==22.5 and again:getItemHeat()==2.5,
+                'reusing a native wrapper must still observe live mutable leaf state')
+        `, 'RowLeafConsumer');
+        assert.equal(engine.sourceActions.itemHeat(id), 2.5);
+        assert.equal(engine.sourceActions.itemWetness(id), 22.5);
+        assert.equal(engine.sourceActions.itemIsBroken(id), false);
+        engine.beginItemDefinitionRegistration('fixture');
+        try {
+            engine.registerItemDefinition({ ...engine.getItemDefinition('Fixture.RowClothing'), type: 'Normal' },
+                { owner: 'fixture', override: true });
+            activate(session, host, `
+                local row=getPlayer():getInventory():getItems():get(0)
+                assert(row==RetainedRowLeaf and rawget(row,'getWetness')==nil and rawget(row,'setWetness')==nil and rawget(row,'updateWetness')==nil,
+                    'a changed native Clothing subtype must update the reused wrapper')
+                assert(row:getItemHeat()==2.5 and not row:isBroken())
+            `, 'RowLeafOverride');
+        } finally {
+            engine.rollbackItemDefinitionRegistration('fixture');
+        }
+
+        activate(session, host, `
+            local row=getPlayer():getInventory():getItems():get(0)
+            assert(row==RetainedRowLeaf and row:getWetness()==22.5 and row:getItemHeat()==2.5,
+                'definition rollback must restore native subtype methods without freezing mutable item state')
+        `, 'RowLeafRollback');
+    } finally {
+        session.close();
+        host.dispose();
+    }
+});

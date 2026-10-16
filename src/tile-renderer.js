@@ -1,52 +1,142 @@
 /** @file Lazy original map placements and pack rectangles in the shared WebGPU world pass. */
+import { WORLD_DEPTH_XY, WORLD_DEPTH_Z, worldDepth } from './renderer.js';
+import { createWorldItemLayer } from './world-item-renderer.js';
 
 const DEFAULT_ANCHOR = Object.freeze({ x: 64, y: 192, nativeTilePixels: 128 });
 const MAX_TEXTURE_BYTES = 63 * 1_024 * 1_024;
 const MAX_CHUNKS = 512;
-const INSTANCE_BYTES = 48;
+const INSTANCE_BYTES = 144;
+
+/**
+ * A cropped sprite and its exact source depth allocation have one residency lifetime.
+ *
+ * @param {object} resource - Paired resident textures.
+ * @returns {void} Releases both GPU owners.
+ */
+function releaseTexture(resource) {
+    resource.texture.destroy();
+    resource.depthTexture?.destroy();
+    resource.maskTexture?.destroy();
+}
+
+/**
+ * Validate native depth bytes immediately before allocating their GPU owner.
+ *
+ * @param {object} depth - Source depth image.
+ * @param {number} limit - Device dimension limit.
+ * @returns {void} Throws for invalid native depth bytes or dimensions.
+ */
+function validateDepthTexture(depth, limit) {
+    if (depth.width > limit || depth.height > limit
+        || !(depth.pixels instanceof Uint8Array) || depth.pixels.length !== depth.width * depth.height) {
+        throw new RangeError('Invalid original tile depth GPU bytes or dimensions');
+    }
+}
+
+/**
+ * Validate native seam-mask bytes immediately before allocating their GPU owner.
+ *
+ * @param {object} mask - Source seam mask.
+ * @param {number} limit - Device dimension limit.
+ * @returns {void} Throws for invalid native mask bytes or dimensions.
+ */
+function validateMaskTexture(mask, limit) {
+    if (![mask.width, mask.height].every((value) => Number.isSafeInteger(value) && value > 0 && value <= limit)
+        || !(mask.pixels instanceof Uint8Array) || mask.pixels.length !== mask.width * mask.height) {
+        throw new RangeError('Invalid original tile seam mask GPU bytes or dimensions');
+    }
+}
 
 const SHADER = /* wgsl */ `
 struct View {
     projection: mat4x4<f32>,
     viewport: vec2<f32>,
     tilePixels: f32,
-    padding: f32,
+    depthSpan: f32,
 };
 @group(0) @binding(0) var<uniform> view: View;
 @group(1) @binding(0) var atlas: texture_2d<f32>;
 @group(1) @binding(1) var atlasSampler: sampler;
+@group(1) @binding(2) var tileDepth: texture_2d<f32>;
+@group(1) @binding(3) var seamMask: texture_2d<f32>;
+@group(1) @binding(4) var maskSampler: sampler;
 struct Vertex {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) @interpolate(flat) bounds: vec4<f32>,
+    @location(1) depthUV: vec2<f32>,
+    @location(2) maskUV: vec2<f32>,
 };
 @vertex fn vertexMain(
     @builtin(vertex_index) vertex: u32,
     @location(0) anchor: vec4<f32>,
-    @location(1) rect: vec4<f32>,
-    @location(2) uv: vec4<f32>,
+    @location(1) positions0: vec4<f32>,
+    @location(2) positions1: vec4<f32>,
+    @location(3) uv0: vec4<f32>,
+    @location(4) uv1: vec4<f32>,
+    @location(5) depthUV0: vec4<f32>,
+    @location(6) depthUV1: vec4<f32>,
+    @location(7) maskUV0: vec4<f32>,
+    @location(8) maskUV1: vec4<f32>,
 ) -> Vertex {
-    let corners = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
-        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
-    );
-    let corner = corners[vertex];
-    let pixels = (rect.xy + corner * rect.zw) * view.tilePixels;
+    let indices = array<u32, 6>(0u, 1u, 3u, 3u, 1u, 2u);
+    let corner = indices[vertex];
+    let positions = array<vec2<f32>, 4>(positions0.xy, positions0.zw, positions1.xy, positions1.zw);
+    let uvs = array<vec2<f32>, 4>(uv0.xy, uv0.zw, uv1.xy, uv1.zw);
+    let depths = array<vec2<f32>, 4>(depthUV0.xy, depthUV0.zw, depthUV1.xy, depthUV1.zw);
+    let masks = array<vec2<f32>, 4>(maskUV0.xy, maskUV0.zw, maskUV1.xy, maskUV1.zw);
+    let pixels = positions[corner] * view.tilePixels;
     var out: Vertex;
     out.clip = view.projection * vec4<f32>(anchor.xyz, 1.0);
     out.clip = vec4<f32>(out.clip.xy + pixels * vec2<f32>(2.0, -2.0) / view.viewport, out.clip.zw);
-    // Preserve the original stack order even across atlas-page batches.
-    out.clip.z -= anchor.w * 0.000001;
-    out.uv = mix(uv.xy, uv.zw, corner);
-    out.bounds = uv;
+    // Painter order is retained by draw runs, never by an invented depth displacement.
+    out.clip.z += anchor.w;
+    out.uv = uvs[corner];
+    out.depthUV = depths[corner];
+    out.maskUV = masks[corner];
     return out;
 }
-@fragment fn fragmentMain(in: Vertex) -> @location(0) vec4<f32> {
+fn diffuse(in: Vertex) -> vec4<f32> {
     let halfTexel = 0.5 / vec2<f32>(textureDimensions(atlas));
-    let uv = clamp(in.uv, in.bounds.xy + halfTexel, in.bounds.zw - halfTexel);
+    let uv = clamp(in.uv, halfTexel, vec2<f32>(1.0) - halfTexel);
     let colour = textureSample(atlas, atlasSampler, uv);
     if (colour.a <= 0.01) { discard; }
     return colour;
+}
+struct Fragment {
+    @location(0) colour: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+fn nativeDepth(uv: vec2<f32>) -> f32 {
+    let dimensions = vec2<i32>(textureDimensions(tileDepth));
+    let pixel = vec2<i32>(floor(uv * vec2<f32>(dimensions)));
+    // Native depth uploads use nearest filtering and retain the texture's REPEAT wrap.
+    let wrapped = ((pixel % dimensions) + dimensions) % dimensions;
+    return textureLoad(tileDepth, wrapped, 0).r;
+}
+@fragment fn fragmentMain(in: Vertex) -> Fragment {
+    let colour = diffuse(in);
+    let d = nativeDepth(in.depthUV);
+    if (d == 0.0) { discard; }
+    let b = in.clip.z - view.depthSpan;
+    var out: Fragment;
+    out.colour = colour;
+    out.depth = b + view.depthSpan * d;
+    return out;
+}
+@fragment fn fragmentSeam(in: Vertex) -> Fragment {
+    let mask = textureSample(seamMask, maskSampler, in.maskUV).r;
+    let colour = diffuse(in);
+    let d = nativeDepth(in.depthUV);
+    if (d * mask == 0.0) { discard; }
+    let b = in.clip.z - view.depthSpan;
+    var out: Fragment;
+    out.colour = colour;
+    out.depth = b + view.depthSpan * d;
+    return out;
+}
+@fragment fn fragmentUntextured(in: Vertex) -> @location(0) vec4<f32> {
+    // setupTileDepth=false retains the ordinary sprite-origin LESS_EQUAL draw.
+    return diffuse(in);
 }
 `;
 
@@ -57,7 +147,7 @@ struct Vertex {
 /** @typedef {{x:number,y:number,nativeTilePixels:number}} TileAnchor */
 /** @typedef {{x:number,y:number,width:number,height:number,tilePixels?:number}} TileView */
 /** @typedef {{left:number,top:number,width:number,height:number,u0:number,v0:number,u1:number,v1:number}} Quad */
-/** @typedef {{pack:PackIndex,sprite:PackSprite,key:string,pageKey:string,quad:Quad}} JoinedSprite */
+/** @typedef {{pack:PackIndex,sprite:PackSprite,key:string,pageKey:string,quad:Quad,depth?:object,vertices?:Float32Array,crop?:{x:number,y:number,w:number,h:number}}} JoinedSprite */
 
 /**
  * Convert a trimmed atlas rectangle into tile-relative sprite geometry.
@@ -99,6 +189,186 @@ function spriteQuad(sprite, page, tilePixels, anchor = DEFAULT_ANCHOR) {
 }
 
 /**
+ * Intersect native depth and scaled diffuse rectangles before anchoring either UV owner.
+ * TileDepthTextureModifier.accept uses sprite soffsets outside the sprite instance scale.
+ *
+ * @param {PackSprite} sprite - Original diffuse trim.
+ * @param {object} depth - Source depth descriptor, including optional native instance geometry.
+ * @param {TileAnchor} [anchor] - Native sprite canvas anchor.
+ * @returns {object} Tile-relative intersection and independent cropped-texture UV bounds.
+ */
+function tileDepthQuad(sprite, depth, anchor = DEFAULT_ANCHOR) {
+    const { scaleX = 1, scaleY = 1, soffX = 0, soffY = 0 } = depth.geometry ?? {};
+    const values = [scaleX, scaleY, soffX, soffY, anchor.x, anchor.y, anchor.nativeTilePixels];
+
+    if (!values.every(Number.isFinite) || scaleX <= 0 || scaleY <= 0 || anchor.nativeTilePixels <= 0) {
+        throw new RangeError('Invalid native depth sprite geometry');
+    }
+
+    const diffuseLeft = soffX + sprite.xoff * scaleX;
+    const diffuseTop = soffY + sprite.yoff * scaleY;
+    const diffuseWidth = sprite.w * scaleX;
+    const diffuseHeight = sprite.h * scaleY;
+    let left = diffuseLeft;
+    let top = diffuseTop;
+    let right = left + diffuseWidth;
+    let bottom = top + diffuseHeight;
+
+    if (depth.kind === 'texture') {
+        if (![depth.width, depth.height].every((value) => Number.isSafeInteger(value) && value > 0)
+            || ![depth.offsetX, depth.offsetY].every(Number.isFinite)) {
+            throw new RangeError('Invalid native depth rectangle');
+        }
+
+        left = Math.max(left, depth.offsetX);
+        top = Math.max(top, depth.offsetY);
+        right = Math.min(right, depth.offsetX + depth.width);
+        bottom = Math.min(bottom, depth.offsetY + depth.height);
+    }
+
+    const mask = depth.seam?.mask;
+
+    if (mask && !depth.seam.vertices) {
+        const clip = mask.clip ?? mask;
+
+        left = Math.max(left, clip.offsetX);
+        top = Math.max(top, clip.offsetY);
+        right = Math.min(right, clip.offsetX + clip.width);
+        bottom = Math.min(bottom, clip.offsetY + clip.height);
+    }
+
+    if (depth.seam?.vertices) {
+        const vertices = depth.seam.vertices;
+
+        if (vertices.length !== 8 || !vertices.every(Number.isFinite)) {
+            throw new RangeError('Invalid original seam vertices');
+        }
+
+        left = Math.min(vertices[0], vertices[2], vertices[4], vertices[6]);
+        right = Math.max(vertices[0], vertices[2], vertices[4], vertices[6]);
+        top = Math.min(vertices[1], vertices[3], vertices[5], vertices[7]);
+        bottom = Math.max(vertices[1], vertices[3], vertices[5], vertices[7]);
+    }
+
+    const screenOffset = depth.screenOffset ?? { x: 0, y: 0 };
+
+    if (![screenOffset.x, screenOffset.y].every(Number.isFinite)) {
+        throw new RangeError('Invalid native depth screen offset');
+    }
+
+    return {
+        left: (left - anchor.x + screenOffset.x) / anchor.nativeTilePixels, top: (top - anchor.y + screenOffset.y) / anchor.nativeTilePixels,
+        width: Math.max(0, right - left) / anchor.nativeTilePixels, height: Math.max(0, bottom - top) / anchor.nativeTilePixels,
+        u0: (left - diffuseLeft) / diffuseWidth, v0: (top - diffuseTop) / diffuseHeight,
+        u1: (right - diffuseLeft) / diffuseWidth, v1: (bottom - diffuseTop) / diffuseHeight,
+        depthU0: depth.kind === 'texture' ? (left - depth.offsetX) / depth.width : 0,
+        depthV0: depth.kind === 'texture' ? (top - depth.offsetY) / depth.height : 0,
+        depthU1: depth.kind === 'texture' ? (right - depth.offsetX) / depth.width : 1,
+        depthV1: depth.kind === 'texture' ? (bottom - depth.offsetY) / depth.height : 1,
+    };
+}
+
+/**
+ * Retain all four source corners, including native seam parallelograms and independent UV owners.
+ *
+ * @param {PackSprite} sprite - Original diffuse crop.
+ * @param {object} depth - Source depth and optional seam mask.
+ * @param {object} quad - Native bounds used for viewport culling.
+ * @param {TileAnchor} anchor - Native canvas anchor.
+ * @returns {Float32Array} Four XY corners followed by diffuse, depth and mask UV corner pairs.
+ */
+function tileDepthVertices(sprite, depth, quad, anchor) {
+    const offset = depth.screenOffset ?? { x: 0, y: 0 };
+    const left = quad.left * anchor.nativeTilePixels + anchor.x - offset.x;
+    const top = quad.top * anchor.nativeTilePixels + anchor.y - offset.y;
+    const right = left + quad.width * anchor.nativeTilePixels;
+    const bottom = top + quad.height * anchor.nativeTilePixels;
+    const corners = depth.seam?.vertices ?? [left, top, right, top, right, bottom, left, bottom];
+    const { scaleX = 1, scaleY = 1, soffX = 0, soffY = 0 } = depth.geometry ?? {};
+    const data = new Float32Array(32);
+    const mask = depth.seam?.mask;
+
+    for (let corner = 0; corner < 4; corner++) {
+        const x = corners[corner * 2];
+        const y = corners[corner * 2 + 1];
+
+        data[corner * 2] = (x - anchor.x + offset.x) / anchor.nativeTilePixels;
+        data[corner * 2 + 1] = (y - anchor.y + offset.y) / anchor.nativeTilePixels;
+        data[8 + corner * 2] = (x - soffX - sprite.xoff * scaleX) / (sprite.w * scaleX);
+        data[9 + corner * 2] = (y - soffY - sprite.yoff * scaleY) / (sprite.h * scaleY);
+        data[16 + corner * 2] = depth.kind === 'texture' ? (x - depth.offsetX) / depth.width : 0;
+        data[17 + corner * 2] = depth.kind === 'texture' ? (y - depth.offsetY) / depth.height : 0;
+        data[24 + corner * 2] = mask ? (x - mask.offsetX) / mask.width : 0;
+        data[25 + corner * 2] = mask ? (y - mask.offsetY) / mask.height : 0;
+    }
+
+    return data;
+}
+
+/**
+ * Keep source atlas neighbours needed by a seam's replaced quad, never a stretched crop edge.
+ *
+ * @param {PackSprite} sprite - Original diffuse crop.
+ * @param {object} depth - Native draw descriptor.
+ * @param {Float32Array} vertices - Native corners whose diffuse UVs are rebased in place.
+ * @returns {{x:number,y:number,w:number,h:number}} Exact bounded GPU diffuse crop, including a linear-sampling halo for seams.
+ */
+function tileDiffuseCrop(sprite, depth, vertices) {
+    if (!depth.seam) {
+        return { x: sprite.x, y: sprite.y, w: sprite.w, h: sprite.h };
+    }
+
+    const minU = Math.min(vertices[8], vertices[10], vertices[12], vertices[14]);
+    const maxU = Math.max(vertices[8], vertices[10], vertices[12], vertices[14]);
+    const minV = Math.min(vertices[9], vertices[11], vertices[13], vertices[15]);
+    const maxV = Math.max(vertices[9], vertices[11], vertices[13], vertices[15]);
+    const x = Math.floor(sprite.x + minU * sprite.w) - 1;
+    const y = Math.floor(sprite.y + minV * sprite.h) - 1;
+    const w = Math.ceil(sprite.x + maxU * sprite.w) + 1 - x;
+    const h = Math.ceil(sprite.y + maxV * sprite.h) + 1 - y;
+
+    for (let corner = 0; corner < 4; corner++) {
+        vertices[8 + corner * 2] = (sprite.x + vertices[8 + corner * 2] * sprite.w - x) / w;
+        vertices[9 + corner * 2] = (sprite.y + vertices[9 + corner * 2] * sprite.h - y) / h;
+    }
+
+    return { x, y, w, h };
+}
+
+/**
+ * Copy only the needed original page rectangle, preserving native startup pack REPEAT at page edges.
+ * GameWindow.enter's flags64/68 flow unchanged through TexturePackDevice; bit32 is absent.
+ *
+ * @param {GPUDevice} device - Shared GPU.
+ * @param {ImageBitmap} bitmap - Temporarily decoded source page.
+ * @param {GPUTexture} texture - Bounded diffuse allocation.
+ * @param {{x:number,y:number,w:number,h:number}} crop - Source pixel rectangle and linear halo.
+ * @returns {void} Submits premultiplied source copies; no CPU pixels or full GPU atlas are retained.
+ */
+function copyTileDiffuse(device, bitmap, texture, crop) {
+    let targetY = 0;
+
+    while (targetY < crop.h) {
+        const sourceY = ((crop.y + targetY) % bitmap.height + bitmap.height) % bitmap.height;
+        const height = Math.min(crop.h - targetY, bitmap.height - sourceY);
+        let targetX = 0;
+
+        while (targetX < crop.w) {
+            const sourceX = ((crop.x + targetX) % bitmap.width + bitmap.width) % bitmap.width;
+            const width = Math.min(crop.w - targetX, bitmap.width - sourceX);
+
+            device.queue.copyExternalImageToTexture(
+                { source: bitmap, origin: { x: sourceX, y: sourceY } },
+                { texture, origin: { x: targetX, y: targetY }, premultipliedAlpha: true }, [width, height],
+            );
+            targetX += width;
+        }
+
+        targetY += height;
+    }
+}
+
+/**
  * Check an unsigned descriptor field.
  *
  * @param {number} value - Descriptor field.
@@ -123,7 +393,7 @@ function tileScreenPosition(tile, camera, tilePixels) {
     return {
         x: (dx - dy) * tilePixels / 2,
         y: (dx + dy) * tilePixels / 4 - tile.z * tilePixels * 1.5,
-        depth: 0.5 - (dx + dy) * 0.002 - tile.z * 0.002,
+        depth: worldDepth(tile, camera),
     };
 }
 
@@ -181,8 +451,8 @@ function isTileVisible(tile, quad, view) {
  * Admit unique cropped sprite allocations in supplied priority order.
  * Source atlas dimensions do not enter this GPU budget; no full pages are retained.
  *
- * @param {Array<{key:string,w:number,h:number}>} sprites - Prioritized original trim sizes.
- * @param {number} budget - Hard RGBA8 texture-byte cap.
+ * @param {Array<{key:string,w:number,h:number,depthBytes?:number}>} sprites - Prioritized original trim and source depth sizes.
+ * @param {number} budget - Hard diffuse-plus-depth texture-byte cap.
  * @returns {{selected:Set<string>,deferred:string[],bytes:number}} Exact bounded allocation plan.
  */
 function createSpriteResidencyPlan(sprites, budget) {
@@ -195,8 +465,9 @@ function createSpriteResidencyPlan(sprites, budget) {
     const deferred = [];
     let bytes = 0;
 
-    for (const { key, w, h } of sprites) {
-        if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 0 || h < 0 || !Number.isSafeInteger(w * h * 4)) {
+    for (const { key, w, h, depthBytes = 0 } of sprites) {
+        if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 0 || h < 0 || !Number.isSafeInteger(w * h * 4)
+            || !Number.isSafeInteger(depthBytes) || depthBytes < 0 || !Number.isSafeInteger(w * h * 4 + depthBytes)) {
             throw new RangeError('Invalid cropped sprite dimensions');
         }
 
@@ -205,7 +476,7 @@ function createSpriteResidencyPlan(sprites, budget) {
         }
 
         seen.add(key);
-        const allocation = w * h * 4;
+        const allocation = w * h * 4 + depthBytes;
 
         if (bytes + allocation <= budget) {
             selected.add(key);
@@ -227,10 +498,10 @@ function createSpriteResidencyPlan(sprites, budget) {
  * @returns {number} Stable depth/order comparison.
  */
 function compareTiles(a, b) {
-    const depthA = -(a.tile.x + a.tile.y + a.tile.z) * 0.002 - a.tile.order * 0.000_001;
-    const depthB = -(b.tile.x + b.tile.y + b.tile.z) * 0.002 - b.tile.order * 0.000_001;
+    const depthA = -WORLD_DEPTH_XY * (a.tile.x + a.tile.y) - WORLD_DEPTH_Z * a.tile.z;
+    const depthB = -WORLD_DEPTH_XY * (b.tile.x + b.tile.y) - WORLD_DEPTH_Z * b.tile.z;
 
-    return depthB - depthA || a.tile.x - b.tile.x || a.tile.y - b.tile.y || a.tile.z - b.tile.z || a.tile.order - b.tile.order;
+    return depthB - depthA || a.tile.order - b.tile.order;
 }
 
 /**
@@ -329,7 +600,9 @@ function createDoorRenderProjection(doors) {
                 spriteName = visual.closedSpriteName;
             }
 
-            return { x: row.x, y: row.y, z: row.z, order: visual.order, spriteName };
+            return Object.defineProperties({ x: row.x, y: row.y, z: row.z, order: visual.order, spriteName }, {
+                sourceX: { value: visual.sourceX }, sourceY: { value: visual.sourceY },
+            });
         });
 
         snapshot = { revision, sourceKeys, tiles };
@@ -342,12 +615,16 @@ function createDoorRenderProjection(doors) {
  * Create one bounded original-content world layer. Pack precedence is the supplied
  * array order, followed by first on-disk occurrence; no missing names are remapped.
  *
- * @param {{device:GPUDevice,format:string,sampler:GPUSampler,packs:Array<PackIndex>,cells:Array<MapCell>,anchor?:TileAnchor,textureBudget?:number,doors?:{visuals:object[],revision:()=>number,read:()=>object[]}}} options - Shared renderer resources and user-selected metadata.
+ * @param {{device:GPUDevice,format:string,sampler:GPUSampler,packs:Array<PackIndex>,cells:Array<MapCell>,tileDepth:{resolve:(name:string,context:object)=>Promise<object>},anchor?:TileAnchor,textureBudget?:number,doors?:{visuals:object[],revision:()=>number,read:()=>object[]},worldItems?:object}} options - Shared renderer resources and user-selected metadata.
  * @returns {object} Async update/whenLoaded, synchronous render, diagnostics and destroy.
  */
-function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAULT_ANCHOR, textureBudget = MAX_TEXTURE_BYTES, doors }) {
+function createTileLayer({ device, format, sampler, packs, cells, tileDepth, anchor = DEFAULT_ANCHOR, textureBudget = MAX_TEXTURE_BYTES, doors, worldItems }) {
     if (!Number.isSafeInteger(textureBudget) || textureBudget < 4 || textureBudget > MAX_TEXTURE_BYTES) {
         throw new RangeError('Tile texture budget must be positive and below 64 MiB');
+    }
+
+    if (typeof tileDepth?.resolve !== 'function') {
+        throw new TypeError('Original tile depth resolver is required');
     }
 
     if (!Number.isFinite(anchor.x) || !Number.isFinite(anchor.y) || !Number.isFinite(anchor.nativeTilePixels) || anchor.nativeTilePixels <= 0) {
@@ -356,6 +633,7 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
 
     const effectiveAnchor = Object.freeze({ ...anchor });
     const refreshDoors = doors === undefined ? undefined : createDoorRenderProjection(doors);
+    const itemLayer = worldItems ? createWorldItemLayer({ device, format, sampler, assets: worldItems }) : null;
     const doorSpriteNames = new Set();
 
     for (const visual of doors?.visuals ?? []) {
@@ -398,80 +676,119 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
         extents.maxLevel = Math.max(extents.maxLevel, cell.maxLevel);
     }
 
+    /**
+     * Join authored or constructor-substituted art using the same pack precedence.
+     *
+     * @param {string} name - Exact effective sprite name.
+     * @param {boolean} [required] - Whether this is a represented draw, not metadata preflight.
+     * @returns {JoinedSprite|undefined} Original source crop and geometry.
+     */
+    function joinSprite(name, required = true) {
+        if (catalogue.has(name)) {
+            return catalogue.get(name);
+        }
+
+        let joined;
+
+        for (const [packIndex, pack] of packs.entries()) {
+            const sprite = pack.lookup(name);
+
+            if (sprite) {
+                const page = pack.pages[sprite.pageIndex];
+                const quad = spriteQuad(sprite, page, 1, effectiveAnchor);
+
+                joined = { pack, sprite, quad, key: `${packIndex}:${sprite.pageIndex}:${sprite.entryIndex}`, pageKey: `${packIndex}:${sprite.pageIndex}` };
+                break;
+            }
+        }
+
+        if (!joined) {
+            if (required) {
+                missingSprites.add(name);
+            }
+
+            return undefined;
+        }
+
+        catalogue.set(name, joined);
+        const { sprite, pack, quad } = joined;
+
+        if (floorCalibration.length < 8 && name.includes('floors') && sprite.w > 0 && Math.abs(sprite.h * 2 - sprite.w) <= 2) {
+            floorCalibration.push({
+                name, source: pack.source.name,
+                trim: { xoff: sprite.xoff, yoff: sprite.yoff, width: sprite.w, height: sprite.h },
+                canvas: { width: sprite.totalW, height: sprite.totalH },
+                suggestedAnchor: { x: sprite.totalW / 2, y: sprite.yoff, nativeTilePixels: sprite.totalW },
+                confidence: 'Original floor trim and nominal canvas; diamond-top anchor, not diamond centre',
+            });
+        }
+
+        extents.left = Math.min(extents.left, quad.left);
+        extents.right = Math.max(extents.right, quad.left + quad.width);
+        extents.top = Math.min(extents.top, quad.top);
+        extents.bottom = Math.max(extents.bottom, quad.top + quad.height);
+
+        return joined;
+    }
+
     for (const names of [...cells.map((cell) => cell.tileNames), doorSpriteNames]) {
         for (const name of names) {
-            if (catalogue.has(name) || missingSprites.has(name)) {
-                continue;
-            }
-
-            let joined;
-
-            for (const [packIndex, pack] of packs.entries()) {
-                const sprite = pack.lookup(name);
-
-                if (sprite) {
-                    const page = pack.pages[sprite.pageIndex];
-                    const quad = spriteQuad(sprite, page, 1, effectiveAnchor);
-
-                    joined = { pack, sprite, quad, key: `${packIndex}:${sprite.pageIndex}:${sprite.entryIndex}`, pageKey: `${packIndex}:${sprite.pageIndex}` };
-                    break;
-                }
-            }
-
-            if (!joined) {
-                missingSprites.add(name);
-                continue;
-            }
-
-            catalogue.set(name, joined);
-            const { sprite, pack, quad } = joined;
-
-            if (floorCalibration.length < 8 && name.includes('floors') && sprite.w > 0 && Math.abs(sprite.h * 2 - sprite.w) <= 2) {
-                floorCalibration.push({
-                    name, source: pack.source.name,
-                    trim: { xoff: sprite.xoff, yoff: sprite.yoff, width: sprite.w, height: sprite.h },
-                    canvas: { width: sprite.totalW, height: sprite.totalH },
-                    suggestedAnchor: { x: sprite.totalW / 2, y: sprite.yoff, nativeTilePixels: sprite.totalW },
-                    confidence: 'Original floor trim and nominal canvas; diamond-top anchor, not diamond centre',
-                });
-            }
-
-            extents.left = Math.min(extents.left, quad.left);
-            extents.right = Math.max(extents.right, quad.left + quad.width);
-            extents.top = Math.min(extents.top, quad.top);
-            extents.bottom = Math.max(extents.bottom, quad.top + quad.height);
+            joinSprite(name, false);
         }
     }
 
     const module = device.createShaderModule({ label: 'original tile quads', code: SHADER });
-    const pipeline = device.createRenderPipeline({
-        label: 'original tile world layer', layout: 'auto',
-        vertex: {
-            module, entryPoint: 'vertexMain',
-            buffers: [{
-                arrayStride: INSTANCE_BYTES, stepMode: 'instance',
-                attributes: [
-                    { shaderLocation: 0, offset: 0, format: 'float32x4' },
-                    { shaderLocation: 1, offset: 16, format: 'float32x4' },
-                    { shaderLocation: 2, offset: 32, format: 'float32x4' },
-                ],
-            }],
-        },
-        fragment: {
-            module, entryPoint: 'fragmentMain',
-            targets: [{
-                format,
-                blend: {
-                    color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
-                    alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
-                },
-            }],
-        },
-        primitive: { topology: 'triangle-list' },
-        depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less-equal' },
-    });
+    const pipelines = new Map();
     const uniformBuffer = device.createBuffer({ label: 'tile projection', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const viewGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: uniformBuffer } }] });
+    const maskSampler = device.createSampler({ label: 'native seam mask linear', minFilter: 'linear', magFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
+
+    /**
+     * Preserve the source ordinary draw's depth-write policy without dummy depth resources.
+     *
+     * @param {object} depth - Native textured or explicitly untextured policy.
+     * @returns {object} Pipeline and its auto-layout-compatible view group.
+     */
+    function materialFor(depth) {
+        const textured = depth.kind === 'texture';
+        const depthWriteEnabled = depth.depthWrite !== false;
+        const key = `${depth.kind}:${Boolean(depth.seam)}:${depthWriteEnabled}`;
+
+        if (!pipelines.has(key)) {
+            let fragmentEntryPoint = textured ? 'fragmentMain' : 'fragmentUntextured';
+
+            if (depth.seam) {
+                fragmentEntryPoint = 'fragmentSeam';
+            }
+
+            const pipeline = device.createRenderPipeline({
+                label: `original tile ${key}`, layout: 'auto',
+                vertex: {
+                    module, entryPoint: 'vertexMain',
+                    buffers: [{
+                        arrayStride: INSTANCE_BYTES, stepMode: 'instance',
+                        attributes: Array.from({ length: 9 }, (_, index) => ({ shaderLocation: index, offset: index * 16, format: 'float32x4' })),
+                    }],
+                },
+                fragment: {
+                    module, entryPoint: fragmentEntryPoint,
+                    targets: [{
+                        format,
+                        blend: {
+                            color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+                            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+                        },
+                    }],
+                },
+                primitive: { topology: 'triangle-list' },
+                depthStencil: { format: 'depth32float', depthWriteEnabled, depthCompare: 'less-equal' },
+            });
+            const viewGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: uniformBuffer } }] });
+
+            pipelines.set(key, { pipeline, viewGroup });
+        }
+
+        return pipelines.get(key);
+    }
 
     /**
      * Destroy CPU-window geometry after a window change, never each frame.
@@ -527,12 +844,14 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
         }
 
         for (const [key, entries] of bySprite) {
-            const data = new Float32Array(entries.length * 12);
+            const data = new Float32Array(entries.length * 36);
 
             for (const [index, { tile, joined }] of entries.entries()) {
-                const { quad } = joined;
+                const { depth, vertices } = joined;
+                const offset = depth.depthPositionOffset ?? { x: 0, y: 0 };
 
-                data.set([tile.x, tile.y, tile.z, tile.order, quad.left, quad.top, quad.width, quad.height, 0, 0, 1, 1], index * 12);
+                data.set([tile.x, tile.y, tile.z, -WORLD_DEPTH_XY * (offset.x + offset.y)], index * 36);
+                data.set(vertices, index * 36 + 4);
             }
 
             if (data.byteLength > device.limits.maxBufferSize) {
@@ -568,7 +887,7 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
                 throw new RangeError('Visible cropped sprites exceed the tile texture budget');
             }
 
-            oldest.texture.texture.destroy();
+            releaseTexture(oldest.texture);
             textureBytes -= oldest.texture.bytes;
             textures.delete(oldest.key);
         }
@@ -594,7 +913,7 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
         const bitmap = await createImageBitmap(blob);
 
         try {
-            if (destroyed) {
+            if (destroyed || (desired && desired.key !== activeKey)) {
                 return;
             }
 
@@ -607,34 +926,60 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
                     return;
                 }
 
-                const { sprite, key, pageKey } = joined;
-                const bytes = sprite.w * sprite.h * 4;
+                const { key, pageKey, depth, crop } = joined;
+                const { w, h, depthBytes } = residencyEntry({ joined });
+                const bytes = w * h * 4 + depthBytes;
 
-                if (sprite.w > device.limits.maxTextureDimension2D || sprite.h > device.limits.maxTextureDimension2D) {
+                if (w > device.limits.maxTextureDimension2D || h > device.limits.maxTextureDimension2D) {
                     throw new RangeError('Original sprite crop exceeds GPU texture dimensions');
                 }
 
                 evict(bytes, pinned);
                 let texture;
+                let depthTexture;
+                let maskTexture;
 
                 try {
                     texture = device.createTexture({
-                        label: `original sprite ${key}`, size: [sprite.w, sprite.h], format: 'rgba8unorm',
+                        label: `original sprite ${key}`, size: [w, h], format: 'rgba8unorm',
                         usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
                     });
-                    device.queue.copyExternalImageToTexture(
-                        { source: bitmap, origin: { x: sprite.x, y: sprite.y } },
-                        { texture, premultipliedAlpha: true }, [sprite.w, sprite.h],
-                    );
-                    const bindGroup = device.createBindGroup({
-                        layout: pipeline.getBindGroupLayout(1),
-                        entries: [{ binding: 0, resource: texture.createView() }, { binding: 1, resource: sampler }],
-                    });
+                    copyTileDiffuse(device, bitmap, texture, crop);
+                    const material = materialFor(depth);
+                    const entries = [{ binding: 0, resource: texture.createView() }, { binding: 1, resource: sampler }];
 
-                    textures.set(key, { texture, group: bindGroup, pageKey, bytes, used: ++clock });
+                    if (depth.kind === 'texture') {
+                        validateDepthTexture(depth, device.limits.maxTextureDimension2D);
+
+                        depthTexture = device.createTexture({
+                            label: `original tile depth ${depth.key}`, size: [depth.width, depth.height], format: 'r8unorm',
+                            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+                        });
+                        device.queue.writeTexture({ texture: depthTexture }, depth.pixels, { bytesPerRow: depth.width, rowsPerImage: depth.height }, [depth.width, depth.height]);
+                        entries.push({ binding: 2, resource: depthTexture.createView() });
+                    }
+
+                    if (depth.seam) {
+                        const mask = depth.seam.mask;
+
+                        validateMaskTexture(mask, device.limits.maxTextureDimension2D);
+
+                        maskTexture = device.createTexture({
+                            label: `original tile seam mask ${mask.key}`, size: [mask.width, mask.height], format: 'r8unorm',
+                            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+                        });
+                        device.queue.writeTexture({ texture: maskTexture }, mask.pixels, { bytesPerRow: mask.width, rowsPerImage: mask.height }, [mask.width, mask.height]);
+                        entries.push({ binding: 3, resource: maskTexture.createView() }, { binding: 4, resource: maskSampler });
+                    }
+
+                    const bindGroup = device.createBindGroup({ layout: material.pipeline.getBindGroupLayout(1), entries });
+
+                    textures.set(key, { texture, depthTexture, maskTexture, material, group: bindGroup, pageKey, bytes, used: ++clock });
                     textureBytes += bytes;
                 } catch (error) {
                     texture?.destroy();
+                    depthTexture?.destroy();
+                    maskTexture?.destroy();
                     throw error;
                 }
             }
@@ -773,6 +1118,8 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
                 placementGroups.push(request.doorSnapshot.tiles);
             }
 
+            const candidates = [];
+
             for (const placements of placementGroups) {
                 const dynamicDoors = placements === request.doorSnapshot?.tiles;
 
@@ -785,30 +1132,73 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
                         continue;
                     }
 
-                    const joined = catalogue.get(tile.spriteName);
+                    candidates.push(tile);
+                }
+            }
 
-                    if (!joined) {
-                        visibleMissingPlacements += 1;
+            /* Concurrent requests share the asset decoder's in-flight source sheet and per-tile bytes.
+               Native ownership and effective constructor art are resolved before exact geometry culling. */
+            // eslint-disable-next-line no-await-in-loop -- One bounded source batch per coalesced window.
+            const depths = await Promise.all(candidates.map((tile) => tileDepth.resolve(tile.spriteName, tile)));
+
+            if (destroyed) {
+                return;
+            }
+
+            for (const [index, tile] of candidates.entries()) {
+                const depth = depths[index];
+
+                if (depth?.kind === 'suppressed') {
+                    continue;
+                }
+
+                const base = joinSprite(depth?.spriteName ?? tile.spriteName);
+
+                if (!base) {
+                    visibleMissingPlacements += 1;
+                }
+
+                if (!base || !base.sprite.w || !base.sprite.h) {
+                    continue;
+                }
+
+                // FBORenderCell emits each object's seam draws before its ordinary base draw.
+                for (const drawDepth of [...(depth?.additionalDraws ?? []), depth]) {
+                    if (!drawDepth || !['texture', 'untextured'].includes(drawDepth.kind)
+                        || (drawDepth.seam && drawDepth.kind !== 'texture')
+                        || (drawDepth.kind === 'untextured' && (drawDepth.depthTest !== 'less-equal' || typeof drawDepth.depthWrite !== 'boolean'))) {
+                        throw new TypeError('Invalid original tile depth draw policy');
                     }
 
-                    if (!joined || !joined.sprite.w || !joined.sprite.h) {
-                        continue;
+                    const position = drawDepth.renderPosition;
+
+                    if (position && ![position.x, position.y, position.z].every(Number.isFinite)) {
+                        throw new TypeError('Invalid native tile render position');
                     }
 
-                    const quad = joined.quad;
+                    const renderTile = position ? { ...tile, x: position.x, y: position.y, z: position.z } : tile;
+                    const nativeQuad = tileDepthQuad(base.sprite, drawDepth, effectiveAnchor);
                     const screenQuad = {
-                        left: quad.left * request.view.tilePixels, top: quad.top * request.view.tilePixels,
-                        width: quad.width * request.view.tilePixels, height: quad.height * request.view.tilePixels,
+                        left: nativeQuad.left * request.view.tilePixels, top: nativeQuad.top * request.view.tilePixels,
+                        width: nativeQuad.width * request.view.tilePixels, height: nativeQuad.height * request.view.tilePixels,
                     };
 
-                    if (!isTileVisible(tile, screenQuad, request.view)) {
+                    if (!isTileVisible(renderTile, screenQuad, request.view)) {
                         continue;
                     }
 
+                    const vertices = tileDepthVertices(base.sprite, drawDepth, nativeQuad, effectiveAnchor);
+                    const crop = tileDiffuseCrop(base.sprite, drawDepth, vertices);
+
+                    const joined = {
+                        ...base, depth: drawDepth, quad: nativeQuad, vertices, crop,
+                        key: `${base.key}:${drawDepth.kind}:${drawDepth.key ?? ''}:${drawDepth.seam?.mask.key ?? ''}:${drawDepth.seam?.name ?? ''}:${drawDepth.depthWrite !== false}:${JSON.stringify(drawDepth.geometry ?? {})}`,
+                    };
+
                     visiblePlacements += 1;
-                    drawTiles.push({ tile, joined });
+                    drawTiles.push({ tile: renderTile, joined });
                     sourcePages.set(joined.pageKey, joined.pack.pages[joined.sprite.pageIndex]);
-                    const distance = (tile.x - request.view.x) ** 2 + (tile.y - request.view.y) ** 2;
+                    const distance = (renderTile.x - request.view.x) ** 2 + (renderTile.y - request.view.y) ** 2;
                     const previous = wanted.get(joined.key);
 
                     if (!previous || distance < previous.distance) {
@@ -831,12 +1221,14 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
             for (const key of plan.deferred) {
                 const { joined } = wanted.get(key);
 
-                deferredSprites.push({ key, source: joined.pack.source.name, sprite: joined.sprite.name, bytes: joined.sprite.w * joined.sprite.h * 4, reason: 'texture budget' });
+                const { w, h, depthBytes } = residencyEntry({ joined });
+
+                deferredSprites.push({ key, source: joined.pack.source.name, sprite: joined.sprite.name, bytes: w * h * 4 + depthBytes, reason: 'texture budget' });
             }
 
             for (const [key, texture] of textures) {
                 if (wanted.has(key) && !pinned.has(key)) {
-                    texture.texture.destroy();
+                    releaseTexture(texture);
                     textureBytes -= texture.bytes;
                     textures.delete(key);
                 }
@@ -964,6 +1356,8 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
                 await pending;
             }
 
+            await itemLayer?.whenLoaded();
+
             if (!destroyed) {
                 await device.queue.onSubmittedWorkDone();
             }
@@ -975,7 +1369,9 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
          * @param {{projection:Float32Array,camera:{x:number,y:number},tilePixels:number,width:number,height:number}} context - Shared isometric view.
          * @returns {boolean} True after a prepared, error-free world window encoded real source tile draws.
          */
-        render(pass, { projection, camera, tilePixels, width, height }) {
+        render(pass, context) {
+            const { projection, camera, tilePixels, width, height } = context;
+
             if (destroyed) {
                 return false;
             }
@@ -995,9 +1391,8 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
             uniforms[16] = width;
             uniforms[17] = height;
             uniforms[18] = tilePixels;
+            uniforms[19] = 2 * WORLD_DEPTH_XY + WORLD_DEPTH_Z;
             device.queue.writeBuffer(uniformBuffer, 0, uniforms);
-            pass.setPipeline(pipeline);
-            pass.setBindGroup(0, viewGroup);
             renderedInstances = 0;
 
             for (const run of runs) {
@@ -1005,6 +1400,8 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
                 const batch = geometry.get(run.key);
 
                 if (texture && batch) {
+                    pass.setPipeline(texture.material.pipeline);
+                    pass.setBindGroup(0, texture.material.viewGroup);
                     pass.setBindGroup(1, texture.group);
                     pass.setVertexBuffer(0, batch.buffer);
                     pass.draw(6, run.count, 0, run.first);
@@ -1012,7 +1409,36 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
                 }
             }
 
+            try {
+                itemLayer?.render(pass, context);
+                const failures = itemLayer?.diagnostics().errors ?? [];
+
+                if (failures.length) {
+                    errors.set('world-items', failures.map(({ id, message }) => `${id}: ${message}`).join('; '));
+                } else {
+                    errors.delete('world-items');
+                }
+            } catch (error) {
+                errors.set('world-items', String(error));
+            }
+
             return renderedInstances > 0 && completedKey !== '' && errors.size === 0;
+        },
+        /**
+         * Composite source alpha-mask contours after the shared world pass.
+         *
+         * @param {GPUCommandEncoder} encoder - Current frame encoder.
+         * @param {GPUTextureView} colorView - Current world color target.
+         * @param {object} context - Current native item snapshot and camera.
+         * @returns {void} Adds genuine silhouette passes only for enabled native outline flags.
+         */
+        renderOutlines(encoder, colorView, context) {
+            try {
+                itemLayer?.renderOutlines(encoder, colorView, context);
+                errors.delete('world-item-outlines');
+            } catch (error) {
+                errors.set('world-item-outlines', String(error));
+            }
         },
         /**
          * Report missing names, incomplete page admission and actual cache state.
@@ -1026,13 +1452,15 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
                 cachedChunks: chunks.size, chunkLimit: MAX_CHUNKS,
                 residentSprites: textures.size, residentPages: new Set([...textures.values()].map(texturePageKey)).size,
                 visiblePlacements, cachedPlacements, visibleMissingPlacements, renderedInstances, drawRuns: runs.length,
-                visibleSourceAtlasBytes, textureStorage: 'original trimmed sprite crops',
+                visibleSourceAtlasBytes, textureStorage: 'original trimmed sprite, tile depth and seam mask crops',
                 missingSprites: [...missingSprites], missingSpriteCount: missingSprites.size,
                 errors: [...errors.entries()].map(errorEntry), deferredSprites: [...deferredSprites],
                 anchor: { ...effectiveAnchor }, anchorConfidence: 'Original nominal128x256 floor canvas and diamond-top convention; caller-calibratable',
                 floorCalibration: [...floorCalibration],
                 packPrecedence: packs.map(packName),
-                complete: !loading && !errors.size && !missingSprites.size && !deferredSprites.length,
+                worldItems: itemLayer?.diagnostics() ?? null,
+                complete: !loading && !errors.size && !missingSprites.size && !deferredSprites.length
+                    && !(itemLayer?.diagnostics().loading),
             };
         },
         /**
@@ -1048,10 +1476,11 @@ function createTileLayer({ device, format, sampler, packs, cells, anchor = DEFAU
             destroyed = true;
             desired = null;
             clearGeometry();
+            itemLayer?.destroy();
             uniformBuffer.destroy();
 
             for (const texture of textures.values()) {
-                texture.texture.destroy();
+                releaseTexture(texture);
             }
 
             textures.clear();
@@ -1098,10 +1527,14 @@ function packName(pack) {
  * Extract exact original crop dimensions for the shared residency planner.
  *
  * @param {{joined:JoinedSprite}} entry - Needed original sprite.
- * @returns {{key:string,w:number,h:number}} Stable identity and allocation size.
+ * @returns {{key:string,w:number,h:number,depthBytes:number}} Stable identity and total native depth/mask allocation size.
  */
 function residencyEntry({ joined }) {
-    return { key: joined.key, w: joined.sprite.w, h: joined.sprite.h };
+    const depth = joined.depth;
+    const depthBytes = depth.kind === 'texture' ? depth.width * depth.height : 0;
+    const mask = depth.seam?.mask;
+
+    return { key: joined.key, w: joined.crop.w, h: joined.crop.h, depthBytes: depthBytes + (mask ? mask.width * mask.height : 0) };
 }
 
 /**
@@ -1114,4 +1547,4 @@ function texturePageKey(texture) {
     return texture.pageKey;
 }
 
-export { compareTiles, createDoorRenderProjection, createSpriteResidencyPlan, createTileLayer, isTileVisible, spriteQuad, tileScreenPosition, visibleChunkBounds };
+export { compareTiles, createDoorRenderProjection, createSpriteResidencyPlan, createTileLayer, isTileVisible, spriteQuad, tileDepthQuad, tileScreenPosition, visibleChunkBounds };

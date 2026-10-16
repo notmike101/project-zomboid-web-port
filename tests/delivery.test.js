@@ -232,6 +232,7 @@ test('a real release includes both dependency licenses with audited bytes and ne
     assert.deepEqual(await listFiles(directory, directory), [...stagedPaths, 'release-manifest.json'].sort());
     assert.equal(stagedPaths.includes('licenses/lua.txt'), true);
     assert.equal(stagedPaths.includes('licenses/wasmoon.txt'), true);
+    assert.equal(stagedPaths.includes('licenses/rust.txt'), true);
     assert.equal(stagedPaths.includes('build.json'), true);
     await Promise.all(manifest.files.map(async (file) => {
         const expectedBytes = await readFile(join(root, 'dist', file.path));

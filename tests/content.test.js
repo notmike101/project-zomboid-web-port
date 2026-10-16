@@ -74,10 +74,14 @@ test('directory range reads preserve literal paths and return only the requested
     assert.throws(() => directory.getFile('missing.pack'), /content missing/i);
 });
 
-test('untrusted interaction and audio roles are rejected before any private asset request', async (t) => {
+test('untrusted interaction, depth and audio roles are rejected before any private asset request', async (t) => {
     for (const roles of [
         { tileDefinitions: [{ path: '../private.tiles', fileId: 1 }] },
         { tileDefinitions: [{ path: PATH, fileId: null }] },
+        { tileDepth: { assignments: '../private.txt', images: [PATH] } },
+        { tileDepth: { assignments: PATH, images: [] } },
+        { tileDepth: { assignments: PATH, images: ['media/missing.png'] } },
+        { tileDepth: { assignments: PATH, images: [PATH], seams: '../private.png' } },
         { audio: { footstep: PATH, doorOpen: 'media/missing.wav', doorClose: PATH } },
     ]) {
         const document = manifest();

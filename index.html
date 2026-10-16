@@ -20,6 +20,22 @@
 <button id="new-session" type="button">New session</button>
 </fieldset>
 <p id="save-status" role="status" aria-live="polite">Loading retained save…</p>
+<details id="keyboard-settings"><summary>Keyboard bindings</summary>
+<p id="keyboard-help">Edit existing source actions. Unbound disables that key; Clear removes both keys and modifiers. Key names identify native physical keys, not your keyboard layout. The browser or operating system may reserve some keys and shortcuts.</p>
+<form id="keyboard-bindings" aria-describedby="keyboard-help keyboard-status">
+<fieldset id="keyboard-controls" disabled><legend>Source keyboard binding</legend>
+<label for="keyboard-action">Action</label><select id="keyboard-action" required></select>
+<label for="keyboard-primary">Primary key</label><select id="keyboard-primary" required></select>
+<label for="keyboard-alternate">Alternate key</label><select id="keyboard-alternate" required></select>
+<label for="keyboard-shift"><input id="keyboard-shift" type="checkbox"> Require Shift</label>
+<label for="keyboard-ctrl"><input id="keyboard-ctrl" type="checkbox"> Require Ctrl</label>
+<label for="keyboard-alt"><input id="keyboard-alt" type="checkbox"> Require Alt</label>
+<button id="keyboard-apply" type="submit">Apply binding</button>
+<button id="keyboard-clear" type="button">Clear binding</button>
+</fieldset>
+</form>
+<p id="keyboard-status" role="status" aria-live="polite">Load a session to edit its keyboard bindings. Apply changes live; Save retains applied bindings after reload.</p>
+</details>
 <details id="movement-settings"><summary>Movement assistance</summary>
 <p>Choose a direction to walk without holding a key, or enter a destination. Selecting movement resumes the game.</p>
 <div class="directions"><button data-walk="0,-1" aria-pressed="false">Walk north</button><button data-walk="-1,0" aria-pressed="false">Walk west</button><button data-walk="1,0" aria-pressed="false">Walk east</button><button data-walk="0,1" aria-pressed="false">Walk south</button></div>

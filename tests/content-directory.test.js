@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { provisionContent } from '../scripts/provision-content.mjs';
+import { parsePngHeader } from '../src/renderer.js';
 
 const execute = promisify(execFile);
 const provisionScript = fileURLToPath(new URL('../scripts/provision-content.mjs', import.meta.url));
@@ -66,6 +67,8 @@ async function startup(source) {
         'media/tiledefinitions_noiseworks.patch.tiles', 'media/jumbo_trees_big.tiles', 'media/jumbo_trees.tiles',
         'media/sound/PZ_FootSteps_Concrete_01.wav', 'media/sound/dooropen.wav', 'media/sound/doorclose.wav',
         'media/scripts/generated/items/clothing.txt', 'media/scripts/generated/items/container.txt',
+        'media/tileDepthTextureAssignments.txt', 'media/depthmaps/DEPTH_preset_depthmaps_01.png',
+        'media/depthmaps/DEPTH_whole_tile.png', 'media/depthmaps/DEPTH_billboard.png', 'media/depthmaps/SEAMS_01.png',
     ]) {
         // eslint-disable-next-line no-await-in-loop -- Keep fixture writes ordered.
         await put(source, path);
@@ -244,13 +247,51 @@ test('startup-only copying excludes unrelated media and incomplete startup fails
 
     await startup(source);
     await put(source, 'media/other.png');
+    await put(source, 'media/depthmaps/DEPTH_Original&MixedCase.png', 'synthetic-depth');
     const manifest = await provisionContent({ source, output, startupOnly: true });
 
     assert.equal(manifest.files.some(({ path }) => path === 'media/other.png'), false);
+    assert.equal(await readFile(join(output, 'media/depthmaps/DEPTH_Original&MixedCase.png'), 'utf8'), 'synthetic-depth');
+    assert.ok(manifest.startup.tileDepth.images.includes('media/depthmaps/DEPTH_Original&MixedCase.png'));
     await rm(join(output, 'media/anims_X/Bob/Bob_Walk.x'));
     await rm(join(output, 'manifest.json'));
     await assert.rejects(provisionContent({ output, indexOnly: true }), /Bob_Walk/u);
     await assert.rejects(readFile(join(output, 'manifest.json')), { code: 'ENOENT' });
+});
+
+test('startup merge selects helper-authored UI images without broad copying or escaping approved paths', async (t) => {
+    const { source, output } = await fixture(t);
+    const selected = 'media/ui/controls/Selected.png';
+    const unrequested = 'media/ui/controls/Unrequested.png';
+    const wrongCase = 'media/ui/controls/CaseSensitive.png';
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+
+    await startup(source);
+    await put(source, selected, png);
+    await put(source, unrequested, 'must not be selected');
+    await put(source, wrongCase, 'must not resolve another casing');
+    await put(source, 'media/private/secret.png', 'PRIVATE_IMAGE');
+    await put(source, 'media/textures/unapproved-consumer.png', 'not an authored UI path');
+    await put(source, 'media/lua/client/Unselected.lua', `button:getImageButtonControl("${unrequested}")`);
+    await put(output, 'media/lua/client/Controls/Selected.lua', `
+        button:getImageButtonControl("${selected}")
+        button:getImageButtonControl('${selected}')
+        button:getImageButtonControl("media/ui/controls/casesensitive.png")
+        button:getImageButtonControl("media/ui/../../private/secret.png")
+        button:getImageButtonControl("media/private/secret.png")
+        button:getImageButtonControl("media/textures/unapproved-consumer.png")
+    `);
+    const manifest = await provisionContent({ source, output, startupOnly: true, sourceBuild: '42.21.0' });
+    const entry = manifest.files.find(({ path }) => path === selected);
+
+    assert.ok(entry);
+    assert.deepEqual(parsePngHeader(await readFile(join(output, entry.path))), { width: 1, height: 1 });
+
+    for (const path of [unrequested, wrongCase, 'media/private/secret.png', 'media/textures/unapproved-consumer.png']) {
+        assert.equal(manifest.files.some((file) => file.path === path), false);
+        // eslint-disable-next-line no-await-in-loop -- Each forbidden source must remain unpublished.
+        await assert.rejects(readFile(join(output, path)), { code: 'ENOENT' });
+    }
 });
 
 test('bounded startup retains door collision definitions and playable samples without copying sound banks', async (t) => {

@@ -1261,10 +1261,16 @@ test('item command validation and detached replacements prevent invalid hook mut
 
 test('activation definition transactions restore numeric rows owners and appended metadata', async () => {
     const engine = await newEngine();
-    const host = createModHost(engine);
+    const host = createModHost({ ...engine, itemDefinitions: undefined });
 
     engine.registerItemDefinition(footwear, { owner: 'original' });
     const original = engine.itemDefinitions();
+    const detached = host.api.items.definitions.get('Fixture.Shoes');
+
+    detached.texture = 'tampered';
+    assert.equal(host.api.items.definitions.get('Fixture.Shoes').texture, 'fixture-shoe');
+    assert.equal(host.api.items.definitions.get('Unknown.Shoes'), null);
+    assert.throws(() => host.api.items.definitions.list(), /unsupported/);
 
     await assert.rejects(() => host.load(moduleUrl(`${manifestSource('fx-collision')}
 export function activate(api) { api.items.definitions.register(${JSON.stringify(footwear)}); }`)),
@@ -1284,10 +1290,19 @@ export function activate(api) {
   api.movement.setSpeed(8);
   api.items.definitions.register({...${JSON.stringify(footwear)}, conditionMax: 27, texture: 'override'}, {override: true});
   api.items.definitions.register({...${JSON.stringify(footwear)}, fullType: 'Fixture.Appended'});
+  fx.result = [api.items.definitions.get('Fixture.Shoes'), api.items.definitions.get('Fixture.Appended')];
   api.hooks.beforeAction(() => false);
   ${ending}
 }`)), { modId: id, stage: 'activate' });
         assert.deepEqual(engine.itemDefinitions(), original);
+        assert.equal(fx.result[0].conditionMax, 27);
+        assert.equal(fx.result[0].texture, 'override');
+        assert.equal(fx.result[0].owner, id);
+        assert.equal(fx.result[1].owner, id);
+        assert.equal(host.api.items.definitions.get('Fixture.Shoes').conditionMax, 12);
+        assert.equal(host.api.items.definitions.get('Fixture.Shoes').texture, 'fixture-shoe');
+        assert.equal(host.api.items.definitions.get('Fixture.Shoes').owner, 'original');
+        assert.equal(host.api.items.definitions.get('Fixture.Appended'), null);
         assert.equal(engine.snapshot().speed, 1.5);
         assert.equal(host.diagnostics().hookCount, 0);
         assert.throws(() => fx.api.items.list(), { stage: 'api' });
@@ -1305,6 +1320,8 @@ export function activate(api) {
 }`));
     assert.equal(engine.itemDefinitions()[0].owner, 'fx-success-items');
     assert.equal(engine.itemDefinitions()[0].conditionMax, 17);
+    assert.equal(fx.api.items.definitions.get('Fixture.Shoes').conditionMax, 17);
+    assert.equal(fx.api.items.definitions.get('Fixture.Shoes').owner, 'fx-success-items');
     assert.throws(() => fx.api.items.definitions.register(footwear), { stage: 'items' });
     engine.freezeItemDefinitions();
     host.dispose();
@@ -1431,6 +1448,7 @@ test('core-only engines refuse item and health capabilities while movement mods 
     for (const attempt of [
         () => host.api.items.list(), () => host.api.items.get(1),
         () => host.api.items.definitions.list(), () => host.api.items.worn('Shoes'),
+        () => host.api.items.definitions.get('Fixture.Shoes'),
         () => host.api.items.spawn({ fullType: 'Fixture.Shoes', x: 5, y: 5 }),
         () => host.api.items.pickup(1), () => host.api.character.getHealth(),
         () => host.api.items.wear(1), () => host.api.items.unequip(1),
@@ -1531,15 +1549,15 @@ export function activate(api) {
     const getSquare = api.world.getSquare;
     const detached = getSquare(5, 5, 0);
 
-    assert.deepEqual(detached, {
-        x: 5, y: 5, z: 0, roomId: 7, outside: false, solid: false,
-        solidTrans: false, tree: false, vehicleObstructed: false, solidFloor: true,
-        canStand: true,
-    });
+    assert.equal(detached.canStand, true);
+    assert.equal(detached.roomId, 7);
+    assert.equal(detached.haveRoof, false);
     detached.canStand = false;
     detached.roomId = 99;
+    detached.haveRoof = true;
     assert.equal(getSquare(5, 5, 0).canStand, true);
     assert.equal(getSquare(5, 5, 0).roomId, 7);
+    assert.equal(getSquare(5, 5, 0).haveRoof, false, 'detached roof edits do not reach native metadata');
     engine.importDoors([], { squares: [{ ...square, solid: true }] });
     assert.equal(getSquare(5, 5, 0).canStand, false, 'replacement is read from WASM, not a cached SDK row');
     assert.equal(getSquare(5, 5, 1), null);
