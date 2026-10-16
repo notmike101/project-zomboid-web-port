@@ -53,6 +53,7 @@ public final class BrowserInteractivePlay {
             zombie.AmbientStreamManager.instance = new zombie.DummyAmbientStreamManager();
             zombie.audio.BaseSoundBank.instance = new zombie.audio.DummySoundBank();
             BrowserFontBootstrap.mountAssets();
+            BrowserContentBootstrap.mountClientAssets();
             BrowserGeometry.mountAssets();
             mountFile("media/texturepacks/WeatherFx.pack");
             mountFile("media/textures/weather/fogcircle_tex.png");
@@ -109,9 +110,6 @@ public final class BrowserInteractivePlay {
                 stage = "original-climate-lifecycle";
                 progress(stage);
                 zombie.iso.weather.ClimateManager.getInstance().init(zombie.iso.IsoWorld.instance.getMetaGrid());
-                stage = "original-font-lifecycle";
-                progress(stage);
-                BrowserFontBootstrap.initialize();
                 stage = "original-early-ui-lifecycle";
                 progress(stage);
                 if (zombie.characters.IsoPlayer.getInstance() != null)
@@ -215,7 +213,9 @@ public final class BrowserInteractivePlay {
                                 + ",\"vehicleScripts\":" + zombie.scripting.ScriptManager.instance.getAllVehicleScripts().size()
                                 + ",\"lootRooms\":" + zombie.inventory.ItemPickerJava.rooms.size()
                                 + ",\"sharedLuaFiles\":" + BrowserContentBootstrap.getSharedLuaFiles()
-                                + ",\"sharedLuaErrors\":" + BrowserContentBootstrap.getSharedLuaErrors() + "}"
+                                + ",\"sharedLuaErrors\":" + BrowserContentBootstrap.getSharedLuaErrors()
+                                + ",\"clientLuaFiles\":" + BrowserContentBootstrap.getClientLuaFiles()
+                                + ",\"clientLuaErrors\":" + BrowserContentBootstrap.getClientLuaErrors() + "}"
                                 + ",\"fonts\":" + BrowserFontBootstrap.snapshot()
                                 + ",\"navigation\":" + navigation + ",\"final\":" + session.snapshot() + ",\"composition\":" + composition + ",\"frame\":" + capture + "}";
                     }

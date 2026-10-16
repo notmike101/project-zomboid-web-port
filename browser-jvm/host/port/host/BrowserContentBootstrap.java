@@ -20,7 +20,7 @@ import zombie.ZomboidGlobals;
 import zombie.inventory.ItemPickerJava;
 import zombie.scripting.ScriptManager;
 
-/** Loads genuine vanilla definitions before models, then their original loot distributions. */
+/** Loads genuine vanilla definitions and complete shared/client Lua before models and world creation. */
 public final class BrowserContentBootstrap {
     private static final String[] DISTRIBUTION_SOURCES = {
         "shared/ISBaseObject.lua",
@@ -47,11 +47,51 @@ public final class BrowserContentBootstrap {
 
     private static int sharedLuaFiles;
     private static int sharedLuaErrors;
+    private static int clientLuaFiles;
+    private static int clientLuaErrors;
+    private static boolean clientMounted;
 
     private BrowserContentBootstrap() { }
 
     public static int getSharedLuaFiles() { return sharedLuaFiles; }
     public static int getSharedLuaErrors() { return sharedLuaErrors; }
+    public static int getClientLuaFiles() { return clientLuaFiles; }
+    public static int getClientLuaErrors() { return clientLuaErrors; }
+
+    /** Mount real client/UI/translation inputs before the first ZFS scan. */
+    public static void mountClientAssets() throws IOException {
+        if (clientMounted) throw new IllegalStateException("Client assets already mounted");
+        Path work = Path.of("/files/work");
+        Set<String> names = new HashSet<>();
+        long total = 0;
+        try (ZipInputStream zip = new ZipInputStream(new FileInputStream("/app/client-assets.jar"))) {
+            for (ZipEntry entry; (entry = zip.getNextEntry()) != null;) {
+                if (entry.isDirectory()) continue;
+                String name = entry.getName();
+                if (!names.add(name) || names.size() > 3000 || !isClientAsset(name))
+                    throw new IOException("Unexpected or duplicate client archive entry: " + name);
+                Path target = work.resolve(name).normalize();
+                if (!target.startsWith(work.resolve("media"))
+                        || !work.relativize(target).toString().replace('\\', '/').equals(name))
+                    throw new IOException("Noncanonical client archive entry: " + name);
+                byte[] bytes = zip.readNBytes(64 * 1024 * 1024 + 1);
+                total += bytes.length;
+                if (total > 64L * 1024 * 1024) throw new IOException("Client archive exceeds size bound");
+                Files.createDirectories(target.getParent());
+                Files.write(target, bytes);
+            }
+        }
+        if (names.stream().filter(name -> name.startsWith("media/lua/client/") && name.endsWith(".lua")).count() != 727)
+            throw new IOException("Expected complete 727-source original client archive");
+        clientMounted = true;
+    }
+
+    private static boolean isClientAsset(String name) {
+        return (name.startsWith("media/lua/client/") && (name.endsWith(".lua") || name.endsWith(".png")))
+                || (name.startsWith("media/ui/") && name.endsWith(".png"))
+                || (name.startsWith("media/lua/shared/Translate/EN/")
+                        && (name.endsWith(".json") || name.endsWith(".tbx")));
+    }
 
     /** Mount before ZFS scans; the archive contains definitions, never installed saves. */
     public static void mountAssets() throws IOException {
@@ -95,6 +135,11 @@ public final class BrowserContentBootstrap {
         if (LuaManager.env == null || LuaManager.thread == null) {
             throw new IllegalStateException("Original LuaManager must be initialized first");
         }
+        if (!clientMounted) throw new IllegalStateException("Original client assets must be mounted first");
+        // Client top-level constructors use original translations and loaded font metrics.
+        zombie.core.Languages.instance.init();
+        zombie.core.Translator.loadFiles();
+        BrowserFontBootstrap.initialize();
         // Same definition prerequisites as GameWindow.initShared, before ScriptManager.Load.
         zombie.characters.skills.PerkFactory.init();
         zombie.characters.skills.CustomPerks.instance.init();
@@ -110,11 +155,12 @@ public final class BrowserContentBootstrap {
         if (ScriptManager.instance.hasLoadErrors()) {
             throw new IllegalStateException("Original script definitions have load errors");
         }
-        loadSharedLua();
+        loadLuaDirectory("shared", 374);
+        loadLuaDirectory("client", 727);
     }
 
     /** Preserves the original directory order and RunLua cache after all script definitions exist. */
-    private static void loadSharedLua() throws Exception {
+    private static void loadLuaDirectory(String directory, int expected) throws Exception {
         List<String> errors = new ArrayList<>();
         Handler failures = new Handler() {
             @Override public void publish(LogRecord record) {
@@ -132,18 +178,25 @@ public final class BrowserContentBootstrap {
         Logger compiler = Logger.getLogger(LuaManager.class.getName());
         compiler.addHandler(failures);
         try {
-            LuaManager.LoadDirBase("shared");
+            LuaManager.LoadDirBase(directory);
         } finally {
             compiler.removeHandler(failures);
-            sharedLuaErrors = errors.size();
-            sharedLuaFiles = (int) LuaManager.loaded.stream()
-                    .filter(name -> name.replace('\\', '/').contains("/media/lua/shared/")).distinct().count();
+            int loaded = (int) LuaManager.loaded.stream()
+                    .filter(name -> name.replace('\\', '/').contains("/media/lua/" + directory + "/")).distinct().count();
+            if (directory.equals("shared")) {
+                sharedLuaErrors = errors.size();
+                sharedLuaFiles = loaded;
+            } else {
+                clientLuaErrors = errors.size();
+                clientLuaFiles = loaded;
+            }
         }
         if (!errors.isEmpty()) {
-            throw new IllegalStateException("Original shared Lua failed: " + errors);
+            throw new IllegalStateException("Original " + directory + " Lua failed: " + errors);
         }
-        if (sharedLuaFiles != 374) {
-            throw new IllegalStateException("Expected 374 original shared Lua sources, loaded " + sharedLuaFiles);
+        int loaded = directory.equals("shared") ? sharedLuaFiles : clientLuaFiles;
+        if (loaded != expected) {
+            throw new IllegalStateException("Expected " + expected + " original " + directory + " Lua sources, loaded " + loaded);
         }
     }
 

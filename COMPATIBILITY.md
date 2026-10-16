@@ -1,5 +1,13 @@
 # Incremental original-bytecode compatibility
 
+## Complete original client Lua in connected play
+
+All 727 original client Lua sources now load through `LuaManager.LoadDirBase("client")` after the 374 shared sources and complete script definitions, before model/world/player creation. Genuine Languages, Translator and font initialization provide the original top-level prerequisites. Original tables, event registrations and RunLua caching are preserved. The separate client archive contains 2,314 unchanged inputs / 41,999,146 bytes: 727 Lua files, five client PNGs, 1,538 UI PNGs and 44 English translation inputs. Repeated preparation is deterministic and independently matches every private qualified name, size and source SHA.
+
+The connected browser regression passes 131 frames with zero shared/client Lua errors and zero swallowed initialization errors, ready fonts, actual keyboard movement/release and original navigation/animation. Both action queues are empty, the path clears and the player returns idle. All 8,905 monitored asset hashes and the game JAR match, denied requests are zero, and original session/resource cleanup completes. This qualifies the existing lifecycle with all client callbacks installed; it does not establish every registered callback, global tick event, menu or complete game startup.
+
+A separate private browser probe additionally executes original `ScriptManager.LoadedAfterLua()` without load errors and original `OnGameBoot` data callbacks. It records 219 entities, 969 crafting recipes, 20 hair colors, 11 trouser colors and the original surname/forename lists. No item filters are defined in this input set; the probe records zero rather than inventing a nonempty filter test. Menu/game-start events and the connected post-Lua/boot integration remain separate work.
+
 ## Original font lifecycle in connected play
 
 The public play bootstrap mounts 348 original font/configuration/shader/texture-pack inputs before ZFS initialization, then calls original `TextManager.Init()` before `UIManager.init`. The uncompressed font closure is 47,946,445 bytes. Its genuine `UI.pack` is necessary: main-menu font atlas names are packed subtextures and do not exist as loose files. Original filesystem texture-pack mounting uses flags2; no image aliases or replacement font metrics are supplied.
@@ -12,7 +20,7 @@ The final integrated source-build/browser gate passes 132 frames, complete share
 
 The connected bootstrap now mounts all 374 unchanged original shared Lua files before the first filesystem scan, then runs original `LuaManager.LoadDirBase("shared")` after complete `ScriptManager.Load()`. Original directory order, tables, event handlers and RunLua caching remain in control. The content archive contains 3,250 files / 15,097,273 bytes, including all shared Lua and the existing audited server data dependencies; every prepared entry matches its installed bytes and manifest hash.
 
-The public browser gate requires 374 shared sources and zero shared-load errors, and now rejects caught Lua error logs as well as missing callback lookups. This closes a gap in the earlier navigation evidence: movement, path success and Java queue cleanup passed, but Lua completion logged a missing `ISLogSystem.logAction`; the gate had not verified its Lua queue. The complete shared closure supplies the real logger. The final integrated run has zero Lua errors and independently inspects the original Lua queue array and current-action field, requiring both to be empty without calling a getter or mutating them. Complete client Lua integration, menus and `LoadedAfterLua()` remain separate work.
+The public browser gate requires 374 shared sources and zero shared-load errors, and now rejects caught Lua error logs as well as missing callback lookups. This closes a gap in the earlier navigation evidence: movement, path success and Java queue cleanup passed, but Lua completion logged a missing `ISLogSystem.logAction`; the gate had not verified its Lua queue. The complete shared closure supplies the real logger. The final integrated run has zero Lua errors and independently inspects the original Lua queue array and current-action field, requiring both to be empty without calling a getter or mutating them. Complete client Lua is now integrated as described above; menus and broader startup events remain separate work.
 
 ## Original player navigation in the connected session
 
