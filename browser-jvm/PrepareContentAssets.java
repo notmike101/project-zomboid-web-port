@@ -14,7 +14,7 @@ import java.util.TreeMap;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-/** Copies vanilla scripts, clothing XML, complete shared Lua and audited server Lua dependencies. */
+/** Copies vanilla scripts, clothing XML and complete original shared/server Lua. */
 public final class PrepareContentAssets {
     private PrepareContentAssets() { }
 
@@ -48,23 +48,12 @@ public final class PrepareContentAssets {
                 files.put(installation.relativize(path).toString().replace('\\', '/'), path);
             }
         }
-        for (String name : List.of("BagsAndContainers", "BinJunk", "ClosetJunk", "CounterJunk",
-                "DeskJunk", "ShelfJunk", "SideTableJunk")) {
-            add(files, installation, "media/lua/server/Items/Distribution_" + name + ".lua");
-        }
-        for (String name : List.of("GloveBoxJunk", "SeatJunk", "TrunkJunk")) {
-            add(files, installation, "media/lua/server/Vehicles/VehicleDistribution_" + name + ".lua");
-        }
-        for (String name : List.of("Distributions", "ProceduralDistributions", "SuburbsDistributions")) {
-            add(files, installation, "media/lua/server/Items/" + name + ".lua");
-        }
-        add(files, installation, "media/lua/server/Vehicles/VehicleDistributions.lua");
-        add(files, installation, "media/lua/shared/VehicleZoneDefinition.lua");
-        add(files, installation, "media/lua/server/Items/AcceptItemFunction.lua");
-        try (var paths = Files.walk(installation.resolve("media/lua/shared"))) {
-            for (Path path : paths.filter(Files::isRegularFile)
-                    .filter(path -> path.getFileName().toString().endsWith(".lua")).toList()) {
-                files.put(installation.relativize(path).toString().replace('\\', '/'), path);
+        for (String directory : List.of("shared", "server")) {
+            try (var paths = Files.walk(installation.resolve("media/lua/" + directory))) {
+                for (Path path : paths.filter(Files::isRegularFile)
+                        .filter(path -> path.getFileName().toString().endsWith(".lua")).toList()) {
+                    files.put(installation.relativize(path).toString().replace('\\', '/'), path);
+                }
             }
         }
         List<Path> inputs = new ArrayList<>();
@@ -104,9 +93,6 @@ public final class PrepareContentAssets {
         System.out.println("Actual installed content assets: " + files.size() + ", bytes: " + totalBytes);
     }
 
-    private static void add(Map<String, Path> files, Path installation, String relative) {
-        files.put(relative, installation.resolve(relative));
-    }
     private static void validateOutputs(List<Path> inputs, List<Path> outputs, Path installation,
             Path directory) throws IOException {
         Set<Path> seen = new HashSet<>();

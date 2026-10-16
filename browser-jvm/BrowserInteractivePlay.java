@@ -66,6 +66,9 @@ public final class BrowserInteractivePlay {
             stage = "original-game-boot-event";
             progress(stage);
             BrowserContentBootstrap.gameBoot();
+            stage = "original-server-lua-and-post-lua";
+            progress(stage);
+            BrowserContentBootstrap.loadServerLua();
             stage = "original-spawn-in-loaded-cell";
             try (BrowserWorldBootstrap world = BrowserWorldBootstrap.openAt(153, 158, 0, cell -> {
                 stage = "original-item-factory";
@@ -130,6 +133,9 @@ public final class BrowserInteractivePlay {
                 progress(stage);
             })) {
                 var player = world.getPlayer();
+                var skins = zombie.core.skinnedmodel.population.PopTemplateManager.instance;
+                if (skins.maleSkins.size() != 5 || skins.femaleSkins.size() != 5)
+                    throw new AssertionError("Original population skin templates must initialize exactly once");
                 if (player.bareHands == null || !player.bareHands.isBareHands())
                     throw new AssertionError("Original player constructor did not initialize bare hands");
                 try {
@@ -152,6 +158,12 @@ public final class BrowserInteractivePlay {
                         geometry[0].activate();
                         if (geometry[0].getChunks().size() != 9 || geometry[0].getGroundFloorCount() != 576)
                             throw new AssertionError("Original loaded neighborhood is incomplete");
+                        stage = "original-global-object-systems";
+                        progress(stage);
+                        zombie.Lua.LuaEventManager.triggerEvent("OnGameTimeLoaded");
+                        zombie.globalObjects.SGlobalObjects.initSystems();
+                        zombie.globalObjects.CGlobalObjects.initSystems();
+                        String globalObjects = globalObjectSnapshot();
                         int shaderId = draw ? renderer.getShaderId() : 0, textureId = draw ? renderer.getMaterialId() : 0;
                         int frames = 0, drawnFrames = 0;
                         float initialX = player.getX(), initialY = player.getY();
@@ -218,9 +230,12 @@ public final class BrowserInteractivePlay {
                                 + ",\"sharedLuaFiles\":" + BrowserContentBootstrap.getSharedLuaFiles()
                                 + ",\"sharedLuaErrors\":" + BrowserContentBootstrap.getSharedLuaErrors()
                                 + ",\"clientLuaFiles\":" + BrowserContentBootstrap.getClientLuaFiles()
-                                + ",\"clientLuaErrors\":" + BrowserContentBootstrap.getClientLuaErrors() + "}"
+                                + ",\"clientLuaErrors\":" + BrowserContentBootstrap.getClientLuaErrors()
+                                + ",\"serverLuaFiles\":" + BrowserContentBootstrap.getServerLuaFiles()
+                                + ",\"serverLuaErrors\":" + BrowserContentBootstrap.getServerLuaErrors() + "}"
                                 + ",\"fonts\":" + BrowserFontBootstrap.snapshot()
                                 + ",\"boot\":" + BrowserContentBootstrap.bootSnapshot()
+                                + ",\"globalObjectSystems\":" + globalObjects
                                 + ",\"navigation\":" + navigation + ",\"final\":" + session.snapshot() + ",\"composition\":" + composition + ",\"frame\":" + capture + "}";
                     }
                 } finally { player.releaseAnimationPlayer(); }
@@ -259,6 +274,35 @@ public final class BrowserInteractivePlay {
             } else cleanupComplete = failure == null;
         }
         report(result);
+    }
+
+    private static String globalObjectSnapshot() {
+        if (zombie.globalObjects.SGlobalObjects.getSystemCount() != 5
+                || zombie.globalObjects.CGlobalObjects.getSystemCount() != 5)
+            throw new AssertionError("Original global-object system registry is incomplete");
+        String[][] names = {{"campfire", "Campfire"}, {"farming", "Farming"}, {"trap", "Trap"},
+                {"rainbarrel", "RainBarrel"}, {"feedingTrough", "FeedingTrough"}};
+        StringBuilder systems = new StringBuilder("[");
+        for (String[] name : names) {
+            var server = zombie.globalObjects.SGlobalObjects.getSystemByName(name[0]);
+            var client = zombie.globalObjects.CGlobalObjects.getSystemByName(name[0]);
+            Object serverType = zombie.Lua.LuaManager.env.rawget("S" + name[1] + "System");
+            Object clientType = zombie.Lua.LuaManager.env.rawget("C" + name[1] + "System");
+            if (server == null || client == null
+                    || !(serverType instanceof se.krka.kahlua.vm.KahluaTable serverClass)
+                    || !(clientType instanceof se.krka.kahlua.vm.KahluaTable clientClass)
+                    || serverClass.rawget("instance") != server.getModData()
+                    || clientClass.rawget("instance") != client.getModData())
+                throw new AssertionError("Original global-object Lua/Java registration missing: " + name[0]);
+            if (systems.length() > 1) systems.append(',');
+            systems.append(quote(name[0]));
+        }
+        var serverHours = zombie.globalObjects.SGlobalObjects.getSystemByName("farming").getModData().rawget("hoursElapsed");
+        var clientHours = zombie.globalObjects.CGlobalObjects.getSystemByName("farming").getModData().rawget("hoursElapsed");
+        if (!(serverHours instanceof Double) || !serverHours.equals(clientHours))
+            throw new AssertionError("Original offline farming initial-state transport differs");
+        return "{\"server\":5,\"client\":5,\"luaInstancesMatch\":true,\"farmingInitialStateMatches\":true,\"names\":"
+                + systems.append(']') + "}";
     }
 
     private static void shutdownAssetExecutor() throws Exception {

@@ -75,7 +75,9 @@ public final class BrowserWorldBootstrap implements AutoCloseable {
         if (zombie.characters.SurvivorDesc.HairCommonColors.isEmpty()) throw new AssertionError("Original hair colors absent");
         zombie.core.skinnedmodel.population.HairStyles.init();
         zombie.core.skinnedmodel.population.BeardStyles.init();
-        zombie.core.skinnedmodel.population.PopTemplateManager.instance.init();
+        // Full model boot already initializes these; selective world profiles still need the original initializer.
+        var templates = zombie.core.skinnedmodel.population.PopTemplateManager.instance;
+        if (templates.maleSkins.isEmpty() && templates.femaleSkins.isEmpty()) templates.init();
         // Its original initializer registers the condition factories required while parsing groups.
         Class.forName("zombie.characters.action.ActionContext");
         if (zombie.characters.action.IActionCondition.s_factoryMap.size() != 12)

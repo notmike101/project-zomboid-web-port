@@ -99,6 +99,7 @@ public final class BrowserGeometry {
             PathfindNative.useNativeCode = DebugOptions.instance.pathfindUseNativeCode.getValue();
             PolygonalMap2.instance.init(world.getMetaGrid());
             session.pathfinding = true;
+            zombie.globalObjects.GlobalObjectLookup.init(world.getMetaGrid());
 
             IsoChunkMap map = cell.getChunkMap(0);
             map.setInitialPos(19, 19);

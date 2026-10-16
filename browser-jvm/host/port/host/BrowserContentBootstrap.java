@@ -22,35 +22,15 @@ import zombie.scripting.ScriptManager;
 
 /** Loads genuine vanilla definitions and complete shared/client Lua before models and world creation. */
 public final class BrowserContentBootstrap {
-    private static final String[] DISTRIBUTION_SOURCES = {
-        "shared/ISBaseObject.lua",
-        "shared/TimedActions/ISBaseTimedAction.lua",
-        "shared/TimedActions/ISClothingExtraAction.lua",
-        "shared/Fishing/FishingZones.lua",
-        "server/Items/AcceptItemFunction.lua",
-        "server/Items/Distribution_BagsAndContainers.lua",
-        "server/Items/Distribution_BinJunk.lua",
-        "server/Items/Distribution_ClosetJunk.lua",
-        "server/Items/Distribution_CounterJunk.lua",
-        "server/Items/Distribution_DeskJunk.lua",
-        "server/Items/Distribution_ShelfJunk.lua",
-        "server/Items/Distribution_SideTableJunk.lua",
-        "server/Vehicles/VehicleDistribution_GloveBoxJunk.lua",
-        "server/Vehicles/VehicleDistribution_SeatJunk.lua",
-        "server/Vehicles/VehicleDistribution_TrunkJunk.lua",
-        "server/Items/Distributions.lua",
-        "server/Items/ProceduralDistributions.lua",
-        "server/Items/SuburbsDistributions.lua",
-        "server/Vehicles/VehicleDistributions.lua",
-        "shared/VehicleZoneDefinition.lua"
-    };
-
     private static int sharedLuaFiles;
     private static int sharedLuaErrors;
     private static int clientLuaFiles;
     private static int clientLuaErrors;
+    private static int serverLuaFiles;
+    private static int serverLuaErrors;
     private static boolean clientMounted;
     private static boolean gameBootCompleted;
+    private static boolean afterLuaCompleted;
 
     private BrowserContentBootstrap() { }
 
@@ -58,6 +38,23 @@ public final class BrowserContentBootstrap {
     public static int getSharedLuaErrors() { return sharedLuaErrors; }
     public static int getClientLuaFiles() { return clientLuaFiles; }
     public static int getClientLuaErrors() { return clientLuaErrors; }
+    public static int getServerLuaFiles() { return serverLuaFiles; }
+    public static int getServerLuaErrors() { return serverLuaErrors; }
+
+    /** Original GameLoadingState's offline Lua/checksum/post-Lua phase, before world creation. */
+    public static void loadServerLua() throws Exception {
+        if (!gameBootCompleted || afterLuaCompleted || zombie.network.GameClient.client || zombie.network.GameServer.server)
+            throw new IllegalStateException("Expected original offline post-boot server-Lua phase");
+        loadLuaDirectory("server", 294);
+        LuaManager.finishChecksum();
+        ScriptManager.instance.LoadedAfterLua();
+        if (ScriptManager.instance.hasLoadErrors())
+            throw new IllegalStateException("Original LoadedAfterLua recorded load errors");
+        if (ScriptManager.instance.getAllGameEntities().size() != 219
+                || ScriptManager.instance.getAllCraftRecipes().size() != 969)
+            throw new AssertionError("Original entity/craft-recipe definitions differ from qualified scope");
+        afterLuaCompleted = true;
+    }
 
     /** Original GameWindow.enter delivers this event after ModelManager.create, before world creation. */
     public static void gameBoot() {
@@ -79,7 +76,11 @@ public final class BrowserContentBootstrap {
                 + ",\"trouserColors\":" + zombie.characters.SurvivorDesc.TrouserCommonColors.size()
                 + ",\"surnames\":" + zombie.characters.SurvivorFactory.Surnames.size()
                 + ",\"femaleNames\":" + zombie.characters.SurvivorFactory.FemaleForenames.size()
-                + ",\"maleNames\":" + zombie.characters.SurvivorFactory.MaleForenames.size() + "}";
+                + ",\"maleNames\":" + zombie.characters.SurvivorFactory.MaleForenames.size()
+                + ",\"loadedAfterLuaCompleted\":" + afterLuaCompleted
+                + ",\"scriptLoadErrors\":" + ScriptManager.instance.hasLoadErrors()
+                + ",\"entities\":" + ScriptManager.instance.getAllGameEntities().size()
+                + ",\"craftRecipes\":" + ScriptManager.instance.getAllCraftRecipes().size() + "}";
     }
 
     /** Mount real client/UI/translation inputs before the first ZFS scan. */
@@ -131,7 +132,7 @@ public final class BrowserContentBootstrap {
                 if (!names.add(name)) throw new IOException("Duplicate content archive entry: " + name);
                 if (!(name.startsWith("media/scripts/") && name.endsWith(".txt"))
                         && !(name.startsWith("media/clothing/") && name.endsWith(".xml"))
-                        && !isDistributionSource(name) && !isSharedSource(name)) {
+                        && !isServerSource(name) && !isSharedSource(name)) {
                     throw new IOException("Unexpected content archive entry: " + name);
                 }
                 if (++entries > 4000) throw new IOException("Too many content archive entries");
@@ -140,7 +141,8 @@ public final class BrowserContentBootstrap {
                     throw new IOException("Noncanonical content archive entry: " + name);
                 }
                 if (!target.startsWith(work.resolve("media/scripts"))
-                        && !target.startsWith(work.resolve("media/clothing")) && !isDistributionSource(name)
+                        && !target.startsWith(work.resolve("media/clothing"))
+                        && !(isServerSource(name) && target.startsWith(work.resolve("media/lua/server")))
                         && !(isSharedSource(name) && target.startsWith(work.resolve("media/lua/shared"))))
                     throw new IOException("Content escapes its allowed browser directory");
                 byte[] bytes = zip.readNBytes(32 * 1024 * 1024 + 1);
@@ -210,15 +212,19 @@ public final class BrowserContentBootstrap {
             if (directory.equals("shared")) {
                 sharedLuaErrors = errors.size();
                 sharedLuaFiles = loaded;
-            } else {
+            } else if (directory.equals("client")) {
                 clientLuaErrors = errors.size();
                 clientLuaFiles = loaded;
+            } else {
+                serverLuaErrors = errors.size();
+                serverLuaFiles = loaded;
             }
         }
         if (!errors.isEmpty()) {
             throw new IllegalStateException("Original " + directory + " Lua failed: " + errors);
         }
-        int loaded = directory.equals("shared") ? sharedLuaFiles : clientLuaFiles;
+        int loaded = directory.equals("shared") ? sharedLuaFiles
+                : directory.equals("client") ? clientLuaFiles : serverLuaFiles;
         if (loaded != expected) {
             throw new IllegalStateException("Expected " + expected + " original " + directory + " Lua sources, loaded " + loaded);
         }
@@ -229,34 +235,8 @@ public final class BrowserContentBootstrap {
         if (LuaManager.env == null || LuaManager.thread == null) {
             throw new IllegalStateException("Original LuaManager must be initialized first");
         }
-        List<String> errors = new ArrayList<>();
-        LuaManager.LoadDirBase("shared", true);
-        Handler failures = new Handler() {
-            @Override public void publish(LogRecord record) {
-                if (record.getLevel().intValue() >= Level.SEVERE.intValue()) {
-                    errors.add(record.getMessage());
-                }
-            }
-            @Override public void flush() { /* Observation only; owns no stream. */ }
-            @Override public void close() { /* Observation only; owns no stream. */ }
-        };
-        Logger compiler = Logger.getLogger(LuaManager.class.getName());
-        Logger execution = Logger.getLogger(zombie.iso.IsoWorld.class.getName());
-        compiler.addHandler(failures);
-        execution.addHandler(failures);
-        try {
-            for (String source : DISTRIBUTION_SOURCES) {
-                String path = "/files/work/media/lua/" + source;
-                if (!Files.isRegularFile(Path.of(path))) throw new IOException("Missing original Lua: " + path);
-                LuaManager.RunLua(path);
-                if (!errors.isEmpty()) {
-                    throw new IllegalStateException("Original distribution Lua failed: " + source + ": " + errors);
-                }
-            }
-        } finally {
-            compiler.removeHandler(failures);
-            execution.removeHandler(failures);
-        }
+        if (!afterLuaCompleted || serverLuaFiles != 294)
+            throw new IllegalStateException("Complete original server Lua must precede loot merging");
         if (!(LuaManager.env.rawget("copyClothingItem") instanceof se.krka.kahlua.vm.LuaClosure)
                 || !(LuaManager.env.rawget("Fishing") instanceof se.krka.kahlua.vm.KahluaTable fishing)
                 || !(fishing.rawget("NoFishZones") instanceof se.krka.kahlua.vm.KahluaTable zones)
@@ -279,10 +259,7 @@ public final class BrowserContentBootstrap {
         return name.startsWith("media/lua/shared/") && name.endsWith(".lua");
     }
 
-    private static boolean isDistributionSource(String name) {
-        for (String source : DISTRIBUTION_SOURCES) {
-            if (name.equals("media/lua/" + source)) return true;
-        }
-        return false;
+    private static boolean isServerSource(String name) {
+        return name.startsWith("media/lua/server/") && name.endsWith(".lua");
     }
 }

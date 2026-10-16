@@ -20,6 +20,7 @@ body{margin:0;background:#171b1c;color:#e8ece8;font:16px system-ui,sans-serif;di
 import { createBrowserPhysics } from './browser-physics.js';
 import { keyboardNatives } from './keyboard.js';
 import { createSpriteNatives } from './sprite-webgl.js';
+import { installUnsafeShortRepair } from './unsafe-short-repair.js';
 
 const interactive = false;
 const canvas = document.getElementById('graphics-canvas');
@@ -87,7 +88,7 @@ const report = (json) => {
     }
 
     if ('pass' in result) {
-        globalThis.probeResult = { ...result, physics: physics.snapshot(), graphicsResources: graphics.resources(), graphicsDiagnostics: [...graphics.diagnostics] };
+        globalThis.probeResult = { ...result, physics: physics.snapshot(), unsafeShortRepair: globalThis.unsafeShortRepair, graphicsResources: graphics.resources(), graphicsDiagnostics: [...graphics.diagnostics] };
         status.textContent = result.pass ? 'Session stopped.' : `Session stopped at ${result.stage || 'startup'}: ${result.error || 'unknown error'}`;
 
         if (result.final) {
@@ -123,6 +124,7 @@ try {
             },
         },
     });
+    globalThis.unsafeShortRepair = installUnsafeShortRepair(globalThis.cj3Module);
     globalThis.exitCode = await cheerpjRunMain('BrowserInteractivePlay', '/app/play-entry.jar:/app/clipper2.jar:/app/animation-entry.jar:/app/animation-view.jar:/app/animation-sdk-view.jar:/app/path-view.jar:/app/float-bridge.jar:/app/memory-bridge.jar:/app/world-entry.jar:/app/atomic-view.jar', interactive ? '0' : '240', 'draw', interactive ? '' : 'verify-navigation');
 
     if (!globalThis.probeResult) {

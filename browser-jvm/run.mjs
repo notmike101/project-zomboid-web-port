@@ -504,6 +504,7 @@ try {
 
     if (graphicsProfile) {
         routes.set('/sprite-webgl.js', { file: path.join(source, 'sprite-webgl.js'), type: 'text/javascript' });
+        routes.set('/unsafe-short-repair.js', { file: path.join(source, 'unsafe-short-repair.js'), type: 'text/javascript' });
         routes.set('/glsl-compat.js', { file: path.join(source, 'glsl-compat.js'), type: 'text/javascript' });
 
         for (const name of ['index.js', 'error.js', 'ast/index.js', 'ast/ast.js', 'ast/visit.js', 'ast/ast-types.js', 'parser/index.js', 'parser/parser.js', 'parser/generator.js', 'parser/grammar.js', 'parser/scope.js', 'parser/utils.js']) {
@@ -791,17 +792,24 @@ try {
             && evidence.result.vanillaContent.vehicleScripts === 241 && evidence.result.vanillaContent.lootRooms === 423
             && evidence.result.vanillaContent.sharedLuaFiles === 374 && evidence.result.vanillaContent.sharedLuaErrors === 0
             && evidence.result.vanillaContent.clientLuaFiles === 727 && evidence.result.vanillaContent.clientLuaErrors === 0
+            && evidence.result.vanillaContent.serverLuaFiles === 294 && evidence.result.vanillaContent.serverLuaErrors === 0
             && evidence.result.physics?.vehicleDefinitions?.length === 241 && evidence.result.physics.ragdollDefinitions?.length === 4;
         evidence.fontsLoaded = evidence.result.fonts?.mapped === 30 && evidence.result.fonts.sdfCompiled === true
             && evidence.result.fonts.sdfShaderId > 0 && evidence.result.fonts.lookups?.length === 34
             && evidence.result.fonts.lookups.every((font) => Number.isInteger(font.height) && font.height > 0
                 && Number.isInteger(font.width) && font.width > 0);
         evidence.originalBootCompleted = evidence.result.boot?.gameBootCompleted === true
+            && evidence.result.boot.loadedAfterLuaCompleted === true && evidence.result.boot.scriptLoadErrors === false
+            && evidence.result.boot.entities === 219 && evidence.result.boot.craftRecipes === 969
             && evidence.result.boot.hairColors === 20 && evidence.result.boot.trouserColors === 11
             && evidence.result.boot.surnames === 3_799 && evidence.result.boot.femaleNames === 1_320
             && evidence.result.boot.maleNames === 993;
+        evidence.globalObjectSystemsLoaded = evidence.result.globalObjectSystems?.server === 5
+            && evidence.result.globalObjectSystems.client === 5 && evidence.result.globalObjectSystems.luaInstancesMatch === true
+            && evidence.result.globalObjectSystems.farmingInitialStateMatches === true;
         evidence.initializationErrors = logs.filter((line) => line.includes('IsoChunk.loadGridSquareIfNeeded> Exception thrown')
             || line.includes('RandomizedBuildingBase.ChunkLoaded> Exception thrown')
+            || line.includes('> Exception thrown') || line.includes('java.lang.RuntimeException:')
             || (line.includes('LuaManager.getFunctionObject') && line.includes('no such function'))
             || (line.includes('LuaManager.getTableObject') && line.includes('no such table'))
             || (line.includes('FileNotFoundException') && line.includes('media/clothing/')));
@@ -813,7 +821,9 @@ try {
             && (evidence.heldInput.x !== evidence.pressedInput.x || evidence.heldInput.y !== evidence.pressedInput.y);
         evidence.inputReleased = evidence.releasedInput?.inputX === 0 && evidence.releasedInput?.inputY === 0
             && evidence.releasedInput.frames >= evidence.heldInput?.frames + 4 && evidence.zeroInputFrames >= 4;
-        evidence.pass = evidence.pass && evidence.frameCompleted && evidence.neighborhoodLoaded && evidence.contentLoaded && evidence.fontsLoaded && evidence.originalBootCompleted
+        evidence.unsafeShortRepairQualified = evidence.result.unsafeShortRepair?.repaired > 0;
+        evidence.pass = evidence.pass && evidence.unsafeShortRepairQualified && evidence.frameCompleted && evidence.neighborhoodLoaded && evidence.contentLoaded && evidence.fontsLoaded && evidence.originalBootCompleted
+            && evidence.globalObjectSystemsLoaded
             && evidence.initializationErrors.length === 0 && evidence.luaErrors.length === 0
             && (interactive || (evidence.inputPressed && evidence.normalMovement && evidence.inputReleased));
         evidence.playerNavigationQualified = evidence.result.navigation?.pass === true
