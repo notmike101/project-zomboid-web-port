@@ -4,22 +4,44 @@
 <pre id="status">Loading browser JVM</pre>
 <script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script>
 <script type="module">
-import {createSpriteNatives} from './sprite-webgl.js';
-window.stageResults=[];
+import { createSpriteNatives } from './sprite-webgl.js';
+
+globalThis.stageResults = [];
 let backend;
+
 try {
-  backend=createSpriteNatives(document.getElementById('graphics-canvas'),json=>{
-    const result=JSON.parse(String(json));
-    window.stageResults.push(result);
-    document.getElementById('status').textContent=JSON.stringify(result);
-    if('pass' in result)window.probeResult={...result,graphicsResources:backend.resources(),graphicsDiagnostics:[...backend.diagnostics]};
-  });
-  await cheerpjInit({version:17,status:'none',javaProperties:['user.dir=/files/work'],natives:{...backend.natives,async Java_probe_CheerpJFull_report(lib,json){window.stageResults.push(JSON.parse(String(json)));}}});
-  window.exitCode=await cheerpjRunMain('probe.CheerpJSprite','/app/sprite-view.jar:/app/full-entry.jar:/app/float-bridge.jar:/app/memory-bridge.jar');
-  if(!window.probeResult)throw Error('Original sprite probe exited without a result: '+window.exitCode);
-} catch(error) {
-  window.probeResult={pass:false,error:String(error.stack||error),graphicsDiagnostics:backend?[...backend.diagnostics]:[]};
-  document.getElementById('status').textContent=JSON.stringify(window.probeResult);
+    backend = createSpriteNatives(document.getElementById('graphics-canvas'), (json) => {
+        const result = JSON.parse(String(json));
+
+        globalThis.stageResults.push(result);
+        document.getElementById('status').textContent = JSON.stringify(result);
+
+        if ('pass' in result) {
+            globalThis.probeResult = { ...result, graphicsResources: backend.resources(), graphicsDiagnostics: [...backend.diagnostics] };
+        }
+    });
+    await cheerpjInit({
+        version: 17, status: 'none', javaProperties: ['user.dir=/files/work'], natives: {
+            ...backend.natives,
+            /**
+             * Records an original-code qualification result.
+             *
+             * @param {unknown} lib - Reserved library context supplied by CheerpJ.
+             * @param {string} json - Serialized qualification result.
+             */
+            Java_probe_CheerpJFull_report(lib, json) {
+                globalThis.stageResults.push(JSON.parse(String(json)));
+            },
+        },
+    });
+    globalThis.exitCode = await cheerpjRunMain('probe.CheerpJSprite', '/app/sprite-view.jar:/app/full-entry.jar:/app/float-bridge.jar:/app/memory-bridge.jar');
+
+    if (!globalThis.probeResult) {
+        throw new Error(`Original sprite probe exited without a result: ${globalThis.exitCode}`);
+    }
+} catch (error) {
+    globalThis.probeResult = { pass: false, error: String(error.stack || error), graphicsDiagnostics: backend ? [...backend.diagnostics] : [] };
+    document.getElementById('status').textContent = JSON.stringify(globalThis.probeResult);
 }
 </script>
 

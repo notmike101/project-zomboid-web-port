@@ -8,33 +8,55 @@
 <canvas id="engine-canvas" width="96" height="96" aria-label="Engine graphics target"></canvas>
 <pre id="details"></pre>
 <script>
-window.probeErrors = [];
+globalThis.probeErrors = [];
 (async () => {
     const worker = new Worker('/engine-worker.js');
     let timer;
+
     try {
         const message = await new Promise((resolve, reject) => {
-            timer = setTimeout(() => reject(new Error('Engine initialization timed out')), 20000);
-            worker.onerror = event => reject(new Error(event.message));
-            worker.onmessage = event => event.data.error ? reject(new Error(event.data.error + '\n' + JSON.stringify(event.data))) : resolve(event.data);
+            timer = setTimeout(() => reject(new Error('Engine initialization timed out')), 20_000);
+            /**
+             * Reports an error raised by the owned worker.
+             *
+             * @param {ErrorEvent} event - Message or error delivered by the owned worker.
+             * @returns {void} No return value.
+             */
+            worker.addEventListener('error', (event) => reject(new Error(event.message)));
+            /**
+             * Handles the next message from the owned runtime.
+             *
+             * @param {MessageEvent} event - Message or error delivered by the owned worker.
+             * @returns {void} No return value.
+             */
+            worker.addEventListener('message', (event) => event.data.error ? reject(new Error(`${event.data.error}\n${JSON.stringify(event.data)}`)) : resolve(event.data));
             const canvas = document.getElementById('engine-canvas').transferControlToOffscreen();
-            worker.postMessage({canvas}, [canvas]);
+
+            worker.postMessage({ canvas }, [canvas]);
         });
-        if (!message.wasmInstance || !message.result.pass) throw new Error('Original engine assertions failed');
+
+        if (!message.wasmInstance || !message.result.pass) {
+            throw new Error('Original engine assertions failed');
+        }
+
         const cases = message.result.cases.length;
         const comparisons = message.result.cases.reduce((count, item) => count + Object.keys(item.outputs).length, 0);
-        window.probeResult = {pass: true, cases, comparisons, matched: comparisons,
-            actual: message.result, worker: true, wasmInstance: true, errors: []};
+
+        globalThis.probeResult = {
+            pass: true, cases, comparisons, matched: comparisons,
+            actual: message.result, worker: true, wasmInstance: true, errors: [],
+        };
         document.getElementById('status').textContent = 'PASS: original engine initialization';
     } catch (error) {
-        window.probeErrors.push(String(error.stack || error));
-        window.probeResult = {pass: false, errors: window.probeErrors};
+        globalThis.probeErrors.push(String(error.stack || error));
+        globalThis.probeResult = { pass: false, errors: globalThis.probeErrors };
         document.getElementById('status').textContent = 'FAIL';
     } finally {
         clearTimeout(timer);
         worker.terminate();
     }
-    document.getElementById('details').textContent = JSON.stringify(window.probeResult, null, 2);
+
+    document.getElementById('details').textContent = JSON.stringify(globalThis.probeResult, null, 2);
 })();
 </script>
 </html>

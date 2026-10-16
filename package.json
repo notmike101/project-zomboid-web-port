@@ -2,6 +2,27 @@
   "name": "zomboid-bytecode-probe",
   "private": true,
   "type": "module",
-  "engines": {"node": ">=22"},
-  "dependencies": {"playwright-core": "1.61.1"}
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "playwright-core": "1.61.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@notmike101/eslint-config-js": "file:vendor/eslint-configs/notmike101-eslint-config-js-4.1.0.tgz",
+    "@notmike101/eslint-config-jsdoc": "file:vendor/eslint-configs/notmike101-eslint-config-jsdoc-1.0.1.tgz",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-html": "^8.2.1",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-jsdoc": "^62.9.0",
+    "eslint-plugin-sort-class-members": "^1.22.1",
+    "eslint-plugin-unicorn": "^64.0.0",
+    "globals": "^17.5.0"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "lint:fix": "eslint . --fix --max-warnings 0"
+  }
 }

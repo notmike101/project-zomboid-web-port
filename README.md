@@ -35,7 +35,7 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for measured results and [PORTING.md](P
 
 ## Prerequisites
 
-- Windows and Node.js 22 or newer.
+- Windows and Node.js 22.13 or newer in the 22.x line, or Node.js 24 or newer.
 - An installed Project Zomboid JAR and its bundled Java 25 runtime.
 - A local JDK 25, Apache Maven 3.9.16, and a Chromium executable with WasmGC support.
 - Locked Node dependencies installed with `npm ci --ignore-scripts --no-audit --no-fund`.
@@ -160,4 +160,9 @@ The browser JVM --profile lua route now completes original LuaManager.init, incl
 
 
 Original SpriteRenderer now draws a shipped texture through its real batch/state handoff and indexed GPU submission: browser PASS 5 cases / 14 outputs, with all 128x128 RGBA pixels checked. GPU buffer mapping/upload/readback qualification passes separately. This frame is a renderer milestone; it is not yet a playable world.
+
+
+## JavaScript linting
+
+Install locked dependencies with `npm ci --ignore-scripts --no-audit --no-fund`, then run `npm run lint`. The script executes `eslint . --max-warnings 0` using `@notmike101/eslint-config-js` and `@notmike101/eslint-config-jsdoc` from the validated upstream package artifacts. `eslint-plugin-html` also checks inline browser scripts. Generated outputs, installed dependencies and private local experiments are excluded; authored browser and Node sources are included. `npm run lint:fix` applies available fixes with the same zero-warning threshold. Artifact provenance is recorded in [vendor/eslint-configs/README.md](vendor/eslint-configs/README.md).
 

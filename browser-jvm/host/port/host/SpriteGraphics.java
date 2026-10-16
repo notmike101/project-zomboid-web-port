@@ -14,6 +14,15 @@ public final class SpriteGraphics {
     public static native void initialize();
     public static native boolean contextCreated();
     public static native boolean framebufferSupported();
+    public static native void processMessages();
+    public static native boolean isActive();
+    public static native boolean isVisible();
+    public static native boolean isCloseRequested();
+    public static native boolean wasResized();
+    public static int getWidth(){return surfaceWidth();}
+    public static int getHeight(){return surfaceHeight();}
+    public static native int getX();
+    public static native int getY();
     public static native void report(String json);
     public static native void resize(int width,int height);
     public static native int surfaceWidth();
