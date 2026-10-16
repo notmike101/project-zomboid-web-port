@@ -348,7 +348,7 @@ try {
         command(executable('java'), ['-cp', tools, 'PreparePath', path.join(output, 'atomic-view.jar'), path.join(output, 'path-view.jar'), path.join(output, 'path-adaptation.json')]);
         command(executable('java'), ['-cp', tools, 'PrepareVendor', gameJar, path.join(output, 'animation-view.jar')]);
         command(executable('java'), ['-cp', tools, 'PrepareAnimationSdk', path.join(output, 'atomic-view.jar'), path.join(output, 'animation-sdk-view.jar'), path.join(output, 'animation-sdk-adaptation.json')]);
-        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes')].join(path.delimiter), '-d', animationClasses, ...['animation/BrowserClientAnimation.java', 'animation/AiSceneSnapshot.java', 'animation/PreparedSceneLoader.java', 'animation/PathCompat.java', 'host/port/host/ReferenceExchange.java', 'host/port/host/ListFirstSupport.java', 'host/port/host/StackFirstSupport.java', 'host/port/host/ArrayListFirstSupport.java', 'host/port/host/CharacterFrame.java', 'host/port/host/ScriptBootstrap.java'].map((name) => path.join(source, name))]);
+        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes')].join(path.delimiter), '-d', animationClasses, ...['animation/BrowserClientAnimation.java', 'animation/AiSceneSnapshot.java', 'animation/PreparedSceneLoader.java', 'animation/PathCompat.java', 'host/port/host/ReferenceExchange.java', 'host/port/host/BrowserClock.java', 'host/port/host/ListFirstSupport.java', 'host/port/host/StackFirstSupport.java', 'host/port/host/ArrayListFirstSupport.java', 'host/port/host/CharacterFrame.java', 'host/port/host/ScriptBootstrap.java'].map((name) => path.join(source, name))]);
         command(executable('jar'), ['--create', '--file', path.join(output, 'animation-entry.jar'), '-C', animationClasses, '.']);
         const manifest = JSON.parse(await readFile(path.join(output, 'animation-assets-manifest.json'), 'utf8'));
 
@@ -459,10 +459,10 @@ try {
         command(executable('javac'), ['-d', tools, path.join(source, 'PrepareAtomic.java'), path.join(source, 'animation/PreparePath.java')]);
         command(executable('java'), ['-cp', tools, 'PrepareAtomic', path.join(output, 'world-view.jar'), path.join(output, 'atomic-view.jar'), path.join(output, 'atomic-adaptation.json')]);
         command(executable('java'), ['-cp', tools, 'PreparePath', path.join(output, 'atomic-view.jar'), path.join(output, 'path-view.jar'), path.join(output, 'path-adaptation.json')]);
-        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'world-classes')].join(path.delimiter), '-d', foodClasses, ...['CheerpJFood.java', 'host/port/host/BrowserFoodBootstrap.java', 'host/port/host/ScriptBootstrap.java', 'host/port/host/ReferenceExchange.java', 'animation/PathCompat.java'].map((name) => path.join(source, name))]);
+        command(executable('javac'), ['--release', '17', '-cp', [gameJar, path.join(output, 'world-classes')].join(path.delimiter), '-d', foodClasses, ...['CheerpJFood.java', 'host/port/host/BrowserFoodBootstrap.java', 'host/port/host/ScriptBootstrap.java', 'host/port/host/ReferenceExchange.java', 'host/port/host/BrowserClock.java', 'animation/PathCompat.java'].map((name) => path.join(source, name))]);
         command(executable('jar'), ['--create', '--file', path.join(output, 'food-entry.jar'), '-C', foodClasses, '.']);
         evidence.legacyCompatibility = { atomic: JSON.parse(await readFile(path.join(output, 'atomic-adaptation.json'), 'utf8')), filesystem: JSON.parse(await readFile(path.join(output, 'path-adaptation.json'), 'utf8')) };
-        await writeFile(path.join(output, 'food.html'), (await readFile(path.join(source, 'world.html'), 'utf8')).replaceAll('CheerpJWorld', 'CheerpJFood').replace('Original player input qualification', 'Original player food qualification').replace('This qualification reads original player input. It does not move or render the player.', 'This qualification runs original inventory and food consumption. It does not move or render the player.').replace('/app/world-entry.jar:', '/app/food-entry.jar:/app/path-view.jar:/app/atomic-view.jar:/app/world-entry.jar:'));
+        await writeFile(path.join(output, 'food.html'), (await readFile(path.join(source, 'world.html'), 'utf8')).replace('import { keyboardNatives } from \'./keyboard.js\';', 'import { keyboardNatives } from \'./keyboard.js\';\nimport { createBrowserClock } from \'./browser-clock.js\';\nconst clock = createBrowserClock();').replace('...keyboard.natives,', '...keyboard.natives, ...clock.natives,').replaceAll('CheerpJWorld', 'CheerpJFood').replace('Original player input qualification', 'Original player food qualification').replace('This qualification reads original player input. It does not move or render the player.', 'This qualification runs original inventory and food consumption. It does not move or render the player.').replace('/app/world-entry.jar:', '/app/food-entry.jar:/app/path-view.jar:/app/atomic-view.jar:/app/world-entry.jar:'));
     }
 
     evidence.viewJarSha256 = await hash(path.join(output, 'view.jar'));
@@ -481,6 +481,10 @@ try {
         ['/view.jar', { file: path.join(output, 'view.jar'), type: 'application/java-archive' }],
         ['/menu.png', { file: png, type: 'image/png' }],
     ]);
+
+    if (animationProfile || profile === 'food') {
+        routes.set('/browser-clock.js', { file: path.join(source, 'browser-clock.js'), type: 'text/javascript' });
+    }
 
     if (runtimeProfile) {
         for (const name of ['full-entry.jar', 'float-bridge.jar', 'memory-bridge.jar', 'runtime-view.jar']) {
