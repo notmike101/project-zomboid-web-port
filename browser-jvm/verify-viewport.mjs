@@ -71,18 +71,21 @@ try {
     const fixture = path.join(root, 'browser-jvm/ViewportQualification.java');
     const textureFixture = path.join(root, 'browser-jvm/TextureEnvQualification.java');
     const quadFixture = path.join(root, 'browser-jvm/IndexedQuadQualification.java');
+    const depthFixture = path.join(root, 'browser-jvm/DepthMipmapQualification.java');
     const preparation = path.join(root, 'browser-jvm/PrepareSpriteGraphics.java');
 
-    await Promise.all([...hostSources, fixture, textureFixture, quadFixture, preparation].map(snapshot));
-    command('javac', ['--release', '17', '-cp', gameJar, '-d', classes, ...hostSources, fixture, textureFixture, quadFixture]);
+    await Promise.all([...hostSources, fixture, textureFixture, quadFixture, depthFixture, preparation].map(snapshot));
+    command('javac', ['--release', '17', '-cp', gameJar, '-d', classes, ...hostSources, fixture, textureFixture, quadFixture, depthFixture]);
     command('javac', ['-d', preparer, preparation]);
     command('java', ['-cp', preparer, 'PrepareSpriteGraphics', runtimeCopy, output, classes]);
-    command('jar', ['--create', '--file', path.join(output, 'qualification.jar'), '-C', classes, 'ViewportQualification.class', '-C', classes, 'TextureEnvQualification.class', '-C', classes, 'IndexedQuadQualification.class']);
+    command('jar', ['--create', '--file', path.join(output, 'qualification.jar'), '-C', classes, 'ViewportQualification.class', '-C', classes, 'TextureEnvQualification.class', '-C', classes, 'IndexedQuadQualification.class', '-C', classes, 'DepthMipmapQualification.class']);
     evidence.manifest = JSON.parse(await readFile(path.join(output, 'sprite-graphics-manifest.json'), 'utf8'));
     const legacy = evidence.manifest.adaptedVendorClasses.find((entry) => entry.class === 'org/lwjgl/opengl/GL11');
 
     assert.deepEqual(legacy.methods.slice().sort(), ['glAlphaFunc(IF)V->glAlphaFunc', 'glPopAttrib()V->glPopAttrib', 'glPolygonMode(II)V->glPolygonMode', 'glPushAttrib(I)V->glPushAttrib', 'glTexEnvi(III)V->glTexEnvi', 'glDisableClientState(I)V->glDisableClientState', 'glEnableClientState(I)V->glEnableClientState', 'glLineWidth(F)V->glLineWidth', 'glFrontFace(I)V->glFrontFace'].sort());
     assert.equal(evidence.manifest.gameMethodBodiesUnchanged, true);
+    assert.ok(evidence.manifest.adaptedVendorClasses.find((entry) => entry.class === 'org/lwjgl/opengl/GL11C').methods.includes('glDepthRange(DD)V->glDepthRange'));
+    assert.ok(evidence.manifest.adaptedVendorClasses.find((entry) => entry.class === 'org/lwjgl/opengl/GL30C').methods.includes('glGenerateMipmap(I)V->glGenerateMipmap'));
     const shaderRoot = path.join(path.dirname(gameJar), 'media/shaders');
     const routes = new Map([
         ['/original-shaders/default.vert', path.join(shaderRoot, 'default.vert')],
@@ -91,6 +94,8 @@ try {
         ['/browser-jvm/texture-env-qualification.js', path.join(root, 'browser-jvm/texture-env-qualification.js')],
         ['/browser-jvm/indexed-quad-qualification.html', path.join(root, 'browser-jvm/indexed-quad-qualification.html')],
         ['/browser-jvm/indexed-quad-qualification.js', path.join(root, 'browser-jvm/indexed-quad-qualification.js')],
+        ['/browser-jvm/depth-mipmap-qualification.html', path.join(root, 'browser-jvm/depth-mipmap-qualification.html')],
+        ['/browser-jvm/depth-mipmap-qualification.js', path.join(root, 'browser-jvm/depth-mipmap-qualification.js')],
         ['/qualification.jar', path.join(output, 'qualification.jar')],
         ['/sprite-view.jar', path.join(output, 'sprite-view.jar')],
         ['/browser-jvm/viewport-qualification.html', path.join(root, 'browser-jvm/viewport-qualification.html')],
@@ -183,6 +188,17 @@ try {
     assert.equal(evidence.indexedQuads.pass, true, evidence.indexedQuads.error);
     assert.equal(evidence.indexedQuads.javaChecks, 8);
     assert.equal(evidence.indexedQuads.samples.length, 6);
+    await quadPage.close();
+    const depthPage = await context.newPage();
+
+    depthPage.on('console', (message) => evidence.logs.push(message.text()));
+    depthPage.on('pageerror', (error) => evidence.logs.push(String(error)));
+    await depthPage.goto(`${origin}/browser-jvm/depth-mipmap-qualification.html`);
+    await depthPage.waitForFunction(() => globalThis.completed, null, { timeout: 90_000 });
+    evidence.depthMipmap = await depthPage.evaluate(() => globalThis.result);
+    assert.equal(evidence.depthMipmap.pass, true, JSON.stringify(evidence.depthMipmap));
+    assert.equal(evidence.depthMipmap.mipmaps.length, 2);
+    assert.deepEqual(evidence.depthMipmap.mipmapCalls, [3_553, 3_553, 0x7F_FF_FF_FF]);
     assert.equal(evidence.denied.length, 0);
     assert.equal(evidence.logs.filter((line) => /Exception|Error:|SEVERE/.test(line)).length, 0);
     evidence.pass = true;

@@ -188,6 +188,18 @@ public final class SpriteGraphics {
     public static native void glStencilOp(int fail,int depthFail,int depthPass);
     public static native void glColorMask(boolean red,boolean green,boolean blue,boolean alpha);
     public static native void glClearDepth(double depth);
+    /** Desktop clamps before mapping; inverted and non-finite ranges are not qualified. */
+    public static void glDepthRange(double near, double far) {
+        if (!Double.isFinite(near) || !Double.isFinite(far))
+            throw new UnsupportedOperationException("Non-finite desktop depth range");
+        near = Math.max(0.0, Math.min(1.0, near));
+        far = Math.max(0.0, Math.min(1.0, far));
+        if (near > far)
+            throw new UnsupportedOperationException("Reversed desktop depth range requires unsupported browser emulation");
+        depthRange(near, far);
+    }
+    private static native void depthRange(double near, double far);
+    public static native void glGenerateMipmap(int target);
     public static native void glScissor(int x,int y,int width,int height);
     public static native void glDepthFunc(int function);
     public static native void glDepthMask(boolean enabled);
@@ -246,6 +258,10 @@ public final class SpriteGraphics {
     public static native int glGenTextures();
     public static native void glBindTexture(int target,int id);
     public static native void glDeleteTextures(int id);
+    /** Deletes only remaining names without changing the caller's buffer state. */
+    public static void glDeleteTextures(IntBuffer ids) {
+        for (int i = ids.position(); i < ids.limit(); i++) glDeleteTextures(ids.get(i));
+    }
     public static native void glTexParameteri(int target,int name,int value);
     public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,ByteBuffer data){int count=data==null?0:textureByteCount(width,height,format,type);byte[] bytes=null;if(data!=null){if(data.remaining()<count)throw new IllegalArgumentException("Texture buffer too short");bytes=new byte[count];data.duplicate().get(bytes);}textureBytes(target,level,internal,width,height,border,format,type,bytes);}
     /** The original FBO allocation uses this typed-null overload; client IntBuffer pixels remain unsupported. */

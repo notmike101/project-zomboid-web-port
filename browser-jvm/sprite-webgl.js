@@ -1038,6 +1038,21 @@ export function createSpriteNatives(canvas, report) {
          */
         glClearDepth: (depth) => gl.clearDepth(depth),
         /**
+         * Applies the ordered finite depth mapping validated and clamped by Java.
+         *
+         * @param {number} near - Clamped near endpoint.
+         * @param {number} far - Clamped far endpoint.
+         * @returns {undefined} Completion of the WebGL state update.
+         */
+        depthRange: (near, far) => gl.depthRange(near, far),
+        /**
+         * Generates real mip levels for the currently bound browser texture.
+         *
+         * @param {number} target - Original texture target; driver validates target and format.
+         * @returns {undefined} Completion of actual mip generation.
+         */
+        glGenerateMipmap: (target) => gl.generateMipmap(target),
+        /**
          * Sets the actual scissor box; WebGL retains invalid negative-size errors.
          *
          * @param {number} x - Left edge in framebuffer pixels.
@@ -1512,8 +1527,13 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} id - Numeric id argument for the declared operation.
          */
         glDeleteTextures: (id) => {
-            gl.deleteTexture(object(textures, id));
-            textures.delete(id);
+            // Desktop deletion silently ignores zero and names that are no longer textures.
+            const texture = textures.get(id);
+
+            if (texture) {
+                gl.deleteTexture(texture);
+                textures.delete(id);
+            }
         },
         /**
          * Executes the selected glTexParameteri operation against the actual WebGL context.
