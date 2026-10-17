@@ -1,5 +1,13 @@
 # Incremental original-bytecode compatibility
 
+## Original population consumer in a real browser
+
+The private full-context population integration now passes through original loading of all 4,065 Java metadata cells, original outfit seed persistence/reopen, 361 selected ready textures and the original population consumer. Five naturally generated records become five actual `IsoZombie` objects with matching native IDs, positions and registration state. Original reporting includes five real zombies; original removal returns actor, registry and real-zombie counts to zero. Nine unique chunk-load/collision notifications retain ownership. The test uses the actual initial age of two hours and redistribution setting of twelve hours, without injected IDs, positions or readiness flags.
+
+The native population replacement remains a separately authored, source-recovered host component: this is original Java consuming its bounded native-service output, not execution of the original population DLL as WASM. Native metadata in this test covers one genuine positive-density cell and its 1,024 intensity entries; the complete Java metadata load must not be described as full native-world coverage. Wider active-cell scheduling, longer gameplay and complete world persistence remain separate work.
+
+The 678-second run completes original cleanup: filesystem queues, direct image storage and decoded owners drain to zero, the asset executor terminates and the population service stops. All 5,005 monitored input/source hashes remain unchanged, original initialization errors and denied requests are zero, and browser/server close. Earlier texture/cleanup failures remain retained; the necessary change was normal callback cooperation in the private owner, with no production decoder or original game class modification.
+
 ## Current original world-rendering frontier
 
 The skybox conversion failure is now fixed separately: the adapter previously parsed declarations in inactive preprocessor branches, then hoisted their initializers outside those branches. It now uses the existing shader parser's preprocessor on each original compilation unit before structural rewriting, retaining desktop version/ES macro semantics and active compiler directives. Twelve actual WebGL semantic cases pass, including nested/elif branches, function macros, undefinition and independent unit macros. All fourteen original manager/skybox shader pairs compile and link from 29 unchanged source files. This fixes the conversion component; the earlier world-frame failure remains a failure and client/server attribute stacks and shadow prerequisites still block integration.

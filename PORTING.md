@@ -1,5 +1,11 @@
 # Toward a playable original-bytecode port
 
+## Original zombie consumer milestone
+
+A private actual-browser integration now passes full Java metadata loading (4,065 cells), original outfit seed persistence and texture readiness, followed by five naturally generated records becoming five original `IsoZombie` objects. Native identity, registration/reporting and original release are checked; cleanup stops the real owners and all 5,005 monitored inputs remain unchanged with zero initialization errors or denied requests. No IDs, positions or game readiness values are forced.
+
+This qualifies the original consumer with the source-recovered native-service prototype for one actual metadata cell and 1,024 intensity entries at the original initial age/settings. It does not qualify the native DLL as WASM, full native-world coverage, later population scheduling or world saves. The next population work must address those remaining native-service behaviors and reusable public integration, preserving the original Java consumer instead of creating a substitute zombie loop.
+
 ## Current renderer integration work
 
 The inactive-branch shader bug is corrected using the already-installed GLSL parser's preprocessor, before either desktop-version conversion or structural global-initializer adaptation. Actual WebGL checks pass twelve semantic cases and fourteen original shader pairs, including both skyboxes. Public serving and the clock verifier include the four additional existing preprocessor modules. Continue with real OpenGL attribute-stack support and the original game-state constructor prerequisite; do not infer a completed world frame from these shader passes.
