@@ -323,6 +323,102 @@ export function createSpriteNatives(canvas, report) {
         }
     }
 
+    /**
+     * Submits complete indexed desktop quads as winding-preserving triangle pairs.
+     * The fourth vertex provokes both triangles. Original GPU storage is read only.
+     *
+     * @param {number} count - Original number of indices, including any incomplete tail.
+     * @param {number} type - Original unsigned index encoding.
+     * @param {number} offset - Byte offset into the original bound element buffer.
+     * @param {number[]} range - Optional original inclusive index range.
+     */
+    function drawIndexedQuads(count, type, offset, range) {
+        const Index = new Map([[gl.UNSIGNED_BYTE, Uint8Array], [gl.UNSIGNED_SHORT, Uint16Array], [gl.UNSIGNED_INT, Uint32Array]]).get(type);
+
+        if (!Index) {
+            compatibilityError ||= gl.INVALID_ENUM;
+
+            return;
+        }
+
+        if (count < 0 || (range && range[1] < range[0])) {
+            compatibilityError ||= gl.INVALID_VALUE;
+
+            return;
+        }
+
+        // Delegate empty draws and lost-context behavior to the actual driver.
+        if (count === 0 || gl.isContextLost()) {
+            if (range) {
+                gl.drawRangeElements(gl.TRIANGLES, range[0], range[1], 0, type, offset);
+            } else {
+                gl.drawElements(gl.TRIANGLES, 0, type, offset);
+            }
+
+            return;
+        }
+
+        const original = gl.getParameter(gl.ELEMENT_ARRAY_BUFFER_BINDING);
+        const width = Index.BYTES_PER_ELEMENT;
+
+        if (!original || offset < 0 || offset % width !== 0 || offset + count * width > gl.getBufferParameter(gl.ELEMENT_ARRAY_BUFFER, gl.BUFFER_SIZE)) {
+            compatibilityError ||= gl.INVALID_OPERATION;
+
+            return;
+        }
+
+        let source;
+        let triangles;
+
+        try {
+            source = new Index(count);
+            /* Widen to avoid interpreting valid byte/short maximum indices as
+               WebGL2's mandatory fixed primitive-restart sentinel. */
+            triangles = new Uint32Array(Math.floor(count / 4) * 6);
+        } catch (error) {
+            if (!(error instanceof RangeError)) {
+                throw error;
+            }
+
+            compatibilityError ||= gl.OUT_OF_MEMORY;
+
+            return;
+        }
+
+        gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER, offset, source);
+
+        for (let input = 0, output = 0; input + 3 < count; input += 4, output += 6) {
+            const a = source[input];
+            const b = source[input + 1];
+            const c = source[input + 2];
+            const d = source[input + 3];
+
+            triangles.set([a, b, d, b, c, d], output);
+        }
+
+        const temporary = gl.createBuffer();
+
+        if (!temporary) {
+            compatibilityError ||= gl.OUT_OF_MEMORY;
+
+            return;
+        }
+
+        try {
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, temporary);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, triangles, gl.STREAM_DRAW);
+
+            if (range) {
+                gl.drawRangeElements(gl.TRIANGLES, range[0], range[1], triangles.length, gl.UNSIGNED_INT, 0);
+            } else {
+                gl.drawElements(gl.TRIANGLES, triangles.length, gl.UNSIGNED_INT, 0);
+            }
+        } finally {
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, original);
+            gl.deleteBuffer(temporary);
+        }
+    }
+
     const api = {
         framebufferSupported,
         /**
@@ -588,6 +684,10 @@ export function createSpriteNatives(canvas, report) {
         drawRange: (mode, first, last, count, type, offset) => {
             applyAlpha();
 
+            if (mode === 7) {
+                return drawIndexedQuads(count, type, offset, [first >>> 0, last >>> 0]);
+            }
+
             return gl.drawRangeElements(mode, first, last, count, type, offset);
         },
         /**
@@ -602,7 +702,43 @@ export function createSpriteNatives(canvas, report) {
         drawElements: (mode, count, type, offset) => {
             applyAlpha();
 
+            if (mode === 7) {
+                return drawIndexedQuads(count, type, offset);
+            }
+
             return gl.drawElements(mode, count, type, offset);
+        },
+        /**
+         * Identifies an unrepresentable desktop vertex after ordinary input checks.
+         * Java supplies the real UnsupportedOperationException before any draw.
+         *
+         * @param {number} count - Original unsigned-int index count.
+         * @param {number} offset - Original index buffer byte offset.
+         * @returns {boolean} Whether a complete quad uses the reserved browser index.
+         */
+        unsupportedQuadIndex: (count, offset) => {
+            if (count < 4 || offset < 0 || offset % 4 !== 0 || gl.isContextLost() || !gl.getParameter(gl.ELEMENT_ARRAY_BUFFER_BINDING)) {
+                return false;
+            }
+
+            if (offset + count * 4 > gl.getBufferParameter(gl.ELEMENT_ARRAY_BUFFER, gl.BUFFER_SIZE)) {
+                return false;
+            }
+
+            const complete = Math.floor(count / 4) * 4;
+            const source = new Uint32Array(Math.min(complete, 4_096));
+
+            for (let index = 0; index < complete; index += source.length) {
+                const slice = source.subarray(0, Math.min(source.length, complete - index));
+
+                gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER, offset + index * 4, slice);
+
+                if (slice.includes(0xFF_FF_FF_FF)) {
+                    return true;
+                }
+            }
+
+            return false;
         },
         /**
          * Executes the selected glEnableVertexAttribArray operation against the actual WebGL context.

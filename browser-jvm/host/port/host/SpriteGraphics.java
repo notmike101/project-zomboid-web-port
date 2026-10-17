@@ -130,10 +130,12 @@ public final class SpriteGraphics {
     private static int offset(long value){if(value<0||value>Integer.MAX_VALUE)throw new UnsupportedOperationException("Buffer offset outside browser range");return(int)value;}
     public static void glVertexAttribPointer(int index,int size,int type,boolean normalized,int stride,long address){vertexPointer(index,size,type,normalized,stride,offset(address));}
     private static native void vertexPointer(int index,int size,int type,boolean normalized,int stride,int offset);
-    public static void glDrawRangeElements(int mode,int first,int last,int count,int type,long address){if(count>0&&Integer.compareUnsigned(first,last)<=0&&indexType(type))validateLineRasterization(mode);drawRange(mode,first,last,count,type,offset(address));}
+    public static void glDrawRangeElements(int mode,int first,int last,int count,int type,long address){int byteOffset=offset(address);if(count>0&&Integer.compareUnsigned(first,last)<=0&&indexType(type)){validateLineRasterization(mode);validateQuadIndices(mode,count,type,byteOffset);}drawRange(mode,first,last,count,type,byteOffset);}
     private static native void drawRange(int mode,int first,int last,int count,int type,int offset);
-    public static void glDrawElements(int mode,int count,int type,long address){if(count>0&&indexType(type))validateLineRasterization(mode);drawElements(mode,count,type,offset(address));}
+    public static void glDrawElements(int mode,int count,int type,long address){int byteOffset=offset(address);if(count>0&&indexType(type)){validateLineRasterization(mode);validateQuadIndices(mode,count,type,byteOffset);}drawElements(mode,count,type,byteOffset);}
     private static native void drawElements(int mode,int count,int type,int offset);
+    private static native boolean unsupportedQuadIndex(int count,int offset);
+    private static void validateQuadIndices(int mode,int count,int type,int offset){if(mode==7&&type==5125&&unsupportedQuadIndex(count,offset))throw new UnsupportedOperationException("Unsigned maximum quad vertex is reserved for browser primitive restart");}
     public static native void glEnableVertexAttribArray(int index);
     public static native void glDisableVertexAttribArray(int index);
     public static native void glActiveTexture(int texture);

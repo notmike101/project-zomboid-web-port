@@ -70,13 +70,14 @@ try {
     const hostSources = ['SpriteGraphics.java', 'SpriteBuffers.java'].map((name) => path.join(root, 'browser-jvm/host/port/host', name));
     const fixture = path.join(root, 'browser-jvm/ViewportQualification.java');
     const textureFixture = path.join(root, 'browser-jvm/TextureEnvQualification.java');
+    const quadFixture = path.join(root, 'browser-jvm/IndexedQuadQualification.java');
     const preparation = path.join(root, 'browser-jvm/PrepareSpriteGraphics.java');
 
-    await Promise.all([...hostSources, fixture, textureFixture, preparation].map(snapshot));
-    command('javac', ['--release', '17', '-cp', gameJar, '-d', classes, ...hostSources, fixture, textureFixture]);
+    await Promise.all([...hostSources, fixture, textureFixture, quadFixture, preparation].map(snapshot));
+    command('javac', ['--release', '17', '-cp', gameJar, '-d', classes, ...hostSources, fixture, textureFixture, quadFixture]);
     command('javac', ['-d', preparer, preparation]);
     command('java', ['-cp', preparer, 'PrepareSpriteGraphics', runtimeCopy, output, classes]);
-    command('jar', ['--create', '--file', path.join(output, 'qualification.jar'), '-C', classes, 'ViewportQualification.class', '-C', classes, 'TextureEnvQualification.class']);
+    command('jar', ['--create', '--file', path.join(output, 'qualification.jar'), '-C', classes, 'ViewportQualification.class', '-C', classes, 'TextureEnvQualification.class', '-C', classes, 'IndexedQuadQualification.class']);
     evidence.manifest = JSON.parse(await readFile(path.join(output, 'sprite-graphics-manifest.json'), 'utf8'));
     const legacy = evidence.manifest.adaptedVendorClasses.find((entry) => entry.class === 'org/lwjgl/opengl/GL11');
 
@@ -88,6 +89,8 @@ try {
         ['/original-shaders/default.frag', path.join(shaderRoot, 'default.frag')],
         ['/browser-jvm/texture-env-qualification.html', path.join(root, 'browser-jvm/texture-env-qualification.html')],
         ['/browser-jvm/texture-env-qualification.js', path.join(root, 'browser-jvm/texture-env-qualification.js')],
+        ['/browser-jvm/indexed-quad-qualification.html', path.join(root, 'browser-jvm/indexed-quad-qualification.html')],
+        ['/browser-jvm/indexed-quad-qualification.js', path.join(root, 'browser-jvm/indexed-quad-qualification.js')],
         ['/qualification.jar', path.join(output, 'qualification.jar')],
         ['/sprite-view.jar', path.join(output, 'sprite-view.jar')],
         ['/browser-jvm/viewport-qualification.html', path.join(root, 'browser-jvm/viewport-qualification.html')],
@@ -169,6 +172,17 @@ try {
     assert.equal(evidence.textureEnvironment.javaChecks, 18);
     assert.equal(evidence.textureEnvironment.checks, 47);
     assert.deepEqual(evidence.textureEnvironment.pixels, [64, 32, 16, 64, 0, 0, 255, 255]);
+    await texturePage.close();
+    const quadPage = await context.newPage();
+
+    quadPage.on('console', (message) => evidence.logs.push(message.text()));
+    quadPage.on('pageerror', (error) => evidence.logs.push(String(error)));
+    await quadPage.goto(`${origin}/browser-jvm/indexed-quad-qualification.html`);
+    await quadPage.waitForFunction(() => globalThis.completed, null, { timeout: 90_000 });
+    evidence.indexedQuads = await quadPage.evaluate(() => globalThis.result);
+    assert.equal(evidence.indexedQuads.pass, true, evidence.indexedQuads.error);
+    assert.equal(evidence.indexedQuads.javaChecks, 8);
+    assert.equal(evidence.indexedQuads.samples.length, 6);
     assert.equal(evidence.denied.length, 0);
     assert.equal(evidence.logs.filter((line) => /Exception|Error:|SEVERE/.test(line)).length, 0);
     evidence.pass = true;
