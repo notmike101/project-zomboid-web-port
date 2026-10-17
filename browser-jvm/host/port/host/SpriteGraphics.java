@@ -130,9 +130,9 @@ public final class SpriteGraphics {
     private static int offset(long value){if(value<0||value>Integer.MAX_VALUE)throw new UnsupportedOperationException("Buffer offset outside browser range");return(int)value;}
     public static void glVertexAttribPointer(int index,int size,int type,boolean normalized,int stride,long address){vertexPointer(index,size,type,normalized,stride,offset(address));}
     private static native void vertexPointer(int index,int size,int type,boolean normalized,int stride,int offset);
-    public static void glDrawRangeElements(int mode,int first,int last,int count,int type,long address){drawRange(mode,first,last,count,type,offset(address));}
+    public static void glDrawRangeElements(int mode,int first,int last,int count,int type,long address){if(count>0&&Integer.compareUnsigned(first,last)<=0&&indexType(type))validateLineRasterization(mode);drawRange(mode,first,last,count,type,offset(address));}
     private static native void drawRange(int mode,int first,int last,int count,int type,int offset);
-    public static void glDrawElements(int mode,int count,int type,long address){drawElements(mode,count,type,offset(address));}
+    public static void glDrawElements(int mode,int count,int type,long address){if(count>0&&indexType(type))validateLineRasterization(mode);drawElements(mode,count,type,offset(address));}
     private static native void drawElements(int mode,int count,int type,int offset);
     public static native void glEnableVertexAttribArray(int index);
     public static native void glDisableVertexAttribArray(int index);
@@ -189,7 +189,20 @@ public final class SpriteGraphics {
     public static native void glScissor(int x,int y,int width,int height);
     public static native void glDepthFunc(int function);
     public static native void glDepthMask(boolean enabled);
-    public static native void glDrawArrays(int mode,int first,int count);
+    public static void glDrawArrays(int mode,int first,int count){if(count>0&&first>=0)validateLineRasterization(mode);drawArrays(mode,first,count);}
+    private static native void drawArrays(int mode,int first,int count);
+    private static native boolean unsupportedSmoothLine(int mode);
+    private static boolean indexType(int type){return type==5121||type==5123||type==5125;}
+    private static void validateLineRasterization(int mode){
+        if(mode>=1&&mode<=3&&unsupportedSmoothLine(mode))throw new UnsupportedOperationException("Smooth lines require a multisampled draw framebuffer");
+    }
+    public static native void glDisableClientState(int array);
+    public static void glEnableClientState(int array){
+        if(Set.of(32884,32885,32886,32887,32888,32889,33879,33886).contains(array))throw new UnsupportedOperationException("Legacy client arrays require conventional vertex input: "+array);
+        glDisableClientState(array);
+    }
+    public static native void glLineWidth(float width);
+    public static native void glFrontFace(int winding);
 
     public static native int glCreateShader(int type);
     public static void glShaderSource(int id,CharSequence source){shaderText(id,source.toString());}

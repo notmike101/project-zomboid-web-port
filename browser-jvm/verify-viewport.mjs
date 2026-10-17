@@ -80,7 +80,7 @@ try {
     evidence.manifest = JSON.parse(await readFile(path.join(output, 'sprite-graphics-manifest.json'), 'utf8'));
     const legacy = evidence.manifest.adaptedVendorClasses.find((entry) => entry.class === 'org/lwjgl/opengl/GL11');
 
-    assert.deepEqual(legacy.methods.slice().sort(), ['glAlphaFunc(IF)V->glAlphaFunc', 'glPopAttrib()V->glPopAttrib', 'glPolygonMode(II)V->glPolygonMode', 'glPushAttrib(I)V->glPushAttrib', 'glTexEnvi(III)V->glTexEnvi'].sort());
+    assert.deepEqual(legacy.methods.slice().sort(), ['glAlphaFunc(IF)V->glAlphaFunc', 'glPopAttrib()V->glPopAttrib', 'glPolygonMode(II)V->glPolygonMode', 'glPushAttrib(I)V->glPushAttrib', 'glTexEnvi(III)V->glTexEnvi', 'glDisableClientState(I)V->glDisableClientState', 'glEnableClientState(I)V->glEnableClientState', 'glLineWidth(F)V->glLineWidth', 'glFrontFace(I)V->glFrontFace'].sort());
     assert.equal(evidence.manifest.gameMethodBodiesUnchanged, true);
     const shaderRoot = path.join(path.dirname(gameJar), 'media/shaders');
     const routes = new Map([

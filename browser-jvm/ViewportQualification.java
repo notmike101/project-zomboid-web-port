@@ -4,6 +4,7 @@ import org.lwjgl.opengl.GL11;
 public final class ViewportQualification {
     public static native void state(int x, int y, int width, int height);
     public static native void report(int checks);
+    public static native void rasterSurface(boolean multisample);
     private static int checks;
 
     private static void check(boolean condition, String message) {
@@ -78,6 +79,34 @@ public final class ViewportQualification {
         }
         GL11.glPolygonMode(GL11.GL_FRONT_AND_BACK,GL11.GL_FILL);
         check(GL11.glGetError()==GL11.GL_NO_ERROR,"Rejected modes preserve fill and GL state");
+        for(int array:new int[]{GL11.GL_VERTEX_ARRAY,GL11.GL_COLOR_ARRAY,GL11.GL_TEXTURE_COORD_ARRAY}){
+            GL11.glDisableClientState(array);
+            check(!GL11.glIsEnabled(array)&&GL11.glGetInteger(array)==0,"Conventional array remains disabled");
+        }
+        boolean clientRejected=false;
+        try { GL11.glEnableClientState(GL11.GL_VERTEX_ARRAY); }
+        catch(UnsupportedOperationException expected){clientRejected=true;}
+        check(clientRejected,"Unimplemented conventional input rejects before state mutation");
+        GL11.glDisableClientState(0);
+        check(GL11.glGetError()==GL11.GL_INVALID_ENUM,"Invalid client array reports GL enum error");
+        GL11.glLineWidth(1);
+        GL11.glFrontFace(GL11.GL_CW);
+        check(GL11.glGetInteger(GL11.GL_FRONT_FACE)==GL11.GL_CW,"Actual front winding changed");
+        GL11.glFrontFace(GL11.GL_CCW);
+        GL11.glEnable(GL11.GL_LINE_SMOOTH);
+        check(GL11.glIsEnabled(GL11.GL_LINE_SMOOTH)&&GL11.glGetInteger(GL11.GL_LINE_SMOOTH)==1,"Actual compatibility line-smooth state enabled");
+        check(GL11.glGetInteger(org.lwjgl.opengl.GL13.GL_SAMPLE_BUFFERS)==1,"Default surface really multisampled");
+        rasterSurface(false);
+        boolean smoothRejected=false,smoothFinally=false;
+        try { GL11.glDrawArrays(GL11.GL_LINES,0,2); }
+        catch(UnsupportedOperationException expected){smoothRejected=true;}
+        finally { smoothFinally=true; }
+        check(smoothRejected&&smoothFinally,"Single-sample smooth line rejects through Java finally");
+        rasterSurface(true);
+        GL11.glDrawArrays(GL11.GL_LINES,0,2);
+        check(GL11.glGetError()==GL11.GL_NO_ERROR,"Multisample line uses real GPU coverage");
+        GL11.glDisable(GL11.GL_LINE_SMOOTH);
+        check(!GL11.glIsEnabled(GL11.GL_LINE_SMOOTH)&&GL11.glGetInteger(GL11.GL_LINE_SMOOTH)==0,"Line smooth state disabled");
         report(checks);
     }
 }

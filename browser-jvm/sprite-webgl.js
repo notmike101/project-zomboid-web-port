@@ -45,7 +45,7 @@ const floats = (value) => new Float32Array(value.buffer, value.byteOffset, value
  * @returns {object} Owned native callbacks and lifecycle inspection functions.
  */
 export function createSpriteNatives(canvas, report) {
-    const gl = canvas.getContext('webgl2', { alpha: true, antialias: false, stencil: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
+    const gl = canvas.getContext('webgl2', { alpha: true, antialias: true, stencil: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
 
     if (!gl) {
         throw new Error('WebGL2 unavailable');
@@ -71,6 +71,8 @@ export function createSpriteNatives(canvas, report) {
     const attached = new Map();
     const locationOwners = new Map();
     const legacyTexture = new Map();
+    let lineSmoothEnabled = false;
+    const clientArrays = new Set([32_884, 32_885, 32_886, 32_887, 32_888, 32_889, 33_879, 33_886]);
     let alphaEnabled = false;
     let alphaFunction = 519;
     let alphaReference = 0;
@@ -516,6 +518,14 @@ export function createSpriteNatives(canvas, report) {
          * @returns {number} Actual scalar state or the corresponding owned object handle.
          */
         integerState: (name) => {
+            if (name === 2_848) {
+                return Number(lineSmoothEnabled);
+            }
+
+            if (clientArrays.has(name)) {
+                return 0;
+            }
+
             if (name === 0x0B_B0) {
                 return attributeStack.length;
             }
@@ -626,6 +636,12 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} cap - Numeric cap argument for the declared operation.
          */
         glEnable: (cap) => {
+            if (cap === 2_848) {
+                lineSmoothEnabled = true;
+
+                return;
+            }
+
             if (cap === 3_008) {
                 alphaEnabled = true;
 
@@ -644,6 +660,12 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} cap - Numeric cap argument for the declared operation.
          */
         glDisable: (cap) => {
+            if (cap === 2_848) {
+                lineSmoothEnabled = false;
+
+                return;
+            }
+
             if (cap === 3_008) {
                 alphaEnabled = false;
 
@@ -663,6 +685,14 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         glIsEnabled: (cap) => {
+            if (cap === 2_848) {
+                return lineSmoothEnabled;
+            }
+
+            if (clientArrays.has(cap)) {
+                return false;
+            }
+
             if (cap === 3_008) {
                 return alphaEnabled;
             }
@@ -743,6 +773,39 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         glViewport: (x, y, w, h) => gl.viewport(x, y, w, h),
+        /**
+         * Keeps conventional arrays disabled independently of generic shader attributes.
+         *
+         * @param {number} array - Original client-array enum.
+         */
+        glDisableClientState: (array) => {
+            if (!clientArrays.has(array)) {
+                compatibilityError ||= gl.INVALID_ENUM;
+            }
+        },
+        /**
+         * Checks the actual draw surface before a desktop smooth-line draw.
+         *
+         * @param {number} mode - Original primitive enum.
+         * @returns {boolean} Whether smooth coverage needs an unimplemented single-sample path.
+         */
+        unsupportedSmoothLine: (mode) => lineSmoothEnabled && [1, 2, 3].includes(mode) && gl.getParameter(gl.SAMPLE_BUFFERS) === 0,
+        /**
+         * Sets actual implementation-supported line width.
+         *
+         * @param {number} width - Original requested width.
+         */
+        glLineWidth: (width) => {
+            gl.lineWidth(width);
+        },
+        /**
+         * Sets actual front-facing winding and retains driver validation.
+         *
+         * @param {number} winding - Original clockwise or counterclockwise enum.
+         */
+        glFrontFace: (winding) => {
+            gl.frontFace(winding);
+        },
         /**
          * Saves a copy of the actual viewport group, or an empty mask entry.
          * Unsupported defined groups are rejected by the Java facade before this call.
@@ -1502,6 +1565,9 @@ export function createSpriteNatives(canvas, report) {
          */
         glFramebufferTexture2D: (target, attachment, textureTarget, id, level) => gl.framebufferTexture2D(target, attachment, textureTarget, object(textures, id), level),
     };
+
+    api.drawArrays = api.glDrawArrays;
+
     const natives = {};
 
     for (const [name, callback] of Object.entries(api)) {
