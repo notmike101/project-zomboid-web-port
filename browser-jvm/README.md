@@ -216,3 +216,20 @@ Only the default `MODULATE` environment-mode invariant is admitted. The other fi
 
 
 The same gate now checks the original VBO renderer's conventional-array cleanup and line rasterization. WebGL2 requests actual antialiasing and the gate requires a genuinely multisampled default surface. Original smooth-line state produces the same partial-coverage pixels as direct GPU multisampling. Single-sample smooth-line draws fail through a real Java exception and finally; conventional-array enabling also remains unsupported, while disabling their default state preserves generic shader attributes. Width/winding are real WebGL operations. This admits the tested multisample rasterization path, not a general desktop client-array or single-sample antialiasing implementation.
+
+## Original keyboard events and text entry
+
+After preparing the public play SDK, run the standalone event/text qualification:
+
+```powershell
+$env:PZ_JDK = 'D:/zomboid-web-2/.tools/jdk-25.0.1+8'
+$env:PZ_BROWSER = 'C:/Users/me/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe'
+$env:PZ_GAME_JAR = 'C:/Games/steam/steamapps/common/ProjectZomboid/projectzomboid.jar'
+node browser-jvm/verify-keyboard-events.mjs
+```
+
+The verifier snapshots the nine prepared play SDK archives in their existing classpath order, the prepared font archive and the unchanged original close-button PNG into its own `target/browser-jvm/keyboard-events` output. It never rebuilds play. `PrepareKeyboardEvents` accepts only the qualified prepared vendor Keyboard class and redirects its `initKeyNames()V` scancode query at BCI288 to the browser's unavailable-scancode result (-1). The original portable key-name fallback, event producers, repeat filtering and polling code remain intact. The manifest records exact input/output class hashes and checks every other instruction byte; no original game class changes.
+
+`keyboardNatives(canvas)` continues to provide held-key queries for existing profiles. A future event-loop caller can opt into `keyboard.enableTextEvents()`, focus its owned text sink with `focusText()`, and call Java `BrowserKeyboardEvents.poll()` before the normal `GameKeyboard` cache update and Core text-entry lifecycle. The opt-in reuses the same held set and keyboard listeners; repeated opt-in creates no additional text sink. Dispose the keyboard owner when its context closes. This component is not installed into public profile frame loops yet.
+
+The qualification requires eleven original queue phases and nine actual original `UITextBox2` phases through normal `GameKeyboard.poll/update` and `Core.DoFrameReady`, using real original fonts. It checks ASCII/BMP text, caret movement and deletion, Shift, Ctrl+A replacement, repeat filtering, Tab/focus release, disposed Java exception/finally and listener/sink/browser cleanup. Supplementary codepoints retain the original Display callback's 16-bit cast; this does not add a Unicode fix. Input events must follow the qualified cancelable `beforeinput` path. Three additional authored notification probes require real Java UnsupportedOperationException and finally for composition, noncancelable text and input-only paths; these rejection probes are deliberately separate from the trusted DOM-input phases. They do not qualify IME, paste or autofill support. Full menu text entry and rendered text widgets remain separate integration qualifications. Results and unchanged source hashes are written to `target/browser-jvm/keyboard-events/result.json`.

@@ -231,3 +231,6 @@ The original spawn-map path progressed through polygon fill and default texture 
 
 
 The original WorldStreamer stop blocker now has a separately packaged, source-pinned runtime repair at Thread.currentThread. Its normal-URI public verifier preserves real thread identity under allocation/GC, original initializer semantics and original stop/worker teardown; bad runtime inputs fail before startup and forced browser cleanup is tested. It is not yet installed in existing profiles. Integrate the [qualified starter](browser-jvm/scheduler-provenance.md) before applying the existing unsafe-short/native-library repairs when building the public original-menu/full-world bootstrap. LightingThread.stop contains no such host-service call and remains a distinct unresolved worker path.
+
+
+The public keyboard service now qualifies the original vendor producers through GameKeyboard/Core into an actual original UITextBox2, with one shared held/event owner. Run verify-keyboard-events.mjs after preparing play; it snapshots its own SDK/font inputs and preserves existing held-only behavior. Integrate enableTextEvents and BrowserKeyboardEvents.poll into the original menu/session input order next. Keep the original character-cast behavior and explicit unsupported composition/input-only boundaries; do not claim full menu typing merely from the standalone widget pass.
