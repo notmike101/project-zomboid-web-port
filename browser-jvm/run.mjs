@@ -511,7 +511,7 @@ try {
         routes.set('/unsafe-short-repair.js', { file: path.join(source, 'unsafe-short-repair.js'), type: 'text/javascript' });
         routes.set('/glsl-compat.js', { file: path.join(source, 'glsl-compat.js'), type: 'text/javascript' });
 
-        for (const name of ['index.js', 'error.js', 'ast/index.js', 'ast/ast.js', 'ast/visit.js', 'ast/ast-types.js', 'parser/index.js', 'parser/parser.js', 'parser/generator.js', 'parser/grammar.js', 'parser/scope.js', 'parser/utils.js']) {
+        for (const name of ['index.js', 'error.js', 'ast/index.js', 'ast/ast.js', 'ast/visit.js', 'ast/ast-types.js', 'parser/index.js', 'parser/parser.js', 'parser/generator.js', 'parser/grammar.js', 'parser/scope.js', 'parser/utils.js', 'preprocessor/index.js', 'preprocessor/preprocessor.js', 'preprocessor/preprocessor-parser.js', 'preprocessor/generator.js']) {
             const relative = `node_modules/@shaderfrog/glsl-parser/${name}`;
 
             routes.set(`/${relative}`, { file: path.join(repository, relative), type: 'text/javascript' });

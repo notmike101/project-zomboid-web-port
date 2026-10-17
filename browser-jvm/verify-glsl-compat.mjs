@@ -69,7 +69,7 @@ try {
             if (gl.getError() !== gl.NO_ERROR) throw new Error('WebGL operation failed');
             return [...data];
         }
-        async function composedGlobals() {
+        async function composedGlobals(conditional = false) {
             const { createSpriteNatives } = await import('/browser-jvm/sprite-webgl.js');
             const canvas = document.createElement('canvas');
             const facade = createSpriteNatives(canvas, () => {});
@@ -82,8 +82,8 @@ try {
                 // Root first deliberately puts the library's initialized global after main.
                 for (const [stage, source] of [
                     [35633, vertex],
-                    [35632, prefix+'uniform sampler2D rootTexture;vec4 sampleRoot(){return texture2D(rootTexture,vec2(0));}float helper();void main(){color=vec4(helper(),0,0,1);}'],
-                    [35632, prefix.replace('out vec4 color;', '')+'uniform sampler2D libraryTexture;vec4 sampleLibrary(){return texture2D(libraryTexture,vec2(0));}uniform float u;float g=u;float helper(){return g;}'],
+                    [35632, prefix+(conditional ? '\\n#define PORT_UNIT_ONLY 1\\n' : '')+'uniform sampler2D rootTexture;vec4 sampleRoot(){return texture2D(rootTexture,vec2(0));}float helper();void main(){color=vec4(helper(),0,0,1);}'],
+                    [35632, prefix.replace('out vec4 color;', '')+'uniform sampler2D libraryTexture;vec4 sampleLibrary(){return texture2D(libraryTexture,vec2(0));}uniform float u;'+(conditional ? '\\n#ifdef PORT_UNIT_ONLY\\nfloat g=0.0;\\n#else\\nfloat g=u;\\n#endif\\n' : 'float g=u;')+'float helper(){return g;}'],
                 ]) {
                     const shader = await call('glCreateShader', stage); handles.push(shader);
                     await call('shaderText', shader, source);
@@ -124,7 +124,7 @@ try {
             try {
                 for (const [stage, source] of [
                     [35633, vertex],
-                    [35632, '#version 330\\n' + 'uniform sampler2D texture;float portLegacyTexture2D=0.0;vec4 texture2D(float value){return vec4(value);}void main(){gl_FragColor=(texture2D(texture,vec2(.5))+texture2D(texture,vec2(.5),0))*.5+texture2D(0.0);}'],
+                    [35632, '#version 330\\n#if __VERSION__ != 330 || defined(GL_ES)\\n#error Original desktop version macros changed\\n#endif\\n' + 'uniform sampler2D texture;float portLegacyTexture2D=0.0;vec4 texture2D(float value){return vec4(value);}void main(){gl_FragColor=(texture2D(texture,vec2(.5))+texture2D(texture,vec2(.5),0))*.5+texture2D(0.0);}'],
                 ]) {
                     const shader = await call('glCreateShader', stage); handles.push(shader);
                     await call('shaderText', shader, source);
@@ -176,7 +176,9 @@ try {
             const globals = program('uniform float u;float g=u;float h=g*2;void main(){color=vec4(g,h,0,1);}');
             const scopes = program('void main(){float f=0.5;float a=0;{int f=1;int values[2]=int[2](0,1);if(f/2==0 && values[1]==1 && (1<<2)==4)a=1;}color=vec4(f>0?a:0,0,0,1);}');
             const numeric = program('float helper(vec2 p,float n){return n/4;}float max(float a,float b){return a>b?a:b;}float result(){return 1-max(0.0,0.0);}void main(){float n=20;color=vec4(helper(vec2(0),3),result(),(1-0.5)*n/20,1);}');
-            return { baseline, overload:pixel(overload), integerOverload:pixel(integerOverload), vectorClamp:pixel(vectorClamp), legacyColor:pixel(legacyColor), globalsFirst:pixel(globals,0.25), globalsSecond:pixel(globals,0.5), scopes:pixel(scopes), numeric:pixel(numeric), composedGlobals:await composedGlobals(), legacyTexture:await legacyTexture() };
+            const conditional = program('\\n#define ACTIVE 1\\n#if ACTIVE\\nuniform float u;\\n#else\\nfloat u=0.875;\\n#ifdef NESTED\\nfloat u=notValidGLSL;\\n#endif\\n#endif\\nfloat g=u;void main(){color=vec4(g,0,0,1);}');
+            const conditionalMacros = program('\\n#define SCALE(x) ((x)*2.0)\\n#define BRANCH 2\\n#if BRANCH == 1\\nfloat g=0.0;\\n#elif BRANCH == 2\\nfloat g=SCALE(0.25);\\n#else\\nfloat g=1.0;\\n#endif\\n#undef BRANCH\\n#ifndef BRANCH\\nfloat h=0.25;\\n#endif\\n#if __VERSION__ != 300 || !defined(GL_ES)\\n#error ES version macros changed\\n#endif\\nvoid main(){color=vec4(g,h,0,1);}');
+            return { baseline, overload:pixel(overload), integerOverload:pixel(integerOverload), vectorClamp:pixel(vectorClamp), legacyColor:pixel(legacyColor), globalsFirst:pixel(globals,0.25), globalsSecond:pixel(globals,0.5), scopes:pixel(scopes), numeric:pixel(numeric), composedGlobals:await composedGlobals(), legacyTexture:await legacyTexture(), conditionalFirst:pixel(conditional,0.25), conditionalSecond:pixel(conditional,0.75), conditionalMacros:pixel(conditionalMacros), conditionalUnits:await composedGlobals(true) };
         } finally {
             for (const program of programs) gl.deleteProgram(program);
             for (const shader of shaders) gl.deleteShader(shader);
@@ -184,8 +186,8 @@ try {
         }
     })()`);
 
-    assert.deepEqual(results, { baseline: [false, false, false], overload: [255, 255, 64, 255], integerOverload: [255, 64, 0, 255], vectorClamp: [255, 64, 128, 255], legacyColor: [64, 128, 191, 255], globalsFirst: [64, 128, 0, 255], globalsSecond: [128, 255, 0, 255], scopes: [255, 0, 0, 255], numeric: [191, 255, 128, 255], composedGlobals: { status: [true, false, false], pixels: [[64, 0, 0, 255], [191, 0, 0, 255]] }, legacyTexture: [[32, 96, 160, 224], [240, 128, 64, 192]] });
-    console.info('GLSL compatibility: nine WebGL2 semantic cases passed, including composed globals and legacy texture sampling.', JSON.stringify(results));
+    assert.deepEqual(results, { baseline: [false, false, false], overload: [255, 255, 64, 255], integerOverload: [255, 64, 0, 255], vectorClamp: [255, 64, 128, 255], legacyColor: [64, 128, 191, 255], globalsFirst: [64, 128, 0, 255], globalsSecond: [128, 255, 0, 255], scopes: [255, 0, 0, 255], numeric: [191, 255, 128, 255], composedGlobals: { status: [true, false, false], pixels: [[64, 0, 0, 255], [191, 0, 0, 255]] }, legacyTexture: [[32, 96, 160, 224], [240, 128, 64, 192]], conditionalFirst: [64, 0, 0, 255], conditionalSecond: [191, 0, 0, 255], conditionalMacros: [128, 64, 0, 255], conditionalUnits: { status: [true, false, false], pixels: [[64, 0, 0, 255], [191, 0, 0, 255]] } });
+    console.info('GLSL compatibility: twelve WebGL2 semantic cases passed, including active branches and independent compilation-unit macros.', JSON.stringify(results));
 } finally {
     await browser?.close();
     await new Promise((done, reject) => {

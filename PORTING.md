@@ -2,6 +2,8 @@
 
 ## Current renderer integration work
 
+The inactive-branch shader bug is corrected using the already-installed GLSL parser's preprocessor, before either desktop-version conversion or structural global-initializer adaptation. Actual WebGL checks pass twelve semantic cases and fourteen original shader pairs, including both skyboxes. Public serving and the clock verifier include the four additional existing preprocessor modules. Continue with real OpenGL attribute-stack support and the original game-state constructor prerequisite; do not infer a completed world frame from these shader passes.
+
 The latest original-cell browser integration advances through all 219 depth images, twelve manager shaders, original context-owned framebuffer creation and an actual lighting publication. It reaches original world/cell drawing, where character shadow null-pointer exceptions, skybox shader uniform assignments and the missing `GL11.glPushClientAttrib` service prevent a completed frame. Preserve each failure and resolve its original prerequisites or platform contract in small components before another world-frame run. Do not disable shadows/skybox, force visibility or replace the renderer. The browser/server close and all 515 monitored hashes remain unchanged, but Java/GPU cleanup and complete frame pixels do not pass.
 
 Continue reusing shipped code: indexed map triangulation already delegates to the game's existing pure-Java GLU tessellator. REA/native comparisons establish the replaced JNI contract; the adapter supplies that contract while the original Java/Lua callers retain behavior. The running population integration and held-frame menu capture remain separate gates, and neither is evidence of whole-game loading or playability.

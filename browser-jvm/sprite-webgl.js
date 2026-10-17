@@ -1,4 +1,4 @@
-import { normalizeDesktopShader, instrumentAlphaTest, hasAlphaIdentifiers, alphaNames } from './glsl-compat.js';
+import { normalizeDesktopShader, preprocessShaderUnit, instrumentAlphaTest, hasAlphaIdentifiers, alphaNames } from './glsl-compat.js';
 
 /**
  * Resolves an owned graphics handle and rejects foreign handles.
@@ -184,6 +184,8 @@ export function createSpriteNatives(canvas, report) {
      */
     function translate(id, source) {
         const defaults = [];
+
+        source = preprocessShaderUnit(source);
 
         sourceDefaults.set(id, defaults);
         const version = /^\s*#version\s+(330(?:\s+core)?|120)\s*$/m.exec(source);

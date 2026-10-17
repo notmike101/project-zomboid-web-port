@@ -1,7 +1,45 @@
 import { visit } from '../node_modules/@shaderfrog/glsl-parser/ast/index.js';
 import { parse, generate } from '../node_modules/@shaderfrog/glsl-parser/index.js';
+import preprocess from '../node_modules/@shaderfrog/glsl-parser/preprocessor/index.js';
 
 const reservedFunctions = new Set(['min', 'max', 'clamp']);
+
+/**
+ * Resolves each original compilation unit's active branches before moving declarations.
+ * Desktop predefined macros are evaluated before the facade changes its version to ES.
+ *
+ * @param {string} source - One original shader compilation unit.
+ * @returns {string} Active source with compiler directives retained.
+ */
+function preprocessShaderUnit(source) {
+    const version = /^\s*#version\s+(\d+)(?:\s+(es|core|compatibility))?\b/m.exec(source);
+    const defines = { __VERSION__: version?.[1] || '110' };
+
+    if (version?.[2] === 'es' || version?.[1] === '100') {
+        defines.GL_ES = '1';
+    }
+
+    return preprocess(source, {
+        defines,
+        preserveComments: false,
+        preserve: {
+            version: preserveDirective,
+            extension: preserveDirective,
+            pragma: preserveDirective,
+            line: preserveDirective,
+            error: preserveDirective,
+        },
+    });
+}
+
+/**
+ * Leaves compiler directives for the actual GLSL compiler after branch selection.
+ *
+ * @returns {boolean} Retain this active directive.
+ */
+function preserveDirective() {
+    return true;
+}
 
 /**
  * Finds the scalar component type of a GLSL numeric type.
@@ -117,7 +155,7 @@ function pair(node, left, right) {
  * @returns {string} Structurally adapted GLSL for the actual ES compiler.
  */
 export function normalizeDesktopShader(source, stage) {
-    const ast = parse(source, { stage, quiet: true });
+    const ast = parse(preprocessShaderUnit(source), { stage, quiet: true });
     const types = new WeakMap();
     const functions = new Map();
     const definitions = [];
@@ -644,3 +682,5 @@ void main() {
 
     return { source: generate(ast), supported: true };
 }
+
+export { preprocessShaderUnit };
