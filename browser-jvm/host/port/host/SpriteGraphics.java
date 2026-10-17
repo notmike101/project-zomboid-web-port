@@ -76,6 +76,57 @@ public final class SpriteGraphics {
         return view;
     }
 
+    public static ShortBuffer memAllocShort(int count) {
+        ByteBuffer owner = memAlloc(allocationBytes(count, 2));
+        ShortBuffer view = owner.asShortBuffer();
+        synchronized (allocations) {
+            allocations.remove(owner);
+            allocations.put(view, owner);
+        }
+        return view;
+    }
+
+    public static ShortBuffer memRealloc(ShortBuffer previous, int count) {
+        return reallocate(previous, count, 2, SpriteGraphics::memAllocShort);
+    }
+
+    public static FloatBuffer memRealloc(FloatBuffer previous, int count) {
+        return reallocate(previous, count, 4, SpriteGraphics::memAllocFloat);
+    }
+
+    private static int allocationBytes(int count, int width) {
+        if (count < 0) throw new IllegalArgumentException("Negative capacity");
+        if (count > Integer.MAX_VALUE / width)
+            throw new UnsupportedOperationException("Browser direct allocation exceeds the Java byte-buffer capacity");
+        return count * width;
+    }
+
+    private static <T extends Buffer> T reallocate(T previous, int count, int width,
+            java.util.function.IntFunction<T> allocate) {
+        allocationBytes(count, width);
+        synchronized (allocations) {
+            ByteBuffer oldOwner = previous == null ? null : allocations.get(previous);
+            if (previous != null && oldOwner == null)
+                throw new IllegalArgumentException("Foreign or released browser allocation");
+            T replacement = allocate.apply(count);
+            try {
+                if (previous != null) {
+                    // LWJGL realloc copies the capacity prefix, independent of position/limit.
+                    ByteBuffer prefix = oldOwner.duplicate();
+                    prefix.clear().limit(Math.min(oldOwner.capacity(), allocations.get(replacement).capacity()));
+                    allocations.get(replacement).duplicate().clear().put(prefix);
+                    replacement.position(Math.min(previous.position(), count));
+                    free(previous);
+                }
+                return replacement;
+            } catch (Throwable failure) {
+                try { free(replacement); }
+                catch (Throwable cleanup) { failure.addSuppressed(cleanup); }
+                throw failure;
+            }
+        }
+    }
+
     public static IntBuffer memAllocInt(int count) {
         ByteBuffer owner = memAlloc(Math.multiplyExact(count, 4));
         IntBuffer view = owner.asIntBuffer();
@@ -87,6 +138,7 @@ public final class SpriteGraphics {
     }
     public static void memFree(ByteBuffer value){free(value);}
     public static void memFree(FloatBuffer value){free(value);}
+    public static void memFree(ShortBuffer value){free(value);}
     public static void memFree(IntBuffer value){free(value);}
     private static void free(Buffer value) {
         if (value == null) return;

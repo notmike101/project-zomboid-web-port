@@ -14,12 +14,17 @@ if (!jdk || !executablePath) {
 
 const root = path.resolve(import.meta.dirname, '..');
 const output = path.join(root, 'target/browser-jvm/native-memory');
-const prepared = path.join(root, 'target/browser-jvm/play/sprite-view.jar');
+const prepared = path.join(root, 'target/browser-jvm/play/runtime-view.jar');
 const classes = path.join(output, 'classes');
+const hostClasses = path.join(output, 'host-classes');
+const tools = path.join(output, 'tools');
 const archive = path.join(output, 'qualification.jar');
 const source = path.join(root, 'browser-jvm/NativeMemoryQualification.java');
+const inputSources = [source, import.meta.filename, ...['PrepareSpriteGraphics.java', 'host/port/host/SpriteGraphics.java', 'host/port/host/SpriteBuffers.java'].map((name) => path.join(root, 'browser-jvm', name))];
 const evidence = { pass: false, denied: [], logs: [] };
 let browser;
+let browserServer;
+let deadline;
 let server;
 
 /**
@@ -45,14 +50,47 @@ function command(name, args) {
     }
 }
 
+/**
+ * Bounds an operation on the browser owned by this verifier.
+ *
+ * @param {Promise<unknown>} operation - Owned browser operation.
+ * @returns {Promise<unknown>} The completed operation.
+ */
+async function bounded(operation) {
+    let timer;
+
+    try {
+        return await Promise.race([operation, new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Owned browser cleanup exceeded five seconds')), 5_000);
+        })]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 await mkdir(classes, { recursive: true });
+await mkdir(hostClasses, { recursive: true });
+await mkdir(tools, { recursive: true });
 
 try {
     const preparedBytes = await readFile(prepared);
 
     evidence.preparedArchive = prepared;
     evidence.sha256Before = hash(preparedBytes);
-    command('javac', ['--release', '17', '-cp', prepared, '-d', classes, source]);
+    evidence.sources = await Promise.all(inputSources.map(async (file) => ({ file, before: hash(await readFile(file)) })));
+    const hostSources = ['host/port/host/SpriteGraphics.java', 'host/port/host/SpriteBuffers.java'].map((name) => path.join(root, 'browser-jvm', name));
+
+    command('javac', ['--release', '17', '-cp', prepared, '-d', hostClasses, ...hostSources]);
+    command('javac', ['-d', tools, path.join(root, 'browser-jvm/PrepareSpriteGraphics.java')]);
+    command('java', ['-cp', tools, 'PrepareSpriteGraphics', prepared, output, hostClasses]);
+    const view = path.join(output, 'sprite-view.jar');
+    const viewBytes = await readFile(view);
+
+    evidence.viewSha256Before = hash(viewBytes);
+
+    command('javac', ['--release', '17', '-cp', view, '-d', classes, source]);
+    command('java', ['-Djdk.util.jar.version=17', '-cp', [classes, view].join(path.delimiter), 'NativeMemoryQualification', 'jvm']);
+    evidence.jvmPassed = true;
     command('jar', ['--create', '--file', archive, '-C', classes, 'NativeMemoryQualification.class']);
     const html = `<script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script><script>
         (async () => {
@@ -69,7 +107,7 @@ try {
     const files = new Map([
         ['/', Buffer.from(html)],
         ['/qualification.jar', await readFile(archive)],
-        ['/sprite-view.jar', preparedBytes],
+        ['/sprite-view.jar', viewBytes],
     ]);
 
     server = createServer((request, response) => {
@@ -113,7 +151,12 @@ try {
     });
     const origin = `http://127.0.0.1:${server.address().port}`;
 
-    browser = await chromium.launch({ executablePath, headless: true });
+    browserServer = await chromium.launchServer({ executablePath, headless: true });
+    deadline = setTimeout(() => {
+        evidence.deadlineExceeded = true;
+        void browserServer.kill().catch((error) => evidence.logs.push(String(error)));
+    }, 150_000);
+    browser = await chromium.connect(browserServer.wsEndpoint());
     const context = await browser.newContext({ serviceWorkers: 'block' });
 
     await context.route('**/*', async (route) => {
@@ -141,12 +184,29 @@ try {
 } catch (error) {
     evidence.error = String(error.stack || error);
 } finally {
+    clearTimeout(deadline);
+
     try {
-        await browser?.close();
-        evidence.browserClosed = true;
+        await bounded(browser?.close() || Promise.resolve());
     } catch (error) {
         evidence.cleanupError = String(error);
         evidence.pass = false;
+    }
+
+    if (browserServer) {
+        const process = browserServer.process();
+
+        try {
+            if (process.exitCode === null && process.signalCode === null) {
+                await bounded(browserServer.kill());
+            }
+
+            evidence.browserClosed = process.exitCode !== null || process.signalCode !== null;
+            evidence.pass = evidence.pass && evidence.browserClosed;
+        } catch (error) {
+            evidence.cleanupError = String(error);
+            evidence.pass = false;
+        }
     }
 
     if (server) {
@@ -158,12 +218,20 @@ try {
 
     try {
         evidence.sha256After = hash(await readFile(prepared));
+        evidence.viewSha256After = hash(await readFile(path.join(output, 'sprite-view.jar')));
+        await Promise.all((evidence.sources || []).map(async (input) => {
+            input.after = hash(await readFile(input.file));
+
+            if (input.before !== input.after) {
+                evidence.pass = false;
+            }
+        }));
     } catch (error) {
         evidence.hashError = String(error);
         evidence.pass = false;
     }
 
-    if (evidence.sha256Before !== evidence.sha256After) {
+    if (evidence.sha256Before !== evidence.sha256After || evidence.viewSha256Before !== evidence.viewSha256After) {
         evidence.pass = false;
     }
 
