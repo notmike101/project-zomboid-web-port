@@ -69,19 +69,25 @@ try {
     await writeFile(runtimeCopy, await snapshot(runtime));
     const hostSources = ['SpriteGraphics.java', 'SpriteBuffers.java'].map((name) => path.join(root, 'browser-jvm/host/port/host', name));
     const fixture = path.join(root, 'browser-jvm/ViewportQualification.java');
+    const textureFixture = path.join(root, 'browser-jvm/TextureEnvQualification.java');
     const preparation = path.join(root, 'browser-jvm/PrepareSpriteGraphics.java');
 
-    await Promise.all([...hostSources, fixture, preparation].map(snapshot));
-    command('javac', ['--release', '17', '-cp', gameJar, '-d', classes, ...hostSources, fixture]);
+    await Promise.all([...hostSources, fixture, textureFixture, preparation].map(snapshot));
+    command('javac', ['--release', '17', '-cp', gameJar, '-d', classes, ...hostSources, fixture, textureFixture]);
     command('javac', ['-d', preparer, preparation]);
     command('java', ['-cp', preparer, 'PrepareSpriteGraphics', runtimeCopy, output, classes]);
-    command('jar', ['--create', '--file', path.join(output, 'qualification.jar'), '-C', classes, 'ViewportQualification.class']);
+    command('jar', ['--create', '--file', path.join(output, 'qualification.jar'), '-C', classes, 'ViewportQualification.class', '-C', classes, 'TextureEnvQualification.class']);
     evidence.manifest = JSON.parse(await readFile(path.join(output, 'sprite-graphics-manifest.json'), 'utf8'));
     const legacy = evidence.manifest.adaptedVendorClasses.find((entry) => entry.class === 'org/lwjgl/opengl/GL11');
 
-    assert.deepEqual(legacy.methods.slice().sort(), ['glAlphaFunc(IF)V->glAlphaFunc', 'glPopAttrib()V->glPopAttrib', 'glPolygonMode(II)V->glPolygonMode', 'glPushAttrib(I)V->glPushAttrib'].sort());
+    assert.deepEqual(legacy.methods.slice().sort(), ['glAlphaFunc(IF)V->glAlphaFunc', 'glPopAttrib()V->glPopAttrib', 'glPolygonMode(II)V->glPolygonMode', 'glPushAttrib(I)V->glPushAttrib', 'glTexEnvi(III)V->glTexEnvi'].sort());
     assert.equal(evidence.manifest.gameMethodBodiesUnchanged, true);
+    const shaderRoot = path.join(path.dirname(gameJar), 'media/shaders');
     const routes = new Map([
+        ['/original-shaders/default.vert', path.join(shaderRoot, 'default.vert')],
+        ['/original-shaders/default.frag', path.join(shaderRoot, 'default.frag')],
+        ['/browser-jvm/texture-env-qualification.html', path.join(root, 'browser-jvm/texture-env-qualification.html')],
+        ['/browser-jvm/texture-env-qualification.js', path.join(root, 'browser-jvm/texture-env-qualification.js')],
         ['/qualification.jar', path.join(output, 'qualification.jar')],
         ['/sprite-view.jar', path.join(output, 'sprite-view.jar')],
         ['/browser-jvm/viewport-qualification.html', path.join(root, 'browser-jvm/viewport-qualification.html')],
@@ -151,6 +157,18 @@ try {
     evidence.result = await page.evaluate(() => globalThis.result);
     assert.equal(evidence.result.pass, true, evidence.result.error);
     assert.equal(evidence.result.stackDepth, 0);
+    await page.close();
+    const texturePage = await context.newPage();
+
+    texturePage.on('console', (message) => evidence.logs.push(message.text()));
+    texturePage.on('pageerror', (error) => evidence.logs.push(String(error)));
+    await texturePage.goto(`${origin}/browser-jvm/texture-env-qualification.html`);
+    await texturePage.waitForFunction(() => globalThis.completed, null, { timeout: 90_000 });
+    evidence.textureEnvironment = await texturePage.evaluate(() => globalThis.result);
+    assert.equal(evidence.textureEnvironment.pass, true, evidence.textureEnvironment.error);
+    assert.equal(evidence.textureEnvironment.javaChecks, 18);
+    assert.equal(evidence.textureEnvironment.checks, 47);
+    assert.deepEqual(evidence.textureEnvironment.pixels, [64, 32, 16, 64, 0, 0, 255, 255]);
     assert.equal(evidence.denied.length, 0);
     assert.equal(evidence.logs.filter((line) => /Exception|Error:|SEVERE/.test(line)).length, 0);
     evidence.pass = true;

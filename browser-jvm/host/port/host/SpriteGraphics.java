@@ -144,6 +144,22 @@ public final class SpriteGraphics {
     public static native void glBlendFuncSeparate(int srcRgb,int dstRgb,int srcAlpha,int dstAlpha);
     public static native void glBlendEquation(int mode);
     public static native void glViewport(int x,int y,int width,int height);
+    /** Only default MODULATE is admitted; other known selector families remain unqualified. */
+    public static void glTexEnvi(int target, int name, int value) {
+        if (target == 8960 && name == 8704 && value != 8448
+                && Set.of(260, 8449, 3042, 7681, 34160).contains(value)) {
+            throw new UnsupportedOperationException("Unqualified texture environment mode: " + value);
+        }
+        if ((target == 8960 && name != 8704
+                && Set.of(34161, 34162, 34163, 3356, 34176, 34177, 34178, 34184, 34185,
+                        34186, 34192, 34193, 34194, 34200, 34201, 34202).contains(name))
+                || (target == 34048 && name == 34049)
+                || (target == 34913 && name == 34914)) {
+            throw new UnsupportedOperationException("Unqualified texture environment selector");
+        }
+        textureEnvironment(target, name, value);
+    }
+    private static native void textureEnvironment(int target, int name, int value);
     /** WebGL fills polygon interiors; boundary-only rasterization needs a separate implementation. */
     public static void glPolygonMode(int face,int mode) {
         if ((face==1028||face==1029||face==1032) && (mode==6912||mode==6913)) {

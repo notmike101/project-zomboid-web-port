@@ -670,6 +670,18 @@ export function createSpriteNatives(canvas, report) {
             return cap === gl.TEXTURE_2D ? legacyTexture.get(activeUnit) === true : gl.isEnabled(cap);
         },
         /**
+         * Retains the qualified default MODULATE invariant; invalid enums do not change GPU state.
+         *
+         * @param {number} target - Original texture environment selector.
+         * @param {number} name - Original parameter name.
+         * @param {number} value - Qualified MODULATE value, or invalid enum to report.
+         */
+        textureEnvironment: (target, name, value) => {
+            if (target !== 8_960 || name !== 8_704 || value !== 8_448) {
+                compatibilityError ||= gl.INVALID_ENUM;
+            }
+        },
+        /**
          * Preserves filled rasterization without sending unavailable desktop enums to WebGL.
          *
          * @param {number} face - Original front, back or both enum.
