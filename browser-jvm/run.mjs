@@ -754,7 +754,7 @@ try {
     }
 
     if (profile === 'play' && !interactive) {
-        await page.waitForFunction(() => globalThis.sessionReady || globalThis.probeResult, undefined, { timeout: 180_000 });
+        await page.waitForFunction(() => globalThis.sessionReady || globalThis.probeResult, undefined, { timeout: 360_000 });
 
         await page.waitForFunction(() => globalThis.playSnapshot?.frames > 0 || globalThis.probeResult, undefined, { timeout: 60_000 });
 

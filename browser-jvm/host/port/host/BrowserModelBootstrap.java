@@ -31,6 +31,11 @@ public final class BrowserModelBootstrap {
         BrowserWorldBootstrap.initializeLua();
         progress.accept("original-script-lifecycle");
         BrowserContentBootstrap.loadDefinitions();
+        initializeModels(progress);
+    }
+
+    /** Initializes original GPU models after mounted content and Lua definitions exist. */
+    public static void initializeModels(Consumer<String> progress) throws Exception {
         int animationMeshes = ScriptManager.instance.getAllAnimationsMeshes().size();
         if (animationMeshes != 75 || ScriptManager.instance.getAnimationsMesh("Human") == null)
             throw new AssertionError("Installed full animation-mesh definitions differ: " + animationMeshes);
@@ -71,7 +76,7 @@ public final class BrowserModelBootstrap {
         Thread.sleep(1);
     }
 
-    private static void mount() throws Exception {
+    public static void mount() throws Exception {
         try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(Path.of("/app/animation-assets.jar")))) {
             for (ZipEntry entry; (entry = zip.getNextEntry()) != null;) {
                 if (entry.isDirectory() || entry.getName().equals("META-INF/MANIFEST.MF")) continue;
