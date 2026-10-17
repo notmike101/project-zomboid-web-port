@@ -1,5 +1,11 @@
 # Incremental original-bytecode compatibility
 
+## Original menu completed-frame inspection
+
+A new immutable-input browser run holds the Java menu owner after a completed original frame while capturing pixels. The Solo frame remains at frame 55 throughout capture and visibly contains all six original mode headings, icons, descriptions and borders; the earlier partial Solo screenshots were captured during subsequent drawing. Original mouse release, mode selection and normal menu exit also pass. This is the original UI, with no authored replacement panels.
+
+The spawn-selection capture holds frame 76 and reports actual map data loaded, but its map area is blank and the original UI displays `ERROR 13`. This is a failed map-rendering result despite the raw automated controller verdict being true, zero GL errors and loaded data. The raw result is retained; the visual assessment explicitly rejects a complete map pass. Original `ExceptionLogger` increments its private count independently of whether its DebugLog stream is enabled, so the former Lua logger/console checks missed these caught exceptions. The next diagnostic reads that count without resetting it, enables the original error stream and stops at the first caught exception. Input copies isolate this diagnostic from graphics work in progress.
+
 ## Original population consumer in a real browser
 
 The private full-context population integration now passes through original loading of all 4,065 Java metadata cells, original outfit seed persistence/reopen, 361 selected ready textures and the original population consumer. Five naturally generated records become five actual `IsoZombie` objects with matching native IDs, positions and registration state. Original reporting includes five real zombies; original removal returns actor, registry and real-zombie counts to zero. Nine unique chunk-load/collision notifications retain ownership. The test uses the actual initial age of two hours and redistribution setting of twelve hours, without injected IDs, positions or readiness flags.

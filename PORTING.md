@@ -1,5 +1,9 @@
 # Toward a playable original-bytecode port
 
+## Menu rendering and caught-error frontier
+
+Holding the original menu owner after a completed frame qualifies the complete six-panel Solo image and explains earlier partial captures. It does not fix the spawn map: that completed frame still has a blank map area and the original `ERROR 13` popup. Keep the raw automated true verdict separate from this visual failure. Observe original `ExceptionLogger.exceptionCount` read-only and forward the original enabled error stream so a caught renderer exception fails verification even when GL reports zero and Lua's Java logger reports no severe record. Diagnose against the same immutable known renderer before mixing in the new attribute-stack implementation.
+
 ## Original zombie consumer milestone
 
 A private actual-browser integration now passes full Java metadata loading (4,065 cells), original outfit seed persistence and texture readiness, followed by five naturally generated records becoming five original `IsoZombie` objects. Native identity, registration/reporting and original release are checked; cleanup stops the real owners and all 5,005 monitored inputs remain unchanged with zero initialization errors or denied requests. No IDs, positions or game readiness values are forced.
