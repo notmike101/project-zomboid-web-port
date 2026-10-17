@@ -104,7 +104,7 @@ try {
     await Promise.all(sdk.map((name) => snapshot(path.join(root, 'target/browser-jvm/play', name), `/${name}`)));
     await snapshot(path.join(output, 'qualification.jar'), '/qualification.jar');
     await snapshot(path.join(output, 'atomic-view.jar'), '/atomic-view.jar');
-    await Promise.all(['browser-clock.js', 'sprite-webgl.js', 'glsl-compat.js'].map((name) => snapshot(path.join(root, 'browser-jvm', name), `/${name}`)));
+    await Promise.all(['browser-clock.js', 'sprite-webgl.js', 'sprite-attrib.js', 'glsl-compat.js'].map((name) => snapshot(path.join(root, 'browser-jvm', name), `/${name}`)));
     await Promise.all(['index.js', 'error.js', 'ast/index.js', 'ast/ast.js', 'ast/visit.js', 'ast/ast-types.js', 'parser/index.js', 'parser/parser.js', 'parser/generator.js', 'parser/grammar.js', 'parser/scope.js', 'parser/utils.js', 'preprocessor/index.js', 'preprocessor/preprocessor.js', 'preprocessor/preprocessor-parser.js', 'preprocessor/generator.js'].map((name) => snapshot(path.join(root, 'node_modules/@shaderfrog/glsl-parser', name), `/node_modules/@shaderfrog/glsl-parser/${name}`)));
     const classpath = ['qualification.jar', ...sdk, 'atomic-view.jar'].map((name) => `/app/${name}`).join(':');
 

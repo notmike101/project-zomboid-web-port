@@ -508,6 +508,7 @@ try {
 
     if (graphicsProfile) {
         routes.set('/sprite-webgl.js', { file: path.join(source, 'sprite-webgl.js'), type: 'text/javascript' });
+        routes.set('/sprite-attrib.js', { file: path.join(source, 'sprite-attrib.js'), type: 'text/javascript' });
         routes.set('/unsafe-short-repair.js', { file: path.join(source, 'unsafe-short-repair.js'), type: 'text/javascript' });
         routes.set('/glsl-compat.js', { file: path.join(source, 'glsl-compat.js'), type: 'text/javascript' });
 

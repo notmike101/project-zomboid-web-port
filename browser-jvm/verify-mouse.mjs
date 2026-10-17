@@ -169,7 +169,7 @@ for (const n of [
     hashes.set(`${root}target/browser-jvm/play/${n}`, sha(b));
 }
 
-for (const n of ['sprite-webgl.js', 'glsl-compat.js']) {
+for (const n of ['sprite-webgl.js', 'sprite-attrib.js', 'glsl-compat.js']) {
     await add(`/${n}`, `${root}browser-jvm/${n}`);
 }
 

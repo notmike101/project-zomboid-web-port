@@ -104,7 +104,7 @@ for (const name of ['keyboard-events-entry.jar', 'keyboard-events-view.jar']) {
     await add(`/${name}`, out + name);
 }
 
-for (const name of ['keyboard.js', 'browser-clock.js', 'sprite-webgl.js', 'glsl-compat.js', 'keyboard-events-qualification.js']) {
+for (const name of ['keyboard.js', 'browser-clock.js', 'sprite-webgl.js', 'sprite-attrib.js', 'glsl-compat.js', 'keyboard-events-qualification.js']) {
     await add(`/${name}`, `${root}browser-jvm/${name}`, true);
 }
 

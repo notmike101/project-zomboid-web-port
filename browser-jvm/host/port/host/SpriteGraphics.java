@@ -222,15 +222,13 @@ public final class SpriteGraphics {
         polygonMode(face,mode);
     }
     private static native void polygonMode(int face,int mode);
-    /** Only the qualified viewport group is implemented; undefined group bits are ignored by GL. */
+    /** Saves hosted desktop state groups; undefined group bits are ignored by GL. */
     public static void glPushAttrib(int mask) {
-        int groups = mask & 0x200fffff;
-        if ((groups & ~0x800) != 0) {
-            throw new UnsupportedOperationException("Unqualified desktop attribute groups: " + groups);
-        }
-        pushViewportAttributes((groups & 0x800) != 0);
+        pushAttributes(mask & 0x200fffff);
     }
-    private static native void pushViewportAttributes(boolean viewport);
+    private static native void pushAttributes(int mask);
+    public static native void glPushClientAttrib(int mask);
+    public static native void glPopClientAttrib();
     public static native void glPopAttrib();
     public static native void glClearColor(float red,float green,float blue,float alpha);
     public static native void glClear(int mask);

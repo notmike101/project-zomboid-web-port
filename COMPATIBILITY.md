@@ -1,5 +1,11 @@
 # Incremental original-bytecode compatibility
 
+## Original client and server attribute-stack services
+
+The missing original skybox attribute calls now have a separately qualified host implementation. Two independent sixteen-entry stacks save and restore the currently hosted server and client groups, including actual viewport/depth, blend/color, front/back stencil, enable, alpha/line compatibility, generic attribute arrays/current values, pixel-store and per-unit texture bindings/parameters. The original all-server mask does not silently add the separate multisample bit. Selected masks, nesting, overflow/underflow and original Java catch/finally behavior remain checked. Unsupported conventional fixed-function arrays still reject explicitly.
+
+Deletion preserves actual ownership: a deleted public buffer/texture name disappears and current references detach immediately, while saved or restored state retains the real object. Nested stacks can restore and draw from those retained objects; replacing the last reference physically releases them. Forty actual GPU/state checks and twelve original Java ABI checks pass, including exact RGBA `[64,128,192,255]` from retained geometry/texture, nonzero texture units and fractional LOD. Image contents, shader programs and framebuffer bindings/attachments are not restored as attribute data. All existing viewport, texture environment, indexed-quad and depth/mipmap checks pass, all 42 monitored hashes remain unchanged, requests denied are zero and the browser closes. Buffer/texture/program/FBO owners reach zero. Two pre-existing source-shader metadata records remain; no physical shader-lifetime claim is made. This is a platform component pass, not a completed original-world frame.
+
 ## Original menu completed-frame inspection
 
 A new immutable-input browser run holds the Java menu owner after a completed original frame while capturing pixels. The Solo frame remains at frame 55 throughout capture and visibly contains all six original mode headings, icons, descriptions and borders; the earlier partial Solo screenshots were captured during subsequent drawing. Original mouse release, mode selection and normal menu exit also pass. This is the original UI, with no authored replacement panels.

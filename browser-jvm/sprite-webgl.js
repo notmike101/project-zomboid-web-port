@@ -1,4 +1,5 @@
 import { normalizeDesktopShader, preprocessShaderUnit, instrumentAlphaTest, hasAlphaIdentifiers, alphaNames } from './glsl-compat.js';
+import { SpriteAttributeState } from './sprite-attrib.js';
 
 /**
  * Resolves an owned graphics handle and rejects foreign handles.
@@ -52,7 +53,6 @@ export function createSpriteNatives(canvas, report) {
     }
 
     let next = 1;
-    let activeUnit = gl.TEXTURE0;
     let eventWidth = canvas.width;
     let eventHeight = canvas.height;
     let eventResized = false;
@@ -70,15 +70,9 @@ export function createSpriteNatives(canvas, report) {
     const sourceDefaults = new Map();
     const attached = new Map();
     const locationOwners = new Map();
-    const legacyTexture = new Map();
-    let lineSmoothEnabled = false;
     const clientArrays = new Set([32_884, 32_885, 32_886, 32_887, 32_888, 32_889, 33_879, 33_886]);
-    let alphaEnabled = false;
-    let alphaFunction = 519;
-    let alphaReference = 0;
-    let compatibilityError = 0;
-    const attributeStack = [];
-    const maxAttributeStackDepth = 16;
+    const compatibility = { activeUnit: gl.TEXTURE0, legacyTexture: new Map(), lineSmoothEnabled: false, alphaEnabled: false, alphaFunction: 519, alphaReference: 0, error: 0 };
+    const attributeState = new SpriteAttributeState(gl, buffers, textures, compatibility);
     const alphaPrograms = new WeakMap();
     /**
      * Excludes injected uniforms while retaining every original uniform on unsupported programs.
@@ -108,11 +102,11 @@ export function createSpriteNatives(canvas, report) {
         const program = gl.getParameter(gl.CURRENT_PROGRAM);
         const info = program && alphaPrograms.get(program);
 
-        if (alphaEnabled && !info?.supported) {
+        if (compatibility.alphaEnabled && !info?.supported) {
             throw new Error(`Unsupported alpha-test draw: ${info?.reason || 'no instrumented fragment program'}`);
         }
 
-        if (alphaEnabled && gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)) {
+        if (compatibility.alphaEnabled && gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)) {
             const type = gl.getFramebufferAttachmentParameter(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE);
 
             if (type !== gl.NONE && gl.getFramebufferAttachmentParameter(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE) === gl.FLOAT) {
@@ -121,8 +115,8 @@ export function createSpriteNatives(canvas, report) {
         }
 
         if (info?.supported) {
-            gl.uniform1i(info.functionLocation, alphaEnabled ? alphaFunction : 519);
-            gl.uniform1f(info.referenceLocation, alphaReference);
+            gl.uniform1i(info.functionLocation, compatibility.alphaEnabled ? compatibility.alphaFunction : 519);
+            gl.uniform1f(info.referenceLocation, compatibility.alphaReference);
         }
     };
 
@@ -155,6 +149,10 @@ export function createSpriteNatives(canvas, report) {
         const id = next++;
 
         map.set(id, value);
+
+        if (map === buffers || map === textures) {
+            attributeState.remember(map === buffers ? 'buffer' : 'texture', id, value);
+        }
 
         return id;
     };
@@ -338,13 +336,13 @@ export function createSpriteNatives(canvas, report) {
         const Index = new Map([[gl.UNSIGNED_BYTE, Uint8Array], [gl.UNSIGNED_SHORT, Uint16Array], [gl.UNSIGNED_INT, Uint32Array]]).get(type);
 
         if (!Index) {
-            compatibilityError ||= gl.INVALID_ENUM;
+            compatibility.error ||= gl.INVALID_ENUM;
 
             return;
         }
 
         if (count < 0 || (range && range[1] < range[0])) {
-            compatibilityError ||= gl.INVALID_VALUE;
+            compatibility.error ||= gl.INVALID_VALUE;
 
             return;
         }
@@ -364,7 +362,7 @@ export function createSpriteNatives(canvas, report) {
         const width = Index.BYTES_PER_ELEMENT;
 
         if (!original || offset < 0 || offset % width !== 0 || offset + count * width > gl.getBufferParameter(gl.ELEMENT_ARRAY_BUFFER, gl.BUFFER_SIZE)) {
-            compatibilityError ||= gl.INVALID_OPERATION;
+            compatibility.error ||= gl.INVALID_OPERATION;
 
             return;
         }
@@ -382,7 +380,7 @@ export function createSpriteNatives(canvas, report) {
                 throw error;
             }
 
-            compatibilityError ||= gl.OUT_OF_MEMORY;
+            compatibility.error ||= gl.OUT_OF_MEMORY;
 
             return;
         }
@@ -401,7 +399,7 @@ export function createSpriteNatives(canvas, report) {
         const temporary = gl.createBuffer();
 
         if (!temporary) {
-            compatibilityError ||= gl.OUT_OF_MEMORY;
+            compatibility.error ||= gl.OUT_OF_MEMORY;
 
             return;
         }
@@ -526,17 +524,18 @@ export function createSpriteNatives(canvas, report) {
          *
          * @param {number} target - Numeric target argument for the declared operation.
          * @param {number} id - Numeric id argument for the declared operation.
-         * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        bufferBind: (target, id) => gl.bindBuffer(target, object(buffers, id)),
+        bufferBind: (target, id) => {
+            gl.bindBuffer(target, object(buffers, id));
+            attributeState.collect();
+        },
         /**
          * Performs the buffer delete operation for the owned browser runtime.
          *
          * @param {number} id - Numeric id argument for the declared operation.
          */
         bufferDelete: (id) => {
-            gl.deleteBuffer(object(buffers, id));
-            buffers.delete(id);
+            attributeState.deleteBuffer(id);
         },
         /**
          * Performs the buffer is operation for the owned browser runtime.
@@ -544,7 +543,7 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} id - Numeric id argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        bufferIs: (id) => gl.isBuffer(object(buffers, id)),
+        bufferIs: (id) => buffers.has(id) && gl.isBuffer(buffers.get(id)),
         /**
          * Performs the buffer data size operation for the owned browser runtime.
          *
@@ -603,9 +602,9 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         rawError: () => {
-            const result = compatibilityError;
+            const result = compatibility.error;
 
-            compatibilityError = 0;
+            compatibility.error = 0;
 
             return result || gl.getError();
         },
@@ -617,7 +616,7 @@ export function createSpriteNatives(canvas, report) {
          */
         integerState: (name) => {
             if (name === 2_848) {
-                return Number(lineSmoothEnabled);
+                return Number(compatibility.lineSmoothEnabled);
             }
 
             if (clientArrays.has(name)) {
@@ -625,15 +624,23 @@ export function createSpriteNatives(canvas, report) {
             }
 
             if (name === 0x0B_B0) {
-                return attributeStack.length;
+                return attributeState.server.length;
             }
 
             if (name === 0x0D_35) {
-                return maxAttributeStackDepth;
+                return attributeState.maximum;
             }
 
             if (name === 0x0B_C1) {
-                return alphaFunction;
+                return compatibility.alphaFunction;
+            }
+
+            if (name === 0x0B_B1) {
+                return attributeState.client.length;
+            }
+
+            if (name === 0x0D_3B) {
+                return attributeState.maximum;
             }
 
             const value = gl.getParameter(name);
@@ -658,6 +665,12 @@ export function createSpriteNatives(canvas, report) {
                 }
             }
 
+            const retained = attributeState.objectId(value);
+
+            if (retained !== undefined) {
+                return retained;
+            }
+
             throw new Error(`Unsupported scalar graphics query ${name}`);
         },
         /**
@@ -669,9 +682,11 @@ export function createSpriteNatives(canvas, report) {
          * @param {boolean} normalized - Requested boolean option.
          * @param {number} stride - Numeric stride argument for the declared operation.
          * @param {number} offset - Numeric offset argument for the declared operation.
-         * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        vertexPointer: (index, size, type, normalized, stride, offset) => gl.vertexAttribPointer(index, size, type, normalized, stride, offset),
+        vertexPointer: (index, size, type, normalized, stride, offset) => {
+            gl.vertexAttribPointer(index, size, type, normalized, stride, offset);
+            attributeState.collect();
+        },
         /**
          * Performs the draw range operation for the owned browser runtime.
          *
@@ -765,7 +780,7 @@ export function createSpriteNatives(canvas, report) {
             gl.activeTexture(unit);
 
             if (unit >= gl.TEXTURE0 && unit < gl.TEXTURE0 + gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS)) {
-                activeUnit = unit;
+                compatibility.activeUnit = unit;
             }
         },
         /**
@@ -775,19 +790,19 @@ export function createSpriteNatives(canvas, report) {
          */
         glEnable: (cap) => {
             if (cap === 2_848) {
-                lineSmoothEnabled = true;
+                compatibility.lineSmoothEnabled = true;
 
                 return;
             }
 
             if (cap === 3_008) {
-                alphaEnabled = true;
+                compatibility.alphaEnabled = true;
 
                 return;
             }
 
             if (cap === gl.TEXTURE_2D) {
-                legacyTexture.set(activeUnit, true);
+                compatibility.legacyTexture.set(compatibility.activeUnit, true);
             } else {
                 gl.enable(cap);
             }
@@ -799,19 +814,19 @@ export function createSpriteNatives(canvas, report) {
          */
         glDisable: (cap) => {
             if (cap === 2_848) {
-                lineSmoothEnabled = false;
+                compatibility.lineSmoothEnabled = false;
 
                 return;
             }
 
             if (cap === 3_008) {
-                alphaEnabled = false;
+                compatibility.alphaEnabled = false;
 
                 return;
             }
 
             if (cap === gl.TEXTURE_2D) {
-                legacyTexture.set(activeUnit, false);
+                compatibility.legacyTexture.set(compatibility.activeUnit, false);
             } else {
                 gl.disable(cap);
             }
@@ -824,7 +839,7 @@ export function createSpriteNatives(canvas, report) {
          */
         glIsEnabled: (cap) => {
             if (cap === 2_848) {
-                return lineSmoothEnabled;
+                return compatibility.lineSmoothEnabled;
             }
 
             if (clientArrays.has(cap)) {
@@ -832,13 +847,14 @@ export function createSpriteNatives(canvas, report) {
             }
 
             if (cap === 3_008) {
-                return alphaEnabled;
+                return compatibility.alphaEnabled;
             }
 
-            return cap === gl.TEXTURE_2D ? legacyTexture.get(activeUnit) === true : gl.isEnabled(cap);
+            return cap === gl.TEXTURE_2D ? compatibility.legacyTexture.get(compatibility.activeUnit) === true : gl.isEnabled(cap);
         },
         /**
-         * Retains the qualified default MODULATE invariant; invalid enums do not change GPU state.
+         * Retains the qualified default MODULATE invariant;
+         invalid enums do not change GPU state.
          *
          * @param {number} target - Original texture environment selector.
          * @param {number} name - Original parameter name.
@@ -846,7 +862,7 @@ export function createSpriteNatives(canvas, report) {
          */
         textureEnvironment: (target, name, value) => {
             if (target !== 8_960 || name !== 8_704 || value !== 8_448) {
-                compatibilityError ||= gl.INVALID_ENUM;
+                compatibility.error ||= gl.INVALID_ENUM;
             }
         },
         /**
@@ -857,24 +873,25 @@ export function createSpriteNatives(canvas, report) {
          */
         polygonMode: (face, mode) => {
             if (![1_028, 1_029, 1_032].includes(face) || mode !== 6_914) {
-                compatibilityError ||= gl.INVALID_ENUM;
+                compatibility.error ||= gl.INVALID_ENUM;
             }
         },
         /**
-         * Retains the desktop comparison and normalized-buffer reference; invalid enums preserve state.
+         * Retains the desktop comparison and normalized-buffer reference;
+         invalid enums preserve state.
          *
          * @param {number} comparison - One of the eight original alpha comparison enums.
          * @param {number} reference - Reference value from the original float ABI.
          */
         glAlphaFunc: (comparison, reference) => {
             if (!Number.isInteger(comparison) || comparison < 512 || comparison > 519) {
-                compatibilityError ||= gl.INVALID_ENUM;
+                compatibility.error ||= gl.INVALID_ENUM;
 
                 return;
             }
 
-            alphaFunction = comparison;
-            alphaReference = Math.fround(Math.min(1, Math.max(0, reference)));
+            compatibility.alphaFunction = comparison;
+            compatibility.alphaReference = Math.fround(Math.min(1, Math.max(0, reference)));
         },
         /**
          * Executes the selected glBlendFunc operation against the actual WebGL context.
@@ -918,7 +935,7 @@ export function createSpriteNatives(canvas, report) {
          */
         glDisableClientState: (array) => {
             if (!clientArrays.has(array)) {
-                compatibilityError ||= gl.INVALID_ENUM;
+                compatibility.error ||= gl.INVALID_ENUM;
             }
         },
         /**
@@ -927,7 +944,7 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} mode - Original primitive enum.
          * @returns {boolean} Whether smooth coverage needs an unimplemented single-sample path.
          */
-        unsupportedSmoothLine: (mode) => lineSmoothEnabled && [1, 2, 3].includes(mode) && gl.getParameter(gl.SAMPLE_BUFFERS) === 0,
+        unsupportedSmoothLine: (mode) => compatibility.lineSmoothEnabled && [1, 2, 3].includes(mode) && gl.getParameter(gl.SAMPLE_BUFFERS) === 0,
         /**
          * Sets actual implementation-supported line width.
          *
@@ -945,39 +962,28 @@ export function createSpriteNatives(canvas, report) {
             gl.frontFace(winding);
         },
         /**
-         * Saves a copy of the actual viewport group, or an empty mask entry.
-         * Unsupported defined groups are rejected by the Java facade before this call.
+         * Saves the actual groups selected by an original desktop attribute mask.
          *
-         * @param {boolean} viewport - Whether GL_VIEWPORT_BIT was selected.
+         * @param {number} mask - Defined desktop group bits.
          */
-        pushViewportAttributes: (viewport) => {
-            if (attributeStack.length === maxAttributeStackDepth) {
-                compatibilityError ||= 0x05_03;
-
-                return;
-            }
-
-            attributeStack.push(viewport
-                ? {
-                        viewport: Array.from(gl.getParameter(gl.VIEWPORT)),
-                        depthRange: Array.from(gl.getParameter(gl.DEPTH_RANGE)),
-                    }
-                : null);
+        pushAttributes: (mask) => {
+            attributeState.pushServer(mask);
         },
-        /** Restores only groups selected by the matching original push. */
+        /** Restores only server groups selected by the matching push. */
         glPopAttrib: () => {
-            if (attributeStack.length === 0) {
-                compatibilityError ||= 0x05_04;
-
-                return;
-            }
-
-            const saved = attributeStack.pop();
-
-            if (saved) {
-                gl.viewport(...saved.viewport);
-                gl.depthRange(...saved.depthRange);
-            }
+            attributeState.popServer();
+        },
+        /**
+         * Captures original client pixel-store and generic vertex-array state.
+         *
+         * @param {number} mask - Original desktop client attribute mask.
+         */
+        glPushClientAttrib: (mask) => {
+            attributeState.pushClient(mask);
+        },
+        /** Restores only the matching client groups. */
+        glPopClientAttrib: () => {
+            attributeState.popClient();
         },
         /**
          * Executes the selected glClearColor operation against the actual WebGL context.
@@ -995,7 +1001,14 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} mask - Numeric mask argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        // Desktop clears of an absent accumulation buffer have no effect; WebGL has none.
+        /* Desktop clears of an absent accumulation buffer have no effect;
+           WebGL has none. */
+        /**
+         * Clears supported buffers while ignoring the absent accumulation buffer.
+         *
+         * @param {number} mask - Original clear mask.
+         * @returns {undefined} Completion of the actual clear operation.
+         */
         glClear: (mask) => gl.clear(mask & ~0x02_00),
         /**
          * Sets both faces' actual stencil write masks.
@@ -1050,12 +1063,14 @@ export function createSpriteNatives(canvas, report) {
         /**
          * Generates real mip levels for the currently bound browser texture.
          *
-         * @param {number} target - Original texture target; driver validates target and format.
+         * @param {number} target - Original texture target;
+         driver validates target and format.
          * @returns {undefined} Completion of actual mip generation.
          */
         glGenerateMipmap: (target) => gl.generateMipmap(target),
         /**
-         * Sets the actual scissor box; WebGL retains invalid negative-size errors.
+         * Sets the actual scissor box;
+         * WebGL retains invalid negative-size errors.
          *
          * @param {number} x - Left edge in framebuffer pixels.
          * @param {number} y - Bottom edge in framebuffer pixels.
@@ -1065,7 +1080,8 @@ export function createSpriteNatives(canvas, report) {
          */
         glScissor: (x, y, width, height) => gl.scissor(x, y, width, height),
         /**
-         * Sets the actual depth comparison function; WebGL retains invalid-enum errors.
+         * Sets the actual depth comparison function;
+         * WebGL retains invalid-enum errors.
          *
          * @param {number} comparison - Original OpenGL depth comparison enum.
          * @returns {undefined} Completion of the WebGL state update.
@@ -1520,22 +1536,18 @@ export function createSpriteNatives(canvas, report) {
          *
          * @param {number} target - Numeric target argument for the declared operation.
          * @param {number} id - Numeric id argument for the declared operation.
-         * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        glBindTexture: (target, id) => gl.bindTexture(target, object(textures, id)),
+        glBindTexture: (target, id) => {
+            gl.bindTexture(target, object(textures, id));
+            attributeState.collect();
+        },
         /**
          * Executes the selected glDeleteTextures operation against the actual WebGL context.
          *
          * @param {number} id - Numeric id argument for the declared operation.
          */
         glDeleteTextures: (id) => {
-            // Desktop deletion silently ignores zero and names that are no longer textures.
-            const texture = textures.get(id);
-
-            if (texture) {
-                gl.deleteTexture(texture);
-                textures.delete(id);
-            }
+            attributeState.deleteTexture(id);
         },
         /**
          * Executes the selected glTexParameteri operation against the actual WebGL context.
@@ -1746,6 +1758,6 @@ export function createSpriteNatives(canvas, report) {
          *
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        resources: () => ({ shaders: shaders.size, programs: programs.size, textures: textures.size, buffers: buffers.size, framebuffers: framebuffers.size }),
+        resources: () => ({ shaders: shaders.size, programs: programs.size, textures: textures.size + attributeState.pendingCount('texture'), buffers: buffers.size + attributeState.pendingCount('buffer'), framebuffers: framebuffers.size }),
     };
 }

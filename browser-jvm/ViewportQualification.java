@@ -27,19 +27,13 @@ public final class ViewportQualification {
         GL11.glViewport(2, 0, 2, 2);
         GL11.glPopAttrib();
         state(2, 0, 2, 2);
-        boolean rejected = false;
-        boolean finished = false;
-        try {
-            GL11.glPushAttrib(GL11.GL_VIEWPORT_BIT | GL11.GL_COLOR_BUFFER_BIT);
-        } catch (UnsupportedOperationException exception) {
-            rejected = exception.getMessage().contains("attribute groups");
-        } finally {
-            finished = true;
-        }
-        check(rejected && finished, "Valid unsupported group throws Java exception and runs finally");
-        check(GL11.glGetInteger(GL11.GL_ATTRIB_STACK_DEPTH) == 0, "Rejected group does not push");
+        GL11.glPushAttrib(GL11.GL_VIEWPORT_BIT | GL11.GL_COLOR_BUFFER_BIT);
+        check(GL11.glGetInteger(GL11.GL_ATTRIB_STACK_DEPTH) == 1, "Combined supported groups push once");
+        GL11.glViewport(0, 0, 1, 1);
+        GL11.glPopAttrib();
+        check(GL11.glGetInteger(GL11.GL_ATTRIB_STACK_DEPTH) == 0, "Combined groups pop once");
         state(2, 0, 2, 2);
-        check(GL11.glGetError() == GL11.GL_NO_ERROR, "Unsupported group does not invent a GL error");
+        check(GL11.glGetError() == GL11.GL_NO_ERROR, "Combined groups preserve original GL state");
         for (int i = 0; i < 16; i++) GL11.glPushAttrib(GL11.GL_VIEWPORT_BIT);
         GL11.glPushAttrib(GL11.GL_VIEWPORT_BIT);
         check(GL11.glGetError() == GL11.GL_STACK_OVERFLOW, "Overflow reports compatibility GL error");

@@ -15,7 +15,7 @@ const server = createServer(async (request, response) => {
     try {
         const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
         const file = resolve(root, `.${pathname}`);
-        const allowed = ['glsl-compat.js', 'sprite-webgl.js'].some((name) => file === resolve(root, 'browser-jvm', name))
+        const allowed = ['glsl-compat.js', 'sprite-webgl.js', 'sprite-attrib.js'].some((name) => file === resolve(root, 'browser-jvm', name))
             || (file.startsWith(resolve(root, 'node_modules/@shaderfrog/glsl-parser') + sep) && !file.includes(`${sep}test`));
 
         if (!['GET', 'HEAD'].includes(request.method) || !allowed) {

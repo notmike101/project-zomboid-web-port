@@ -73,26 +73,26 @@ try {
     gl.depthRange(0.125, 0.375);
     const first = state();
 
-    await call('pushViewportAttributes', true);
+    await call('pushAttributes', 2_048);
     gl.viewport(2, 0, 2, 2);
     gl.depthRange(0.625, 0.875);
     const second = state();
 
-    await call('pushViewportAttributes', true);
+    await call('pushAttributes', 2_048);
     gl.viewport(1, 1, 1, 1);
     gl.depthRange(0, 1);
     await call('glPopAttrib');
     require(state() === second, 'Nested pop restores copied viewport and depth range');
     await call('glPopAttrib');
     require(state() === first, 'Outer pop restores original viewport and depth range');
-    await call('pushViewportAttributes', false);
+    await call('pushAttributes', 0);
     gl.viewport(2, 0, 2, 2);
     gl.depthRange(0.625, 0.875);
     await call('glPopAttrib');
     require(state() === second, 'Empty mask leaves actual viewport and depth range unchanged');
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(0, 0, 1, 1);
-    await call('pushViewportAttributes', true);
+    await call('pushAttributes', 2_048);
     gl.scissor(1, 0, 1, 1);
     gl.disable(gl.SCISSOR_TEST);
     await call('glPopAttrib');
@@ -101,10 +101,10 @@ try {
     require(await call('rawError') === 1_284 && state() === second, 'Underflow preserves actual state');
 
     for (let i = 0; i < 16; i++) {
-        await call('pushViewportAttributes', true);
+        await call('pushAttributes', 2_048);
     }
 
-    await call('pushViewportAttributes', true);
+    await call('pushAttributes', 2_048);
     require(await call('rawError') === 1_283 && await call('integerState', 2_992) === 16 && state() === second, 'Overflow preserves state and stack');
 
     for (let i = 0; i < 16; i++) {
@@ -171,7 +171,7 @@ try {
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.viewport(0, 0, 2, 2);
     gl.depthRange(0.125, 0.375);
-    await call('pushViewportAttributes', true);
+    await call('pushAttributes', 2_048);
     gl.viewport(2, 0, 2, 2);
     gl.depthRange(0.625, 0.875);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

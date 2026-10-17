@@ -1,5 +1,11 @@
 # Toward a playable original-bytecode port
 
+## Renderer prerequisites ready for the next integration
+
+Actual client/server attribute-stack support now passes forty GPU/state and twelve Java ABI checks, preserving existing viewport, texture environment, indexed-quad and depth/mipmap regressions. Saved/restored references retain deleted buffers and textures until their final use; the test draws exact pixels from both and verifies physical release. Current bindings detach immediately and public names disappear, rather than delaying the observable deletion. All 42 monitored inputs remain unchanged and strict JavaScript lint passes. Full original rendering remains unqualified.
+
+The next private cell envelope is prepared with the separately tested original `IngameState` constructor prerequisite; it compiles but has not run. Rebuild only the released graphics SDK chain from the frozen runtime using the same Sprite/Input/World/Atomic/Path/Animation adapters, and snapshot its actual JS dependencies before the next browser gate. Preserve existing asset/model preparation and failed runs. The next actual frame must retain strict caught-error checks and be visually inspected; shader/state component passes alone do not establish a visible world or playable game.
+
 ## Menu rendering and caught-error frontier
 
 Holding the original menu owner after a completed frame qualifies the complete six-panel Solo image and explains earlier partial captures. It does not fix the spawn map: that completed frame still has a blank map area and the original `ERROR 13` popup. Keep the raw automated true verdict separate from this visual failure. Observe original `ExceptionLogger.exceptionCount` read-only and forward the original enabled error stream so a caught renderer exception fails verification even when GL reports zero and Lua's Java logger reports no severe record. Diagnose against the same immutable known renderer before mixing in the new attribute-stack implementation.
