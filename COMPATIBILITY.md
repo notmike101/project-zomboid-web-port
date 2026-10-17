@@ -1,5 +1,11 @@
 # Incremental original-bytecode compatibility
 
+## Current original world-rendering frontier
+
+The next actual browser run passes the original render-context setup, all 219 depth images and twelve manager shader programs. Original lighting publishes state/update counters 1/1 after two normal warmup frames. The original world/cell renderer then runs, but no complete frame passes: `FBORenderCell.renderInternal` logs two null-pointer exceptions in `IsoGameCharacter.renderShadow`, the newly reached skybox fragment shader fails because converted code assigns to `SBParam*` uniforms, and `ModelManager.RenderSkyBox` ultimately throws for the missing `GL11.glPushClientAttrib` native service. These are three separate retained failures; compiling the earlier twelve programs does not qualify this skybox shader.
+
+Failure cleanup drains forty asset callbacks to zero, with zero decoded-image owners and null physics world/simulation. All 515 monitored input hashes remain unchanged, requests denied are zero, and browser/server close. Java cleanup remains unqualified under the primary-failure policy; GPU resources still exist before context closure. No visibility flags, original character code or rendering options were changed to bypass these failures. The next work is to qualify the necessary platform state and shader conversion and identify the genuine shadow prerequisite before repeating the full renderer.
+
 ## Original boot event before world creation
 
 Connected play now delivers original `OnGameBoot` after model initialization, before world/player creation, matching that part of original GameWindow entry order. Its genuine registered callbacks produce 20 hair colors, 11 trouser colors, 3,799 surnames, 1,320 female forenames and 993 male forenames. The same counts remain through the 131-frame public regression, which passes all existing input/navigation/render/queue/error/hash/cleanup gates. The host's earlier direct hair bootstrap runs only for selective qualification profiles whose original hair list is still empty; it no longer duplicates the complete boot event's data.
