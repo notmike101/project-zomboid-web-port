@@ -32,7 +32,7 @@ await assert.rejects(call('generatePolygons', null, owner, 1, 0, 0), /require th
 
 const forwarded = [];
 let lookups = 0;
-const helper = Object.fromEntries(['allocate', 'clear', 'addPath', 'addAABB', 'addPolygon', 'clipAABB', 'generate', 'getPolygon'].map((name) => [name, async (...args) => {
+const helper = Object.fromEntries(['allocate', 'clear', 'addPath', 'addAABB', 'addPolygon', 'clipAABB', 'generate', 'getPolygon', 'triangulate2'].map((name) => [name, async (...args) => {
     await Promise.resolve();
     forwarded.push([name, ...args]);
 
@@ -42,6 +42,10 @@ const helper = Object.fromEntries(['allocate', 'clear', 'addPath', 'addAABB', 'a
         }
 
         return 2;
+    }
+
+    if (name === 'triangulate2') {
+        return 24;
     }
 
     return name === 'getPolygon' ? 0 : undefined;
@@ -71,6 +75,7 @@ await call('addPolygon', lib, nextOwner, 0, 1, 2, 3, 4, 5, 6, 7);
 await call('clipAABB', lib, nextOwner, 4, 3, 2, 1);
 assert.equal(await call('generatePolygons', lib, nextOwner, 1, 0, 0), 2);
 assert.equal(await call('getPolygon', lib, nextOwner, 1, buffer), 0);
+assert.equal(await call('triangulate2', lib, nextOwner, 1, buffer), 24);
 await assert.rejects(call('generatePolygons', lib, nextOwner, 2, 0, 0), /Unqualified/);
 assert.equal(lookups, 1);
 assert.deepEqual(forwarded, [
@@ -82,6 +87,7 @@ assert.deepEqual(forwarded, [
     ['clipAABB', nextOwner, 4, 3, 2, 1],
     ['generate', nextOwner, 1, 0, 0],
     ['getPolygon', nextOwner, 1, buffer],
+    ['triangulate2', nextOwner, 1, buffer],
     ['generate', nextOwner, 2, 0, 0],
 ]);
 assert.deepEqual(physics.snapshot().clipperContainers, { allocations: 2, clears: 2 });

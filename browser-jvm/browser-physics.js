@@ -822,6 +822,18 @@ export function createBrowserPhysics() {
             async Java_zombie_vehicles_Clipper_getPolygon(lib, receiver, index, buffer) {
                 return await (await clipperSupport(lib)).getPolygon(receiver, index, buffer);
             },
+            /**
+             * Tessellates a real generated polygon into its original indexed buffer ABI.
+             *
+             * @param {object} lib - Actual browser JVM library.
+             * @param {object} receiver - Original owned Clipper instance.
+             * @param {number} index - Original polygon index.
+             * @param {object} buffer - Original direct output ByteBuffer.
+             * @returns {Promise<number>} Actual triangle index count.
+             */
+            async Java_zombie_vehicles_Clipper_triangulate2(lib, receiver, index, buffer) {
+                return await (await clipperSupport(lib)).triangulate2(receiver, index, buffer);
+            },
         },
     };
 }

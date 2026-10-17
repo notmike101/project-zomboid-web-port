@@ -12,6 +12,10 @@ import com.github.micycle1.clipper2.core.Point64;
 import com.github.micycle1.clipper2.engine.Clipper64;
 import com.github.micycle1.clipper2.engine.PolyPath64;
 import com.github.micycle1.clipper2.engine.PolyTree64;
+import org.lwjgl.util.glu.GLU;
+import org.lwjgl.util.glu.GLUtessellator;
+import org.lwjgl.util.glu.GLUtessellatorCallbackAdapter;
+import org.lwjgl.util.glu.tessellation.GLUtessellatorImpl;
 
 /** Real Clipper2 engine and qualified original JNI byte-buffer contract. */
 public final class ClipperSupport {
@@ -24,6 +28,47 @@ public final class ClipperSupport {
     }
 
     private record Polygon(Path64 outer, ArrayList<Path64> holes) { }
+
+    private record Triangulation(ArrayList<Point64> vertices, ArrayList<Integer> indices) { }
+
+    /** Keeps the original flattened vertex identities in the shipped GLU callbacks. */
+    private static final class Tessellation extends GLUtessellatorCallbackAdapter {
+        final ArrayList<Point64> vertices;
+        final ArrayList<Integer> indices = new ArrayList<>();
+        String failure;
+
+        Tessellation(ArrayList<Point64> vertices) { this.vertices = vertices; }
+
+        private void fail(String message) { if (failure == null) failure = message; }
+
+        @Override public void begin(int primitive) {
+            if (primitive != 4) fail("GLU emitted a non-triangle primitive");
+        }
+
+        // Registering this callback makes GLU emit separate triangles rather than strips/fans.
+        @Override public void edgeFlag(boolean boundary) { }
+
+        @Override public void vertex(Object data) {
+            if (data instanceof Integer index && index >= 0 && index < vertices.size()) indices.add(index);
+            else fail("GLU lost the original vertex identity");
+        }
+
+        @Override public void error(int code) { fail("GLU tessellation error " + code); }
+
+        @Override public void combine(double[] coordinates, Object[] data, float[] weights, Object[] output) {
+            // Coincident input vertices may merge; newly created vertices cannot fit the native table ABI.
+            for (Object item : data) {
+                if (item instanceof Integer index) {
+                    Point64 point = vertices.get(index);
+                    if (point.x == coordinates[0] && point.y == coordinates[1]) {
+                        output[0] = index;
+                        return;
+                    }
+                }
+            }
+            fail("Triangulation requires an additional intersection vertex");
+        }
+    }
 
     private ClipperSupport() { }
 
@@ -182,5 +227,76 @@ public final class ClipperSupport {
             writeRing(output, hole);
         }
         return 0;
+    }
+
+    private static Triangulation triangulate(Polygon polygon) {
+        ArrayList<Path64> rings = new ArrayList<>();
+        rings.add(polygon.outer);
+        rings.addAll(polygon.holes);
+        ArrayList<Point64> vertices = new ArrayList<>();
+        for (Path64 ring : rings) {
+            for (Point64 point : ring) {
+                long exactIntegerLimit = 1L << 53;
+                if (point.x < -exactIntegerLimit || point.x > exactIntegerLimit
+                        || point.y < -exactIntegerLimit || point.y > exactIntegerLimit)
+                    throw new UnsupportedOperationException("Triangulation coordinates exceed exact double-integer precision");
+                vertices.add(point);
+            }
+        }
+        if (vertices.size() > Short.MAX_VALUE)
+            throw new UnsupportedOperationException("Triangulation exceeds the original signed-short vertex table");
+        Tessellation callback = new Tessellation(vertices);
+        GLUtessellator tessellator = GLUtessellatorImpl.gluNewTess();
+        tessellator.gluTessNormal(0, 0, 1);
+        for (int event : new int[] { GLU.GLU_TESS_BEGIN, GLU.GLU_TESS_VERTEX, GLU.GLU_TESS_EDGE_FLAG,
+                GLU.GLU_TESS_ERROR, GLU.GLU_TESS_COMBINE }) tessellator.gluTessCallback(event, callback);
+        tessellator.gluTessProperty(GLU.GLU_TESS_WINDING_RULE, GLU.GLU_TESS_WINDING_ODD);
+        try {
+            tessellator.gluTessBeginPolygon(null);
+            int index = 0;
+            for (Path64 ring : rings) {
+                tessellator.gluTessBeginContour();
+                for (Point64 point : ring)
+                    tessellator.gluTessVertex(new double[] { point.x, point.y, 0 }, 0, index++);
+                tessellator.gluTessEndContour();
+            }
+            tessellator.gluTessEndPolygon();
+        } finally { tessellator.gluDeleteTess(); }
+        if (callback.failure != null) throw new UnsupportedOperationException(callback.failure);
+        if (callback.indices.size() % 3 != 0) throw new IllegalStateException("GLU emitted an incomplete triangle");
+        for (int index = 0; index < callback.indices.size(); index += 3) {
+            Point64 a = vertices.get(callback.indices.get(index));
+            Point64 b = vertices.get(callback.indices.get(index + 1));
+            Point64 c = vertices.get(callback.indices.get(index + 2));
+            double cross = ((double) b.x - a.x) * ((double) c.y - a.y)
+                    - ((double) b.y - a.y) * ((double) c.x - a.x);
+            if (cross == 0) throw new UnsupportedOperationException("GLU emitted a degenerate triangle");
+            if (cross < 0) {
+                int swap = callback.indices.get(index + 1);
+                callback.indices.set(index + 1, callback.indices.get(index + 2));
+                callback.indices.set(index + 2, swap);
+            }
+        }
+        return new Triangulation(vertices, callback.indices);
+    }
+
+    /** Emits the original indexed ABI using the already-shipped pure Java GLU tessellator. */
+    public static int triangulate2(Object owner, int index, ByteBuffer buffer) {
+        Polygon polygon = state(owner).polygons.get(index);
+        if (buffer == null || !buffer.isDirect() || buffer.isReadOnly())
+            throw new IllegalArgumentException("Invalid triangulation output buffer");
+        Triangulation mesh = triangulate(polygon);
+        int bytes = Math.addExact(2, Math.addExact(Math.multiplyExact(mesh.vertices.size(), 8),
+                Math.multiplyExact(mesh.indices.size(), 2)));
+        if (bytes > buffer.capacity()) throw new BufferOverflowException();
+        ByteBuffer output = buffer.duplicate().order(ByteOrder.BIG_ENDIAN);
+        output.clear();
+        output.putShort((short) mesh.vertices.size());
+        for (Point64 point : mesh.vertices) {
+            output.putFloat((float) (point.x / 1000.0));
+            output.putFloat((float) (point.y / 1000.0));
+        }
+        for (int vertex : mesh.indices) output.putShort((short) vertex);
+        return mesh.indices.size();
     }
 }
