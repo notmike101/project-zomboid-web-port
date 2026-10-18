@@ -4,6 +4,9 @@ import java.lang.classfile.Instruction;
 import java.lang.classfile.MethodModel;
 import java.lang.classfile.MethodTransform;
 import java.lang.classfile.Opcode;
+import java.lang.constant.ConstantDescs;
+import java.lang.constant.MethodTypeDesc;
+import java.util.Arrays;
 import java.lang.classfile.instruction.InvokeInstruction;
 import java.lang.constant.ClassDesc;
 import java.nio.file.Files;
@@ -14,11 +17,67 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
-/** Redirects one pinned vendor key-name scancode query, preserving original queue and polling code. */
+/** Adapts the pinned input startup platform, preserving original keyboard queue and polling code. */
 public final class PrepareKeyboardEvents {
 
     private static final String INPUT_SHA =
         "31cc6df18d521a02a4752eb15169f72b188483cd62c10483a97872d2ddf0b9cd";
+
+    private record DisplayAdapter(byte[] bytes, String manifest) {}
+
+    /** Browser startup belongs to this input overlay: graphics-only profiles retain their original unsupported init. */
+    private static DisplayAdapter adaptDisplay(byte[] input) throws Exception {
+        String beforeHash = hash(input);
+        if (!beforeHash.equals("66a404a9b1ea05a8e06a717d2b61de95a421f44f82299952f5737787ddc6b082"))
+            throw new IllegalArgumentException("Unqualified graphics-adapted Display source: " + beforeHash);
+        var api = ClassFile.of();
+        var original = api.parse(input);
+        var display = ClassDesc.of("org.lwjglx.opengl.Display");
+        var host = ClassDesc.of("port.host.SpriteGraphics");
+        var mode = ClassDesc.of("org.lwjglx.opengl.DisplayMode");
+        var failure = ClassDesc.of("java.lang.IllegalStateException");
+        int[] sites = {0};
+        byte[] output = api.transformClass(original, (builder, element) -> {
+            if (!(element instanceof MethodModel method) || !method.methodName().equalsString("init")
+                    || !method.methodType().equalsString("()V")) {
+                builder.with(element);
+                return;
+            }
+            sites[0]++;
+            builder.withMethodBody(method.methodName(), method.methodType(), method.flags().flagsMask(), code -> {
+                // Retain the original guard/assignment, then initialize the browser platform and original producer.
+                code.getstatic(display, "isInitialized", ConstantDescs.CD_boolean)
+                    .ifThen(Opcode.IFNE, branch -> branch.new_(failure).dup()
+                        .ldc("Display has already been initialized.")
+                        .invokespecial(failure, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String)).athrow())
+                    .iconst_1().putstatic(display, "isInitialized", ConstantDescs.CD_boolean)
+                    .invokestatic(host, "contextCreated", MethodTypeDesc.of(ConstantDescs.CD_boolean))
+                    .ifThen(Opcode.IFEQ, branch -> branch.new_(failure).dup().ldc("Browser graphics context is destroyed")
+                        .invokespecial(failure, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String)).athrow())
+                    .invokestatic(host, "getCapabilities", MethodTypeDesc.of(ClassDesc.of("org.lwjgl.opengl.GLCapabilities"))).pop()
+                    .invokestatic(ClassDesc.of("org.lwjglx.input.Keyboard"), "create", MethodTypeDesc.of(ConstantDescs.CD_void))
+                    .invokestatic(host, "getDesktopDisplayMode", MethodTypeDesc.of(mode))
+                    .putstatic(display, "desktopDisplayMode", mode).return_();
+            });
+        });
+        if (sites[0] != 1) throw new IllegalArgumentException("Expected one Display.init selector");
+        var emitted = api.parse(output);
+        int unchanged = 0;
+        for (var before : original.methods()) {
+            if (before.methodName().equalsString("init") && before.methodType().equalsString("()V")) continue;
+            var after = emitted.methods().stream().filter(method -> method.methodName().equalsString(before.methodName().stringValue())
+                && method.methodType().equalsString(before.methodType().stringValue())).findFirst().orElseThrow();
+            var beforeCode = before.findAttribute(Attributes.code());
+            var afterCode = after.findAttribute(Attributes.code());
+            if (beforeCode.isPresent() != afterCode.isPresent() || beforeCode.isPresent()
+                    && !Arrays.equals(beforeCode.get().codeArray(), afterCode.orElseThrow().codeArray()))
+                throw new AssertionError("Other Display method changed: " + before.methodName());
+            unchanged++;
+        }
+        return new DisplayAdapter(output, "{\"class\":\"org/lwjglx/opengl/Display\",\"method\":\"init()V\",\"inputSha256\":\""
+            + beforeHash + "\",\"outputSha256\":\"" + hash(output) + "\",\"unchangedOtherMethods\":" + unchanged
+            + ",\"gameClassesChanged\":false,\"monitorHandleManufactured\":false,\"keyboardCreateOriginal\":true}");
+    }
 
     private static String hash(byte[] bytes) throws Exception {
         return HexFormat.of().formatHex(
@@ -41,6 +100,7 @@ public final class PrepareKeyboardEvents {
             (Files.exists(manifest) && Files.isSameFile(input, manifest))
         ) throw new IllegalArgumentException("Input/output alias");
         byte[] source;
+        DisplayAdapter display;
         try (var zip = new ZipFile(input.toFile())) {
             var entry = zip.getEntry("org/lwjglx/input/Keyboard.class");
             if (entry == null) throw new IllegalArgumentException(
@@ -48,6 +108,11 @@ public final class PrepareKeyboardEvents {
             );
             try (var stream = zip.getInputStream(entry)) {
                 source = stream.readAllBytes();
+            }
+            var displayEntry = zip.getEntry("org/lwjglx/opengl/Display.class");
+            if (displayEntry == null) throw new IllegalArgumentException("Missing graphics-adapted Display class");
+            try (var stream = zip.getInputStream(displayEntry)) {
+                display = adaptDisplay(stream.readAllBytes());
             }
         }
         String beforeHash = hash(source);
@@ -155,6 +220,11 @@ public final class PrepareKeyboardEvents {
             zip.putNextEntry(entry);
             zip.write(result);
             zip.closeEntry();
+            var displayEntry = new ZipEntry("org/lwjglx/opengl/Display.class");
+            displayEntry.setTime(0);
+            zip.putNextEntry(displayEntry);
+            zip.write(display.bytes());
+            zip.closeEntry();
         }
         Files.writeString(
             manifest,
@@ -162,7 +232,7 @@ public final class PrepareKeyboardEvents {
                 beforeHash +
                 "\",\"outputClassSha256\":\"" +
                 hash(result) +
-                "\",\"method\":\"initKeyNames()V\",\"originalBCI\":288,\"redirect\":\"org/lwjgl/glfw/GLFW.glfwGetKeyScancode(I)I -> port.host.BrowserKeyboardEvents.unavailableScancode(I)I\",\"gameClassesChanged\":false,\"allOtherInstructionsUnchanged\":true}"
+                "\",\"method\":\"initKeyNames()V\",\"originalBCI\":288,\"redirect\":\"org/lwjgl/glfw/GLFW.glfwGetKeyScancode(I)I -> port.host.BrowserKeyboardEvents.unavailableScancode(I)I\",\"gameClassesChanged\":false,\"allOtherInstructionsUnchanged\":true,\"display\":" + display.manifest() + "}"
         );
     }
 }

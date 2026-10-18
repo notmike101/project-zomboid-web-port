@@ -2,7 +2,9 @@
 
 ## Genuine display startup boundary
 
-The actual original windowed `GameWindow.InitDisplay` closure now passes a private browser gate using an options file written by original Core code. Preserve this producer and the original display cache branches when composing startup. Its earlier `Display.init` entry still needs qualification of keyboard and GLFW platform services. The real JDK filesystem-watch probe also stops at missing `LinuxWatchService.inotifyInit`; implement the platform service beneath original watcher logic rather than disabling it. These component results do not release the normal loading transition guard.
+The original windowed `GameWindow.InitDisplay` closure passes using an options file written by original Core code. Its earlier `Display.init → Keyboard.create` entry now also passes the public `verify-display-init.mjs` gate with 33 Java assertions and eleven real keyboard queue phases. The existing keyboard-event overlay owns that startup adaptation; preserve its genuine initialized guard, portable names, actual surface descriptor and the original display cache branches.
+
+Next preserve original Display message-pump ordering: its keyboard/mouse producers precede the RenderThread game-input consumers, while the current menu explicitly supplies those producers. Avoid double polling when connecting that loop; cursor/focus, controllers and clipboard remain actual platform prerequisites. The browser JDK filesystem watcher is being implemented beneath its original Java logic after observing the missing `LinuxWatchService.inotifyInit`; do not disable it or inject a fallback exception. These component results do not release the normal loading transition guard.
 
 ## Current public population gate
 
