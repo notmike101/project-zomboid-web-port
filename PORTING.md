@@ -1,5 +1,11 @@
 # Toward a playable original-bytecode port
 
+## Loading prerequisites verified since the renderer frontier
+
+Three additional original-code components now pass: the direct first-save collision/population branch with its genuinely unstarted worker; original singleton GameTime/climate file save/load plus fresh original-JVM cross-read; and the public vehicle metadata queue through the real world-streamer thread and original main-queue release. These reuse the current host services without replacing Java serialization, queue processing or worker loops. Their exact scopes and retained failures are recorded in COMPATIBILITY.md.
+
+Continue with positive-density persistence and full original collision/population initialization, original animal save/worker dependencies and the mandatory physics-mesh loading closure. The empty vehicle database test does not close current-world ownership or serialized vehicle loading; the default GameTime file does not close active weather/moddata or whole-world persistence. Keep the remaining full loading/save gate explicit. The private future renderer observer now compiles read-only startup callback enumeration through original `LuaEventManager.getEvents()` and intrinsic canvas export; neither has been executed in a new world run.
+
 ## Next integration: original state ownership
 
 The latest actual world gate renders original floors, walls, doors and vegetation through 4,192 commands and eight chunk framebuffers, but strictly fails on caught debug-render null-pointer exceptions. Original source identifies the null current-state envelope as the cause. Stop extending that envelope: qualify genuine collision/population initialization and start, current-world vehicle database/streamer ownership and startup callbacks, then enter through the original state machine and let `IngameState.render()` own rendering. A fresh empty state machine also runs its first game update during transition, so its dependencies belong to the admission gate. Preserve the failed run and all 538 unchanged input hashes.
