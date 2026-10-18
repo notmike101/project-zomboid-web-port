@@ -10,6 +10,8 @@ The connected route runs original Java bytecode in **CheerpJ 4.3's Java 17 brows
 
 This is distinct from the repository's **TeaVM 0.16.0 Java-to-WASM experiments**, which compile selected original-code dependency closures ahead of time. The connected walking session is not a whole-game standalone WASM build. See [TEAVM.md](TEAVM.md) for those comparisons and their compiler boundaries.
 
+A separate [real Bullet WASM component](browser-jvm/BULLET.md) now runs original Java Bullet initialization and mesh calls against the upstream C++ engine. Its original JVM/browser comparison passes. It remains separate from the walking profile while original world/chunk activation and dynamic simulation are integrated.
+
 The installed game files remain untouched. Preparation creates private copies with documented class-version and narrowly qualified Java SDK adaptations. Loaded compatibility copies are not byte-for-byte identical to the installed classes. Manifests record the changes and source hashes; no gameplay algorithms are replaced with successful stubs.
 
 ## Dependencies

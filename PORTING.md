@@ -2,7 +2,7 @@
 
 ## Full initialization and native-engine reuse
 
-Positive initial population save/reopen now passes with natural records, original target/timer semantics and independent original-DLL cross-reading. The original sandbox binary file consumer also passes strict browser/JVM checks after adding its genuine Lua initializer. Continue from these existing services into actual original collision/population initialization; do not keep retesting empty persistence cases.
+Positive initial population save/reopen now passes with natural records, original target/timer semantics and independent original-DLL cross-reading. The original sandbox binary file consumer also passes strict browser/JVM checks after adding its genuine Lua initializer. Reuse these services in the actual original loading lifecycle; do not keep retesting empty persistence cases.
 
 Original world-generation settings, instance tracking and statistics file consumers now also pass nonempty browser save/load and fresh original-JVM exact cross-reading. Reuse these original codecs in the mandatory first save. The remaining `MetaTracker` consumer must run with the actual helicopter and ambient-manager owners; serialization fixtures do not establish populated-world persistence.
 
@@ -18,7 +18,7 @@ Direct unchanged Java Bullet declarations now feed actual browser WASM hull/comp
 
 Three additional original-code components now pass: the direct first-save collision/population branch with its genuinely unstarted worker; original singleton GameTime/climate file save/load plus fresh original-JVM cross-read; and the public vehicle metadata queue through the real world-streamer thread and original main-queue release. These reuse the current host services without replacing Java serialization, queue processing or worker loops. Their exact scopes and retained failures are recorded in COMPATIBILITY.md.
 
-Continue with positive-density persistence and full original collision/population initialization, original animal save/worker dependencies and the mandatory physics-mesh loading closure. The empty vehicle database test does not close current-world ownership or serialized vehicle loading; the default GameTime file does not close active weather/moddata or whole-world persistence. Keep the remaining full loading/save gate explicit. The private future renderer observer now compiles read-only startup callback enumeration through original `LuaEventManager.getEvents()` and intrinsic canvas export; neither has been executed in a new world run.
+Continue from positive-density persistence and full original collision/population initialization into loaded-chunk/startGame ownership, original animal save/worker dependencies and the mandatory physics-mesh loading closure. The empty vehicle database test does not close current-world ownership or serialized vehicle loading; the default GameTime file does not close active weather/moddata or whole-world persistence. Keep the remaining full loading/save gate explicit. The private future renderer observer now compiles read-only startup callback enumeration through original `LuaEventManager.getEvents()` and intrinsic canvas export; neither has been executed in a new world run.
 
 ## Next integration: original state ownership
 
