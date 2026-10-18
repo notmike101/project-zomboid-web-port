@@ -90,7 +90,7 @@ try {
     command('jar', ['--create', '--file', path.join(output, 'qualification.jar'), '-C', classes, '.']);
     await serve('/qualification.jar', path.join(output, 'qualification.jar'));
 
-    for (const name of ['sqlitejdbc.js', 'sqlite-natives.js', 'sqlite-namespace.js', 'native-long-return.js', 'native-library-loader.js']) {
+    for (const name of ['sqlitejdbc.js', 'sqlite-natives.js', 'sqlite-namespace.js', 'native-long-return.js', 'native-library-loader.js', 'process-natives.js']) {
         await serve(`/${name}`, path.join(root, 'browser-jvm', name));
     }
 
@@ -108,14 +108,17 @@ try {
         import {reserveSqliteNamespace} from '/sqlite-namespace.js';
         import {getSqliteSnapshot} from '/sqlite-natives.js';
         import {installNativeLibraryLoader} from '/native-library-loader.js';
+        import {createProcessNatives} from '/process-natives.js';
+        const processes=createProcessNatives();
         const phase=new URL(location.href).searchParams.get('phase'),entries=${JSON.stringify(entries)};
         try{
             await reserveSqliteNamespace();
-            await cheerpjInit({version:17,status:'none',natives:{${callbacks},async Java_AccountPersistProbe_image(lib,array){globalThis.imageHex=await(await lib.port.host.SqliteSupport).hex(array);}}});
+            await cheerpjInit({version:17,status:'none',natives:{...processes.natives,${callbacks},async Java_AccountPersistProbe_image(lib,array){globalThis.imageHex=await(await lib.port.host.SqliteSupport).hex(array);}}});
             installNativeLibraryLoader(cj3Module);
             const code=await cheerpjRunMain(entries[phase],'${cp}',phase,'${uuid}');
             if(code!==0||!globalThis.result?.pass)throw Error('Java fixture failed: '+code+' '+JSON.stringify(globalThis.result));
             globalThis.result.natives=getSqliteSnapshot();
+            globalThis.result.processes=processes.diagnostics();
             try{await(await import('/sqlite-namespace.js?late')).reserveSqliteNamespace();throw Error('Late namespace accepted');}catch(e){if(!String(e).includes('before initializing'))throw e;globalThis.result.lateReservationRejected=true;}
         }catch(e){globalThis.result={pass:false,error:String(e.stack||e)};}finally{globalThis.done=true;}
     </script>`));
@@ -187,6 +190,13 @@ try {
 
             evidence.phases.push({ phase, ...result });
             assert.equal(result.pass, true, JSON.stringify(result));
+
+            if (phase === 'jdbc') {
+                assert.equal(result.originalInitializer, true);
+                assert.equal(result.nativeProcessesUnavailable, true);
+                assert.equal(result.processes.rejected, 2);
+            }
+
             assert.equal(result.natives.databases, 0);
             assert.equal(result.natives.statements, 0);
             assert.equal(result.natives.workingFiles, 0);

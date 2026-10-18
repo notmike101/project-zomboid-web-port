@@ -29,7 +29,14 @@ public final class SqliteJdbcProbe {
             );
             System.setProperty("org.sqlite.lib.path", "/app");
             System.setProperty("org.sqlite.lib.name", "sqlitejdbc.js");
-            Class.forName("org.sqlite.JDBC");
+            boolean unavailable = false, finalized = false;
+            try {
+                Runtime.getRuntime().exec("browser-port-native-process-probe");
+            } catch (java.io.IOException expected) {
+                unavailable = expected.getMessage().contains("External native processes are unavailable");
+            } finally { finalized = true; }
+            if (!unavailable || !finalized) throw new AssertionError("Original JDK process exception/finally");
+            zombie.util.PZSQLUtils.init();
             try (
                 var c = DriverManager.getConnection(
                     "jdbc:sqlite:/files/sqlite-owned/11111111-1111-4111-8111-111111111111/db/probe.db"
@@ -124,7 +131,7 @@ public final class SqliteJdbcProbe {
                 );
             }
             report(
-                "{\"pass\":true,\"originalXerial\":true,\"truncate\":true,\"signed64\":true,\"nulBlobNull\":true,\"rollback\":true,\"generatedKeys\":true,\"constraintException\":true}"
+                "{\"pass\":true,\"originalInitializer\":true,\"nativeProcessesUnavailable\":true,\"originalXerial\":true,\"truncate\":true,\"signed64\":true,\"nulBlobNull\":true,\"rollback\":true,\"generatedKeys\":true,\"constraintException\":true}"
             );
         } catch (Throwable error) {
             error.printStackTrace();
