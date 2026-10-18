@@ -1,0 +1,5 @@
+# These inputs are validated byte-for-byte by the RakNet preparer.
+browser-jvm/raknet-sources.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# Upstream notices retain their original mixed line endings and whitespace.
+browser-jvm/RAKNET-LICENSE.txt -text -whitespace
+browser-jvm/RAKNET-PATENTS.txt -text -whitespace
