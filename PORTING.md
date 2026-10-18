@@ -1,14 +1,22 @@
 # Toward a playable original-bytecode port
 
+## Use the original Java pathfinding backend in browser startup
+
+Do not make Windows emulation of the unused PZPathFind backend a prerequisite for every further gameplay increment. Source inspection confirms that original IsoWorld.init owns the genuine DebugOption choice and initializes PolygonalMap2; original IngameState updates and stops the selected Java backend. The unconditional native load/free occurs in desktop GameWindow orchestration. An authored browser lifecycle can omit that inactive platform dependency without a fake native descriptor or any original-class edit.
+
+The next coherent owner should use original MainThread.init with browser platform callbacks, bind GameWindow.gameThread to the actual returned owner through a real startup handshake, and invoke unchanged GameWindow.frameStep through a narrow bridge. Preserve original boot producers, state-machine/menu/loading progression, mandatory saves, error reporting and actual resource teardown. MainThread.shutdown is empty; genuine close/join and reached-owner cleanup are required. This is a source-only architecture decision, not a full lifecycle pass or permission to bypass the existing loading guards. Native Clipper, physics, population and lighting requirements remain.
+
 ## Reuse the original pure-fluid query
 
 The SDK overlay now admits one additional proved call: FluidContainer.isPureFluid(Fluid) BCI15 uses the existing exact-ArrayList first-element helper. The actual missing-method baseline and fresh public-preparer browser/native comparison establish empty, one-water and mixed-fluid parity. The overlay has ten sites, six fluid sites; other method code arrays and other overlay classes are unchanged. Reuse this prepared output in the existing full-content owner before extending original inventory interactions. Do not infer script hydration, drinking or a vehicle fix from this bounded builtin-identity check.
+
+That next private inventory component now passes using the existing original full-script/factory owner: hydrated Bleach, an actually Water-selected random WaterBottle and Apple produce the expected original isPureWater results. Actual component identity and reset/disposal are preserved, all input hashes match and the browser closes normally. The preserved sanitation diagnostics and later historical distributions failure remain separate. Continue from these original item/query paths into real inventory UI and input; no drinking or complete world initialization is claimed.
 
 ## Reusable native library startup component
 
 The pinned full upstream RakNet engine and its browser owner are now public source, with provisioning and build instructions in [RAKNET-SOURCES.md](browser-jvm/RAKNET-SOURCES.md). Reuse this single owner for both native descriptors when composing genuine startup; await actual shared-memory engine initialization before publishing the original empty RakNet JNI surface. Production loading runs no codec fixtures. Keep real worker cleanup separate from unqualified global C++ destruction.
 
-Same-artifact codec comparisons and explicit original SteamUtils Java completion pass, but the private complete diagnostic remains raw FAIL on 29 pre-cleanup request cancellations of unknown ownership. Preserve that distinction during integration. No menu/controller headers are changed by this increment, and no peers, socket readiness or protocol equivalence may be inferred from library loading. The next native startup boundary remains original PZPathFind initialization and its real exit cleanup; inspect CRT/TLS/import ownership before executing it rather than supplying a fake loaded marker.
+Same-artifact codec comparisons and explicit original SteamUtils Java completion pass, but the private complete diagnostic remains raw FAIL on 29 pre-cleanup request cancellations of unknown ownership. Preserve that distinction during integration. No menu/controller headers are changed by this increment, and no peers, socket readiness or protocol equivalence may be inferred from library loading. Original PZPathFind initialization and exit cleanup remain required if selecting that native backend; prefer the original Java backend for browser embedding rather than supplying a fake loaded marker.
 
 ## Original custom-cursor startup prerequisite
 

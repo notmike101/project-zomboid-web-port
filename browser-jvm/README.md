@@ -124,6 +124,8 @@ The public play verification runs the installed original `ISWalkToTimedAction` t
 
 The SDK preparer now includes the exact FluidContainer.isPureFluid(Fluid) first-element call at BCI15, reusing ListFirstSupport rather than implementing fluid behavior. The manifest contains ten SDK sites, six fluid sites. A genuine browser missing-method baseline is corrected, and fresh public-preparer output matches original JDK25 results for empty, one-water and mixed water/tainted-water containers. The existing eight helper checks also pass; original factory/disposal and all other method code arrays remain intact. This qualifies builtin fluid identity queries, not inventory drinking or a vehicle fix.
 
+A private continuation also passes original InventoryItem.isPureWater queries on script-hydrated factory objects: Bleach false, an actually Water-selected WaterBottle true, and Apple false, with both tainted-water policies. Random bottle selection, original component/reset ownership and the existing mixture remain intact. All input hashes match and the browser closes normally. It stops before distributions and does not establish drinking or world interactions; original whitespace sanitation messages and the historical later distributions failure are retained.
+
 ## RakNet source build component
 
 [RAKNET-SOURCES.md](RAKNET-SOURCES.md) documents the pinned source inputs, existing Emscripten dependency, preparation function, module routes and Java helper. This component compiles the full upstream candidate engine and supplies actual library ownership plus two selected ZNet logger natives. It does not yet change the public launch profiles or their headers.
