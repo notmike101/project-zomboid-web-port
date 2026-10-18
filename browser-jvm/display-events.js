@@ -1,3 +1,5 @@
+import { createCustomCursors } from './custom-cursor.js';
+
 /**
  * Owns browser window observations while reusing the existing keyboard and mouse owners.
  *
@@ -6,8 +8,8 @@
  * @returns {object} Native callbacks, observations and disposal.
  */
 export function createDisplayEvents(canvas, keyboard) {
+    const cursors = createCustomCursors(canvas);
     const gl = canvas.getContext('webgl2');
-    const previousCursor = canvas.style.cursor;
     let closed = false;
     let snapshot = null;
     let pumps = 0;
@@ -39,6 +41,7 @@ export function createDisplayEvents(canvas, keyboard) {
 
     return {
         natives: {
+            ...cursors.natives,
             /**
              * Samples actual DOM state and runs the original callback nestmates.
              *
@@ -114,23 +117,21 @@ export function createDisplayEvents(canvas, keyboard) {
                     throw await new (await lib.java.lang.UnsupportedOperationException)('Only normal/hidden owned browser cursor is qualified');
                 }
 
-                const before = canvas.style.cursor;
-                const cursor = value === 212_993 ? 'default' : 'none';
-
-                canvas.style.cursor = cursor;
-
-                if (getComputedStyle(canvas).cursor !== cursor) {
-                    canvas.style.cursor = before;
-                    throw await new (await lib.java.lang.UnsupportedOperationException)('Owned CSS cursor cannot be applied');
-                }
+                await cursors.setMode(lib, value);
 
                 modes++;
             },
         },
         /**
-         * Reports actual observations and lifecycle counters.
+         * Reports the shared image owner without changing state.
          *
-         * @returns {object} Owned service snapshot.
+         * @returns {object} Image diagnostics.
+         */
+        cursorSnapshot: () => cursors.snapshot(),
+        /**
+         * Reports actual window observations and lifecycle counters.
+         *
+         * @returns {object} Display diagnostics.
          */
         snapshot: () => ({ ...snapshot, pumps, modes, closed, cursor: canvas.style.cursor }),
         /**
@@ -139,7 +140,7 @@ export function createDisplayEvents(canvas, keyboard) {
          */
         dispose() {
             closed = true;
-            canvas.style.cursor = previousCursor;
+            cursors.dispose();
         },
     };
 }

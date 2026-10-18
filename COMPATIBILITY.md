@@ -1,5 +1,13 @@
 # Incremental original-bytecode compatibility
 
+## Original custom cursors in the public Display owner
+
+`node browser-jvm/verify-display-events.mjs` now composes unchanged original `Mouse.initCustomCursor()` with the existing original Display/RenderThread owner. All 27 existing Java checks and seven actual DOM phases remain passing, followed by 28 cursor checks, eleven mode/lifetime observations and three pixel comparisons. Five preparer alias guards and the original-vendor JVM conversion oracle also pass. All 68 monitored inputs remain unchanged, denied requests and strict runtime errors are zero, and the browser closes normally without forced termination.
+
+Original NativeImage decoding/finally cleanup and the vendor Cursor's first 49 constructor bytes, including image flipping and conversion, remain intact. The overlay emits only two vendor classes, preserving six other Cursor and thirty other Mouse method bodies; it emits no game classes. The platform tail creates actual browser image URLs and CSS hotspots instead of native GLFW pointers. Both installed cursor PNGs match their vendor-produced raw RGBA; browser decoding preserves alpha and opaque RGB. An opaque 2×2 case matches native JVM, browser raw and browser decoded pixels exactly, including signed-byte 255. Transparent RGB after canvas premultiplication is not claimed exact.
+
+One Display cursor owner handles default, hidden and selected-image modes. Hiding retains selection, selecting while hidden stays hidden, and returning to normal restores the selected image. Cleanup revokes all three created URLs, retains zero cursor/STB image owners, restores prior CSS and loses the graphics context. Native `getHandle()` explicitly rejects rather than inventing a pointer; pointer lock, animation and images larger than 32 pixels remain unsupported. This public component does not yet integrate original `GameWindow.initShared`, the menu profile or the complete render loop.
+
 ## Original native instruction reuse experiment
 
 A private browser experiment executes five calls to the unchanged installed `ZNetNoSteam64.dll` log-level setter through the WebAssembly CPU engine from [Unicorn.js](https://github.com/AlexAltea/unicorn.js). The original PE sections are mapped directly at their preferred address; the actual x86-64 entry and callees update the original threshold and return normally. All executable section bytes and three audited inputs remain unchanged, with no captured browser errors or denied requests and normal browser/server closure.

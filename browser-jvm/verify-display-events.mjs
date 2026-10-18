@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
@@ -99,8 +99,8 @@ async function prepare() {
     await writeFile(runtime, await snapshot(path.join(menu, 'runtime-view.jar')));
     await writeFile(startup, await snapshot(path.join(menu, 'menu-input-view.jar')));
     await writeFile(atomic, await snapshot(path.join(menu, 'atomic-view.jar')));
-    const hostSources = ['host/port/host/BrowserClipboard.java', 'host/port/host/BrowserMouse.java', 'host/port/host/BrowserKeyboardEvents.java', 'host/port/host/BrowserClock.java', 'host/port/host/BrowserDisplayEvents.java', 'DisplayEventsQualification.java', 'host/port/host/BrowserControllers.java'].map((name) => path.join(source, name));
-    const preparers = ['PrepareDisplayEvents.java', 'PrepareClipboard.java', 'PrepareControllers.java'].map((name) => path.join(source, name));
+    const hostSources = ['host/port/host/BrowserClipboard.java', 'host/port/host/BrowserMouse.java', 'host/port/host/BrowserKeyboardEvents.java', 'host/port/host/BrowserClock.java', 'host/port/host/BrowserDisplayEvents.java', 'DisplayEventsQualification.java', 'host/port/host/BrowserControllers.java', 'host/port/host/BrowserCustomCursor.java', 'host/org/lwjgl/stb/STBImage.java', 'CustomCursorQualification.java'].map((name) => path.join(source, name));
+    const preparers = ['PrepareDisplayEvents.java', 'PrepareClipboard.java', 'PrepareControllers.java', 'PrepareCustomCursor.java'].map((name) => path.join(source, name));
 
     await Promise.all([...hostSources, ...preparers, import.meta.filename].map(snapshot));
     command('javac', ['--release', '17', '-cp', [gameJar, atomic].join(path.delimiter), '-d', classes, ...hostSources]);
@@ -108,6 +108,42 @@ async function prepare() {
     command('java', ['-cp', [tools, gameJar].join(path.delimiter), 'PrepareDisplayEvents', runtime, startup, path.join(output, 'display-events-view.jar'), path.join(output, 'display-events-manifest.json')]);
     command('java', ['-cp', tools, 'PrepareClipboard', atomic, path.join(output, 'clipboard-view.jar'), path.join(output, 'clipboard-manifest.json')]);
     command('java', ['-cp', tools, 'PrepareControllers', atomic, path.join(output, 'controller-view.jar'), path.join(output, 'controller-manifest.json'), path.join(output, 'clipboard-view.jar'), startup]);
+    command('java', ['-cp', tools, 'PrepareCustomCursor', atomic, path.join(menu, 'menu-mouse-view.jar'), path.join(output, 'cursor-view.jar'), path.join(output, 'cursor-manifest.json')]);
+    const aliasOutput = path.join(output, 'cursor-alias.jar');
+    const aliasManifest = path.join(output, 'cursor-alias.json');
+
+    await writeFile(aliasOutput, Buffer.from('owned output sentinel'));
+    await writeFile(aliasManifest, Buffer.from('owned manifest sentinel'));
+    const aliasCases = [
+        [atomic, atomic, aliasManifest],
+        [path.join(menu, 'menu-mouse-view.jar'), aliasOutput, aliasOutput],
+        [path.join(menu, 'menu-mouse-view.jar'), aliasOutput, atomic],
+        [path.join(menu, 'menu-mouse-view.jar'), path.join(output, '.', 'atomic-view.jar'), aliasManifest],
+    ];
+    const hardAlias = path.join(output, `cursor-hardlink-${randomUUID()}.jar`);
+
+    await link(atomic, hardAlias);
+    aliasCases.push([path.join(menu, 'menu-mouse-view.jar'), hardAlias, aliasManifest]);
+    const protectedFiles = [atomic, path.join(menu, 'menu-mouse-view.jar'), aliasOutput, aliasManifest];
+    const protectedHashes = await Promise.all(protectedFiles.map(async (file) => sha(await readFile(file))));
+
+    for (const [mouseInput, destination, manifest] of aliasCases) {
+        const rejected = spawnSync(path.join(jdk, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'), ['-cp', tools, 'PrepareCustomCursor', atomic, mouseInput, destination, manifest], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+
+        assert.notEqual(rejected.status, 0);
+        assert.match(rejected.stderr, /Aliased cursor paths/u);
+        assert.deepEqual(await Promise.all(protectedFiles.map(async (file) => sha(await readFile(file)))), protectedHashes);
+    }
+
+    evidence.cursorAliasChecks = aliasCases.length;
+    const oracle = spawnSync(path.join(jdk, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'), ['-cp', [classes, gameJar].join(path.delimiter), 'CustomCursorQualification'], { encoding: 'utf8', timeout: 30_000, windowsHide: true });
+
+    assert.equal(oracle.status, 0, oracle.stderr || oracle.stdout);
+    assert.match(oracle.stdout, /RGBA16bytes fe807fffc3b2a1ffff0201ffffffffff/u);
+    evidence.nativeCursorOracle = oracle.stdout.trim();
+    evidence.cursorAdaptation = JSON.parse(await readFile(path.join(output, 'cursor-manifest.json'), 'utf8'));
+    assert.equal(evidence.cursorAdaptation.cursorUnchanged, 6);
+    assert.equal(evidence.cursorAdaptation.mouseUnchanged, 30);
     routes.set('/controller-view.jar', await snapshot(path.join(output, 'controller-view.jar')));
     routes.set('/media/gamecontrollerdb.txt', await snapshot(path.join(path.dirname(gameJar), 'media/gamecontrollerdb.txt')));
     command('jar', ['--create', '--file', path.join(output, 'qualification.jar'), '-C', classes, '.']);
@@ -117,17 +153,21 @@ async function prepare() {
     assert.equal(evidence.adaptation.verifiedClassFile, true);
     assert.equal(evidence.adaptation.gameClassesEmitted, 0);
 
+    for (const name of ['media/ui/cursor_blank.png', 'media/ui/cursor_white.png', 'media/fileGuidTable.xml']) {
+        routes.set(`/${name}`, await snapshot(path.join(path.dirname(gameJar), name)));
+    }
+
     for (const name of sdk) {
         routes.set(`/${name}`, await snapshot(name === 'atomic-view.jar' ? atomic : path.join(menu, name)));
     }
 
     routes.set('/menu-mouse-view.jar', await snapshot(path.join(menu, 'menu-mouse-view.jar')));
 
-    for (const name of ['startup-input-view.jar', 'qualification.jar', 'display-events-view.jar', 'clipboard-view.jar']) {
+    for (const name of ['cursor-view.jar', 'startup-input-view.jar', 'qualification.jar', 'display-events-view.jar', 'clipboard-view.jar']) {
         routes.set(`/${name}`, await snapshot(path.join(output, name)));
     }
 
-    for (const name of ['display-events-qualification.html', 'display-events-qualification.js', 'display-events.js', 'keyboard.js', 'browser-clock.js', 'browser-mouse.js', 'sprite-webgl.js', 'sprite-attrib.js', 'glsl-compat.js', 'unsafe-short-repair.js', 'controller-natives.js']) {
+    for (const name of ['display-events-qualification.html', 'display-events-qualification.js', 'display-events.js', 'custom-cursor.js', 'keyboard.js', 'browser-clock.js', 'browser-mouse.js', 'sprite-webgl.js', 'sprite-attrib.js', 'glsl-compat.js', 'unsafe-short-repair.js', 'controller-natives.js']) {
         routes.set(`/browser-jvm/${name}`, await snapshot(path.join(source, name)));
     }
 }
@@ -370,6 +410,17 @@ function verifyResult(result) {
     assert.equal(result.pass, true, result.error);
     assert.equal(result.exit, 0);
     assert.equal(result.java.checks, 27);
+    assert.equal(result.cursorEvidence.java.checks, 28);
+    assert.equal(result.cursorEvidence.java.pass, true);
+    assert.equal(result.cursorEvidence.observations.length, 11);
+    assert.equal(result.cursorEvidence.pixelChecks.length, 3);
+    assert.ok(result.cursorEvidence.pixelChecks.every((check) => check.rawMatch && check.decodedMatch));
+    assert.equal(result.cursorEvidence.pixelChecks[2].actualSHA, 'd1949d50e95a41b3793225b460e1ea0a76d622b67277d590b12ee7207b39760b');
+    assert.equal(result.cursorEvidence.pixelChecks[2].decodedSHA, result.cursorEvidence.pixelChecks[2].actualSHA);
+    assert.equal(result.cursors.created, 3);
+    assert.equal(result.cursors.revoked, 3);
+    assert.equal(result.cursors.owned, 0);
+    assert.equal(result.cursors.closed, true);
     assert.equal(result.controllers.before.listeners, 0);
     assert.equal(result.controllers.after.listeners, 0);
     assert.deepEqual(result.controllers.before.queries, Array.from({ length: 16 }, (_, index) => index));

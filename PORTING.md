@@ -1,5 +1,11 @@
 # Toward a playable original-bytecode port
 
+## Original custom-cursor startup prerequisite
+
+The public Display-events gate now executes original Mouse.initCustomCursor in the same original Display/RenderThread owner. Its previous27Java/7DOM checks and new28cursor checks/11observations/3pixel cases pass, with68unchanged inputs and normal cleanup. Reuse the new pinned vendor cursor overlay after the prepared Mouse overlay and the shared Display image-cursor owner when admitting original GameWindow.initShared. Original PNG decoding/finally and vendor flip/conversion remain responsible for pixels; the browser adapter supplies real image resources and CSS hotspots. Do not add a duplicate manual game initialization call to claim full startup.
+
+Original library/logging startup also now returns an explicit successful private Java report through SteamUtils.init, a genuine full upstream RakNet WASM owner and the qualified ZNet callbacks. A narrow native credentialless iframe adaptation resolves the runtime download helper's isolation-policy block while /files remains a separate IndexedDB backend. The strict overall diagnostic still fails on pre-cleanup canceled fetches after valid HTTP responses; their owner remains unknown. Preserve that failure separately from successful Java state checks and do not claim networking, peers, full GameWindow initialization or a clean complete hosting gate.
+
 ## Preserve original native implementations where practical
 
 Alongside original Java execution, a private WebAssembly CPU experiment now runs an unchanged installed x86-64 ZNet setter and its suppressed-log path in a real browser. Preserve this as a narrowly scoped feasibility result. Before expanding it, inspect the next original operation's initialization and imports with REA and investigate reusable runtime services. A few successful calls do not establish a Windows/JNI environment or whole-library performance. Do not replace the current browser JVM route or publish emulated-library readiness from this result.

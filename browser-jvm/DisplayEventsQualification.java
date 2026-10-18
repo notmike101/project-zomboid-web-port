@@ -106,6 +106,7 @@ public final class DisplayEventsQualification {
             check(org.lwjgl.opengl.GL11.glGetError() == 0, "No graphics errors from actual platform lifecycle");
             Display.removeFocusGainedListener(onGained);
             Display.removeFocusLostListener(onLost);
+            CustomCursorQualification.run(root);
             Display.destroy();
             boolean closed = false, finalized = false;
             try { Display.processMessages(); } catch (IllegalStateException expected) { closed = true; }
@@ -113,6 +114,9 @@ public final class DisplayEventsQualification {
             check(closed && finalized, "Closed surface original pump propagates genuine Java lifecycle exception/finally");
             report("{\"pass\":true,\"checks\":" + checks + ",\"gained\":" + gained + ",\"lost\":" + lost
                 + ",\"clipboardReads\":" + BrowserClipboard.reads() + ",\"originalProcessBodyRestored\":true}");
+        } catch (Exception | Error failure) {
+            report("{\"pass\":false,\"checks\":" + checks + "}");
+            throw failure;
         } finally {
             try {
                 if (renderOwner) zombie.GameWindow.GameInput.quit();
