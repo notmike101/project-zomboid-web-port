@@ -4,6 +4,7 @@ import { createBrowserPhysics } from './browser-physics.js';
 import { createFileWatchNatives } from './file-watch-natives.js';
 import { keyboardNatives } from './keyboard.js';
 import { installNativeLibraryLoader } from './native-library-loader.js';
+import { createProcessNatives } from './process-natives.js';
 import { startSchedulerRuntime } from './scheduler-runtime.js';
 import { createSpriteNatives } from './sprite-webgl.js';
 import { reserveSqliteNamespace } from './sqlite-namespace.js';
@@ -16,6 +17,7 @@ const mouse = createBrowserMouse(canvas);
 const clock = createBrowserClock();
 const physics = createBrowserPhysics();
 const watch = createFileWatchNatives();
+const processes = createProcessNatives();
 const stop = document.querySelector('#stop');
 const status = document.querySelector('#status');
 const events = keyboard.enableTextEvents();
@@ -66,6 +68,7 @@ try {
             ...clock.natives,
             ...physics.natives,
             ...watch.natives,
+            ...processes.natives,
             /**
              * Reads the explicit browser owner's stop request.
              *
@@ -129,6 +132,7 @@ try {
     }
 
     globalThis.removeEventListener('mouseup', focusKeyboard);
+    globalThis.menuProcesses = processes.diagnostics();
     keyboard.dispose();
     mouse.dispose();
     globalThis.menuInput = { keyboard: events.snapshot(), mouse: mouse.snapshot() };

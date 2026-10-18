@@ -693,7 +693,7 @@ try {
     }
 
     if (profile === 'menu') {
-        for (const name of ['menu.js', 'file-watch-natives.js', 'browser-clock.js', 'browser-mouse.js', 'keyboard.js', 'browser-physics.js', 'ragdoll-definitions.js', 'scheduler-runtime.js', 'sqlitejdbc.js', 'sqlite-natives.js', 'sqlite-namespace.js', 'native-long-return.js', 'native-library-loader.js']) {
+        for (const name of ['menu.js', 'file-watch-natives.js', 'process-natives.js', 'browser-clock.js', 'browser-mouse.js', 'keyboard.js', 'browser-physics.js', 'ragdoll-definitions.js', 'scheduler-runtime.js', 'sqlitejdbc.js', 'sqlite-natives.js', 'sqlite-namespace.js', 'native-long-return.js', 'native-library-loader.js']) {
             routes.set(`/${name}`, { file: path.join(source, name), type: 'text/javascript' });
         }
 
@@ -1059,7 +1059,7 @@ try {
 
     if (profile === 'menu') {
         await page.waitForFunction(() => globalThis.menuCompleted, undefined, { timeout: interactive ? 0 : 360_000 });
-        evidence.menuCleanup = await page.evaluate(() => ({ input: globalThis.menuInput, contextLost: globalThis.menuContextLost, watch: globalThis.menuWatch }));
+        evidence.menuCleanup = await page.evaluate(() => ({ input: globalThis.menuInput, contextLost: globalThis.menuContextLost, watch: globalThis.menuWatch, processes: globalThis.menuProcesses }));
     }
 
     await page.waitForFunction(() => globalThis.probeResult, undefined, { timeout: interactive ? 0 : 180_000 });

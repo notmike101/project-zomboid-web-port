@@ -81,7 +81,7 @@ public final class BrowserMenuSession implements AutoCloseable {
         System.setProperty("org.sqlite.lib.path", "/app");
         System.setProperty("org.sqlite.lib.name", "sqlitejdbc.js");
         zombie.ZomboidFileSystem.instance.setCacheDir(root + "/cache");
-        Class.forName("org.sqlite.JDBC");
+        zombie.util.PZSQLUtils.init();
         progress("original-jdbc-ready");
         // Same original -nosound browser component mode as the existing play profile.
         Core.soundDisabled = true;
