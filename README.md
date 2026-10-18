@@ -26,6 +26,8 @@ The connected browser route is currently qualified on **Windows x64**.
 | JDK | Full JDK 25 with java, javac and jar; preparation uses its Class-File API |
 | Browser | A Chromium executable with WebGL2 support; Playwright Core does not install a browser automatically |
 | Clipper2 Java | Pinned 2.0.1b release JAR in .tools/clipper2-2.0.1b.jar; the play runner verifies its SHA-256 |
+| Earcut C++ | Pinned 2.2.4 header and ISC license under .tools/earcut-4811a2b6; see [Earcut setup](browser-jvm/EARCUT.md) |
+| Emscripten / Python | Play and menu build Earcut with the pinned local Emscripten 3.1.74 SDK and `py -3`; see [SDK setup](browser-jvm/BULLET.md#prepare-the-optional-tools) |
 | Network | Access to https://cjrtnc.leaningtech.com/4.3/ for the CheerpJ runtime |
 
 The local importer uses the matching installed Jassimp DLL to prepare genuine model/animation data. It does not launch the installed game or server.
@@ -39,6 +41,8 @@ Apache Maven 3.9.16, a WasmGC-capable browser and the installed bundled Java run
 ## Run the walking session
 
 Run these commands in PowerShell from the repository root. Replace the example paths with your actual installation, JDK and browser paths.
+
+First prepare the pinned Emscripten SDK and two Earcut source files using [Earcut setup](browser-jvm/EARCUT.md). The launcher compiles the native triangulation kernel locally; it does not install these tools or download sources for you.
 
 ~~~powershell
 npm ci --ignore-scripts --no-audit --no-fund

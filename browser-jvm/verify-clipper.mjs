@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
+import { prepareEarcutRuntime } from './prepare-earcut-runtime.mjs';
 
 const { PZ_JDK: jdk, PZ_BROWSER: executablePath, PZ_GAME_JAR: gameJar } = process.env;
 
@@ -14,7 +15,8 @@ if (!jdk || !executablePath || !gameJar) {
 
 const root = path.resolve(import.meta.dirname, '..');
 const output = path.join(root, 'target/browser-jvm/clipper');
-const classes = path.join(output, 'classes');
+const preparation = path.join(output, `preparation-${randomUUID()}`);
+const classes = path.join(preparation, 'classes');
 const archive = path.join(output, 'qualification.jar');
 const prepared = path.join(root, 'target/browser-jvm/play/sprite-view.jar');
 const dependency = path.join(root, '.tools/clipper2-2.0.1b.jar');
@@ -94,26 +96,42 @@ function canonical(rows) {
 }
 
 /**
- * Computes an oriented cross product using double precision for every delta.
+ * Computes exact twice-area for recovered integer coordinates.
  *
- * @param {number[]} a - First point.
- * @param {number[]} b - Second point.
- * @param {number[]} c - Third point.
- * @returns {number} Twice the signed triangle area.
+ * @param {bigint[]} a - First point.
+ * @param {bigint[]} b - Second point.
+ * @param {bigint[]} c - Third point.
+ * @returns {bigint} Signed cross product without tolerance.
  */
 function cross(a, b, c) {
     return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
 }
 
 /**
- * Decodes the reported float32 vertex table without changing the stored raw report.
+ * Recovers the qualified milliscale coordinates, requiring exact float32 roundtrip.
+ *
+ * @param {number[][]} vertices - Raw report table, preserved unchanged.
+ * @returns {bigint[][]} Exact comparison-only integer coordinates.
+ */
+function integerVertices(vertices) {
+    return vertices.map((point) => point.map((value) => {
+        const integer = Math.round(Math.fround(value) * 1_000);
+
+        assert.equal(Math.fround(integer / 1_000), Math.fround(value));
+
+        return BigInt(integer);
+    }));
+}
+
+/**
+ * Validates original index bounds and strictly positive triangle winding.
  *
  * @param {object} row - Raw indexed ABI report.
- * @returns {number[][][]} Counterclockwise triangles.
+ * @returns {bigint[][][]} Triangles over exact recovered coordinates.
  */
 function triangles(row) {
-    const vertices = row.vertices.map((point) => point.map(Math.fround));
-    const result = [];
+    const vertices = integerVertices(row.vertices);
+    const mesh = [];
 
     assert.equal(row.indices.length, row.returned);
     assert.equal(row.returned % 3, 0);
@@ -124,35 +142,38 @@ function triangles(row) {
         assert(ids.every((id) => Number.isInteger(id) && id >= 0 && id < vertices.length));
         const triangle = ids.map((id) => vertices[id]);
 
-        assert(cross(...triangle) > 0, 'Triangulation winding must remain strictly counterclockwise');
-        result.push(triangle);
+        assert(cross(...triangle) > 0n, 'Triangulation must remain strictly counterclockwise');
+        mesh.push(triangle);
     }
 
-    return result;
+    return mesh;
 }
 
 /**
- * Tests triangle coverage, allowing only double-arithmetic roundoff on shared edges.
+ * Tests coverage at a rational point whose denominator is exactly 62.
  *
- * @param {number[][][]} mesh - Decoded triangles.
- * @param {number[]} point - Sample location.
- * @returns {boolean} Whether the polygon covers the location.
+ * @param {bigint[][][]} mesh - Exact integer triangle mesh.
+ * @param {bigint[]} point - Rational point numerators.
+ * @returns {boolean} Whether any triangle covers the point.
  */
 function covers(mesh, point) {
-    return mesh.some(([a, b, c]) => [cross(a, b, point), cross(b, c, point), cross(c, a, point)].every((value) => value >= -Number.EPSILON * 100));
+    return mesh.some((triangle) => {
+        const [a, b, c] = triangle.map((vertex) => vertex.map((value) => value * 62n));
+
+        return [cross(a, b, point), cross(b, c, point), cross(c, a, point)].every((value) => value >= 0n);
+    });
 }
 
 /**
- * Compares genuine native and browser indexed meshes by ABI and geometric coverage.
- * Triangle index order is retained in the evidence and is not claimed identical.
+ * Compares raw ABI plus exact areas and rational coverage; index identity is reported separately.
  *
- * @param {object[]} reference - Original DLL reports.
- * @param {object[]} actual - Actual original browser JNI reports.
- * @returns {object[]} Geometric comparison summaries.
+ * @param {object[]} reference - Fresh original DLL reports.
+ * @param {object[]} actual - Original Java calls through actual upstream WASM.
+ * @returns {object[]} Independently checked geometric evidence.
  */
 function compareTriangulations(reference, actual) {
-    assert.equal(reference.length, 10);
-    assert.equal(actual.length, 10);
+    assert.equal(reference.length, 11);
+    assert.equal(actual.length, 11);
 
     return reference.map((native, index) => {
         const browser = actual[index];
@@ -163,46 +184,50 @@ function compareTriangulations(reference, actual) {
 
         const nativeMesh = triangles(native);
         const browserMesh = triangles(browser);
-        const nativeArea = nativeMesh.reduce((sum, triangle) => sum + cross(...triangle) / 2, 0);
-        const browserArea = browserMesh.reduce((sum, triangle) => sum + cross(...triangle) / 2, 0);
+        const nativeArea = nativeMesh.reduce((sum, triangle) => sum + cross(...triangle), 0n);
+        const browserArea = browserMesh.reduce((sum, triangle) => sum + cross(...triangle), 0n);
 
-        assert(Math.abs(nativeArea - browserArea) <= Math.max(1, nativeArea) * Number.EPSILON * 64, 'Triangle areas differ');
-        const xs = native.vertices.map(([x]) => Math.fround(x));
-        const ys = native.vertices.map(([, y]) => Math.fround(y));
-        const bounds = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+        assert.equal(browserArea, nativeArea);
+        const vertices = integerVertices(native.vertices);
+        const xs = vertices.map(([x]) => Number(x));
+        const ys = vertices.map(([, y]) => Number(y));
+        const bounds = [BigInt(Math.min(...xs)), BigInt(Math.max(...xs)), BigInt(Math.min(...ys)), BigInt(Math.max(...ys))];
 
         for (let x = 0; x < 31; x++) {
             for (let y = 0; y < 31; y++) {
-                const point = [bounds[0] + (bounds[1] - bounds[0]) * (2 * x + 1) / 62, bounds[2] + (bounds[3] - bounds[2]) * (2 * y + 1) / 62];
+                const point = [bounds[0] * 62n + (bounds[1] - bounds[0]) * BigInt(2 * x + 1), bounds[2] * 62n + (bounds[3] - bounds[2]) * BigInt(2 * y + 1)];
 
                 assert.equal(covers(browserMesh, point), covers(nativeMesh, point), 'Triangle coverage differs');
             }
         }
 
         if (native.triangulation === 'hole') {
-            assert.equal(covers(browserMesh, [5, 5]), false);
+            assert.equal(covers(browserMesh, [310_000n, 310_000n]), false);
         } else if (native.triangulation === 'two-holes') {
-            assert.equal(covers(browserMesh, [2, 2]), false);
-            assert.equal(covers(browserMesh, [7, 7]), false);
+            assert.equal(covers(browserMesh, [124_000n, 124_000n]), false);
+            assert.equal(covers(browserMesh, [434_000n, 434_000n]), false);
         }
 
-        return { name: native.triangulation, polygon: native.polygon, triangles: browserMesh.length, area: browserArea, coverageSamples: 961, identicalIndexOrder: JSON.stringify(native.indices) === JSON.stringify(browser.indices) };
+        return { name: native.triangulation, polygon: native.polygon, triangles: browserMesh.length, twiceIntegerArea: browserArea.toString(), coverageSamples: 961, identicalIndexOrder: JSON.stringify(native.indices) === JSON.stringify(browser.indices) };
     });
 }
 
 await mkdir(classes, { recursive: true });
 
 try {
+    evidence.earcutBuild = await prepareEarcutRuntime(path.join(output, 'earcut'));
     const inputs = [path.resolve(gameJar), nativeLibrary, dependency, prepared, import.meta.filename,
-        ...['host/port/host/ClipperSupport.java', 'ClipperQualification.java', 'ClipperTriangulationQualification.java', 'browser-physics.js'].map((name) => path.join(root, 'browser-jvm', name))];
+        ...['host/port/host/ClipperSupport.java', 'ClipperQualification.java', 'ClipperTriangulationQualification.java', 'browser-physics.js', 'prepare-earcut-runtime.mjs', 'earcut-engine.cpp', 'earcut-sources.json'].map((name) => path.join(root, 'browser-jvm', name))];
+
+    inputs.push(...['earcut-engine.mjs', 'earcut-engine.wasm', 'EARCUT-LICENSE.txt', 'earcut-manifest.json'].map((name) => path.join(output, 'earcut', name)));
     const snapshots = await Promise.all(inputs.map(async (file) => ({ file, sha256: hash(await readFile(file)) })));
 
     evidence.inputsBefore = snapshots;
     const provenance = JSON.parse(await readFile(path.join(root, 'browser-jvm/third-party/clipper2/provenance.json'), 'utf8'));
 
     assert.equal(snapshots[2].sha256, provenance.sha256, 'Pinned Clipper2 dependency hash');
-    const originalDirectory = path.join(output, 'original');
-    const viewDirectory = path.join(output, 'view');
+    const originalDirectory = path.join(preparation, 'original');
+    const viewDirectory = path.join(preparation, 'view');
     const entry = 'zombie/vehicles/Clipper.class';
 
     await mkdir(originalDirectory, { recursive: true });
@@ -216,19 +241,6 @@ try {
     assert.deepEqual(viewClass.subarray(0, 6), originalClass.subarray(0, 6));
     assert.deepEqual(viewClass.subarray(8), originalClass.subarray(8), 'Original Clipper code changed');
     evidence.originalClipper = { originalSha256: hash(originalClass), viewSha256: hash(viewClass), codeUnchanged: true };
-    const tessellatorEntries = command('jar', ['--list', '--file', prepared]).split(/\r?\n/).filter((name) => name.startsWith('org/lwjgl/util/glu/') && name.endsWith('.class'));
-
-    assert(tessellatorEntries.includes('org/lwjgl/util/glu/tessellation/GLUtessellatorImpl.class'));
-    command('jar', ['--extract', '--file', path.resolve(gameJar), ...tessellatorEntries], originalDirectory);
-    command('jar', ['--extract', '--file', prepared, ...tessellatorEntries], viewDirectory);
-    evidence.shippedTessellator = await Promise.all(tessellatorEntries.map(async (name) => {
-        const original = await readFile(path.join(originalDirectory, name));
-        const view = await readFile(path.join(viewDirectory, name));
-
-        assert.deepEqual(view, original, 'Shipped GLU class changed');
-
-        return { name, sha256: hash(view) };
-    }));
     const viewArchive = path.join(output, 'clipper-view.jar');
 
     command('jar', ['--create', '--file', viewArchive, '-C', viewDirectory, '.']);
@@ -237,7 +249,7 @@ try {
     command('jar', ['--create', '--file', archive, ...[
         'ClipperQualification.class', 'AdapterChecks.class', 'port/host/ClipperSupport.class',
         'port/host/ClipperSupport$State.class', 'port/host/ClipperSupport$Polygon.class',
-        'port/host/ClipperSupport$Triangulation.class', 'port/host/ClipperSupport$Tessellation.class', 'ClipperTriangulationQualification.class',
+        'port/host/ClipperSupport$Triangulation.class', 'ClipperTriangulationQualification.class',
     ].flatMap((name) => ['-C', classes, name])]);
     const stdout = command('java', ['--enable-native-access=ALL-UNNAMED', `-Djava.library.path=${path.dirname(path.resolve(gameJar))}`, '-Dzomboid.debuglibs.clipper=0',
         '-cp', [archive, dependency, path.resolve(gameJar)].join(path.delimiter), 'ClipperQualification', 'native']);
@@ -253,7 +265,7 @@ try {
 
     await writeFile(path.join(output, 'native-triangulation.jsonl'), triangulationStdout);
     evidence.triangulationNativeRows = triangulationStdout.split(/\r?\n/).filter((line) => line.startsWith('{"triangulation":')).map(JSON.parse);
-    assert.equal(evidence.triangulationNativeRows.length, 10);
+    assert.equal(evidence.triangulationNativeRows.length, 11);
     const html = `<link rel="icon" href="data:,"><script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script><script type="module">
         import { createBrowserPhysics } from '/browser-physics.js';
         try {
@@ -261,7 +273,7 @@ try {
             await cheerpjInit({version:17,status:'none',javaProperties:['user.dir=/files/clipper-qualification'],natives:physics.natives});
             const code = await cheerpjRunMain('ClipperQualification','/app/qualification.jar:/app/clipper2.jar:/app/clipper-view.jar');
             const triangles = code === 0 ? await cheerpjRunMain('ClipperTriangulationQualification','/app/qualification.jar:/app/clipper2.jar:/app/clipper-view.jar') : -1;
-            globalThis.result = {pass:code===0&&triangles===0,code,triangles,containers:physics.snapshot().clipperContainers};
+            globalThis.result = {pass:code===0&&triangles===0,code,triangles,containers:physics.snapshot().clipperContainers,triangulation:physics.snapshot().triangulation};
         } catch (error) { globalThis.result={pass:false,error:String(error.stack||error)}; }
         finally { globalThis.completed=true; }
     </script>`;
@@ -272,6 +284,7 @@ try {
         ['/ragdoll-definitions.js', await readFile(path.join(root, 'browser-jvm/ragdoll-definitions.js'))],
     ]);
 
+    await Promise.all(['earcut-engine.mjs', 'earcut-engine.wasm', 'EARCUT-LICENSE.txt'].map(async (name) => files.set(`/browser-jvm/earcut/${name}`, await readFile(path.join(output, 'earcut', name)))));
     evidence.served = [...files].map(([route, bytes]) => ({ route, sha256: hash(bytes), bytes: bytes.length }));
     server = createServer((request, response) => {
         const pathname = new URL(request.url, 'http://localhost').pathname;
@@ -298,7 +311,9 @@ try {
 
         if (pathname.endsWith('.jar')) {
             contentType = 'application/java-archive';
-        } else if (pathname.endsWith('.js')) {
+        } else if (pathname.endsWith('.wasm')) {
+            contentType = 'application/wasm';
+        } else if (pathname.endsWith('.js') || pathname.endsWith('.mjs')) {
             contentType = 'text/javascript';
         }
 
@@ -321,6 +336,9 @@ try {
     const origin = `http://127.0.0.1:${server.address().port}`;
 
     browserServer = await chromium.launchServer({ executablePath, headless: true });
+    evidence.browserOwner = { pid: browserServer.process().pid, startedAt: new Date().toISOString(), deadlineAt: new Date(Date.now() + 150_000).toISOString() };
+    await writeFile(path.join(output, 'owner.json'), JSON.stringify(evidence.browserOwner, null, 2));
+    console.info(JSON.stringify({ output, browserOwner: evidence.browserOwner }));
     deadline = setTimeout(() => {
         evidence.deadlineExceeded = true;
         void bounded(browserServer.kill()).catch((error) => evidence.logs.push(String(error)));
@@ -363,7 +381,10 @@ try {
     assert.deepEqual(canonical(evidence.browserRows), canonical(evidence.nativeRows));
     evidence.triangulationComparison = compareTriangulations(evidence.triangulationNativeRows, evidence.triangulationBrowserRows);
     assert(evidence.logs.some((line) => line.trim() === 'CLIPPER_TRIANGULATION_GUARDS_PASS'), 'Original JNI rejection/finally checks did not complete');
-    assert.deepEqual(evidence.result.containers, { allocations: 2, clears: 143 });
+    assert.deepEqual(evidence.result.containers, { allocations: 2, clears: 145 });
+    assert.equal(evidence.result.triangulation.calls, 12);
+    assert.equal(evidence.result.triangulation.transportAllocations, 0);
+    assert.equal(evidence.result.triangulation.transportBytes, 0);
     assert.equal(evidence.denied.length, 0, 'Requests escaped the qualification allowlist');
     evidence.pass = true;
 } catch (error) {
@@ -422,6 +443,7 @@ try {
         evidence.pass = false;
     }
 
+    evidence.pass &&= !evidence.deadlineExceeded && !evidence.cleanupError;
     await writeFile(path.join(output, 'result.json'), JSON.stringify(evidence, null, 2));
 }
 

@@ -53,6 +53,122 @@ function integer(value, name) {
  * @returns {object} Native callbacks and inspectable owned geometry state.
  */
 export function createBrowserPhysics() {
+    let earcutEngine;
+    const triangulation = { loaded: false, calls: 0, transportAllocations: 0, transportBytes: 0, peakTransportBytes: 0 };
+
+    /**
+     * Runs the genuine upstream triangulator with owned WASM transport allocations.
+     *
+     * @param {object} lib - Current Java native class namespace.
+     * @param {Float64Array} coordinates - Original exact integer coordinates, flattened by Java.
+     * @param {Int32Array} ends - Exclusive vertex ends of the outer ring and holes.
+     * @returns {Promise<Int32Array>} Detached original vertex indices.
+     */
+    async function triangulateEarcut(lib, coordinates, ends) {
+        if (!(coordinates instanceof Float64Array) || !(ends instanceof Int32Array)
+            || coordinates.length % 2 || coordinates.length < 6 || coordinates.length > 65_534
+            || ends.length < 1 || ends.length > coordinates.length / 6) {
+            const Exception = await lib.java.lang.IllegalArgumentException;
+
+            throw await new Exception('Invalid original Earcut arrays');
+        }
+
+        const count = coordinates.length / 2;
+        let start = 0;
+        let invalidRing = false;
+
+        for (const end of ends) {
+            if (end < start + 3 || end > count) {
+                invalidRing = true;
+                break;
+            }
+
+            start = end;
+        }
+
+        if (invalidRing) {
+            const Exception = await lib.java.lang.IllegalArgumentException;
+
+            throw await new Exception('Invalid original Earcut ring bounds');
+        }
+
+        if (start !== count || !coordinates.every((value) => Number.isFinite(value) && Number.isInteger(value) && Math.abs(value) <= 2 ** 53)) {
+            const Exception = await lib.java.lang.IllegalArgumentException;
+
+            throw await new Exception('Inexact original Earcut coordinate');
+        }
+
+        const owned = [];
+        let engine;
+
+        try {
+            const moduleUrl = new URL('/browser-jvm/earcut/earcut-engine.mjs', globalThis.location.href).href;
+
+            earcutEngine ||= import(moduleUrl).then((module) => module.default());
+            engine = await earcutEngine;
+            triangulation.loaded = true;
+            const capacity = (count + 2 * (ends.length - 1) - 2) * 3;
+
+            /**
+             * Allocates actual WASM storage and records its owner before use.
+             *
+             * @param {number} size - Required transport bytes.
+             * @returns {number} Actual WASM address.
+             */
+            function allocate(size) {
+                const address = engine._malloc(size);
+
+                if (!address) {
+                    throw new Error('Earcut malloc failed');
+                }
+
+                owned.push({ address, size });
+                triangulation.transportAllocations++;
+                triangulation.transportBytes += size;
+                triangulation.peakTransportBytes = Math.max(triangulation.peakTransportBytes, triangulation.transportBytes);
+
+                return address;
+            }
+
+            const xy = allocate(coordinates.length * 8);
+            const rings = allocate(ends.length * 4);
+            const output = allocate((capacity + 2) * 4);
+
+            engine.HEAPF64.set(coordinates, xy / 8);
+            engine.HEAP32.set(ends, rings / 4);
+            engine.HEAP32.fill(0x5A_5A_5A_5A, output / 4, output / 4 + capacity + 2);
+            const returned = engine._triangulate(xy, count, rings, ends.length, output, capacity);
+
+            if (returned < 0 || returned > capacity || returned % 3) {
+                throw new Error(`Earcut rejected original polygon: ${returned}`);
+            }
+
+            if (engine.HEAP32[output / 4 + capacity] !== 0x5A_5A_5A_5A || engine.HEAP32[output / 4 + capacity + 1] !== 0x5A_5A_5A_5A) {
+                throw new Error('Earcut wrote outside declared output');
+            }
+
+            const result = engine.HEAP32.slice(output / 4, output / 4 + returned);
+
+            if (!result.every((index) => index >= 0 && index < count)) {
+                throw new Error('Earcut index outside original table');
+            }
+
+            triangulation.calls++;
+
+            return result;
+        } catch (error) {
+            const Exception = await lib.java.lang.IllegalStateException;
+
+            throw await new Exception(`Upstream Earcut failure: ${String(error)}`);
+        } finally {
+            for (const allocation of owned.reverse()) {
+                engine._free(allocation.address);
+                triangulation.transportAllocations--;
+                triangulation.transportBytes -= allocation.size;
+            }
+        }
+    }
+
     const ragdolls = createRagdollDefinitions();
     const chunks = new Map();
     const maps = new Map();
@@ -343,6 +459,7 @@ export function createBrowserPhysics() {
             collision: [...collision].map(([square, flags]) => ({ square, flags })),
             populationChunks: [...populationChunks],
             clipperContainers: { allocations: clipperAllocations, clears: clipperClears },
+            triangulation: { ...triangulation },
             maps: [...maps.values()].map((value) => ({ ...value })),
             chunks: [...chunks.values()].map((chunk) => ({
                 x: chunk.x, y: chunk.y, min: chunk.min, max: chunk.max,
@@ -502,6 +619,7 @@ export function createBrowserPhysics() {
     return {
         initialize, setLevels, submit, snapshot, setCollisionChunk, setCollisionSquares, collisionAt, stepSimulation, defineVehicleScript,
         natives: {
+            Java_port_host_ClipperSupport_triangulateNative: triangulateEarcut,
             ...ragdolls.natives,
             /**
              * Identifies the implemented host backend in the original version labels.

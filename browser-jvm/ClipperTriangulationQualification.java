@@ -79,6 +79,16 @@ public final class ClipperTriangulationQualification {
         } catch (UnsupportedOperationException expected) { }
         if (small.getLong(0) != 0x5a5a5a5a5a5a5a5aL) throw new AssertionError("Precision rejection wrote output");
         ClipperSupport.clear(owner);
+        try {
+            var method = ClipperSupport.class.getDeclaredMethod("triangulateNative", double[].class, int[].class);
+            method.setAccessible(true);
+            try {
+                method.invoke(null, new double[] {0,0,1,0,Double.NaN,1}, new int[] {3});
+                throw new AssertionError("JNI invalid coordinate accepted");
+            } catch (java.lang.reflect.InvocationTargetException expected) {
+                if (!(expected.getCause() instanceof IllegalArgumentException)) throw new AssertionError("JNI did not return a real Java validation exception", expected);
+            }
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
         System.out.println("CLIPPER_TRIANGULATION_GUARDS_PASS");
     }
 
@@ -96,5 +106,7 @@ public final class ClipperTriangulationQualification {
         test("collinear-duplicate", new float[][] {{0, 0, 5, 0, 10, 0, 10, 10, 10, 10, 0, 10}}, new float[0][], false);
         test("collinear-sweep", new float[][] {{8, 0, 6, 1, 4, 2, 2, 3, 0, 4, -1, 4, -1, 0}}, new float[0][], false);
         if (!nativeMode) guards();
+        test("actual-map-cell50-4",new float[][]{{68,183,69,183,69,189,68,189,68,195,58,195,58,196,52,196,52,195,42,195,42,177,68,177}},new float[0][],false);
+        clipper.clear();
     }
 }

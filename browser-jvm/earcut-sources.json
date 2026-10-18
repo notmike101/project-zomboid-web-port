@@ -1,0 +1,13 @@
+{
+  "upstream": "mapbox/earcut.hpp",
+  "version": "2.2.4",
+  "commit": "4811a2b69b91f6127a75e780de6e2113609ddabb",
+  "installedVersion": "unknown",
+  "localDirectory": ".tools/earcut-4811a2b6",
+  "files": [
+    { "file": "earcut.hpp", "sha256": "3b838bc3f643d34ced850b6d53b19e2d9abdf6c2c067425b02868d131379b3cc", "url": "https://raw.githubusercontent.com/mapbox/earcut.hpp/4811a2b69b91f6127a75e780de6e2113609ddabb/include/mapbox/earcut.hpp" },
+    { "file": "LICENSE", "sha256": "828f2aed51b6526881a236758ec9b08cd69928fbfc70346d9d44a0b3a3444fe1", "url": "https://raw.githubusercontent.com/mapbox/earcut.hpp/4811a2b69b91f6127a75e780de6e2113609ddabb/LICENSE" }
+  ],
+  "setup": "Place the two exact files above under localDirectory. The preparer verifies their SHA-256 and the existing pinned Emscripten 3.1.74 compiler, downloads nothing, and writes generated code only under target. The ISC license is copied alongside generated artifacts.",
+  "scope": "Genuine upstream triangulation; the installed DLL's exact upstream version is unknown. Native comparison checks geometry and separately reports index-order matches."
+}

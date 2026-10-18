@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { createFileWatchService } from './file-watch-service.mjs';
 import { createMediaHandler } from './media-files.mjs';
+import { prepareEarcutRuntime } from './prepare-earcut-runtime.mjs';
 import { prepareSchedulerRuntime } from './prepare-scheduler-runtime.mjs';
 
 const source = fileURLToPath(new URL('./', import.meta.url));
@@ -267,6 +268,12 @@ try {
         }
 
         assetHashes.push({ name: 'clipper2-2.0.1b.jar', file: clipperJar, sha256Before: clipperSha256 });
+        evidence.earcutBuild = await prepareEarcutRuntime(path.join(output, 'earcut'));
+        await Promise.all(['earcut-engine.mjs', 'earcut-engine.wasm', 'EARCUT-LICENSE.txt', 'earcut-manifest.json'].map(async (name) => {
+            const file = path.join(output, 'earcut', name);
+
+            assetHashes.push({ name: `earcut/${name}`, file, sha256Before: await hash(file) });
+        }));
     }
 
     if (runtimeProfile) {
@@ -555,6 +562,20 @@ try {
         ['/view.jar', { file: path.join(output, 'view.jar'), type: 'application/java-archive' }],
         ['/menu.png', { file: png, type: 'image/png' }],
     ]);
+
+    if (['play', 'menu'].includes(profile)) {
+        for (const name of ['earcut-engine.mjs', 'earcut-engine.wasm', 'EARCUT-LICENSE.txt']) {
+            let type = 'text/plain';
+
+            if (name.endsWith('.wasm')) {
+                type = 'application/wasm';
+            } else if (name.endsWith('.mjs')) {
+                type = 'text/javascript';
+            }
+
+            routes.set(`/browser-jvm/earcut/${name}`, { file: path.join(output, 'earcut', name), type });
+        }
+    }
 
     if (animationProfile || profile === 'food') {
         routes.set('/browser-clock.js', { file: path.join(source, 'browser-clock.js'), type: 'text/javascript' });
