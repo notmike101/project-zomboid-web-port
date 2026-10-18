@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+import { createFileWatchService } from './file-watch-service.mjs';
 import { createMediaHandler } from './media-files.mjs';
 import { prepareSchedulerRuntime } from './prepare-scheduler-runtime.mjs';
 
@@ -208,6 +209,7 @@ let browserServer;
 let menuDeadline;
 let menuPage;
 let server;
+let fileWatchService;
 const evidence = { pass: false, runtime: 'CheerpJ 4.3 Java17', closed: false };
 const assetHashes = [];
 const activeMediaRequests = new Set();
@@ -479,7 +481,7 @@ try {
         const menuClasses = path.join(output, 'menu-classes');
 
         await mkdir(menuClasses, { recursive: true });
-        command(executable('javac'), ['-d', tools, ...['PrepareContentAssets.java', 'PrepareFontAssets.java', 'PrepareClientAssets.java', 'PrepareMenuAssets.java', 'PrepareMouse.java', 'PrepareKeyboardEvents.java'].map((name) => path.join(source, name))]);
+        command(executable('javac'), ['-d', tools, ...['PrepareContentAssets.java', 'PrepareFontAssets.java', 'PrepareClientAssets.java', 'PrepareMenuAssets.java', 'PrepareMouse.java', 'PrepareKeyboardEvents.java', 'PrepareClipboard.java'].map((name) => path.join(source, name))]);
         await boundedReadOnly(['Content', 'Font', 'Client', 'Menu'], async (kind) => {
             const directory = path.join(output, `${kind.toLowerCase()}-data`);
 
@@ -501,7 +503,8 @@ try {
         });
         command(executable('java'), ['-cp', tools, 'PrepareMouse', path.join(output, 'atomic-view.jar'), path.join(output, 'menu-mouse-view.jar'), path.join(output, 'menu-mouse.json')]);
         command(executable('java'), ['-cp', tools, 'PrepareKeyboardEvents', path.join(output, 'atomic-view.jar'), path.join(output, 'menu-input-view.jar'), path.join(output, 'menu-keyboard.json')]);
-        const helpers = ['host/port/host/ClipperSupport.java', 'BrowserMenu.java', 'BrowserMenuSession.java', 'BrowserMenuJsonQualification.java', 'host/port/host/BrowserMouse.java', 'host/port/host/BrowserKeyboardEvents.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserFontBootstrap.java', 'host/port/host/SqliteFiles.java', 'host/port/host/SqliteSupport.java', 'host/org/lwjgl/stb/STBImage.java'];
+        command(executable('java'), ['-cp', tools, 'PrepareClipboard', path.join(output, 'atomic-view.jar'), path.join(output, 'menu-clipboard-view.jar'), path.join(output, 'menu-clipboard.json')]);
+        const helpers = ['host/port/host/ClipperSupport.java', 'BrowserMenu.java', 'BrowserMenuSession.java', 'BrowserMenuJsonQualification.java', 'host/port/host/BrowserClipboard.java', 'host/port/host/BrowserMouse.java', 'host/port/host/BrowserKeyboardEvents.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserFontBootstrap.java', 'host/port/host/SqliteFiles.java', 'host/port/host/SqliteSupport.java', 'host/org/lwjgl/stb/STBImage.java'];
 
         command(executable('javac'), ['--release', '17', '-cp', [gameJar, clipperJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', menuClasses, ...helpers.map((name) => path.join(source, name))]);
         command(executable('java'), ['-cp', [menuClasses, gameJar].join(path.delimiter), 'BrowserMenuJsonQualification']);
@@ -669,14 +672,14 @@ try {
     }
 
     if (profile === 'menu') {
-        for (const name of ['menu.js', 'browser-clock.js', 'browser-mouse.js', 'keyboard.js', 'browser-physics.js', 'ragdoll-definitions.js', 'scheduler-runtime.js', 'sqlitejdbc.js', 'sqlite-natives.js', 'sqlite-namespace.js', 'native-long-return.js', 'native-library-loader.js']) {
+        for (const name of ['menu.js', 'file-watch-natives.js', 'browser-clock.js', 'browser-mouse.js', 'keyboard.js', 'browser-physics.js', 'ragdoll-definitions.js', 'scheduler-runtime.js', 'sqlitejdbc.js', 'sqlite-natives.js', 'sqlite-namespace.js', 'native-long-return.js', 'native-library-loader.js']) {
             routes.set(`/${name}`, { file: path.join(source, name), type: 'text/javascript' });
         }
 
         routes.set('/clipper2.jar', { file: clipperJar, type: 'application/java-archive' });
         routes.set('/menu-map-files.tsv', { file: path.join(output, 'menu-data/menu-map-files.tsv'), type: 'text/plain' });
 
-        for (const name of ['menu-entry.jar', 'menu-mouse-view.jar', 'menu-input-view.jar']) {
+        for (const name of ['menu-entry.jar', 'menu-clipboard-view.jar', 'menu-mouse-view.jar', 'menu-input-view.jar']) {
             routes.set(`/${name}`, { file: path.join(output, name), type: 'application/java-archive' });
         }
 
@@ -735,8 +738,19 @@ try {
         }
     });
 
+    if (profile === 'menu') {
+        const started = performance.now();
+
+        fileWatchService = createFileWatchService({ mounts: [{ virtualPrefix: '/app/media', root: options['media-root'] }] });
+        evidence.menuWatchMount = { ...fileWatchService.diagnostics(), preparationMilliseconds: performance.now() - started };
+    }
+
     server = createServer(async (request, response) => {
         try {
+            if (fileWatchService?.handle(request, response)) {
+                return;
+            }
+
             if (!['GET', 'HEAD'].includes(request.method)) {
                 response.writeHead(405).end();
 
@@ -850,7 +864,8 @@ try {
         const item = { url: request.url(), method: request.method(), postDataBytes: request.postDataBuffer()?.length || 0 };
 
         requests.push(item);
-        const local = url.origin === origin && !url.search && (routes.has(url.pathname) || url.pathname === '/media' || url.pathname.startsWith('/media/'));
+        const local = url.origin === origin && !url.search && (routes.has(url.pathname) || url.pathname === '/media' || url.pathname.startsWith('/media/')
+            || (profile === 'menu' && url.pathname === '/watch-events'));
         const runtime = url.origin === 'https://cjrtnc.leaningtech.com' && url.pathname.startsWith('/4.3/');
 
         if (!['GET', 'HEAD'].includes(request.method()) || item.postDataBytes || (!local && !runtime)) {
@@ -1023,7 +1038,7 @@ try {
 
     if (profile === 'menu') {
         await page.waitForFunction(() => globalThis.menuCompleted, undefined, { timeout: interactive ? 0 : 360_000 });
-        evidence.menuCleanup = await page.evaluate(() => ({ input: globalThis.menuInput, contextLost: globalThis.menuContextLost }));
+        evidence.menuCleanup = await page.evaluate(() => ({ input: globalThis.menuInput, contextLost: globalThis.menuContextLost, watch: globalThis.menuWatch }));
     }
 
     await page.waitForFunction(() => globalThis.probeResult, undefined, { timeout: interactive ? 0 : 180_000 });
@@ -1037,6 +1052,10 @@ try {
 
     if (profile === 'menu') {
         evidence.luaErrors = logs.filter((line) => /SEVERE|Error found in|KahluaThread.flushErrorMessage|PAGEERROR:/.test(line));
+        evidence.menuWatchQualified = evidence.menuCleanup.watch?.disposed === true
+            && evidence.menuCleanup.watch.owned === 0 && evidence.menuCleanup.watch.polls === 0
+            && evidence.menuCleanup.watch.queuedPackets === 0 && !evidence.menuCleanup.watch.remoteFailure;
+        evidence.pass = evidence.pass && evidence.menuWatchQualified;
         evidence.pass = evidence.pass && evidence.result.originalMenuExited && evidence.result.ownedCleanup && evidence.result.frontEndTicks > 0 && evidence.menuCleanup.contextLost === true && evidence.luaErrors.length === 0 && (interactive || (evidence.menuAfterInput?.newGameVisible === true && evidence.menuHeldInput?.mouseDown === true && evidence.menuScrollHeld?.x === 0 && evidence.menuScrollHeld?.y === 0 && Math.abs(evidence.menuHeldInput.mouseX - evidence.menuBeforeInput.solo.x) <= 2 && Math.abs(evidence.menuHeldInput.mouseY - evidence.menuBeforeInput.solo.y) <= 2 && evidence.menuTextSinkFocused === true && evidence.menuSetup?.setup?.loaded === true && evidence.menuSetup.setup.data >= 2 && evidence.menuSetup.setup.images >= 1 && evidence.menuAfterInput.thumbnailsReady === 6 && evidence.menuPixels.nonblack > 0 && evidence.menuPixels.colors > 1 && evidence.menuPixels.error === 0 && evidence.menuPixels.framebufferBound === false));
     }
 
@@ -1144,6 +1163,21 @@ try {
             await browser.close();
         } catch (error) {
             cleanupErrors.push(`browser: ${error.message}`);
+        }
+    }
+
+    if (fileWatchService) {
+        try {
+            await menuBounded(fileWatchService.close(), 5_000);
+            evidence.menuWatchClosed = fileWatchService.diagnostics();
+
+            if (!evidence.menuWatchClosed.closed || evidence.menuWatchClosed.watchers || evidence.menuWatchClosed.clients
+                || evidence.menuWatchClosed.queued || evidence.menuWatchClosed.entries || evidence.menuWatchClosed.watcherListeners
+                || evidence.menuWatchClosed.timerActive) {
+                cleanupErrors.push('Menu filesystem observation owners remain');
+            }
+        } catch (error) {
+            cleanupErrors.push(`file watcher: ${error.message}`);
         }
     }
 

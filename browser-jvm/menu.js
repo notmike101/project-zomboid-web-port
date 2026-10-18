@@ -1,6 +1,7 @@
 import { createBrowserClock } from './browser-clock.js';
 import { createBrowserMouse } from './browser-mouse.js';
 import { createBrowserPhysics } from './browser-physics.js';
+import { createFileWatchNatives } from './file-watch-natives.js';
 import { keyboardNatives } from './keyboard.js';
 import { installNativeLibraryLoader } from './native-library-loader.js';
 import { startSchedulerRuntime } from './scheduler-runtime.js';
@@ -14,6 +15,7 @@ const keyboard = keyboardNatives(canvas);
 const mouse = createBrowserMouse(canvas);
 const clock = createBrowserClock();
 const physics = createBrowserPhysics();
+const watch = createFileWatchNatives();
 const stop = document.querySelector('#stop');
 const status = document.querySelector('#status');
 const events = keyboard.enableTextEvents();
@@ -63,6 +65,7 @@ try {
             ...mouse.natives,
             ...clock.natives,
             ...physics.natives,
+            ...watch.natives,
             /**
              * Reads the explicit browser owner's stop request.
              *
@@ -110,12 +113,21 @@ try {
     });
     installUnsafeShortRepair(globalThis.cj3Module);
     installNativeLibraryLoader(globalThis.cj3Module);
-    const archives = ['menu-entry.jar', 'clipper2.jar', 'menu-mouse-view.jar', 'menu-input-view.jar', 'animation-entry.jar', 'animation-view.jar', 'animation-sdk-view.jar', 'path-view.jar', 'float-bridge.jar', 'memory-bridge.jar', 'world-entry.jar', 'atomic-view.jar'];
+    watch.install();
+    const archives = ['menu-entry.jar', 'menu-clipboard-view.jar', 'clipper2.jar', 'menu-mouse-view.jar', 'menu-input-view.jar', 'animation-entry.jar', 'animation-view.jar', 'animation-sdk-view.jar', 'path-view.jar', 'float-bridge.jar', 'memory-bridge.jar', 'world-entry.jar', 'atomic-view.jar'];
 
     globalThis.exit = await cheerpjRunMain('BrowserMenu', archives.map((name) => `/app/${name}`).join(':'), `/files/sqlite-owned/${crypto.randomUUID()}`);
 } catch (error) {
     globalThis.probeResult = { pass: false, error: String(error.stack || error) };
 } finally {
+    try {
+        watch.dispose();
+        globalThis.menuWatch = { ...watch.diagnostics(), disposed: true };
+    } catch (error) {
+        globalThis.menuWatch = { ...watch.diagnostics(), disposed: false, error: String(error) };
+        globalThis.probeResult = { pass: false, error: `Original watch cleanup failed: ${error}` };
+    }
+
     globalThis.removeEventListener('mouseup', focusKeyboard);
     keyboard.dispose();
     mouse.dispose();
