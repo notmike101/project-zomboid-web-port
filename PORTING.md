@@ -10,6 +10,8 @@ The next physics prerequisite is real Bullet mesh ownership. A data-only origina
 
 The original native full-owner reference now passes the true default metadata bounds, full collision/population initialization, original save-directory producer and pre-start worker save. Browser work should use that exact original closure with lazy real media, sparse native ownership and genuine density callbacks, without the old single-cell/grid-size admission limits. A focused full-owner gate does not require rebuilding models or repeating the old renderer envelope.
 
+Direct unchanged Java Bullet declarations now feed actual browser WASM hull/compound creation and cleanup through the qualified module loader. Continue from that private proof to genuine `initPZBullet` JVM/SkeletonBone validation and the real normal `WorldSimulation.create` header/configuration. The one-cell empty-world header does not admit normal world parameters, and no empty bootstrap handler is exported to conceal the remaining prerequisite.
+
 ## Loading prerequisites verified since the renderer frontier
 
 Three additional original-code components now pass: the direct first-save collision/population branch with its genuinely unstarted worker; original singleton GameTime/climate file save/load plus fresh original-JVM cross-read; and the public vehicle metadata queue through the real world-streamer thread and original main-queue release. These reuse the current host services without replacing Java serialization, queue processing or worker loops. Their exact scopes and retained failures are recorded in COMPATIBILITY.md.
