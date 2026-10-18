@@ -1,5 +1,11 @@
 # Toward a playable original-bytecode port
 
+## Reusable native library startup component
+
+The pinned full upstream RakNet engine and its browser owner are now public source, with provisioning and build instructions in [RAKNET-SOURCES.md](browser-jvm/RAKNET-SOURCES.md). Reuse this single owner for both native descriptors when composing genuine startup; await actual shared-memory engine initialization before publishing the original empty RakNet JNI surface. Production loading runs no codec fixtures. Keep real worker cleanup separate from unqualified global C++ destruction.
+
+Same-artifact codec comparisons and explicit original SteamUtils Java completion pass, but the private complete diagnostic remains raw FAIL on 29 pre-cleanup request cancellations of unknown ownership. Preserve that distinction during integration. No menu/controller headers are changed by this increment, and no peers, socket readiness or protocol equivalence may be inferred from library loading. The next native startup boundary remains original PZPathFind initialization and its real exit cleanup; inspect CRT/TLS/import ownership before executing it rather than supplying a fake loaded marker.
+
 ## Original custom-cursor startup prerequisite
 
 The public Display-events gate now executes original Mouse.initCustomCursor in the same original Display/RenderThread owner. Its previous27Java/7DOM checks and new28cursor checks/11observations/3pixel cases pass, with68unchanged inputs and normal cleanup. Reuse the new pinned vendor cursor overlay after the prepared Mouse overlay and the shared Display image-cursor owner when admitting original GameWindow.initShared. Original PNG decoding/finally and vendor flip/conversion remain responsible for pixels; the browser adapter supplies real image resources and CSS hotspots. Do not add a duplicate manual game initialization call to claim full startup.

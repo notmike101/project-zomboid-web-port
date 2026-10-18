@@ -1,5 +1,13 @@
 # Incremental original-bytecode compatibility
 
+## Original non-Steam library startup with upstream RakNet
+
+The public source now includes a pinned full RakNet C++ build and one browser JVM module owner. All 110 upstream translation units build to WASM; the preparer validates 264 source/header identities and applies two exact portability changes. The installed DLL's upstream revision remains unknown. No original game method is changed. See [source provisioning and ownership](browser-jvm/RAKNET-SOURCES.md).
+
+The same built artifact matches 17 original-DLL BitStream reference rows in Node (404 checks) and the browser (406 checks). Original `SteamUtils.init()` completes with an explicit successful Java report, networking-library loading enabled, Steam disabled and zero added logged exceptions. The actual blob-loaded ZNet logger records four calls and delivers both expected original Java callbacks. This establishes library initialization and the selected codec/logger operations, not working multiplayer or transport.
+
+The complete private diagnostic remains **FAIL** on 29 pre-cleanup canceled requests after valid responses; their owner is unknown. Browser/server closure, zero remaining workers and unchanged hashes for 305 inputs are separately verified. Public menu/controller/header integration has not been performed. Peer startup, sockets, protocol equivalence, Steam, global C++ destruction and full shutdown remain unqualified. ZNet callback success is qualified; the installed native callback's describe-and-clear behavior when Java throws is not reproduced or admitted by this component.
+
 ## Original custom cursors in the public Display owner
 
 `node browser-jvm/verify-display-events.mjs` now composes unchanged original `Mouse.initCustomCursor()` with the existing original Display/RenderThread owner. All 27 existing Java checks and seven actual DOM phases remain passing, followed by 28 cursor checks, eleven mode/lifetime observations and three pixel comparisons. Five preparer alias guards and the original-vendor JVM conversion oracle also pass. All 68 monitored inputs remain unchanged, denied requests and strict runtime errors are zero, and the browser closes normally without forced termination.

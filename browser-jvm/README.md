@@ -120,6 +120,12 @@ A separate fresh CheerpJ filesystem qualification uses `user.dir=/app` and the u
 
 The public play verification runs the installed original `ISWalkToTimedAction` through `ISTimedActionQueue` after keyboard release. `PlayerNavigationQualification` reuses cached shared definitions, loads its two original client action dependencies and advances the normal session. A passing result requires original movement/animation, Succeeded, target arrival, empty Java actions, an empty actual Lua queue with no current action, cleared path and idle with zero input. Lua error logs fail the gate. Complete shared Lua supplies original `ISLogSystem`, resolving the earlier swallowed completion error. The session delivers the original selected pathfinding backend's results after the world/action update. Interactive mode does not queue this verification action.
 
+## RakNet source build component
+
+[RAKNET-SOURCES.md](RAKNET-SOURCES.md) documents the pinned source inputs, existing Emscripten dependency, preparation function, module routes and Java helper. This component compiles the full upstream candidate engine and supplies actual library ownership plus two selected ZNet logger natives. It does not yet change the public launch profiles or their headers.
+
+The same artifact matches 17 original native BitStream rows in Node and a browser; original non-Steam SteamUtils initialization also reports explicit Java success. The complete private diagnostic still fails on 29 pre-cleanup canceled fetches, whose owner is unresolved. Networking, peer startup, shipped-version equivalence and complete shutdown remain unqualified.
+
 ## Native indoor lighting qualification
 
 After preparing the play SDK profile, set `PZ_JDK`, `PZ_BROWSER` and `PZ_GAME_DIR` and run `node browser-jvm/verify-lighting.mjs`. It builds only authored transport, loads the actual lighting DLL for bounded data calculations, and compares the same original JNI declarations in a fresh browser. General scenes match 896 cells and 43,904 packed integers; incremental and publication protocols check retained geometry, one-publication delay and consumed dirty bits. Input hashes and resource cleanup are required. The production backend accounts for all 50 JNI names and explicitly rejects unqualified features. [Native provenance and exact limits](lighting-provenance.md) distinguish this service qualification from original game initialization and rendering.
