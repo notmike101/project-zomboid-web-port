@@ -1,5 +1,6 @@
 import { createBrowserClock } from './browser-clock.js';
 import { createBrowserMouse } from './browser-mouse.js';
+import { createControllerNatives } from './controller-natives.js';
 import { createDisplayEvents } from './display-events.js';
 import { keyboardNatives } from './keyboard.js';
 import { createSpriteNatives } from './sprite-webgl.js';
@@ -14,8 +15,9 @@ const keyboard = keyboardNatives(canvas);
 const events = keyboard.enableTextEvents();
 const mouse = createBrowserMouse(canvas);
 const display = createDisplayEvents(canvas, events);
+const controllers = createControllerNatives();
 const gl = canvas.getContext('webgl2');
-const archives = ['qualification.jar', 'display-events-view.jar', 'clipboard-view.jar', 'startup-input-view.jar', 'menu-mouse-view.jar', 'animation-entry.jar', 'animation-view.jar', 'animation-sdk-view.jar', 'path-view.jar', 'float-bridge.jar', 'memory-bridge.jar', 'world-entry.jar', 'atomic-view.jar'];
+const archives = ['qualification.jar', 'display-events-view.jar', 'controller-view.jar', 'clipboard-view.jar', 'startup-input-view.jar', 'menu-mouse-view.jar', 'animation-entry.jar', 'animation-view.jar', 'animation-sdk-view.jar', 'path-view.jar', 'float-bridge.jar', 'memory-bridge.jar', 'world-entry.jar', 'atomic-view.jar'];
 let systemCalls = 0;
 
 if (navigator.clipboard) {
@@ -46,9 +48,9 @@ try {
         version: 17,
         status: 'none',
         clipboardMode: 'java',
-        javaProperties: [`user.home=${ownedRoot}/home`],
+        javaProperties: [`user.home=${ownedRoot}/home`, `user.dir=${ownedRoot}`],
         natives: {
-            ...graphics.natives, ...clock.natives, ...keyboard.natives, ...mouse.natives, ...display.natives,
+            ...graphics.natives, ...clock.natives, ...keyboard.natives, ...mouse.natives, ...display.natives, ...controllers.natives,
             /**
              * Pauses at a real input boundary without altering original state.
              *
@@ -92,6 +94,10 @@ try {
 } catch (error) {
     globalThis.result = { pass: false, error: String(error.stack || error) };
 } finally {
+    const beforeControllers = controllers.diagnostics();
+
+    controllers.dispose();
+    globalThis.result.controllers = { before: beforeControllers, after: controllers.diagnostics() };
     display.dispose();
     keyboard.dispose();
     mouse.dispose();

@@ -105,7 +105,10 @@ try {
     const keyboardHost = path.join(output, 'BrowserKeyboardEvents.java');
 
     await writeFile(keyboardHost, await snapshot(path.join(root, 'browser-jvm/host/port/host/BrowserKeyboardEvents.java')));
-    command('javac', ['--release', '17', '-cp', runtimeCopy, '-d', classes, frozenHost, keyboardHost, frozenSources[0], frozenSources[1]]);
+    const displayEventsHost = path.join(output, 'BrowserDisplayEvents.java');
+
+    await writeFile(displayEventsHost, await snapshot(path.join(root, 'browser-jvm/host/port/host/BrowserDisplayEvents.java')));
+    command('javac', ['--release', '17', '-cp', runtimeCopy, '-d', classes, frozenHost, keyboardHost, displayEventsHost, frozenSources[0], frozenSources[1]]);
     command('javac', ['-d', preparer, frozenPreparer, frozenSources[2]]);
     command('java', ['-cp', preparer, 'PrepareClipboard', runtimeCopy, path.join(output, 'clipboard-view.jar'), path.join(output, 'clipboard-manifest.json')]);
     const startupCopy = path.join(output, 'startup-input-view.jar');

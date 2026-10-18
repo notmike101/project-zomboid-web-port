@@ -72,14 +72,25 @@ public final class BrowserControllers {
         return result;
     }
 
-    /** Checks changes around the real DOM yield, before another Java frame can complete. */
-    public static void processMessages() {
+    private static void checkOwnerEvents() {
         live();
         if (owner != Thread.currentThread()) {
             throw new IllegalStateException("Controller events require the original Java owner thread");
         }
         checkEvents();
+    }
+
+    /** Checks changes around the legacy DOM yield for the standalone initialization gate. */
+    public static void processMessages() {
+        checkOwnerEvents();
         SpriteGraphics.processMessages();
+        checkEvents();
+    }
+
+    /** Retains controller guards around the real event boundary of original Display.processMessages. */
+    public static void pollEvents() {
+        checkOwnerEvents();
+        BrowserDisplayEvents.pollEvents();
         checkEvents();
     }
 

@@ -1,12 +1,11 @@
 import org.lwjglx.opengl.Display;
 import org.lwjglx.opengl.DisplayMode;
-import org.lwjglx.opengl.PixelFormat;
 import org.lwjglx.input.Keyboard;
 import port.host.BrowserClipboard;
 import port.host.BrowserDisplayEvents;
 import zombie.core.Core;
 
-/** Bounded original vendor component. No original render/game thread or world startup. */
+/** Original render-owner initialization and vendor event pump; no game loop or world startup. */
 public final class DisplayEventsQualification {
     private static int checks, gained, lost;
     private static native void phase(int phase);
@@ -39,11 +38,17 @@ public final class DisplayEventsQualification {
         var onLost = (Display.FocusLostListener) () -> lost++;
         Core core = Core.getInstance();
         boolean lock = core.getOptionLockCursorToWindow();
+        boolean renderOwner = false;
         try {
             check(!lock, "Original default cursor policy is unlocked; no option bypass");
             Display.init();
-            Display.create(new PixelFormat(32, 0, 24, 8, 0));
-            zombie.core.Clipboard.initMainThread();
+            java.nio.file.Files.createDirectories(root.resolve("media"));
+            java.nio.file.Files.copy(java.nio.file.Path.of("/app/media/gamecontrollerdb.txt"), root.resolve("media/gamecontrollerdb.txt"));
+            core.saveOptions();
+            zombie.core.opengl.RenderThread.init();
+            renderOwner = true;
+            check(zombie.core.opengl.RenderThread.renderThread == Thread.currentThread() && zombie.core.opengl.RenderThread.isRunning(), "Actual original render owner");
+            check(org.lwjglx.input.Controllers.isCreated() && port.host.BrowserControllers.ownsCallback() && port.host.BrowserControllers.queries() == 16, "Actual original controller initialization");
             Display.addFocusGainedListener(onGained);
             Display.addFocusLostListener(onLost);
             int reads = BrowserClipboard.reads();
@@ -109,11 +114,20 @@ public final class DisplayEventsQualification {
             report("{\"pass\":true,\"checks\":" + checks + ",\"gained\":" + gained + ",\"lost\":" + lost
                 + ",\"clipboardReads\":" + BrowserClipboard.reads() + ",\"originalProcessBodyRestored\":true}");
         } finally {
-            core.setOptionLockCursorToWindow(lock);
-            Display.removeFocusGainedListener(onGained);
-            Display.removeFocusLostListener(onLost);
-            if (Display.isCreated()) Display.destroy();
-            filesystem.setCacheDir(previousCache);
+            try {
+                if (renderOwner) zombie.GameWindow.GameInput.quit();
+            } finally {
+                try {
+                    if (port.host.BrowserControllers.ownsCallback()) port.host.BrowserControllers.dispose();
+                } finally {
+                    try {
+                        core.setOptionLockCursorToWindow(lock);
+                        Display.removeFocusGainedListener(onGained);
+                        Display.removeFocusLostListener(onLost);
+                        if (Display.isCreated()) Display.destroy();
+                    } finally { filesystem.setCacheDir(previousCache); }
+                }
+            }
         }
     }
 }

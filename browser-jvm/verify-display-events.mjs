@@ -99,14 +99,17 @@ async function prepare() {
     await writeFile(runtime, await snapshot(path.join(menu, 'runtime-view.jar')));
     await writeFile(startup, await snapshot(path.join(menu, 'menu-input-view.jar')));
     await writeFile(atomic, await snapshot(path.join(menu, 'atomic-view.jar')));
-    const hostSources = ['host/port/host/BrowserClipboard.java', 'host/port/host/BrowserMouse.java', 'host/port/host/BrowserKeyboardEvents.java', 'host/port/host/BrowserClock.java', 'host/port/host/BrowserDisplayEvents.java', 'DisplayEventsQualification.java'].map((name) => path.join(source, name));
-    const preparers = ['PrepareDisplayEvents.java', 'PrepareClipboard.java'].map((name) => path.join(source, name));
+    const hostSources = ['host/port/host/BrowserClipboard.java', 'host/port/host/BrowserMouse.java', 'host/port/host/BrowserKeyboardEvents.java', 'host/port/host/BrowserClock.java', 'host/port/host/BrowserDisplayEvents.java', 'DisplayEventsQualification.java', 'host/port/host/BrowserControllers.java'].map((name) => path.join(source, name));
+    const preparers = ['PrepareDisplayEvents.java', 'PrepareClipboard.java', 'PrepareControllers.java'].map((name) => path.join(source, name));
 
     await Promise.all([...hostSources, ...preparers, import.meta.filename].map(snapshot));
-    command('javac', ['--release', '17', '-cp', gameJar, '-d', classes, ...hostSources]);
+    command('javac', ['--release', '17', '-cp', [gameJar, atomic].join(path.delimiter), '-d', classes, ...hostSources]);
     command('javac', ['-d', tools, ...preparers]);
     command('java', ['-cp', [tools, gameJar].join(path.delimiter), 'PrepareDisplayEvents', runtime, startup, path.join(output, 'display-events-view.jar'), path.join(output, 'display-events-manifest.json')]);
     command('java', ['-cp', tools, 'PrepareClipboard', atomic, path.join(output, 'clipboard-view.jar'), path.join(output, 'clipboard-manifest.json')]);
+    command('java', ['-cp', tools, 'PrepareControllers', atomic, path.join(output, 'controller-view.jar'), path.join(output, 'controller-manifest.json'), path.join(output, 'clipboard-view.jar'), startup]);
+    routes.set('/controller-view.jar', await snapshot(path.join(output, 'controller-view.jar')));
+    routes.set('/media/gamecontrollerdb.txt', await snapshot(path.join(path.dirname(gameJar), 'media/gamecontrollerdb.txt')));
     command('jar', ['--create', '--file', path.join(output, 'qualification.jar'), '-C', classes, '.']);
     evidence.adaptation = JSON.parse(await readFile(path.join(output, 'display-events-manifest.json'), 'utf8'));
     assert.equal(evidence.adaptation.unchangedOtherMethods, 50);
@@ -124,7 +127,7 @@ async function prepare() {
         routes.set(`/${name}`, await snapshot(path.join(output, name)));
     }
 
-    for (const name of ['display-events-qualification.html', 'display-events-qualification.js', 'display-events.js', 'keyboard.js', 'browser-clock.js', 'browser-mouse.js', 'sprite-webgl.js', 'sprite-attrib.js', 'glsl-compat.js', 'unsafe-short-repair.js']) {
+    for (const name of ['display-events-qualification.html', 'display-events-qualification.js', 'display-events.js', 'keyboard.js', 'browser-clock.js', 'browser-mouse.js', 'sprite-webgl.js', 'sprite-attrib.js', 'glsl-compat.js', 'unsafe-short-repair.js', 'controller-natives.js']) {
         routes.set(`/browser-jvm/${name}`, await snapshot(path.join(source, name)));
     }
 }
@@ -366,7 +369,12 @@ if (!evidence.pass) {
 function verifyResult(result) {
     assert.equal(result.pass, true, result.error);
     assert.equal(result.exit, 0);
-    assert.equal(result.java.checks, 25);
+    assert.equal(result.java.checks, 27);
+    assert.equal(result.controllers.before.listeners, 0);
+    assert.equal(result.controllers.after.listeners, 0);
+    assert.deepEqual(result.controllers.before.queries, Array.from({ length: 16 }, (_, index) => index));
+    assert.equal(result.controllers.before.mapping.bytes, 589_746);
+    assert.equal(result.controllers.before.mapping.sha256, '5552a9d2d39781903db666baf5c6d074ce0a8659266ce31915735e1df40dcd72');
     assert.equal(result.java.gained, 2);
     assert.equal(result.java.lost, 1);
     assert.equal(result.java.clipboardReads, 3);

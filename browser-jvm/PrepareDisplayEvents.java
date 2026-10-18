@@ -92,7 +92,8 @@ public final class PrepareDisplayEvents {
                     if (instruction instanceof InvokeInstruction call && Set.of(0, 3, 6, 107).contains(offset)) {
                         String target = switch (offset) { case 0 -> "pollEvents"; case 3, 6 -> "poll"; default -> "windowAttrib"; };
                         ClassDesc owner = offset == 3 ? ClassDesc.of("port.host.BrowserKeyboardEvents")
-                            : offset == 6 ? ClassDesc.of("port.host.BrowserMouse") : HOST;
+                            : offset == 6 ? ClassDesc.of("port.host.BrowserMouse")
+                            : offset == 0 ? ClassDesc.of("port.host.BrowserControllers") : HOST;
                         String expected = switch (offset) { case 0 -> "glfwPollEvents"; case 3, 6 -> "poll"; default -> "glfwGetWindowAttrib"; };
                         if (call.opcode() != Opcode.INVOKESTATIC || !call.name().equalsString(expected))
                             throw new IllegalArgumentException("Unexpected original processMessages callsite");
