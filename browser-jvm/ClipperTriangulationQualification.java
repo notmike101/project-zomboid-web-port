@@ -94,6 +94,7 @@ public final class ClipperTriangulationQualification {
         test("multipart", new float[][] {rectangle(0, 0, 3, 3), rectangle(8, 8, 2, 2)}, new float[0][], false);
         test("fractional", new float[][] {rectangle(-.0005f, .12345f, 3.12349f, 4.005f)}, new float[0][], false);
         test("collinear-duplicate", new float[][] {{0, 0, 5, 0, 10, 0, 10, 10, 10, 10, 0, 10}}, new float[0][], false);
+        test("collinear-sweep", new float[][] {{8, 0, 6, 1, 4, 2, 2, 3, 0, 4, -1, 4, -1, 0}}, new float[0][], false);
         if (!nativeMode) guards();
     }
 }

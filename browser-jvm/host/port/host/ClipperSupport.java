@@ -34,10 +34,14 @@ public final class ClipperSupport {
     /** Keeps the original flattened vertex identities in the shipped GLU callbacks. */
     private static final class Tessellation extends GLUtessellatorCallbackAdapter {
         final ArrayList<Point64> vertices;
+        final boolean swapped;
         final ArrayList<Integer> indices = new ArrayList<>();
         String failure;
 
-        Tessellation(ArrayList<Point64> vertices) { this.vertices = vertices; }
+        Tessellation(ArrayList<Point64> vertices, boolean swapped) {
+            this.vertices = vertices;
+            this.swapped = swapped;
+        }
 
         private void fail(String message) { if (failure == null) failure = message; }
 
@@ -60,7 +64,8 @@ public final class ClipperSupport {
             for (Object item : data) {
                 if (item instanceof Integer index) {
                     Point64 point = vertices.get(index);
-                    if (point.x == coordinates[0] && point.y == coordinates[1]) {
+                    if ((swapped ? point.y : point.x) == coordinates[0]
+                            && (swapped ? point.x : point.y) == coordinates[1]) {
                         output[0] = index;
                         return;
                     }
@@ -230,6 +235,10 @@ public final class ClipperSupport {
     }
 
     private static Triangulation triangulate(Polygon polygon) {
+        return triangulate(polygon, false);
+    }
+
+    private static Triangulation triangulate(Polygon polygon, boolean swapped) {
         ArrayList<Path64> rings = new ArrayList<>();
         rings.add(polygon.outer);
         rings.addAll(polygon.holes);
@@ -245,7 +254,7 @@ public final class ClipperSupport {
         }
         if (vertices.size() > Short.MAX_VALUE)
             throw new UnsupportedOperationException("Triangulation exceeds the original signed-short vertex table");
-        Tessellation callback = new Tessellation(vertices);
+        Tessellation callback = new Tessellation(vertices, swapped);
         GLUtessellator tessellator = GLUtessellatorImpl.gluNewTess();
         tessellator.gluTessNormal(0, 0, 1);
         for (int event : new int[] { GLU.GLU_TESS_BEGIN, GLU.GLU_TESS_VERTEX, GLU.GLU_TESS_EDGE_FLAG,
@@ -257,7 +266,8 @@ public final class ClipperSupport {
             for (Path64 ring : rings) {
                 tessellator.gluTessBeginContour();
                 for (Point64 point : ring)
-                    tessellator.gluTessVertex(new double[] { point.x, point.y, 0 }, 0, index++);
+                    tessellator.gluTessVertex(new double[] {
+                            swapped ? point.y : point.x, swapped ? point.x : point.y, 0 }, 0, index++);
                 tessellator.gluTessEndContour();
             }
             tessellator.gluTessEndPolygon();
@@ -270,7 +280,12 @@ public final class ClipperSupport {
             Point64 c = vertices.get(callback.indices.get(index + 2));
             double cross = ((double) b.x - a.x) * ((double) c.y - a.y)
                     - ((double) b.y - a.y) * ((double) c.x - a.x);
-            if (cross == 0) throw new UnsupportedOperationException("GLU emitted a degenerate triangle");
+            if (cross == 0) {
+                // GLU's sweep can fan along a collinear boundary. An exact axis swap
+                // changes the sweep without changing input vertices or omitting triangles.
+                if (!swapped) return triangulate(polygon, true);
+                throw new UnsupportedOperationException("GLU emitted a degenerate triangle under both sweep axes");
+            }
             if (cross < 0) {
                 int swap = callback.indices.get(index + 1);
                 callback.indices.set(index + 1, callback.indices.get(index + 2));

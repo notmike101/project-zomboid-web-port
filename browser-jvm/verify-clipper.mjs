@@ -151,8 +151,8 @@ function covers(mesh, point) {
  * @returns {object[]} Geometric comparison summaries.
  */
 function compareTriangulations(reference, actual) {
-    assert.equal(reference.length, 9);
-    assert.equal(actual.length, 9);
+    assert.equal(reference.length, 10);
+    assert.equal(actual.length, 10);
 
     return reference.map((native, index) => {
         const browser = actual[index];
@@ -253,7 +253,7 @@ try {
 
     await writeFile(path.join(output, 'native-triangulation.jsonl'), triangulationStdout);
     evidence.triangulationNativeRows = triangulationStdout.split(/\r?\n/).filter((line) => line.startsWith('{"triangulation":')).map(JSON.parse);
-    assert.equal(evidence.triangulationNativeRows.length, 9);
+    assert.equal(evidence.triangulationNativeRows.length, 10);
     const html = `<link rel="icon" href="data:,"><script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script><script type="module">
         import { createBrowserPhysics } from '/browser-physics.js';
         try {
@@ -363,7 +363,7 @@ try {
     assert.deepEqual(canonical(evidence.browserRows), canonical(evidence.nativeRows));
     evidence.triangulationComparison = compareTriangulations(evidence.triangulationNativeRows, evidence.triangulationBrowserRows);
     assert(evidence.logs.some((line) => line.trim() === 'CLIPPER_TRIANGULATION_GUARDS_PASS'), 'Original JNI rejection/finally checks did not complete');
-    assert.deepEqual(evidence.result.containers, { allocations: 2, clears: 142 });
+    assert.deepEqual(evidence.result.containers, { allocations: 2, clears: 143 });
     assert.equal(evidence.denied.length, 0, 'Requests escaped the qualification allowlist');
     evidence.pass = true;
 } catch (error) {
