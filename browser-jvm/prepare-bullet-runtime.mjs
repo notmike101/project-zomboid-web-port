@@ -9,7 +9,7 @@ const repository = path.resolve(import.meta.dirname, '..');
 const sourceRoot = path.join(repository, '.tools/bullet3-2c204c49');
 const sdk = path.join(repository, '.tools/emsdk-3.1.74-source/emsdk-3d6d8ee910466516a53e665b86458faa81dae9ba');
 const compiler = path.join(sdk, 'upstream/emscripten/emcc.py');
-const exports = ['scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'create_world', 'world_state', 'destroy_world', 'malloc', 'free'];
+const exports = ['scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'create_world', 'world_state', 'destroy_world', 'create_mapped_world', 'activate_map', 'world_header', 'deactivate_map', 'map_info', 'map_chunk', 'destroy_mapped_world', 'malloc', 'free'];
 
 /**
  * Computes a byte-exact source or generated artifact fingerprint.

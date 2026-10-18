@@ -70,6 +70,103 @@ function readHullPoints(engine, handle, child, pointer) {
 }
 
 /**
+ * Orders coordinate keys by the native reference's Java string ordering.
+ *
+ * @param {string} left - First key.
+ * @param {string} right - Second key.
+ * @returns {number} Comparison sign.
+ */
+function compareKeys(left, right) {
+    if (left === right) {
+        return 0;
+    }
+
+    return left < right ? -1 : 1;
+}
+
+/**
+ * Checks one actual chunk record and its identity shared between maps.
+ *
+ * @param {object} engine - Initialized WASM module.
+ * @param {number} id - Player map identifier.
+ * @param {number} x - Actual chunk X.
+ * @param {number} y - Actual chunk Y.
+ * @param {number} output - Owned scratch pointer.
+ * @param {Map<string, number>} identities - Observed coordinate/pointer identities.
+ * @returns {Array<number>} Actual coordinates and player ownership mask.
+ */
+function readChunk(engine, id, x, y, output, identities) {
+    const pointer = engine._map_chunk(id, x, y, output);
+    const [wx, wy, mask, min, max, records, nonzero, parent] = Array.from(engine.HEAP32.subarray(output / 4, output / 4 + 8));
+
+    if (!pointer || wx !== x || wy !== y || !(mask & (1 << id)) || min !== 0 || max !== 0 || records !== 1 || nonzero !== 0 || parent !== 1) {
+        throw new Error('Actual initial chunk/record storage');
+    }
+
+    const key = `${wx},${wy}`;
+
+    if (identities.has(key) && identities.get(key) !== pointer) {
+        throw new Error('Actual shared chunk identity');
+    }
+
+    identities.set(key, pointer);
+
+    return [wx, wy, mask];
+}
+
+/**
+ * Copies real map ownership and initialized geometry records from the WASM core.
+ *
+ * @param {object} engine - Initialized double-precision engine.
+ * @param {Array<number|boolean>|null} world - Original initialized header, or null.
+ * @returns {object} Detached world header, map and chunk observations.
+ */
+function readMaps(engine, world) {
+    const output = engine._malloc(64);
+    const maps = [];
+    const chunks = new Map();
+    const identities = new Map();
+    let references = 0;
+
+    try {
+        for (let player = 0; player < 4; player++) {
+            if (engine._map_info(player, output) !== 1) {
+                continue;
+            }
+
+            const [id, x, y, width, clipMin, clipMax] = Array.from(engine.HEAP32.subarray(output / 4, output / 4 + 6));
+
+            if (clipMin !== Math.max(Math.trunc(width / 2) - 1, 0) || clipMax !== Math.min(Math.trunc(width / 2) + 1, width)) {
+                throw new Error('Actual clip range');
+            }
+
+            maps.push([id, x, y, width]);
+
+            for (let dx = 0; dx < width; dx++) {
+                for (let dy = 0; dy < width; dy++) {
+                    const row = readChunk(engine, id, x + dx, y + dy, output, identities);
+
+                    chunks.set(`${row[0]},${row[1]}`, row);
+                    references++;
+                }
+            }
+        }
+
+        let header = null;
+
+        // Legacy shape-only initialization does not allocate mapped-header storage.
+        if (world && world[4] === world[0] * 256 && world[5] === world[1] * 256
+            && engine._world_header(output) === 1) {
+            header = Array.from(engine.HEAP32.subarray(output / 4, output / 4 + 6));
+        }
+
+        return { header, maps, chunks: Array.from(chunks).sort(([left], [right]) => compareKeys(left, right)).map(([,row]) => row), distinct: chunks.size, shared: references - chunks.size };
+    } finally {
+        engine._free(output);
+    }
+}
+
+/**
  * Creates the explicitly selected real Bullet mesh/empty-world JNI component.
  * PZ's embedded upstream revision and dynamic simulation remain unqualified.
  *
@@ -135,17 +232,58 @@ export function createBulletNatives(engine) {
          * @param {...unknown} values - Actual original six integers and server flag.
          */
         initWorld(lib, ...values) {
-            const header = [0, 0, 0, 0, 1, 1, false];
+            const legacy = [0, 0, 0, 0, 1, 1, false];
+            const isLegacy = values.length === legacy.length && values.every((value, index) => value === legacy[index]);
 
-            if (world || values.length !== header.length || values.some((value, index) => value !== header[index])) {
+            if (world || values.length !== 7 || values[6] !== false
+                || !values.slice(0, 6).every((value) => Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647)) {
                 throw new Error('Unqualified Bullet world header');
             }
 
-            if (engine._create_world() !== 1) {
-                throw new Error('Actual Bullet Dynamics world creation failed');
+            const pointer = engine._malloc(24);
+
+            try {
+                engine.HEAP32.set(values.slice(0, 6), pointer / 4);
+
+                if ((isLegacy ? engine._create_world() : engine._create_mapped_world(pointer)) !== 1) {
+                    throw new Error('Unqualified Bullet world header or Dynamics creation failure');
+                }
+            } finally {
+                engine._free(pointer);
             }
 
             world = values.slice();
+        },
+        /**
+         * Allocates initial chunk records and shares actual overlapping chunk ownership.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Player map index, zero through three.
+         * @param {number} x - Actual minimum chunk X.
+         * @param {number} y - Actual minimum chunk Y.
+         * @param {number} width - Qualified original thirteen-chunk width.
+         */
+        activateChunkMap(lib, id, x, y, width) {
+            requireWorld();
+
+            if (world[4] !== world[0] * 256 || world[5] !== world[1] * 256
+                || ![id, x, y, width].every((value) => Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647)
+                || engine._activate_map(id, x, y, width) !== 1) {
+                throw new Error('Unsupported initial chunk-map activation');
+            }
+        },
+        /**
+         * Releases this player's actual chunk references, preserving other owners.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Player map index, zero through three.
+         */
+        deactivateChunkMap(lib, id) {
+            requireWorld();
+
+            if (!Number.isInteger(id) || engine._deactivate_map(id) !== 1) {
+                throw new Error('Unsupported chunk-map deactivation');
+            }
         },
         /**
          * Queries actual engine lifecycle state rather than a Java readiness flag.
@@ -218,7 +356,7 @@ export function createBulletNatives(engine) {
             clearMeshes();
 
             if (world) {
-                if (engine._destroy_world() !== 1) {
+                if (engine._destroy_mapped_world() !== 1) {
                     throw new Error('Actual Bullet Dynamics destruction failed');
                 }
 
@@ -270,6 +408,7 @@ export function createBulletNatives(engine) {
                 const ready = engine._world_state(pointer) === 1;
 
                 return {
+                    ...readMaps(engine, world),
                     bootstrap: bootstrap ? { validatedBones: bootstrap.names.slice(), callbackStored: true } : null,
                     world: world?.slice() ?? null, dynamics: ready ? Array.from(engine.HEAPF64.subarray(pointer / 8, pointer / 8 + 5)) : null,
                     meshes: shapes, liveMeshes: engine._live_meshes(), scalarBytes: engine._scalar_bytes(),

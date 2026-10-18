@@ -55,6 +55,10 @@ public final class BulletNativeReference {
             base = SymbolLookup.loaderLookup()
                 .find("Java_zombie_core_physics_Bullet_initWorld").orElseThrow().address() - 0xc040;
         }
+        if (stage.equals("map0") || stage.equals("overlap") || stage.equals("retained1")
+                || stage.equals("empty") || stage.equals("reused")) {
+            recordChunks(stage);
+        }
         long world = pointer(base + 0x1d5728);
         ArrayList<String> shapes = new ArrayList<>();
         String dynamics = "null";
@@ -91,6 +95,70 @@ public final class BulletNativeReference {
         }
         System.out.println("BULLET_REFERENCE {\"stage\":\"" + stage + "\",\"dynamics\":"
             + dynamics + ",\"meshes\":[" + String.join(",", shapes) + "]}");
+    }
+
+    private static void check(boolean condition, String message) {
+        if (!condition) throw new AssertionError(message);
+    }
+
+    /** Reads actual native map pointers/record bytes; no fabricated map counters. */
+    private static void recordChunks(String stage) {
+        long world = pointer(base + 0x1d5728);
+        int[] expectedHeader = {-250, -250, 250, 250, -64000, -64000};
+        for (int index = 0; index < expectedHeader.length; index++) {
+            check(integer(world + 0x30 + index * 4L) == expectedHeader[index], "Native world header");
+        }
+        java.util.Map<String, Long> pointers = new java.util.TreeMap<>();
+        java.util.List<String> maps = new ArrayList<>();
+        int references = 0;
+        for (int player = 0; player < 4; player++) {
+            long map = pointer(world + 0x48 + player * 8L);
+            if (map == 0) continue;
+            int minX = integer(map + 4);
+            int minY = integer(map + 8);
+            int width = integer(map + 12);
+            check(integer(map) == player, "Actual player map ID");
+            check(integer(map + 16) == Math.max(width / 2 - 1, 0)
+                && integer(map + 20) == Math.min(width / 2 + 1, width), "Actual map clipping range");
+            maps.add("[" + player + "," + minX + "," + minY + "," + width + "]");
+            long rows = pointer(map + 24);
+            for (int x = 0; x < width; x++) {
+                for (int y = 0; y < width; y++) {
+                    long chunk = pointer(pointer(rows + x * 8L) + y * 8L);
+                    check(chunk != 0, "Actual nonempty slot");
+                    int wx = integer(chunk);
+                    int wy = integer(chunk + 4);
+                    check(wx == minX + x && wy == minY + y, "Native slot coordinates");
+                    check(view(chunk + 24 + player, 1).get(ValueLayout.JAVA_BYTE, 0) == 1, "Actual player ownership");
+                    check(integer(chunk + 8) == 0 && integer(chunk + 12) == 0, "Initial original chunk level range");
+                    long record = pointer(pointer(chunk + 16));
+                    check(pointer(record) == chunk, "Actual geometry record parent");
+                    for (int offset = 8; offset < 0x1810; offset++) {
+                        check(view(record + offset, 1).get(ValueLayout.JAVA_BYTE, 0) == 0, "Actual initialized geometry storage");
+                    }
+                    String key = wx + "," + wy;
+                    Long previous = pointers.putIfAbsent(key, chunk);
+                    check(previous == null || previous.longValue() == chunk, "Actual overlap shares chunk identity");
+                    references++;
+                }
+            }
+        }
+        int shared = references - pointers.size();
+        java.util.List<String> chunks = new ArrayList<>();
+        for (var entry : pointers.entrySet()) {
+            long chunk = entry.getValue();
+            int mask = 0;
+            for (int player = 0; player < 4; player++) {
+                int flag = view(chunk + 24 + player, 1).get(ValueLayout.JAVA_BYTE, 0);
+                check(flag == 0 || flag == 1, "Native ownership byte");
+                if (flag != 0) mask |= 1 << player;
+            }
+            chunks.add("[" + entry.getKey() + "," + mask + "]");
+        }
+        check(integer(pointer(world + 8) + 12) == 0, "No collision objects before original geometry upload");
+        System.out.println("CHUNK_REFERENCE {\"stage\":\"" + stage + "\",\"maps\":["
+            + String.join(",", maps) + "],\"chunks\":[" + String.join(",", chunks)
+            + "],\"distinct\":" + pointers.size() + ",\"shared\":" + shared + "}");
     }
 
     public static void main(String[] args) throws Exception {

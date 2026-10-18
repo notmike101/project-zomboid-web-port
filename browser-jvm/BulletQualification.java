@@ -79,6 +79,32 @@ public final class BulletQualification {
             check(exceptions() == 0, "Original logged exception counter");
             emit("finally");
         }
+        try {
+            Bullet.initWorld(-250, -250, 250, 250, -64000, -64000, false);
+            Bullet.activateChunkMap(0, 1327, 1293, 13);
+            emit("map0");
+            if (browser) {
+                boolean rejected = false;
+                try {
+                    Bullet.activateChunkMap(0, 1327, 1293, 13);
+                } catch (IllegalArgumentException expected) {
+                    rejected = true;
+                }
+                check(rejected, "Duplicate map activation rejected before mutation");
+            }
+            Bullet.activateChunkMap(1, 1328, 1293, 13);
+            emit("overlap");
+            Bullet.deactivateChunkMap(0);
+            emit("retained1");
+            Bullet.deactivateChunkMap(1);
+            emit("empty");
+            Bullet.activateChunkMap(0, 1327, 1293, 13);
+            emit("reused");
+        } finally {
+            Bullet.destroyWorld();
+            check(!Bullet.isWorldInit() && exceptions() == 0, "Chunk ownership cleanup");
+            emit("chunks-finally");
+        }
         System.out.println("BULLET_QUALIFICATION_PASS");
     }
 }

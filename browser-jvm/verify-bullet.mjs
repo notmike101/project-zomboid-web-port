@@ -249,7 +249,7 @@ try {
     evidence.browser = await page.evaluate(() => ({ samples: globalThis.samples, exit: globalThis.exit, failure: globalThis.failure }));
     assert.equal(evidence.browser.exit, 0);
     assert.equal(evidence.browser.failure, undefined);
-    assert.deepEqual(evidence.browser.samples.map((sample) => sample.stage), ['bootstrap', 'single', 'compound', 'rejected', 'cleared', 'finally']);
+    assert.deepEqual(evidence.browser.samples.map((sample) => sample.stage), ['bootstrap', 'single', 'compound', 'rejected', 'cleared', 'finally', 'map0', 'overlap', 'retained1', 'empty', 'reused', 'chunks-finally']);
 
     for (const referenceRow of referenceRows) {
         const sample = evidence.browser.samples.find((row) => row.stage === referenceRow.stage);
@@ -258,6 +258,23 @@ try {
         assert.deepEqual(sample.dynamics?.slice(0, 4) ?? null, referenceRow.dynamics);
     }
 
+    const chunkRows = evidence.native.stdout.split(/\r?\n/u).filter((line) => line.startsWith('CHUNK_REFERENCE ')).map((line) => JSON.parse(line.slice(16)));
+
+    assert.deepEqual(chunkRows.map((row) => [row.stage, row.distinct, row.shared]), [
+        ['map0', 169, 0], ['overlap', 182, 156], ['retained1', 169, 0], ['empty', 0, 0], ['reused', 169, 0],
+    ]);
+
+    for (const row of chunkRows) {
+        const sample = evidence.browser.samples.find((entry) => entry.stage === row.stage);
+
+        for (const field of ['maps', 'chunks', 'distinct', 'shared']) {
+            assert.deepEqual(sample[field], row[field]);
+        }
+
+        assert.deepEqual(sample.header, [-250, -250, 250, 250, -64_000, -64_000]);
+    }
+
+    assert.equal(evidence.browser.samples.at(-1).distinct, 0);
     const bootstrap = evidence.browser.samples[0].bootstrap;
 
     assert.equal(bootstrap.callbackStored, true);
