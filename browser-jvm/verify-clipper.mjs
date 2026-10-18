@@ -256,6 +256,8 @@ try {
 
     await writeFile(path.join(output, 'native.jsonl'), stdout);
     evidence.nativeRows = stdout.split(/\r?\n/).filter((line) => line.startsWith('{"name":')).map(JSON.parse);
+    evidence.offsetNativeRows = stdout.split(/\r?\n/).filter((line) => line.startsWith('{"offsetCase":')).map(JSON.parse);
+    assert.equal(evidence.offsetNativeRows.length, 32, 'Missing native highway offset cases');
     assert.equal(evidence.nativeRows.length, 134, 'Missing native reference cases');
     assert.equal(evidence.nativeRows.filter((row) => row.operation === 1).length, 67, 'Missing intersection cases');
     assert.equal(evidence.nativeRows.filter((row) => row.operation === 3).length, 67, 'Missing difference cases');
@@ -360,6 +362,7 @@ try {
     });
     const page = await context.newPage();
 
+    evidence.offsetBrowserRows = [];
     evidence.browserRows = [];
     evidence.triangulationBrowserRows = [];
     page.on('console', (message) => {
@@ -367,6 +370,8 @@ try {
 
         if (message.text().startsWith('{"name":')) {
             evidence.browserRows.push(JSON.parse(message.text()));
+        } else if (message.text().startsWith('{"offsetCase":')) {
+            evidence.offsetBrowserRows.push(JSON.parse(message.text()));
         } else if (message.text().startsWith('{"triangulation":')) {
             evidence.triangulationBrowserRows.push(JSON.parse(message.text()));
         }
@@ -379,9 +384,11 @@ try {
     assert.equal(evidence.browserRows.length, 134, 'Missing browser cases');
     assert(evidence.logs.some((line) => line.includes('CLIPPER_ADAPTER_CHECKS_PASS')), 'Browser adapter boundary assertions did not complete');
     assert.deepEqual(canonical(evidence.browserRows), canonical(evidence.nativeRows));
+    assert.equal(evidence.offsetBrowserRows.length, 32, 'Missing browser highway offset cases');
+    assert.deepEqual(canonical(evidence.offsetBrowserRows), canonical(evidence.offsetNativeRows));
     evidence.triangulationComparison = compareTriangulations(evidence.triangulationNativeRows, evidence.triangulationBrowserRows);
     assert(evidence.logs.some((line) => line.trim() === 'CLIPPER_TRIANGULATION_GUARDS_PASS'), 'Original JNI rejection/finally checks did not complete');
-    assert.deepEqual(evidence.result.containers, { allocations: 2, clears: 145 });
+    assert.deepEqual(evidence.result.containers, { allocations: 2, clears: 150 });
     assert.equal(evidence.result.triangulation.calls, 12);
     assert.equal(evidence.result.triangulation.transportAllocations, 0);
     assert.equal(evidence.result.triangulation.transportBytes, 0);

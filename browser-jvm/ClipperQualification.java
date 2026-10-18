@@ -154,6 +154,78 @@ public final class ClipperQualification {
             runCases();
             runPrimitiveCases();
         }
+        runOffsetCases();
+    }
+
+
+    /** Exercises original highway widths without changing the stored subject between calls. */
+    private static void runOffsetCases() {
+        float[][] subjects = {
+            rect(0, 0, 10, 10),
+            // Original WorldMapBinary highway=trail at Muldraugh cell48,4.
+            {141, 152, 224, 69, 240, 69, 235, 74, 235, 72, 225, 72, 146, 151, 146, 153},
+            rect(-10, -10, 20, 20),
+            rect(0, 0, 4, 4),
+        };
+        for (int fixture = 0; fixture < subjects.length; fixture++) {
+            clipper.clear();
+            addOffsetPath(subjects[fixture], false);
+            if (fixture == 2) {
+                addOffsetPath(rect(-2, -2, 4, 4), true);
+            } else if (fixture == 3) {
+                addOffsetPath(rect(6, 0, 4, 4), false);
+            }
+            int call = 0;
+            for (double offset : new double[] {0, 1, 1, 2, 4, 4, 6, 0}) {
+                int count = clipper.generatePolygons(Clipper.ctDifference, offset, Clipper.jtSquare);
+                StringJoiner polygons = new StringJoiner(",", "[", "]");
+                for (int polygon = 0; polygon < count; polygon++) {
+                    ByteBuffer output = ByteBuffer.allocateDirect(65536);
+                    for (int index = 0; index < output.capacity(); index++) {
+                        output.put((byte) 0x5a);
+                    }
+                    output.position(11);
+                    output.limit(65000);
+                    clipper.getPolygon(polygon, output);
+                    if (output.position() != 11 || output.limit() != 65000) {
+                        throw new AssertionError("Offset output position/limit changed");
+                    }
+                    ByteBuffer read = output.duplicate().order(ByteOrder.BIG_ENDIAN);
+                    read.clear();
+                    String outer = ring(read);
+                    int holeCount = Short.toUnsignedInt(read.getShort());
+                    StringJoiner holes = new StringJoiner(",", "[", "]");
+                    for (int hole = 0; hole < holeCount; hole++) {
+                        holes.add(ring(read));
+                    }
+                    int encodedBytes = read.position();
+                    for (int index = encodedBytes; index < read.capacity(); index++) {
+                        if (read.get(index) != (byte) 0x5a) {
+                            throw new AssertionError("Offset output tail changed");
+                        }
+                    }
+                    polygons.add("{\"outer\":" + outer + ",\"holes\":" + holes
+                            + ",\"position\":" + output.position() + ",\"limit\":" + output.limit()
+                            + ",\"encodedBytes\":" + encodedBytes + ",\"tailUnchanged\":true}");
+                }
+                System.out.println("{\"offsetCase\":" + fixture + ",\"call\":" + call++
+                        + ",\"offset\":" + offset + ",\"polygons\":" + polygons + "}");
+            }
+        }
+        clipper.clear();
+    }
+
+    private static void addOffsetPath(float[] points, boolean clip) {
+        ByteBuffer input = ByteBuffer.allocateDirect(points.length * Float.BYTES);
+        for (float value : points) {
+            input.putFloat(value);
+        }
+        input.position(7);
+        int position = input.position();
+        clipper.addPath(points.length / 2, input, clip, true);
+        if (input.position() != position) {
+            throw new AssertionError("Offset input position changed");
+        }
     }
 
     private static void runPrimitiveCases() {
@@ -232,6 +304,27 @@ final class AdapterChecks {
             } catch (UnsupportedOperationException expected) { }
             if (ClipperSupport.generate(owner, 1, 0, 0) != 1) {
                 throw new AssertionError("Real engine intersection failed");
+            }
+            // Unsupported offsets/joins must leave the preceding polygon available.
+            double[][] unsupportedOffsets = {
+                {3, -1, 0}, {3, .5, 0}, {3, 3, 0}, {3, 8, 0},
+                {3, Double.NaN, 0}, {3, Double.POSITIVE_INFINITY, 0},
+                {1, 1, 0}, {3, 1, 1}, {2, 1, 0},
+            };
+            for (double[] request : unsupportedOffsets) {
+                ByteBuffer before = ByteBuffer.allocateDirect(128);
+                ClipperSupport.getPolygon(owner, 0, before);
+                try {
+                    ClipperSupport.generate(owner, (int) request[0], request[1], (int) request[2]);
+                    throw new AssertionError("Unqualified offset or join accepted");
+                } catch (UnsupportedOperationException expected) { }
+                ByteBuffer after = ByteBuffer.allocateDirect(128);
+                ClipperSupport.getPolygon(owner, 0, after);
+                for (int index = 0; index < before.capacity(); index++) {
+                    if (before.get(index) != after.get(index)) {
+                        throw new AssertionError("Rejected offset changed prior geometry");
+                    }
+                }
             }
             // Reject every primitive atomically: previously generated geometry must remain available.
             for (int primitive = 0; primitive < 3; primitive++) {

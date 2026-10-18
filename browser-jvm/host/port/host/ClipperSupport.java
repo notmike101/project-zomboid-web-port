@@ -10,6 +10,9 @@ import com.github.micycle1.clipper2.core.FillRule;
 import com.github.micycle1.clipper2.core.Path64;
 import com.github.micycle1.clipper2.core.Point64;
 import com.github.micycle1.clipper2.engine.Clipper64;
+import com.github.micycle1.clipper2.offset.ClipperOffset;
+import com.github.micycle1.clipper2.offset.JoinType;
+import com.github.micycle1.clipper2.offset.EndType;
 import com.github.micycle1.clipper2.engine.PolyPath64;
 import com.github.micycle1.clipper2.engine.PolyTree64;
 
@@ -132,16 +135,33 @@ public final class ClipperSupport {
         }
     }
 
+    private static void addOffsetRings(PolyPath64 node, ClipperOffset offsetter) {
+        if (node.getPolygon() != null) {
+            // Native single-path groups preserve its independently expanded hole boundaries.
+            offsetter.addPath(node.getPolygon(), JoinType.Square, EndType.Polygon);
+        }
+        for (int index = 0; index < node.getCount(); index++) {
+            addOffsetRings(node.get(index), offsetter);
+        }
+    }
+
     public static int generate(Object owner, int operation, double offset, int join) {
         State state = state(owner);
-        // shortcut: only zero-offset intersection/difference are native-qualified; extend after native comparisons.
-        if ((operation != 1 && operation != 3) || offset != 0 || join != 0) {
-            throw new UnsupportedOperationException("Only native-qualified zero-offset intersection and difference are enabled");
+        // shortcut: only the original highway's native-qualified Square offsets are enabled; compare other widths/joins before extending.
+        if ((operation != 1 && operation != 3) || join != 0
+                || (offset != 0 && (operation != 3 || (offset != 1 && offset != 2 && offset != 4 && offset != 6)))) {
+            throw new UnsupportedOperationException("Only zero-offset intersection/difference and Difference/Square offsets 1,2,4,6 are qualified");
         }
         PolyTree64 tree = new PolyTree64();
         ClipType type = operation == 1 ? ClipType.Intersection : ClipType.Difference;
         if (!state.engine.execute(type, FillRule.Positive, tree)) {
             throw new IllegalStateException("Clipper2 execution failed");
+        }
+        if (offset != 0) {
+            ClipperOffset offsetter = new ClipperOffset();
+            addOffsetRings(tree, offsetter);
+            tree = new PolyTree64();
+            offsetter.execute(offset * 1000.0, tree);
         }
         state.polygons.clear();
         collect(tree, state.polygons);
