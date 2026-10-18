@@ -120,6 +120,10 @@ A separate fresh CheerpJ filesystem qualification uses `user.dir=/app` and the u
 
 The public play verification runs the installed original `ISWalkToTimedAction` through `ISTimedActionQueue` after keyboard release. `PlayerNavigationQualification` reuses cached shared definitions, loads its two original client action dependencies and advances the normal session. A passing result requires original movement/animation, Succeeded, target arrival, empty Java actions, an empty actual Lua queue with no current action, cleared path and idle with zero input. Lua error logs fail the gate. Complete shared Lua supplies original `ISLogSystem`, resolving the earlier swallowed completion error. The session delivers the original selected pathfinding backend's results after the world/action update. Interactive mode does not queue this verification action.
 
+## Original pure-fluid SDK adaptation
+
+The SDK preparer now includes the exact FluidContainer.isPureFluid(Fluid) first-element call at BCI15, reusing ListFirstSupport rather than implementing fluid behavior. The manifest contains ten SDK sites, six fluid sites. A genuine browser missing-method baseline is corrected, and fresh public-preparer output matches original JDK25 results for empty, one-water and mixed water/tainted-water containers. The existing eight helper checks also pass; original factory/disposal and all other method code arrays remain intact. This qualifies builtin fluid identity queries, not inventory drinking or a vehicle fix.
+
 ## RakNet source build component
 
 [RAKNET-SOURCES.md](RAKNET-SOURCES.md) documents the pinned source inputs, existing Emscripten dependency, preparation function, module routes and Java helper. This component compiles the full upstream candidate engine and supplies actual library ownership plus two selected ZNet logger natives. It does not yet change the public launch profiles or their headers.

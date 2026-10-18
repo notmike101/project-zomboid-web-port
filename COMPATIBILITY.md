@@ -1,5 +1,11 @@
 # Incremental original-bytecode compatibility
 
+## Original pure-fluid query SDK compatibility
+
+The existing SDK preparer now also redirects the original `FluidContainer.isPureFluid(Fluid)` collection call at BCI15 to the unchanged `ListFirstSupport`. The actual Java 17 browser baseline raises `NoSuchMethodError` for a one-entry list; freshly prepared output matches the original JDK25 for empty, one-water and mixed water/tainted-water containers. Original factory creation, fluid insertion and disposal execute normally, and the existing eight collection-helper checks pass in both runtimes.
+
+The overlay now records ten exact SDK sites, six in FluidContainer. All 101 other FluidContainer method code arrays and the other three overlay classes remain identical; only the selected three-byte invocation changes, preserving the original query algorithm. Served inputs remain unchanged and the browser closes normally. This adds builtin fluid identity support; it does not qualify inventory drinking, script hydration or resolve the separate vehicle failure. The older nine-site full-content result below remains its original evidence scope.
+
 ## Original non-Steam library startup with upstream RakNet
 
 The public source now includes a pinned full RakNet C++ build and one browser JVM module owner. All 110 upstream translation units build to WASM; the preparer validates 264 source/header identities and applies two exact portability changes. The installed DLL's upstream revision remains unknown. No original game method is changed. See [source provisioning and ownership](browser-jvm/RAKNET-SOURCES.md).

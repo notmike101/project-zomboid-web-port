@@ -92,6 +92,7 @@ public final class PrepareAnimationSdk {
                         } else if (entry.equals(FLUID_CONTAINER) && call.owner().asInternalName().equals("java/util/ArrayList")
                                 && call.name().equalsString("getFirst") && call.type().equalsString("()Ljava/lang/Object;")
                                 && (signature.equals("readFromScript(Lzombie/scripting/entity/ComponentScript;)V")
+                                    || signature.equals("isPureFluid(Lzombie/entity/components/fluids/Fluid;)Z") && offset == 15
                                     || (offset == 24 || offset == 38) && (signature.equals("getPrimaryFluid()Lzombie/entity/components/fluids/Fluid;")
                                         || signature.equals("getPrimaryFluidAmount()F")))) {
                             if (signature.equals("readFromScript(Lzombie/scripting/entity/ComponentScript;)V") && offset != 126)
@@ -106,7 +107,7 @@ public final class PrepareAnimationSdk {
                         code.invokestatic(ClassDesc.of(helper), methodName, MethodTypeDesc.ofDescriptor(descriptor));
                     }));
                 });
-                int expectedSites = entry.equals(ANIM_LAYER) ? 2 : entry.equals(FLUID_CONTAINER) ? 5 : 1;
+                int expectedSites = entry.equals(ANIM_LAYER) ? 2 : entry.equals(FLUID_CONTAINER) ? 6 : 1;
                 if (sites.size() != expectedSites) throw new IllegalArgumentException("Unexpected SDK site count: " + entry + " " + sites.size());
                 classes.put(entry, adapted);
                 records.add("{\"entry\":\"" + entry + "\",\"inputClassSha256\":\"" + before

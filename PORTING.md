@@ -1,5 +1,9 @@
 # Toward a playable original-bytecode port
 
+## Reuse the original pure-fluid query
+
+The SDK overlay now admits one additional proved call: FluidContainer.isPureFluid(Fluid) BCI15 uses the existing exact-ArrayList first-element helper. The actual missing-method baseline and fresh public-preparer browser/native comparison establish empty, one-water and mixed-fluid parity. The overlay has ten sites, six fluid sites; other method code arrays and other overlay classes are unchanged. Reuse this prepared output in the existing full-content owner before extending original inventory interactions. Do not infer script hydration, drinking or a vehicle fix from this bounded builtin-identity check.
+
 ## Reusable native library startup component
 
 The pinned full upstream RakNet engine and its browser owner are now public source, with provisioning and build instructions in [RAKNET-SOURCES.md](browser-jvm/RAKNET-SOURCES.md). Reuse this single owner for both native descriptors when composing genuine startup; await actual shared-memory engine initialization before publishing the original empty RakNet JNI surface. Production loading runs no codec fixtures. Keep real worker cleanup separate from unqualified global C++ destruction.
