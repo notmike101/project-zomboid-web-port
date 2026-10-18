@@ -28,6 +28,8 @@ The connected browser route is currently qualified on **Windows x64**.
 
 The local importer uses the matching installed Jassimp DLL to prepare genuine model/animation data. It does not launch the installed game or server.
 
+An experimental original front-end profile is also available; see [`--profile menu`](browser-jvm/README.md). It is an incomplete qualification tool: spawn-map rendering and world loading remain unresolved, and the final loading transition is guarded. Its current complete runtime composition has not received a fresh browser pass.
+
 The Clipper2 dependency uses the Boost Software License 1.0. Its pinned release SHA-256 is `f143c550014a15a45884b4506a5ed984c7467bd080880aa9cb80bb9aaabdf2ff`; the runner rejects a different archive. Dependency provenance and license are kept under browser-jvm/third-party/clipper2/.
 
 Apache Maven 3.9.16, a WasmGC-capable browser and the installed bundled Java runtime are additionally needed for the separate [TeaVM/reference comparisons](TEAVM.md). Maven is not required by the connected browser-JVM command below.

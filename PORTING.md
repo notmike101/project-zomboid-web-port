@@ -1,5 +1,15 @@
 # Toward a playable original-bytecode port
 
+## Full initialization and native-engine reuse
+
+Positive initial population save/reopen now passes with natural records, original target/timer semantics and independent original-DLL cross-reading. The original sandbox binary file consumer also passes strict browser/JVM checks after adding its genuine Lua initializer. Continue from these existing services into actual original collision/population initialization; do not keep retesting empty persistence cases.
+
+Normal world generation uses a sparse 501-by-501 metadata grid. The earlier fixture's explicit bounded generation settings and all 4,065 installed headers do not qualify those default bounds. The next original-owner gate must preserve actual UI defaults/seed production, genuine map files and ordered/null collision sources, with owned save roots and strict caught-error checks.
+
+The next physics prerequisite is real Bullet mesh ownership. A data-only original-DLL oracle establishes float-to-double hull points, actual bounding boxes, compound child identity transforms, registry clear and world destruction. Real double-precision Bullet WASM now passes those shape comparisons in an actual browser; a separate real Dynamics build matches native empty-world gravity/object count in Node. Continue with original JNI/module/float-array feed and genuine wrapper initialization, retaining exact qualified generations. A pinned upstream Bullet 3.25 source candidate and Emscripten 3.1.74 are ignored local build inputs; the installed DLL's upstream core version remains unknown. These component results do not qualify the complete original dynamics-world initialization, simulation, vehicles or ragdolls; reuse real engine code for those closures rather than inventing physics.
+
+The original native full-owner reference now passes the true default metadata bounds, full collision/population initialization, original save-directory producer and pre-start worker save. Browser work should use that exact original closure with lazy real media, sparse native ownership and genuine density callbacks, without the old single-cell/grid-size admission limits. A focused full-owner gate does not require rebuilding models or repeating the old renderer envelope.
+
 ## Loading prerequisites verified since the renderer frontier
 
 Three additional original-code components now pass: the direct first-save collision/population branch with its genuinely unstarted worker; original singleton GameTime/climate file save/load plus fresh original-JVM cross-read; and the public vehicle metadata queue through the real world-streamer thread and original main-queue release. These reuse the current host services without replacing Java serialization, queue processing or worker loops. Their exact scopes and retained failures are recorded in COMPATIBILITY.md.
