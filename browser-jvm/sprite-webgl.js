@@ -479,6 +479,14 @@ export function createSpriteNatives(canvas, report) {
          */
         contextCreated: () => !gl.isContextLost(),
         /**
+         * Updates the title of the document which owns this graphics surface.
+         *
+         * @param {string} title - Original vendor window title.
+         */
+        setTitle: (title) => {
+            canvas.ownerDocument.title = title;
+        },
+        /**
          * Performs the resize operation for the owned browser runtime.
          *
          * @param {number} w - Numeric w argument for the declared operation.
@@ -1748,7 +1756,13 @@ export function createSpriteNatives(canvas, report) {
          * @param {...unknown} args - Arguments supplied by the Java native invocation.
          * @returns {Promise<unknown>} Result after the actual browser operation completes.
          */
-        natives[`Java_port_host_SpriteGraphics_${name}`] = async (lib, ...args) => await callback(...args);
+        natives[`Java_port_host_SpriteGraphics_${name}`] = async (lib, ...args) => {
+            if (name === 'setTitle' && (!canvas.isConnected || gl.isContextLost())) {
+                throw await new (await lib.java.lang.IllegalStateException)('Browser title surface is closed');
+            }
+
+            return await callback(...args);
+        };
     }
 
     return {

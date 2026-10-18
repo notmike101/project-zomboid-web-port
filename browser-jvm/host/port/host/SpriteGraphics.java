@@ -30,6 +30,9 @@ public final class SpriteGraphics {
     public static native boolean isVisible();
     public static native boolean isCloseRequested();
     public static native boolean wasResized();
+    /** Keeps the vendor title cache/created check while addressing the owned browser document. */
+    public static void setWindowTitle(long desktopWindow, CharSequence title) { setTitle(title.toString()); }
+    private static native void setTitle(String title);
     public static int getWidth(){return surfaceWidth();}
     public static int getHeight(){return surfaceHeight();}
     /** The owned browser surface is windowed; monitor modes and refresh rates are unavailable. */

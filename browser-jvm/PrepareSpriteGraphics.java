@@ -50,11 +50,26 @@ public final class PrepareSpriteGraphics {
                     boolean gl=name.startsWith("org/lwjgl/opengl/")&&GL_CLASSES.contains(simple);
                     boolean legacyAttributes=name.equals("org/lwjgl/opengl/GL11");
                     boolean memory=name.equals("org/lwjgl/system/MemoryUtil"), api=name.equals("org/lwjgl/opengl/GL"), display=name.equals("org/lwjglx/opengl/Display");
+                    if(display&&!hash(original).equals("6a9dc0e2e2b11ce6d952ae1653dc29ef899ccb3403ed85c93a2898580986c89a"))throw new IllegalArgumentException("Unqualified vendor Display input");
+                    int[] titleSites={0};
                     if(gl||legacyAttributes||memory||api||display||name.equals("org/lwjgl/opengl/GLCapabilities")){
                         bytes=cf.transformClass(model,(builder,element)->{
                             if(!(element instanceof MethodModel method)){builder.with(element);return;}
                             String methodName=method.methodName().stringValue(),descriptor=method.methodType().stringValue();
                             String helper=methodName.endsWith("ARB")?methodName.substring(0,methodName.length()-3):methodName;
+                            if(display&&methodName.equals("setTitle")&&descriptor.equals("(Ljava/lang/String;)V")){
+                                int[] bci={0};
+                                builder.transformMethod(method,MethodTransform.transformingCode((code,instruction)->{
+                                    int offset=bci[0];
+                                    if(instruction instanceof Instruction operation)bci[0]+=operation.sizeInBytes();
+                                    if(instruction instanceof InvokeInstruction call&&call.opcode()==Opcode.INVOKESTATIC&&call.owner().asInternalName().equals("org/lwjgl/glfw/GLFW")&&call.name().equalsString("glfwSetWindowTitle")&&call.type().equalsString("(JLjava/lang/CharSequence;)V")){
+                                        if(offset!=16)throw new IllegalArgumentException("Unqualified Display title call site: "+offset);
+                                        titleSites[0]++;
+                                        code.invokestatic(HOST,"setWindowTitle",call.typeSymbol());
+                                    }else code.with(instruction);
+                                }));
+                                changes.add("setTitle(Ljava/lang/String;)V:GLFW.glfwSetWindowTitle@16->setWindowTitle");return;
+                            }
                             if(display&&methodName.equals("<clinit>")){
                                 changes.add("<clinit>:preserved+browser-capabilities");
                                 builder.transformMethod(method,MethodTransform.transformingCode((code,instruction)->{
@@ -97,6 +112,7 @@ public final class PrepareSpriteGraphics {
                             });changes.add("<init>(Z):bounded-ARB-buffer-descriptor");
                         }
                     }
+                    if(display&&titleSites[0]!=1)throw new IllegalArgumentException("Expected one vendor title call site");
                     if(gl||legacyAttributes||memory||api||display||name.equals("org/lwjgl/opengl/GLCapabilities"))constructorChecks+=verifyConstructors(model,bytes);
                     if(name.startsWith("zombie/")){gameClasses[0]++;if(!Arrays.equals(original,bytes))throw new AssertionError("Original game class changed: "+name);}
                     if(!Arrays.equals(original,bytes))changed.add("{\"class\":"+quote(name)+",\"inputSha256\":"+quote(hash(original))+",\"outputSha256\":"+quote(hash(bytes))+",\"methods\":["+String.join(",",changes.stream().map(PrepareSpriteGraphics::quote).toList())+"]}");
