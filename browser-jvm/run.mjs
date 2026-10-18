@@ -1,12 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, readFile, writeFile, stat, realpath, readdir } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, writeFile, stat, realpath, readdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { createMediaHandler } from './media-files.mjs';
+import { prepareSchedulerRuntime } from './prepare-scheduler-runtime.mjs';
 
 const source = fileURLToPath(new URL('./', import.meta.url));
 const repository = path.resolve(source, '..');
@@ -29,8 +30,8 @@ if (!['game-jar', 'media-root', 'jdk', 'browser'].every((name) => options[name])
 
 const profile = options.profile || 'graphics';
 
-if (!['graphics', 'lua', 'input', 'sprite', 'world', 'character-shader', 'animation', 'food', 'play'].includes(profile)) {
-    throw new Error('Profile must be graphics, lua, input, sprite, world, character-shader, animation, food or play');
+if (!['graphics', 'lua', 'input', 'sprite', 'world', 'character-shader', 'animation', 'food', 'play', 'menu'].includes(profile)) {
+    throw new Error('Profile must be graphics, lua, input, sprite, world, character-shader, animation, food, play or menu');
 }
 
 if (options.interactive && !['true', 'false'].includes(options.interactive)) {
@@ -39,15 +40,15 @@ if (options.interactive && !['true', 'false'].includes(options.interactive)) {
 
 const interactive = options.interactive === 'true';
 
-if (interactive && profile !== 'play') {
-    throw new Error('--interactive true is available only for the play profile');
+if (interactive && !['play', 'menu'].includes(profile)) {
+    throw new Error('--interactive true is available only for play and menu profiles');
 }
 
-const animationProfile = ['animation', 'play'].includes(profile);
+const animationProfile = ['animation', 'play', 'menu'].includes(profile);
 const output = path.join(repository, 'target', 'browser-jvm', profile);
-const runtimeProfile = ['lua', 'sprite', 'world', 'character-shader', 'animation', 'food', 'play'].includes(profile);
-const graphicsProfile = ['sprite', 'character-shader', 'animation', 'play'].includes(profile);
-const worldSdkProfile = ['world', 'animation', 'food', 'play'].includes(profile);
+const runtimeProfile = ['lua', 'sprite', 'world', 'character-shader', 'animation', 'food', 'play', 'menu'].includes(profile);
+const graphicsProfile = ['sprite', 'character-shader', 'animation', 'play', 'menu'].includes(profile);
+const worldSdkProfile = ['world', 'animation', 'food', 'play', 'menu'].includes(profile);
 const animationInputs = [
     'models_X/skinned/MaleBody.x', 'models_X/skinned/FemaleBody.x', 'models_X/skinned/Male_Skeleton.X', 'models_X/skinned/Female_Skeleton.X',
     'anims_X/Bob/Bob_Idle.X', 'anims_X/Bob/Bob_Idle_HeavyBreathing.X',
@@ -203,10 +204,32 @@ const denied = [];
 const logs = [];
 const build = [];
 let browser;
+let browserServer;
+let menuDeadline;
+let menuPage;
 let server;
 const evidence = { pass: false, runtime: 'CheerpJ 4.3 Java17', closed: false };
 const assetHashes = [];
 const activeMediaRequests = new Set();
+
+/**
+ * Applies an absolute Node-side bound to an owned browser operation.
+ *
+ * @param {Promise} operation - Owned operation.
+ * @param {number} milliseconds - Deadline interval.
+ * @returns {Promise} Actual operation completion.
+ */
+async function menuBounded(operation, milliseconds) {
+    let timer;
+
+    try {
+        return await Promise.race([operation, new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Owned menu deadline exceeded')), milliseconds);
+        })]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 /**
  * Runs a compiler or preparation tool and records its result.
@@ -225,7 +248,7 @@ function command(binary, args) {
 }
 
 try {
-    await boundedReadOnly([gameJar, png, options.browser, executable('javac'), executable('java'), ...(profile === 'play' ? [clipperJar] : [])], async (file) => {
+    await boundedReadOnly([gameJar, png, options.browser, executable('javac'), executable('java'), ...(['play', 'menu'].includes(profile) ? [clipperJar] : [])], async (file) => {
         if (!(await stat(file)).isFile()) {
             throw new Error(`Expected file: ${file}`);
         }
@@ -234,7 +257,7 @@ try {
     evidence.originalJarSha256Before = await hash(gameJar);
     evidence.pngSha256Before = await hash(png);
 
-    if (profile === 'play') {
+    if (['play', 'menu'].includes(profile)) {
         const clipperSha256 = await hash(clipperJar);
 
         if (clipperSha256 !== 'f143c550014a15a45884b4506a5ed984c7467bd080880aa9cb80bb9aaabdf2ff') {
@@ -452,6 +475,54 @@ try {
         evidence.fullGamePlayable = false;
     }
 
+    if (profile === 'menu') {
+        const menuClasses = path.join(output, 'menu-classes');
+
+        await mkdir(menuClasses, { recursive: true });
+        command(executable('javac'), ['-d', tools, ...['PrepareContentAssets.java', 'PrepareFontAssets.java', 'PrepareClientAssets.java', 'PrepareMenuAssets.java', 'PrepareMouse.java', 'PrepareKeyboardEvents.java'].map((name) => path.join(source, name))]);
+        await boundedReadOnly(['Content', 'Font', 'Client', 'Menu'], async (kind) => {
+            const directory = path.join(output, `${kind.toLowerCase()}-data`);
+
+            await mkdir(directory, { recursive: true });
+            command(executable('java'), ['-cp', tools, `Prepare${kind}Assets`, path.dirname(gameJar), directory]);
+            const rows = (await readFile(path.join(directory, `${kind.toLowerCase()}-assets.tsv`), 'utf8')).trim().split(/\r?\n/u);
+
+            await boundedReadOnly(rows, async (row) => {
+                const fields = row.split('\t');
+                const [name, size, sha256] = kind !== 'Menu' ? fields : [fields[2], fields[1], fields[0]];
+                const file = path.resolve(path.dirname(gameJar), name);
+
+                if (!contained(path.dirname(gameJar), file) || !/^media\//u.test(name) || !/^\d+$/u.test(size) || await hash(file) !== sha256) {
+                    throw new Error(`Invalid menu ${kind} input: ${name}`);
+                }
+
+                assetHashes.push({ name, file, sha256Before: sha256 });
+            });
+        });
+        command(executable('java'), ['-cp', tools, 'PrepareMouse', path.join(output, 'atomic-view.jar'), path.join(output, 'menu-mouse-view.jar'), path.join(output, 'menu-mouse.json')]);
+        command(executable('java'), ['-cp', tools, 'PrepareKeyboardEvents', path.join(output, 'atomic-view.jar'), path.join(output, 'menu-input-view.jar'), path.join(output, 'menu-keyboard.json')]);
+        const helpers = ['host/port/host/ClipperSupport.java', 'BrowserMenu.java', 'BrowserMenuSession.java', 'BrowserMenuJsonQualification.java', 'host/port/host/BrowserMouse.java', 'host/port/host/BrowserKeyboardEvents.java', 'host/port/host/BrowserModelBootstrap.java', 'host/port/host/BrowserContentBootstrap.java', 'host/port/host/BrowserFontBootstrap.java', 'host/port/host/SqliteFiles.java', 'host/port/host/SqliteSupport.java', 'host/org/lwjgl/stb/STBImage.java'];
+
+        command(executable('javac'), ['--release', '17', '-cp', [gameJar, clipperJar, path.join(output, 'sprite-classes'), path.join(output, 'world-classes'), path.join(output, 'animation-classes')].join(path.delimiter), '-d', menuClasses, ...helpers.map((name) => path.join(source, name))]);
+        command(executable('java'), ['-cp', [menuClasses, gameJar].join(path.delimiter), 'BrowserMenuJsonQualification']);
+        command(executable('jar'), ['--create', '--file', path.join(output, 'menu-entry.jar'), '-C', menuClasses, '.']);
+        const mapRows = (await readFile(path.join(output, 'menu-data/menu-map-files.tsv'), 'utf8')).trim().split(/\r?\n/u);
+
+        await boundedReadOnly(mapRows, async (row) => {
+            const [sha256Before, size, name] = row.split('\t');
+            const file = path.resolve(path.dirname(gameJar), name);
+
+            if (!contained(options['media-root'], file) || !/^media\/maps\//u.test(name) || !/^\d+$/u.test(size) || await hash(file) !== sha256Before) {
+                throw new Error('Invalid original map source');
+            }
+
+            assetHashes.push({ name, file, sha256Before });
+        });
+        evidence.scheduler = await prepareSchedulerRuntime(path.join(output, 'scheduler-runtime'));
+        evidence.fullGamePlayable = false;
+        evidence.interactive = interactive;
+    }
+
     if (profile === 'food') {
         const foodClasses = path.join(output, 'food-classes');
 
@@ -473,7 +544,7 @@ try {
     evidence.adaptedVendorClasses = manifest.adaptedVendorClasses;
     evidence.gameMethodBodiesUnchanged = manifest.gameMethodBodiesUnchanged;
 
-    const entryPages = { graphics: path.join(source, 'index.html'), lua: path.join(source, 'lua.html'), input: path.join(source, 'input.html'), sprite: path.join(source, 'sprite.html'), world: path.join(source, 'world.html'), animation: path.join(source, 'animation.html'), play: path.join(output, 'play.html'), food: path.join(output, 'food.html'), 'character-shader': path.join(output, 'character-shader.html') };
+    const entryPages = { menu: path.join(source, 'menu.html'), graphics: path.join(source, 'index.html'), lua: path.join(source, 'lua.html'), input: path.join(source, 'input.html'), sprite: path.join(source, 'sprite.html'), world: path.join(source, 'world.html'), animation: path.join(source, 'animation.html'), play: path.join(output, 'play.html'), food: path.join(output, 'food.html'), 'character-shader': path.join(output, 'character-shader.html') };
     const entryPage = entryPages[profile];
     const routes = new Map([
         ['/', { file: entryPage, type: 'text/html; charset=utf-8' }],
@@ -597,10 +668,62 @@ try {
         });
     }
 
+    if (profile === 'menu') {
+        for (const name of ['menu.js', 'browser-clock.js', 'browser-mouse.js', 'keyboard.js', 'browser-physics.js', 'ragdoll-definitions.js', 'scheduler-runtime.js', 'sqlitejdbc.js', 'sqlite-natives.js', 'sqlite-namespace.js', 'native-long-return.js', 'native-library-loader.js']) {
+            routes.set(`/${name}`, { file: path.join(source, name), type: 'text/javascript' });
+        }
+
+        routes.set('/clipper2.jar', { file: clipperJar, type: 'application/java-archive' });
+        routes.set('/menu-map-files.tsv', { file: path.join(output, 'menu-data/menu-map-files.tsv'), type: 'text/plain' });
+
+        for (const name of ['menu-entry.jar', 'menu-mouse-view.jar', 'menu-input-view.jar']) {
+            routes.set(`/${name}`, { file: path.join(output, name), type: 'application/java-archive' });
+        }
+
+        for (const kind of ['content', 'font', 'client', 'menu']) {
+            routes.set(`/${kind}-assets.jar`, { file: path.join(output, `${kind}-data/${kind}-assets.jar`), type: 'application/java-archive' });
+        }
+
+        for (const name of ['cj3.js', 'load-function.js', 'manifest.json']) {
+            routes.set(`/scheduler-runtime/${name}`, { file: path.join(output, 'scheduler-runtime', name), type: name.endsWith('.json') ? 'application/json' : 'text/javascript' });
+        }
+
+        for (const name of ['sqlite3.mjs', 'sqlite3.wasm']) {
+            routes.set(`/${name}`, { file: path.join(repository, 'node_modules/@sqlite.org/sqlite-wasm/sqlite-wasm/jswasm', name), type: name.endsWith('.wasm') ? 'application/wasm' : 'text/javascript' });
+        }
+    }
+
     evidence.profile = profile;
 
     if (runtimeProfile) {
         evidence.runtimeAdaptations = JSON.parse(await readFile(path.join(output, 'float-bridge-summary.json'), 'utf8'));
+    }
+
+    if (profile === 'menu') {
+        const snapshotRoot = await mkdtemp(path.join(output, 'routes-'));
+        const snapshots = new Map();
+        const originals = [...new Set([...routes.values()].map((route) => route.file))];
+
+        // Browser range requests must keep one generation while shared sources are edited.
+        await boundedReadOnly([...originals.entries()], async ([index, original]) => {
+            const sha256Before = await hash(original);
+            const file = path.join(snapshotRoot, `${index}${path.extname(original)}`);
+
+            await copyFile(original, file);
+
+            if (await hash(file) !== sha256Before || await hash(original) !== sha256Before) {
+                throw new Error(`Menu source changed during snapshot: ${original}`);
+            }
+
+            snapshots.set(original, file);
+            assetHashes.push({ name: `menu-route:${index}`, file: original, sha256Before });
+        });
+
+        for (const route of routes.values()) {
+            route.file = snapshots.get(route.file);
+        }
+
+        evidence.menuRouteSnapshot = { root: snapshotRoot, routes: routes.size, files: snapshots.size };
     }
 
     const mediaHandler = await createMediaHandler(options['media-root'], async (file) => {
@@ -701,7 +824,24 @@ try {
     const origin = `http://127.0.0.1:${server.address().port}`;
 
     evidence.origin = origin;
-    browser = await chromium.launch({ executablePath: options.browser, headless: !interactive });
+
+    if (profile === 'menu') {
+        browserServer = await chromium.launchServer({ executablePath: options.browser, headless: !interactive });
+
+        if (!interactive) {
+            menuDeadline = setTimeout(() => {
+                evidence.menuDeadlineExceeded = true;
+                void menuBounded(browserServer.kill(), 5_000).catch((error) => {
+                    logs.push(String(error));
+                });
+            }, 600_000);
+        }
+
+        browser = await chromium.connect(browserServer.wsEndpoint());
+    } else {
+        browser = await chromium.launch({ executablePath: options.browser, headless: !interactive });
+    }
+
     const context = await browser.newContext({ serviceWorkers: 'block' });
 
     await context.route('**/*', async (route) => {
@@ -723,6 +863,10 @@ try {
         await route.continue();
     });
     const page = await context.newPage();
+
+    if (profile === 'menu') {
+        menuPage = page;
+    }
 
     page.on('console', (message) => {
         logs.push(`${message.type()}: ${message.text()}`);
@@ -781,6 +925,107 @@ try {
         }
     }
 
+    if (profile === 'menu' && !interactive) {
+        await page.waitForFunction(() => globalThis.menuSnapshot?.frames >= 30 || globalThis.probeResult, undefined, { timeout: 360_000 });
+        evidence.menuBeforeInput = await page.evaluate(() => globalThis.menuSnapshot);
+
+        if (!(await page.evaluate(() => Boolean(globalThis.probeResult)))) {
+            const target = evidence.menuBeforeInput.solo;
+            const box = await page.locator('canvas').boundingBox();
+
+            await page.mouse.move(box.x + target.x * box.width / 1_280, box.y + target.y * box.height / 720);
+            await page.mouse.down();
+            await page.waitForFunction((first) => globalThis.probeResult || (globalThis.menuSnapshot?.mouseDown && globalThis.menuSnapshot.frames >= first + 4), evidence.menuBeforeInput.frames, { timeout: 30_000 });
+            evidence.menuHeldInput = await page.evaluate(() => globalThis.menuSnapshot);
+            evidence.menuScrollHeld = await page.evaluate(() => ({ x: scrollX, y: scrollY }));
+            await page.mouse.up();
+            await page.waitForFunction(() => (globalThis.menuSnapshot?.newGameVisible && globalThis.menuSnapshot.thumbnailsReady === 6) || globalThis.probeResult, undefined, { timeout: 60_000 });
+            const soloFrame = await page.evaluate(() => globalThis.menuSnapshot.frames);
+
+            await page.waitForFunction((first) => globalThis.probeResult || globalThis.menuSnapshot?.frames >= first + 20, soloFrame, { timeout: 30_000 });
+            await page.evaluate(() => {
+                globalThis.menuCaptureRequested = true;
+            });
+            await page.waitForFunction(() => globalThis.menuCaptureHeld || globalThis.probeResult, undefined, { timeout: 30_000 });
+            evidence.menuAfterInput = await page.evaluate(() => globalThis.menuSnapshot);
+            evidence.menuTextSinkFocused = await page.evaluate(() => document.activeElement?.tagName === 'TEXTAREA');
+            evidence.result = await page.evaluate(() => globalThis.probeResult);
+
+            if (evidence.result) {
+                throw new Error(`Original menu stopped before Next: ${evidence.result.error || 'Unexpected early completion'}`);
+            }
+
+            try {
+                await page.locator('canvas').screenshot({ path: path.join(output, 'menu-frame.png') });
+                evidence.menuSoloCapture = await page.evaluate(() => ({ held: globalThis.menuCaptureHeld, snapshot: globalThis.menuSnapshot }));
+            } finally {
+                await page.evaluate(() => globalThis.releaseMenuCapture());
+            }
+
+            if (!evidence.menuSoloCapture.held || evidence.menuSoloCapture.snapshot.frames !== evidence.menuAfterInput.frames) {
+                throw new Error('Original menu advanced during the completed-frame Solo capture');
+            }
+
+            const next = evidence.menuAfterInput.next;
+
+            await page.mouse.move(box.x + next.x * box.width / 1_280, box.y + next.y * box.height / 720);
+            await page.mouse.down();
+            await page.waitForFunction((first) => globalThis.probeResult || (globalThis.menuSnapshot?.mouseDown && globalThis.menuSnapshot.frames >= first + 4), evidence.menuAfterInput.frames, { timeout: 30_000 });
+            await page.mouse.up();
+            await page.waitForFunction(() => globalThis.probeResult || (globalThis.menuSnapshot?.setup?.loaded && globalThis.menuSnapshot.setup.data >= 2 && globalThis.menuSnapshot.setup.images >= 1), undefined, { timeout: 120_000 });
+            const loadedFrame = await page.evaluate(() => globalThis.menuSnapshot.frames);
+
+            await page.waitForFunction((first) => globalThis.probeResult || globalThis.menuSnapshot?.frames >= first + 12, loadedFrame, { timeout: 30_000 });
+            await page.evaluate(() => {
+                globalThis.menuCaptureRequested = true;
+            });
+            await page.waitForFunction(() => globalThis.menuCaptureHeld || globalThis.probeResult, undefined, { timeout: 30_000 });
+            evidence.menuSetup = await page.evaluate(() => globalThis.menuSnapshot);
+            evidence.result = await page.evaluate(() => globalThis.probeResult);
+
+            if (evidence.result) {
+                throw new Error(`Original menu stopped during map rendering: ${evidence.result.error || 'Unexpected early completion'}`);
+            }
+
+            try {
+                evidence.menuPixels = await page.evaluate(() => {
+                    const canvas = document.querySelector('canvas');
+                    const gl = canvas.getContext('webgl2');
+                    const bytes = new Uint8Array(canvas.width * canvas.height * 4);
+
+                    gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+                    let nonblack = 0;
+                    const colors = new Set();
+
+                    for (let index = 0; index < bytes.length; index += 4) {
+                        if (bytes[index] || bytes[index + 1] || bytes[index + 2]) {
+                            nonblack += 1;
+                        }
+
+                        colors.add(`${bytes[index]},${bytes[index + 1]},${bytes[index + 2]},${bytes[index + 3]}`);
+                    }
+
+                    return { nonblack, colors: colors.size, error: gl.getError(), framebufferBound: gl.getParameter(gl.FRAMEBUFFER_BINDING) !== null };
+                });
+                await page.locator('canvas').screenshot({ path: path.join(output, 'menu-setup.png') });
+                evidence.menuMapCapture = await page.evaluate(() => ({ held: globalThis.menuCaptureHeld, snapshot: globalThis.menuSnapshot }));
+            } finally {
+                await page.evaluate(() => globalThis.releaseMenuCapture());
+            }
+
+            if (!evidence.menuMapCapture.held || evidence.menuMapCapture.snapshot.frames !== evidence.menuSetup.frames) {
+                throw new Error('Original menu advanced during the completed-frame map capture');
+            }
+
+            await page.locator('#stop').click();
+        }
+    }
+
+    if (profile === 'menu') {
+        await page.waitForFunction(() => globalThis.menuCompleted, undefined, { timeout: interactive ? 0 : 360_000 });
+        evidence.menuCleanup = await page.evaluate(() => ({ input: globalThis.menuInput, contextLost: globalThis.menuContextLost }));
+    }
+
     await page.waitForFunction(() => globalThis.probeResult, undefined, { timeout: interactive ? 0 : 180_000 });
     evidence.result = await page.evaluate(() => globalThis.probeResult);
 
@@ -789,6 +1034,11 @@ try {
     }
 
     evidence.pass = evidence.result.pass === true && denied.length === 0;
+
+    if (profile === 'menu') {
+        evidence.luaErrors = logs.filter((line) => /SEVERE|Error found in|KahluaThread.flushErrorMessage|PAGEERROR:/.test(line));
+        evidence.pass = evidence.pass && evidence.result.originalMenuExited && evidence.result.ownedCleanup && evidence.result.frontEndTicks > 0 && evidence.menuCleanup.contextLost === true && evidence.luaErrors.length === 0 && (interactive || (evidence.menuAfterInput?.newGameVisible === true && evidence.menuHeldInput?.mouseDown === true && evidence.menuScrollHeld?.x === 0 && evidence.menuScrollHeld?.y === 0 && Math.abs(evidence.menuHeldInput.mouseX - evidence.menuBeforeInput.solo.x) <= 2 && Math.abs(evidence.menuHeldInput.mouseY - evidence.menuBeforeInput.solo.y) <= 2 && evidence.menuTextSinkFocused === true && evidence.menuSetup?.setup?.loaded === true && evidence.menuSetup.setup.data >= 2 && evidence.menuSetup.setup.images >= 1 && evidence.menuAfterInput.thumbnailsReady === 6 && evidence.menuPixels.nonblack > 0 && evidence.menuPixels.colors > 1 && evidence.menuPixels.error === 0 && evidence.menuPixels.framebufferBound === false));
+    }
 
     if (profile === 'play') {
         evidence.frameCompleted = Number.isInteger(evidence.result.frames) && evidence.result.frames > 0;
@@ -840,7 +1090,7 @@ try {
         evidence.fullGamePlayable = false;
     }
 
-    if (animationProfile && evidence.pass) {
+    if (animationProfile && profile !== 'menu' && evidence.pass) {
         const screenshot = path.join(output, 'character-frame.png');
 
         await page.locator('#graphics-canvas').screenshot({ path: screenshot });
@@ -849,10 +1099,47 @@ try {
 } catch (error) {
     evidence.pass = false;
     evidence.error = String(error.stack || error);
+
+    if (menuPage && !menuPage.isClosed()) {
+        try {
+            evidence.menuFailureState = await menuBounded(menuPage.evaluate(() => ({ snapshot: globalThis.menuSnapshot, stages: globalThis.stageResults, result: globalThis.probeResult })), 5_000);
+
+            if (!(await menuBounded(menuPage.evaluate(() => globalThis.menuCompleted), 5_000))) {
+                await menuBounded(menuPage.locator('#stop').click(), 5_000);
+                await menuBounded(menuPage.waitForFunction(() => globalThis.menuCompleted, undefined, { timeout: 10_000 }), 11_000);
+            }
+
+            evidence.menuFailureCleanup = await menuBounded(menuPage.evaluate(() => ({ result: globalThis.probeResult, input: globalThis.menuInput, contextLost: globalThis.menuContextLost })), 5_000);
+        } catch (cleanupError) {
+            evidence.menuFailureCleanupError = String(cleanupError);
+        }
+    }
 } finally {
     const cleanupErrors = [];
 
-    if (browser) {
+    clearTimeout(menuDeadline);
+
+    if (browserServer) {
+        try {
+            await menuBounded(browserServer.close(), 5_000);
+        } catch (error) {
+            evidence.browserCloseError = String(error);
+        }
+
+        const process = browserServer.process();
+
+        try {
+            if (process.exitCode === null && process.signalCode === null) {
+                await menuBounded(browserServer.kill(), 5_000);
+            }
+
+            if (process.exitCode === null && process.signalCode === null) {
+                cleanupErrors.push('Owned browser process remains alive');
+            }
+        } catch (error) {
+            cleanupErrors.push(`browser owner: ${error.message}`);
+        }
+    } else if (browser) {
         try {
             await browser.close();
         } catch (error) {
