@@ -30,6 +30,54 @@ public final class PrepareSpriteGraphics {
         return preserved;
     }
 
+    /** Only the desktop window operations are replaced; public mode-selection branches remain original. */
+    private static boolean browserDisplayMethod(ClassBuilder builder, MethodModel method, List<String> changes) {
+        String key = method.methodName().stringValue() + method.methodType().stringValue();
+        if (!Set.of("create()V", "create(Lorg/lwjglx/opengl/PixelFormat;)V", "destroy()V",
+                "setBorderlessWindow(Z)V", "setDisplayModeAndFullscreenInternal(Lorg/lwjglx/opengl/DisplayMode;Z)V").contains(key)) return false;
+        ClassDesc display = ClassDesc.of("org.lwjglx.opengl.Display");
+        ClassDesc mode = ClassDesc.of("org.lwjglx.opengl.DisplayMode");
+        changes.add(key + ":owned-browser-surface+vendor-caches");
+        builder.withMethodBody(method.methodName(), method.methodType(), method.flags().flagsMask() & ~0x100, code -> {
+            switch (key) {
+                case "create()V", "create(Lorg/lwjglx/opengl/PixelFormat;)V" -> {
+                    if (key.equals("create()V")) code.invokestatic(HOST, "create", MethodTypeDesc.of(ConstantDescs.CD_void));
+                    else code.aload(0).invokestatic(HOST, "create", method.methodTypeSymbol());
+                    code.invokestatic(HOST, "getDesktopDisplayMode", MethodTypeDesc.of(mode)).dup()
+                        .putstatic(display, "desktopDisplayMode", mode).putstatic(display, "gameWindowMode", mode)
+                        .iconst_1().putstatic(display, "displayCreated", ConstantDescs.CD_boolean)
+                        .lconst_0().getstatic(display, "windowTitle", ConstantDescs.CD_String)
+                        .invokestatic(HOST, "setWindowTitle", MethodTypeDesc.of(ConstantDescs.CD_void,
+                            ConstantDescs.CD_long, ClassDesc.of("java.lang.CharSequence")));
+                    displaySizeCaches(code, display);
+                    code.getstatic(display, "vsyncEnabled", ConstantDescs.CD_boolean)
+                        .invokestatic(HOST, "setVSyncEnabled", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_boolean));
+                }
+                case "destroy()V" -> code.invokestatic(HOST, "destroy", MethodTypeDesc.of(ConstantDescs.CD_void))
+                    .iconst_0().putstatic(display, "displayCreated", ConstantDescs.CD_boolean);
+                case "setBorderlessWindow(Z)V" -> code.iload(0)
+                    .invokestatic(HOST, "requireWindowedBorder", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_boolean))
+                    .iload(0).putstatic(display, "isBorderlessWindow", ConstantDescs.CD_boolean);
+                default -> {
+                    code.aload(0).iload(1).invokestatic(HOST, "applyDisplayMode", method.methodTypeSymbol())
+                        .aload(0).putstatic(display, "gameWindowMode", mode)
+                        .iload(1).invokestatic(ClassDesc.of("zombie.core.Core"), "setFullScreen",
+                            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_boolean));
+                    displaySizeCaches(code, display);
+                }
+            }
+            code.return_();
+        });
+        return true;
+    }
+
+    private static void displaySizeCaches(CodeBuilder code, ClassDesc display) {
+        for (String field : List.of("displayWidth", "latestWidth", "displayFramebufferWidth"))
+            code.invokestatic(HOST, "surfaceWidth", MethodTypeDesc.of(ConstantDescs.CD_int)).putstatic(display, field, ConstantDescs.CD_int);
+        for (String field : List.of("displayHeight", "latestHeight", "displayFramebufferHeight"))
+            code.invokestatic(HOST, "surfaceHeight", MethodTypeDesc.of(ConstantDescs.CD_int)).putstatic(display, field, ConstantDescs.CD_int);
+    }
+
     public static void main(String[] args)throws Exception{
         if(args.length!=3)throw new IllegalArgumentException("runtimeViewJar outputDirectory authoredClasses");
         Path input=Path.of(args[0]).toRealPath(),output=Path.of(args[1]).toAbsolutePath().normalize(),authored=Path.of(args[2]).toRealPath();
@@ -57,6 +105,7 @@ public final class PrepareSpriteGraphics {
                             if(!(element instanceof MethodModel method)){builder.with(element);return;}
                             String methodName=method.methodName().stringValue(),descriptor=method.methodType().stringValue();
                             String helper=methodName.endsWith("ARB")?methodName.substring(0,methodName.length()-3):methodName;
+                            if (display && browserDisplayMethod(builder, method, changes)) return;
                             if(display&&methodName.equals("setTitle")&&descriptor.equals("(Ljava/lang/String;)V")){
                                 int[] bci={0};
                                 builder.transformMethod(method,MethodTransform.transformingCode((code,instruction)->{
@@ -88,7 +137,7 @@ public final class PrepareSpriteGraphics {
                             }
                             boolean selected=(method.flags().flagsMask()&0x8)!=0&&((gl&&methods.contains(helper+descriptor))||(legacyAttributes&&Set.of("glAlphaFunc(IF)V","glPushAttrib(I)V","glPopAttrib()V","glPushClientAttrib(I)V","glPopClientAttrib()V","glPolygonMode(II)V","glTexEnvi(III)V","glDisableClientState(I)V","glEnableClientState(I)V","glLineWidth(F)V","glFrontFace(I)V").contains(methodName+descriptor)&&methods.contains(helper+descriptor))||(memory&&Set.of("memAlloc","memAllocFloat","memAllocInt","memAllocShort","memRealloc","memFree","memSet").contains(helper)&&methods.contains(helper+descriptor))
                                     ||(api&&Set.of("initialize","getCapabilities").contains(helper)&&methods.contains(helper+descriptor))
-                                    ||(display&&Set.of("swapBuffers","isCreated","makeCurrent","releaseContext","setVSyncEnabled","processMessages","isActive","isVisible","isCloseRequested","wasResized","getWidth","getHeight","getX","getY","getAvailableDisplayModes").contains(helper)&&methods.contains(helper+descriptor)));
+                                    ||(display&&Set.of("swapBuffers","isCreated","makeCurrent","releaseContext","setVSyncEnabled","processMessages","isActive","isVisible","isCloseRequested","wasResized","getWidth","getHeight","getX","getY","getAvailableDisplayModes","isFullscreen","getDesktopDisplayMode","getFramebufferWidth","getFramebufferHeight").contains(helper)&&methods.contains(helper+descriptor)));
                             if(!selected){builder.with(element);return;}
                             changes.add(methodName+descriptor+"->"+helper);
                             builder.withMethodBody(method.methodName(),method.methodType(),method.flags().flagsMask()&~0x100,code->{

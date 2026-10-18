@@ -479,6 +479,62 @@ export function createSpriteNatives(canvas, report) {
          */
         contextCreated: () => !gl.isContextLost(),
         /**
+         * Reads fullscreen from the real document, including a fullscreen canvas ancestor.
+         *
+         * @returns {boolean} Actual fullscreen ownership.
+         */
+        isFullscreen: () => {
+            const element = canvas.ownerDocument.fullscreenElement;
+
+            return element !== null && element.contains(canvas);
+        },
+        adoptDisplay: ensure,
+        /**
+         * Resizes the real drawing surface, avoiding destructive same-size assignments.
+         *
+         * @param {number} width - Validated width.
+         * @param {number} height - Validated height.
+         * @returns {boolean} Whether the real drawing buffer accepted the requested dimensions.
+         */
+        resizeDisplay: (width, height) => {
+            const previousWidth = canvas.width;
+            const previousHeight = canvas.height;
+
+            if (canvas.width !== width) {
+                canvas.width = width;
+            }
+
+            if (canvas.height !== height) {
+                canvas.height = height;
+            }
+
+            if (gl.drawingBufferWidth !== width || gl.drawingBufferHeight !== height) {
+                canvas.width = previousWidth;
+                canvas.height = previousHeight;
+
+                return false;
+            }
+
+            return true;
+        },
+        /**
+         * Destroys the actual owned graphics context and observes its loss event.
+         *
+         * @returns {Promise<void>} Actual context destruction.
+         */
+        destroyDisplay: async () => {
+            if (gl.isContextLost()) {
+                return;
+            }
+
+            const extension = gl.getExtension('WEBGL_lose_context');
+
+            await new Promise((resolve) => {
+                canvas.addEventListener('webglcontextlost', resolve, { once: true });
+                extension.loseContext();
+            });
+        },
+        /**
          * Updates the title of the document which owns this graphics surface.
          *
          * @param {string} title - Original vendor window title.
@@ -615,6 +671,25 @@ export function createSpriteNatives(canvas, report) {
             compatibility.error = 0;
 
             return result || gl.getError();
+        },
+        /**
+         * Returns actual WebGL vendor/version information required by original Core.init.
+         *
+         * @param {number} name - Original GL string selector.
+         * @returns {string|null} Actual implementation information.
+         */
+        glGetString: (name) => {
+            if (name === 0x1F_03) {
+                return gl.getSupportedExtensions().join(' ');
+            }
+
+            if ([gl.VENDOR, gl.RENDERER, gl.VERSION, gl.SHADING_LANGUAGE_VERSION].includes(name)) {
+                return gl.getParameter(name);
+            }
+
+            compatibility.error ||= gl.INVALID_ENUM;
+
+            return null;
         },
         /**
          * Performs the integer state operation for the owned browser runtime.
@@ -1757,11 +1832,58 @@ export function createSpriteNatives(canvas, report) {
          * @returns {Promise<unknown>} Result after the actual browser operation completes.
          */
         natives[`Java_port_host_SpriteGraphics_${name}`] = async (lib, ...args) => {
+            if (name === 'adoptDisplay' || name === 'resizeDisplay') {
+                if (!canvas.isConnected || gl.isContextLost()) {
+                    throw await new (await lib.java.lang.IllegalStateException)('Browser Display surface is closed');
+                }
+            }
+
+            if (name === 'adoptDisplay') {
+                const [color, alpha, depth, stencil, samples] = args;
+                const draw = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+                const read = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+                let bits;
+
+                try {
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                    bits = [gl.RED_BITS, gl.GREEN_BITS, gl.BLUE_BITS, gl.ALPHA_BITS,
+                        gl.DEPTH_BITS, gl.STENCIL_BITS, gl.SAMPLES].map((parameter) => gl.getParameter(parameter));
+                } finally {
+                    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, draw);
+                    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
+                }
+
+                if (color < 0 || alpha < 0 || depth < 0 || stencil < 0 || samples < 0
+                    || color > bits.slice(0, 4).reduce((sum, value) => sum + value, 0)
+                    || alpha > bits[3] || depth > bits[4] || stencil > bits[5] || samples > bits[6]) {
+                    throw await new (await lib.org.lwjglx.LWJGLException)('Owned WebGL context cannot provide the requested pixel format');
+                }
+            }
+
+            if (name === 'resizeDisplay') {
+                const [width, height] = args;
+                const maximum = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+
+                if (width <= 0 || height <= 0 || width > maximum[0] || height > maximum[1]) {
+                    throw await new (await lib.java.lang.IllegalArgumentException)('Browser Display dimensions exceed the owned WebGL limits');
+                }
+            }
+
+            if (name === 'destroyDisplay' && !gl.isContextLost() && !gl.getExtension('WEBGL_lose_context')) {
+                throw await new (await lib.java.lang.UnsupportedOperationException)('Browser context destruction is unavailable');
+            }
+
             if (name === 'setTitle' && (!canvas.isConnected || gl.isContextLost())) {
                 throw await new (await lib.java.lang.IllegalStateException)('Browser title surface is closed');
             }
 
-            return await callback(...args);
+            const result = await callback(...args);
+
+            if (name === 'resizeDisplay' && !result) {
+                throw await new (await lib.org.lwjglx.LWJGLException)('Browser drawing buffer did not accept the requested dimensions');
+            }
+
+            return result;
         };
     }
 

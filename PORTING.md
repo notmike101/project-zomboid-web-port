@@ -1,5 +1,9 @@
 # Toward a playable original-bytecode port
 
+## Genuine display startup boundary
+
+The actual original windowed `GameWindow.InitDisplay` closure now passes a private browser gate using an options file written by original Core code. Preserve this producer and the original display cache branches when composing startup. Its earlier `Display.init` entry still needs qualification of keyboard and GLFW platform services. The real JDK filesystem-watch probe also stops at missing `LinuxWatchService.inotifyInit`; implement the platform service beneath original watcher logic rather than disabling it. These component results do not release the normal loading transition guard.
+
 ## Current public population gate
 
 The positive population service now has a reproducible public gate, `node browser-jvm/verify-population.mjs`, using the prepared play SDK. It runs the actual original worker/save/stop lifecycle in two fresh browser VMs and cross-reads browser files with the original installed DLL. The qualified case generates 88 natural records, preserves timers and outfit names, reopens selected records exactly and allocates next ID 89. Original Java remains responsible for metadata and lifecycle; the missing native backend is a bounded translation of inspected algorithms.

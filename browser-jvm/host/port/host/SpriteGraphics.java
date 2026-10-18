@@ -21,6 +21,7 @@ public final class SpriteGraphics {
     private static GLCapabilities capabilities;
     private static Thread contextOwner;
     private static boolean requestedVsync;
+    private static boolean displayAdopted;
     private SpriteGraphics() { }
     public static native void initialize();
     public static native boolean contextCreated();
@@ -39,6 +40,47 @@ public final class SpriteGraphics {
     public static org.lwjglx.opengl.DisplayMode[] getAvailableDisplayModes() {
         return new org.lwjglx.opengl.DisplayMode[]{new org.lwjglx.opengl.DisplayMode(surfaceWidth(), surfaceHeight())};
     }
+    /** Adopts the already owned WebGL context; no desktop window or handle is manufactured. */
+    public static void create(org.lwjglx.opengl.PixelFormat format) {
+        Objects.requireNonNull(format, "format");
+        if (displayAdopted) throw new UnsupportedOperationException("Browser Display recreation is not qualified");
+        if (format.getAuxBuffers() != 0 || format.getAccumulationBitsPerPixel() != 0
+                || format.getAccumulationAlpha() != 0 || format.isStereo()
+                || format.isFloatingPoint() || format.isSRGB())
+            throw new UnsupportedOperationException("Browser Display does not support this pixel format");
+        adoptDisplay(format.getBitsPerPixel(), format.getAlphaBits(), format.getDepthBits(),
+                format.getStencilBits(), format.getSamples());
+        makeCurrent();
+        glClearColor(0, 0, 0, 1);
+        glClear(0x4100);
+        present(false);
+        displayAdopted = true;
+    }
+    public static void create() { create(new org.lwjglx.opengl.PixelFormat()); }
+    private static native void adoptDisplay(int color, int alpha, int depth, int stencil, int samples);
+    public static native boolean isFullscreen();
+    /** Monitor modes are not advertised: this is the actual owned windowed surface descriptor. */
+    public static org.lwjglx.opengl.DisplayMode getDesktopDisplayMode() {
+        return new org.lwjglx.opengl.DisplayMode(surfaceWidth(), surfaceHeight());
+    }
+    public static int getFramebufferWidth() { return surfaceWidth(); }
+    public static int getFramebufferHeight() { return surfaceHeight(); }
+    public static void applyDisplayMode(org.lwjglx.opengl.DisplayMode mode, boolean fullscreen) {
+        Objects.requireNonNull(mode, "mode");
+        if (fullscreen || mode.isFullscreenCapable() || isFullscreen())
+            throw new UnsupportedOperationException("Browser monitor/fullscreen mode changes are not qualified");
+        resizeDisplay(mode.getWidth(), mode.getHeight());
+    }
+    private static native void resizeDisplay(int width, int height);
+    public static void requireWindowedBorder(boolean borderless) {
+        if (borderless) throw new UnsupportedOperationException("Browser borderless monitor mode is not qualified");
+    }
+    public static void destroy() {
+        destroyDisplay();
+        contextOwner = null;
+        capabilities = null;
+    }
+    private static native void destroyDisplay();
     public static native int getX();
     public static native int getY();
     public static native void report(String json);
@@ -53,7 +95,7 @@ public final class SpriteGraphics {
     /** Authored intrinsic emits the vendor descriptor constructor; no desktop discovery. */
     private static native GLCapabilities newDescriptor();
     public static boolean isCreated(){return contextCreated();}
-    public static void makeCurrent(){initialize();Thread thread=Thread.currentThread();if(contextOwner!=null&&contextOwner!=thread)throw new IllegalStateException("Browser graphics context is owned by another Java thread");contextOwner=thread;}
+    public static void makeCurrent(){if(!contextCreated())throw new IllegalStateException("Browser graphics context is destroyed");initialize();Thread thread=Thread.currentThread();if(contextOwner!=null&&contextOwner!=thread)throw new IllegalStateException("Browser graphics context is owned by another Java thread");contextOwner=thread;}
     public static void releaseContext(){if(contextOwner!=Thread.currentThread())throw new IllegalStateException("Browser graphics context is not owned by this Java thread");contextOwner=null;}
     public static void setVSyncEnabled(boolean enabled){initialize();requestedVsync=enabled;}
     public static boolean requestedVsync(){return requestedVsync;}
@@ -180,6 +222,7 @@ public final class SpriteGraphics {
     public static void glGetBufferParameteriv(int target,int name,IntBuffer output){SpriteBuffers.getParameter(target,name,output);}
     public static native int rawError();
     public static int glGetError(){int error=SpriteBuffers.error();return error!=0?error:rawError();}
+    public static native String glGetString(int name);
     public static native int integerState(int name);
     public static int glGetInteger(int name){if(name==0x8894)return SpriteBuffers.binding(0x8892);if(name==0x8895)return SpriteBuffers.binding(0x8893);return integerState(name);}
     private static int offset(long value){if(value<0||value>Integer.MAX_VALUE)throw new UnsupportedOperationException("Buffer offset outside browser range");return(int)value;}

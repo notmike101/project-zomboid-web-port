@@ -1,5 +1,11 @@
 # Incremental original-bytecode compatibility
 
+## Original windowed display initialization
+
+A private browser component now passes the actual `Core.saveOptions → GameWindow.InitDisplay → Core.init → SpriteRenderer.create` closure with 26 Java assertions and 42 unchanged inputs. Original options writing/loading selects the windowed branch without option setters. Real WebGL supplies the 1280×720 surface, vendor/version strings and VBO capability selection. Original display caches follow successful creation and real resize to 320×240 and back. Unsupported fullscreen, borderless and recreation requests throw genuine Java exceptions without publishing false state.
+
+Original destruction causes real WebGL context loss and subsequent context acquisition fails. The original ring buffer's 256 JavaScript registry records remain until browser closure; this is not a zero-registry cleanup claim. The browser owner closes normally with no captured errors or denied requests. Earlier `Display.init`, keyboard/controller/clipboard initialization, absent-options fullscreen startup and full game startup remain unqualified. A separate prerequisite probe finds the browser JDK's missing `LinuxWatchService.inotifyInit` native; no fake watcher or injected fallback exception is installed.
+
 ## Public population generation and persistence
 
 `node browser-jvm/verify-population.mjs` now qualifies a positive single-cell population service through the original Java worker, save, stop and fresh-browser reopen paths. Two browser VMs pass 996 and 999 assertions, plus 24 Java buffer checks each. Natural generation produces 88 records in 83 positive target chunks; original names, timers and selected records survive reopening, and the next ID is 89. A fresh installed-DLL reader independently reads the browser-written files with the same selected records and next ID. Inputs and map metadata remain unchanged; both browser owners and original workers close normally.
