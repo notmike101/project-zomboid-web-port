@@ -268,3 +268,15 @@ File watching implements the missing LinuxWatchService native transport while re
 Clipboard uses a real JDK application-local `Clipboard` behind four pinned GLFW vendor selectors. The 26-assertion browser gate runs the original game Clipboard methods, including worker/main-thread handoff, and exits normally without system clipboard calls. It does not require Toolkit/display initialization. OS clipboard permissions and the complete original RenderThread lifecycle remain unqualified.
 
 The `--profile menu` build installs the clipboard overlay/helper and browser watch transport. Its local server owns a read-only `/app/media` watch mount and serves only the exact `/watch-events` SSE endpoint; shutdown releases watchers, listeners and clients before server closure. The current installed tree contains 49,121 indexed entries and took 75.2 seconds to prepare on the measured Windows run. This is additional preparation time before browser startup. Original watcher/clipboard lifecycle execution is separately qualified, not inferred merely from installing services in the bounded menu. The fresh menu run still fails in original map selection because GLU emits a degenerate triangle under both sweep axes; it is not a complete-menu or full-game pass. It retains 9,132 unchanged monitored input hashes, zero denied requests and closed browser/server/input owners.
+
+## Original render-owner initialization
+
+After preparing play and running `node browser-jvm/verify-display-init.mjs`, use the same `PZ_JDK`, `PZ_BROWSER` and `PZ_GAME_JAR` variables to run:
+
+```powershell
+node browser-jvm/verify-render-thread-init.mjs
+```
+
+Results are written to `target/browser-jvm/render-thread-init/<run-id>/result.json`. This combined component executes unchanged original `RenderThread.init`, including its real display/controller/clipboard calls and duplicate guard. The original code assigns its own owner thread and initialization state. The gate passes 66 Java checks and four alias/incompatible-input preparation guards. It requires genuine keyboard-only browser observations, checks the original mapping payload, and rejects unavailable controller/pointer operations with actual Java exceptions. An authored untrusted event tests rejection only; physical hotplug and connected controllers are unsupported.
+
+The overlay consumes the qualified clipboard GLFW class and startup-input Display class, then preserves all unselected vendor method bodies. No game classes are emitted. Actual original Input.quit releases 32 gamepad values, and owned listeners/input/display/browser/server resources close with 50 unchanged inputs. Full render-loop execution, same-VM controller reuse and complete RenderThread.shutdown are not qualified; shutdown can initialize additional puddle/render resources. The component reports that limit explicitly. Existing menu/play profiles do not select this controller overlay yet.
