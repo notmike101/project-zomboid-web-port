@@ -325,6 +325,34 @@ export function createPopulationNatives() {
         return data.collision;
     }
 
+    /**
+     * Resolves the collision cells that original spawn exclusions can query.
+     * Neighbor loading does not create population cells or consume random values.
+     *
+     * @param {object} lib - Actual CheerpJ Java transport namespace.
+     * @param {number} x - Population cell x coordinate.
+     * @param {number} y - Population cell y coordinate.
+     * @returns {Promise<Map<string, Array<Uint8Array>>>} Original decoded neighboring collision chunks.
+     */
+    async function collisionNeighborhood(lib, x, y) {
+        const coordinates = [];
+        const neighbors = new Map();
+
+        for (let ny = y - 1; ny <= y + 1; ny++) {
+            for (let nx = x - 1; nx <= x + 1; nx++) {
+                if (inGrid(nx, ny)) {
+                    coordinates.push([nx, ny]);
+                }
+            }
+        }
+
+        await sequence(coordinates, async ([nx, ny]) => {
+            neighbors.set(key(nx, ny), await cellCollision(lib, nx, ny));
+        });
+
+        return neighbors;
+    }
+
     const floatKeys = ['PopulationMultiplier', 'PopulationStartMultiplier', 'PopulationPeakMultiplier', 'RespawnHours', 'RespawnUnseenHours', 'RespawnMultiplier', 'RedistributeHours', 'MinZombiesPerChunk', 'MaxZombiesPerChunk', 'UniformZombiesPerChunk'];
 
     const intKeys = ['PopulationPeakDay', 'FollowSoundDistance'];
@@ -411,17 +439,42 @@ export function createPopulationNatives() {
             return cell;
         }
 
-        if ((state.grid[2] !== 1 || state.grid[3] !== 1) && data.density.some((value) => value > 0)) {
-            unsupported('multi-cell population generation neighbor closure');
-        }
-
         if (state.gameState.get('SandboxOptions.Distribution') === 2) {
             unsupported('uniform distribution target branch not qualified');
         }
 
         const chunks = await cellCollision(lib, x, y);
+        const neighbors = await collisionNeighborhood(lib, x, y);
+        /**
+         * Reads the same global square flags as the original lazy collision grid.
+         *
+         * @param {number} sx - Global square x coordinate.
+         * @param {number} sy - Global square y coordinate.
+         * @returns {number} Original square collision bits, or outside-grid solidity.
+         */
+        const globalFlags = (sx, sy) => {
+            const cx = Math.floor(sx / 256);
+            const cy = Math.floor(sy / 256);
+
+            if (!inGrid(cx, cy)) {
+                return 1;
+            }
+
+            const neighbor = neighbors.get(key(cx, cy));
+
+            if (!neighbor) {
+                unsupported('unprepared global collision neighbor');
+            }
+
+            const lx = sx - cx * 256;
+            const ly = sy - cy * 256;
+
+            return neighbor[(ly >> 3) * 32 + (lx >> 3)][(ly & 7) * 8 + (lx & 7)];
+        };
+
         const config = configBytes();
         const result = generate({
+            globalFlags,
             cellX: x,
             cellY: y,
             rng,
@@ -473,10 +526,10 @@ export function createPopulationNatives() {
         }
 
         const uniform = state.gameState.get('SandboxOptions.Distribution') === 2;
-        const positive = state.metadata.get(name)?.density.some((value) => value > 0);
-        const neighborBoundary = (state.grid[2] !== 1 || state.grid[3] !== 1) && positive;
 
-        if (!uniform && !neighborBoundary) {
+        if (!uniform) {
+            await collisionNeighborhood(lib, x, y);
+
             return;
         }
 
@@ -489,7 +542,7 @@ export function createPopulationNatives() {
             return;
         }
 
-        unsupported(uniform ? 'uniform distribution target branch not qualified' : 'multi-cell positive generation neighbor closure');
+        unsupported('uniform distribution target branch not qualified');
     }
 
     const collisionService = {
@@ -1012,12 +1065,19 @@ export function createPopulationNatives() {
                 }
             }
 
+            /* Original1800218e0 clips seen chunks using the area's first cell,
+               even while its generation loop advances to a neighboring cell. */
             await sequence(areaCells(state.areas), async ([cx, cy, x, y, w, h]) => {
                 const cell = await ensureCell(lib, cx * 32, cy * 32);
 
-                for (let ty = Math.max(y, cy * 32); ty < Math.min(y + h - 1, cy * 32 + 32); ty++) {
-                    for (let tx = Math.max(x, cx * 32); tx < Math.min(x + w - 1, cx * 32 + 32); tx++) {
-                        cell.lastSeen[tx - cx * 32 + (ty - cy * 32) * 32] = Math.fround(state.workerTime[1]);
+                for (let ty = Math.max(y, Math.trunc(y / 32) * 32); ty < Math.min(y + h - 1, Math.trunc(y / 32) * 32 + 32); ty++) {
+                    for (let tx = Math.max(x, Math.trunc(x / 32) * 32); tx < Math.min(x + w - 1, Math.trunc(x / 32) * 32 + 32); tx++) {
+                        const lx = tx - cx * 32;
+                        const ly = ty - cy * 32;
+
+                        if (lx >= 0 && lx < 32 && ly >= 0 && ly < 32) {
+                            cell.lastSeen[lx + ly * 32] = Math.fround(state.workerTime[1]);
+                        }
                     }
                 }
             });

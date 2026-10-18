@@ -8,7 +8,9 @@ The actual original windowed `GameWindow.InitDisplay` closure now passes a priva
 
 The positive population service now has a reproducible public gate, `node browser-jvm/verify-population.mjs`, using the prepared play SDK. It runs the actual original worker/save/stop lifecycle in two fresh browser VMs and cross-reads browser files with the original installed DLL. The qualified case generates 88 natural records, preserves timers and outfit names, reopens selected records exactly and allocates next ID 89. Original Java remains responsible for metadata and lifecycle; the missing native backend is a bounded translation of inspected algorithms.
 
-Next recover adjacent positive-cell lookup and initialization ordering against the original DLL, then admit those semantics explicitly. Keep the single-cell guard until that comparison passes. In parallel, preserve original physics upload and later collider-build phases over real Bullet, and complete actual startup platform services before composing the normal loading thread. Independent component passes do not establish a loaded or playable game.
+Adjacent positive-cell lookup and initialization ordering now pass the original-DLL comparison and the public browser gate. Global neighboring collision queries preserve the original target/spawn algorithms, shared RNG/IDs and native timer clipping. The public case naturally generates 220 records, reopens selected seam records in a fresh browser and the original DLL, and restores next ID 221. The initial single-cell generation guard is removed; ongoing age, movement, respawn, multiple collision layers and automatic saves remain guarded.
+
+Carry this service into the actual loading lifecycle without introducing a separate world simulation. In parallel, preserve original physics upload and later collider-build phases over real Bullet, and complete actual startup platform services before composing the normal loading thread. Independent component passes do not establish a loaded or playable game.
 
 ## Full initialization and native-engine reuse
 

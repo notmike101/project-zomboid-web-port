@@ -145,6 +145,46 @@ function nativePhase(label, owner, phase) {
 }
 
 /**
+ * Checks every persisted chunk timer against the inspected original area clip.
+ * Original native1800218e0 retains the first cell's clip while initializing neighbors.
+ *
+ * @param {Buffer} bytes - Actual original-format saved cell.
+ * @param {number} cellX - Global cell x coordinate.
+ * @param {number} cellY - Global cell y coordinate.
+ * @param {Array<number>} areas - Actual original LoadedAreas producer output.
+ * @returns {object} Counts after every chunk scalar has been checked.
+ */
+function checkTimers(bytes, cellX, cellY, areas) {
+    const cell = decodeCell(bytes);
+    let seen = 0;
+
+    assert.deepEqual(cell.scalars, [2, 2]);
+
+    for (const [index, chunk] of cell.chunks.entries()) {
+        const x = cellX * 32 + index % 32;
+        const y = cellY * 32 + (index >> 5);
+        let expected = 0;
+
+        for (let offset = 0; offset < areas.length; offset += 4) {
+            const [ax, ay, width, height] = areas.slice(offset, offset + 4);
+            const firstX = Math.trunc(ax / 32) * 32;
+            const firstY = Math.trunc(ay / 32) * 32;
+
+            if (x >= Math.max(ax, firstX) && x < Math.min(ax + width - 1, firstX + 32)
+                && y >= Math.max(ay, firstY) && y < Math.min(ay + height - 1, firstY + 32)) {
+                expected = 2;
+            }
+        }
+
+        assert.equal(chunk.scalars[0], expected, `Original seen timer: ${cellX},${cellY}/${index}`);
+        assert.equal(chunk.scalars[1], 2, `Original generation timer: ${cellX},${cellY}/${index}`);
+        seen += expected === 2 ? 1 : 0;
+    }
+
+    return { cellX, cellY, seen, checkedChunks: cell.chunks.length };
+}
+
+/**
  * Limits browser-owner close and kill independently of the JVM page.
  *
  * @param {Promise<unknown>} operation - Actual owned browser operation.
@@ -280,7 +320,7 @@ async function browserPhase(phase, emitted) {
             const record = /^POPULATION_FILE (\S+) (\d+) (\d+) ([\da-f]+)$/.exec(text.trim());
 
             if (record) {
-                if (/^(?:z_outfits\.bin|zpop\/zpop_(?:41_40|ids|virtual)\.bin)$/.test(record[1])) {
+                if (/^(?:z_outfits\.bin|zpop\/zpop_(?:41_40|42_40|ids|virtual)\.bin)$/.test(record[1])) {
                     const offset = Number(record[2]);
                     const total = Number(record[3]);
                     const previous = exports.get(record[1]) || { total, hex: '' };
@@ -364,13 +404,28 @@ try {
     const preparedText = command('original-inputs', 'java', [`-Duser.home=${path.join(preparation, 'home')}`, '-cp', `${nativeClasses}${path.delimiter}${gameJar}`, 'PopulationInputs', preparation], path.join(preparation, 'work'), 120_000);
 
     assert.ok(preparedText.includes('POPULATION_INPUTS_PASS'));
-    const density = snapshot(path.join(preparation, 'original-density.bin'));
+    const densities = new Map();
+
+    for (const x of [41, 42]) {
+        densities.set(x, snapshot(path.join(preparation, `density_${x}_40.bin`)));
+    }
+
     const nativeOwner = path.join(root, 'native-world');
 
-    copyInputs(nativeOwner, [...ordinaryInputs, collisionName]);
-    fs.writeFileSync(path.join(nativeOwner, 'work/original-density.bin'), density);
-    assert.ok(nativePhase('native-write', nativeOwner, 'write').includes('POSITIVE_WRITER_PASS'));
-    assert.ok(nativePhase('native-read', nativeOwner, 'read').includes('POSITIVE_READER_PASS'));
+    copyInputs(nativeOwner, [...ordinaryInputs, collisionName, 'media/maps/Muldraugh, KY/chunkdata_42_40.bin']);
+
+    for (const [x, bytes] of densities) {
+        fs.writeFileSync(path.join(nativeOwner, `work/density_${x}_40.bin`), bytes);
+    }
+
+    const originalWrite = nativePhase('native-write', nativeOwner, 'write');
+
+    assert.ok(originalWrite.includes('ADJACENT_WRITER_PASS'));
+    const originalAreas = JSON.parse(/ORIGINAL_LOADED_AREAS (\[[^\]]+])/.exec(originalWrite)[1]);
+
+    evidence.nativeTimers = [41, 42].map((x) => checkTimers(fs.readFileSync(path.join(nativeOwner,
+        `home/Zomboid/Saves/Sandbox/PopulationOracle/zpop/zpop_${x}_40.bin`)), x, 40, originalAreas));
+    assert.ok(nativePhase('native-read', nativeOwner, 'read').includes('ADJACENT_READER_PASS'));
 
     const cp = [];
 
@@ -386,11 +441,13 @@ try {
     command('archive', 'jar', ['--create', '--file', path.join(root, 'qualification.jar'), '-C', browserClasses, '.']);
     routes.set('/qualification.jar', fs.readFileSync(path.join(root, 'qualification.jar')));
 
-    for (const name of [...ordinaryInputs, collisionName]) {
+    for (const name of [...ordinaryInputs, collisionName, 'media/maps/Muldraugh, KY/chunkdata_42_40.bin']) {
         routes.set(`/${name}`, snapshot(path.join(installation, name)));
     }
 
-    routes.set('/original-density.bin', density);
+    for (const [x, bytes] of densities) {
+        routes.set(`/density_${x}_40.bin`, bytes);
+    }
 
     for (const name of ['population-natives.js', 'population-kernel.js', 'population-save-codec.js', 'unsafe-short-repair.js', 'native-library-loader.js']) {
         routes.set(`/${name}`, snapshot(path.join(source, name)));
@@ -448,17 +505,24 @@ try {
     const emitted = {};
 
     await browserPhase('write', emitted);
-    assert.equal(Object.keys(emitted).length, 4);
+    assert.equal(Object.keys(emitted).length, 5);
     const cell = decodeCell(emitted['zpop/zpop_41_40.bin']);
 
     assert.ok(cell.chunks.some((chunk) => chunk.records.length));
     assert.ok(decodeIDs(emitted['zpop/zpop_ids.bin']) > 1);
     assert.equal(decodeEmptyVirtual(emitted['zpop/zpop_virtual.bin']).length, 609);
+    const browserAreas = JSON.parse(/ORIGINAL_LOADED_AREAS (\[[^\]]+])/.exec(evidence.browsers[0].logs.join('\n'))[1]);
+
+    assert.deepEqual(browserAreas, originalAreas);
+    evidence.browserTimers = [41, 42].map((x) => checkTimers(emitted[`zpop/zpop_${x}_40.bin`], x, 40, browserAreas));
     await browserPhase('read', emitted);
     const cross = path.join(root, 'native-crossread');
 
-    copyInputs(cross, [...ordinaryInputs, collisionName]);
-    fs.writeFileSync(path.join(cross, 'work/original-density.bin'), density);
+    copyInputs(cross, [...ordinaryInputs, collisionName, 'media/maps/Muldraugh, KY/chunkdata_42_40.bin']);
+
+    for (const [x, bytes] of densities) {
+        fs.writeFileSync(path.join(cross, `work/density_${x}_40.bin`), bytes);
+    }
 
     const crossreadHashes = new Map();
 
@@ -470,7 +534,7 @@ try {
         crossreadHashes.set(target, digest(bytes));
     }
 
-    assert.ok(nativePhase('native-crossread', cross, 'read').includes('POSITIVE_READER_PASS'));
+    assert.ok(nativePhase('native-crossread', cross, 'read').includes('ADJACENT_READER_PASS'));
     assert.ok([...crossreadHashes].every(([file, before]) => digest(fs.readFileSync(file)) === before));
     evidence.crossreadFilesUnchanged = true;
     evidence.nativeCrossread = true;

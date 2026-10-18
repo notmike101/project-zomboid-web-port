@@ -24,7 +24,13 @@ public final class PopulationQualification {
     for (int offset = 0; offset < value.length(); offset += 2048) {
       int end = Math.min(offset + 2048, value.length());
       System.out.println(
-          "POPULATION_FILE " + name + " " + offset + " " + value.length() + " "
+          "POPULATION_FILE "
+              + name
+              + " "
+              + offset
+              + " "
+              + value.length()
+              + " "
               + value.substring(offset, end));
     }
   }
@@ -235,35 +241,33 @@ public final class PopulationQualification {
         zombie.SandboxOptions.instance.zombies.getValue());
     check(
         zombie.SandboxOptions.instance.distribution.getValue() == 1, "actual normal distribution1");
-    call(M, "n_initMetaGrid", bounds, 41, 40, 1, 1);
-    Path input =
-        Path.of(System.getProperty("user.dir"))
-            .resolve("media/maps/Muldraugh, KY/chunkdata_41_40.bin");
-    call(
-        M,
-        "n_initMetaCell",
-        new Class<?>[] {int.class, int.class, String.class},
-        41,
-        40,
-        input.toString());
-    byte[] density =
-        Files.readAllBytes(Path.of(System.getProperty("user.dir")).resolve("original-density.bin"));
-    check(density.length == 1024, "genuine Java density input length");
-    check(
-        java.util.stream.IntStream.range(0, 1024).anyMatch(i -> density[i] != 0),
-        "actual positive original Java Voronoi density input");
-    for (int y = 0; y < 32; y++)
-      for (int x = 0; x < 32; x++)
-        call(
-            M,
-            "n_initMetaChunk",
-            new Class<?>[] {int.class, int.class, int.class, int.class, int.class},
-            41,
-            40,
-            x,
-            y,
-            density[x + y * 32] & 255);
-    call(M, "n_init", bounds, 41, 40, 1, 1);
+
+    call(M, "n_initMetaGrid", bounds, 41, 40, 2, 1);
+    Path work = Path.of(System.getProperty("user.dir"));
+    for (int cellX = 41; cellX <= 42; cellX++) {
+      Path collision = work.resolve("media/maps/Muldraugh, KY/chunkdata_" + cellX + "_40.bin");
+      call(
+          M,
+          "n_initMetaCell",
+          new Class<?>[] {int.class, int.class, String.class},
+          cellX,
+          40,
+          collision.toString());
+      byte[] density = Files.readAllBytes(work.resolve("density_" + cellX + "_40.bin"));
+      check(density.length == 1024, "actual adjacent density input length");
+      for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++)
+          call(
+              M,
+              "n_initMetaChunk",
+              new Class<?>[] {int.class, int.class, int.class, int.class, int.class},
+              cellX,
+              40,
+              x,
+              y,
+              density[x + y * 32] & 255);
+    }
+    call(M, "n_init", bounds, 41, 40, 2, 1);
     mcd = true;
     call(
         P,
@@ -273,7 +277,7 @@ public final class PopulationQualification {
         false,
         41,
         40,
-        1,
+        2,
         1);
     pop = true;
     ZombiePopulationManager.instance.onConfigReloaded();
@@ -287,8 +291,13 @@ public final class PopulationQualification {
     System.out.println("ACTUAL_OUTFIT_NAMES " + Arrays.toString(outfits));
     IsoWorld.instance.currentCell = new IsoCell(10, 10);
     worldCreated = true;
-    IsoWorld.instance.currentCell.getChunkMap(0).setInitialPos(1333, 1299);
+    IsoWorld.instance.currentCell.getChunkMap(0).setInitialPos(1344, 1299);
     ZombiePopulationManager.instance.updateLoadedAreas();
+    zombie.popman.LoadedAreas actualAreas =
+        (zombie.popman.LoadedAreas) field(ZombiePopulationManager.instance, "loadedAreas");
+    System.out.println(
+        "ORIGINAL_LOADED_AREAS "
+            + Arrays.toString(Arrays.copyOf(actualAreas.areas, actualAreas.count * 4)));
     MapCollisionData.instance.start();
     MapCollisionData.instance.startGame();
     started = true;
@@ -359,7 +368,7 @@ public final class PopulationQualification {
       lastRespawn.add(bytes.getFloat());
     }
     check(
-        !bytes.hasRemaining() && positive > 0 && lastSeen > 0 && total > 0,
+        !bytes.hasRemaining() && positive > 0 && total > 0,
         "positive native file density/loaded-area/timers/records");
     check(lastRespawn.equals(Set.of((float) age())), "source initial chunk generation timers");
     System.out.println(
@@ -379,23 +388,51 @@ public final class PopulationQualification {
             + total);
   }
 
+  static Map<Integer, R> saved() throws Exception {
+    Map<Integer, R> all = new TreeMap<>();
+    int priorMax = 0;
+    for (int cellX = 41; cellX <= 42; cellX++) {
+      Path file = save.resolve("zpop/zpop_" + cellX + "_40.bin");
+      Map<Integer, R> cell = parse(file);
+      wireScalars(file);
+      check(!cell.isEmpty(), "natural adjacent cell has records");
+      int min = cell.keySet().stream().mapToInt(Integer::intValue).min().orElseThrow();
+      int max = cell.keySet().stream().mapToInt(Integer::intValue).max().orElseThrow();
+      check(
+          min == priorMax + 1 && max - min + 1 == cell.size(),
+          "row-major shared persistent ID allocation");
+      priorMax = max;
+      for (R r : cell.values()) {
+        check(
+            r.x >= cellX * 256 && r.x < (cellX + 1) * 256 && r.y >= 40 * 256 && r.y < 41 * 256,
+            "record in original generating cell");
+        check(all.put(r.id, r) == null, "IDs unique across adjacent cells");
+      }
+      long seam = cell.values().stream().filter(r -> Math.abs(r.x - 42 * 256) < 8).count();
+      System.out.println(
+          "ADJACENT_CELL cell="
+              + cellX
+              + ",40 records="
+              + cell.size()
+              + " minID="
+              + min
+              + " maxID="
+              + max
+              + " seamRecords="
+              + seam);
+    }
+    return all;
+  }
+
   static void writer(boolean ignored) throws Exception {
-    check(worker.isAlive(), "original live worker owns positive save");
-    bounded("OriginalPositiveMCDSave", () -> MapCollisionData.instance.save());
-    check(worker.isAlive(), "original positive public save completed");
-    Path file = save.resolve("zpop/zpop_41_40.bin");
-    Map<Integer, R> records = parse(file);
-    check(!records.isEmpty(), "naturally generated positive records persisted");
-    wireScalars(file);
-    check(
-        records.values().stream().allMatch(r -> r.state == 4 && r.id > 0 && r.z == 0),
-        "actual initial native record state/IDs");
-    System.out.println(
-        "POSITIVE_WRITER_PASS records="
-            + records.size()
-            + " age="
-            + age()
-            + " noInjectedRecords=true");
+    check(worker.isAlive(), "original worker owns adjacent save");
+    bounded("OriginalAdjacentSave", () -> MapCollisionData.instance.save());
+    Map<Integer, R> before = saved();
+    // Unchanged original LoadedAreas publishes no work. Public save owns completion.
+    ZombiePopulationManager.instance.updateLoadedAreas();
+    bounded("OriginalAdjacentRepeatedSave", () -> MapCollisionData.instance.save());
+    check(before.equals(saved()), "same loaded areas/time do not regenerate or allocate IDs");
+    System.out.println("ADJACENT_WRITER_PASS records=" + before.size() + " noInjectedRecords=true");
   }
 
   static List<R> output() throws Exception {
@@ -418,34 +455,54 @@ public final class PopulationQualification {
   }
 
   static void reader(boolean ignored) throws Exception {
-    Path file = save.resolve("zpop/zpop_41_40.bin");
-    Map<Integer, R> expected = parse(file);
-    wireScalars(file);
-    List<R> selected =
-        expected.values().stream()
-            .filter(r -> Math.floor(r.x / 8) == 1333 && Math.floor(r.y / 8) == 1299)
-            .toList();
-    check(!selected.isEmpty(), "saved selected genuine positive chunk nonempty");
-    call(P, "n_loadChunk", new Class<?>[] {int.class, int.class, boolean.class}, 1333, 1299, true);
+    Map<Integer, R> expected = saved();
+    Set<String> chunks = new LinkedHashSet<>();
+    for (int cellX = 41; cellX <= 42; cellX++) {
+      final int selectedX = cellX;
+      R nearest =
+          expected.values().stream()
+              .filter(r -> (int) Math.floor(r.x / 256) == selectedX)
+              .min(Comparator.comparingDouble(r -> Math.abs(r.x - 42 * 256)))
+              .orElseThrow();
+      chunks.add((int) Math.floor(nearest.x / 8) + "," + (int) Math.floor(nearest.y / 8));
+    }
+    for (String chunk : chunks) {
+      String[] xy = chunk.split(",");
+      call(
+          P,
+          "n_loadChunk",
+          new Class<?>[] {int.class, int.class, boolean.class},
+          Integer.parseInt(xy[0]),
+          Integer.parseInt(xy[1]),
+          true);
+    }
     barrier();
     List<R> actual = output();
-    check(actual.size() == selected.size(), "reopened positive selected count");
+    List<R> selected =
+        expected.values().stream()
+            .filter(
+                r -> chunks.contains((int) Math.floor(r.x / 8) + "," + (int) Math.floor(r.y / 8)))
+            .toList();
+    check(
+        actual.size() == selected.size() && actual.size() >= 2,
+        "natural adjacent-chunk publication count");
     for (R record : actual)
       check(
           record.equals(expected.get(record.id)),
-          "exact naturally generated native record survives reopen");
+          "exact adjacent natural publication survives reopen");
     int max = expected.keySet().stream().mapToInt(Integer::intValue).max().orElseThrow();
-    int next = register(10664.5f, 10392.5f, (byte) 0, 0, 5, 0);
-    check(next == max + 1, "positive restored next ID");
+    R first = actual.get(0);
+    int next = register(first.x, first.y, (byte) 0, 0, 5, 0);
+    check(next == max + 1, "shared next persistent ID survives adjacent reopen");
     System.out.println(
-        "POSITIVE_READER_PASS count="
+        "ADJACENT_READER_PASS count="
             + actual.size()
-            + " expectedMax="
+            + " chunks="
+            + chunks
+            + " maxID="
             + max
             + " nextID="
-            + next
-            + " age="
-            + age());
+            + next);
   }
 
   static void cleanup() throws Exception {
@@ -488,13 +545,15 @@ public final class PopulationQualification {
       for (String name :
           new String[] {
             "stdlib.lua",
-            "original-density.bin",
+            "density_41_40.bin",
+            "density_42_40.bin",
             "media/lua/shared/defines.lua",
             "media/lua/shared/Sandbox/Apocalypse.lua",
             "media/lua/shared/NPCs/ZombiesZoneDefinition.lua",
             "media/fileGuidTable.xml",
             "media/clothing/clothing.xml",
-            "media/maps/Muldraugh, KY/chunkdata_41_40.bin"
+            "media/maps/Muldraugh, KY/chunkdata_41_40.bin",
+            "media/maps/Muldraugh, KY/chunkdata_42_40.bin"
           }) {
         Path target = work.resolve(name);
         Files.createDirectories(target.getParent());

@@ -187,9 +187,10 @@ function collision(bytes) {
  * @param {number} root0.cellY - Global y coordinate in the caller API units.
  * @param {number} root0.idStart - Original starting persistent-ID allocator.
  * @param {number} root0.age - Actual original world age in hours.
+ * @param {function(number, number): number} [root0.globalFlags] - Original global square collision lookup.
  * @returns {object} Original target chunks, natural records and allocator totals.
  */
-function generate({ rng, density, chunks, config, constants, directions, cellX, cellY, idStart = 1, age = 0 }) {
+function generate({ rng, density, chunks, config, constants, directions, cellX, cellY, idStart = 1, age = 0, globalFlags }) {
     if (!Number.isInteger(cellX) || !Number.isInteger(cellY)) {
         throw new TypeError('cell coordinates required');
     }
@@ -211,13 +212,13 @@ function generate({ rng, density, chunks, config, constants, directions, cellX, 
     const constant = (address) => constants.readFloatLE(address - 0xF_A1_D8);
 
     /**
-     * Reads collision flags inside the current cell; its unqualified neighbors remain blocked.
+     * Reads original global collision flags, or the qualified isolated-cell fallback.
      *
      * @param {number} x - Global x coordinate in the caller API units.
      * @param {number} y - Global y coordinate in the caller API units.
      * @returns {number} Original packed square flags.
      */
-    const flags = (x, y) => {
+    const flags = globalFlags ?? ((x, y) => {
         x -= cellX * 256;
 
         y -= cellY * 256;
@@ -227,7 +228,7 @@ function generate({ rng, density, chunks, config, constants, directions, cellX, 
         }
 
         return chunks[(y >> 3) * 32 + (x >> 3)][(y & 7) * 8 + (x & 7)];
-    };
+    });
 
     /**
      * Tests square solidity and the original directional wall bits.
