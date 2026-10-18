@@ -1,5 +1,13 @@
 # Toward a playable original-bytecode port
 
+## Next integration: original state ownership
+
+The latest actual world gate renders original floors, walls, doors and vegetation through 4,192 commands and eight chunk framebuffers, but strictly fails on caught debug-render null-pointer exceptions. Original source identifies the null current-state envelope as the cause. Stop extending that envelope: qualify genuine collision/population initialization and start, current-world vehicle database/streamer ownership and startup callbacks, then enter through the original state machine and let `IngameState.render()` own rendering. A fresh empty state machine also runs its first game update during transition, so its dependencies belong to the admission gate. Preserve the failed run and all 538 unchanged input hashes.
+
+Private original-worker manual persistence now passes four fresh browser VMs, 116 assertions, eleven byte-identical native-reference files and original-DLL cross-reading. Reuse this recovered host service when integrating the real loading/save lifecycle. First extend qualification beyond its two zero-density cases to positive-density state, nonempty virtual groups and automatic scheduling; retain the 300-second guard until that behavior works. This is not a complete world save or continuous population simulation.
+
+The shipped GLU triangulation adapter now handles the observed collinear sweep failure by retrying an exact axis exchange, preserving all vertices and rejecting if both projections fail. Ten native/browser fixtures, 44 triangles and 9,610 coverage samples pass through preserved real browser outputs with the corrected clear-count assertion; the raw stale-counter failure remains retained. Continue investigating the separate original `WorldMapVisited` empty-metadata initialization failure before claiming a complete spawn map. Do not manufacture metadata bounds.
+
 ## Renderer prerequisites ready for the next integration
 
 Actual client/server attribute-stack support now passes forty GPU/state and twelve Java ABI checks, preserving existing viewport, texture environment, indexed-quad and depth/mipmap regressions. Saved/restored references retain deleted buffers and textures until their final use; the test draws exact pixels from both and verifies physical release. Current bindings detach immediately and public names disappear, rather than delaying the observable deletion. All 42 monitored inputs remain unchanged and strict JavaScript lint passes. Full original rendering remains unqualified.

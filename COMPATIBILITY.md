@@ -1,5 +1,19 @@
 # Incremental original-bytecode compatibility
 
+## Original renderer and persistence integration update
+
+The latest private world run reaches 4,192 original render commands and eight real 1,024-square chunk framebuffers, with 849,239 visible drawing-buffer pixels. Visual inspection confirms original floors, walls, doors and vegetation. The captured page stretches the 1,280-by-720 canvas into a square; it is not an intrinsic-resolution export. No visible actor or complete frame is qualified. The strict result is FAIL despite the Java report returning true: two caught null-pointer exceptions remain in `FBORenderCell.debugChunkStateRenderPlayer`. All 538 monitored hashes remain unchanged, denied requests are zero and browser/server close.
+
+Source inspection identifies the authored envelope's missing state-machine lifecycle: both current state and debug-state instance are null, so the original identity comparison enters its debug-render branch. The next integration must enter a genuine original game state and use its original render owner. That requires actual collision/population initialization and start, current-world vehicle database/streamer ownership and startup callbacks; assigning a current-state field or suppressing the error would not qualify that lifecycle.
+
+A separate private persistence component now passes four fresh browser VMs and 116 assertions through the original live collision worker and public save method. Eleven resulting files match original-DLL outputs byte for byte; fresh original JVM/DLL readers pass 47 assertions on the browser files, including restored IDs, outfit remapping and collision results. All 24 browser inputs remain unchanged and owned services close. This qualifies two zero-density manual-save cases, including negative-cell boundaries, rather than whole-world saving. Positive-density scheduling, nonempty virtual groups, automatic saves and continuous population movement remain unqualified; the existing 300-second automatic-save guard remains.
+
+## Alternate GLU sweep for collinear map boundaries
+
+The existing shipped GLU adapter now retries a zero-area triangle once with the exact x/y projection exchanged, preserving original vertex identities and computing output winding in original coordinates. It introduces no triangulation algorithm, vertex perturbation or omitted triangles. A failure under both projections still rejects before output writes. Ten native/browser fixtures now produce 44 positive-area triangles and pass 9,610 sampled coverage checks, alongside the 134 retained polygon cases and Java buffer/index/finally guards. A real map polygon motivated the synthetic collinear-sweep regression; this is not proof that all map polygons render.
+
+The actual browser result initially reports FAIL solely because the controller expected 142 clears instead of the new fixture's 143. Replaying every corrected controller assertion against the preserved browser output passes; this is a derived reassessment, not a second browser run. Input hashes remain unchanged, denied requests are zero and both browser owners close.
+
 ## Original client and server attribute-stack services
 
 The missing original skybox attribute calls now have a separately qualified host implementation. Two independent sixteen-entry stacks save and restore the currently hosted server and client groups, including actual viewport/depth, blend/color, front/back stencil, enable, alpha/line compatibility, generic attribute arrays/current values, pixel-store and per-unit texture bindings/parameters. The original all-server mask does not silently add the separate multisample bit. Selected masks, nesting, overflow/underflow and original Java catch/finally behavior remain checked. Unsupported conventional fixed-function arrays still reject explicitly.
