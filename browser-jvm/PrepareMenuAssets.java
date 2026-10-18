@@ -13,6 +13,8 @@ public final class PrepareMenuAssets {
         if (!requested.equals(output) || output.startsWith(installed)) throw new IllegalArgumentException("Output boundary");
         SortedSet<String> names = new TreeSet<>();
         names.add("media/texturepacks/UI2.pack");
+        names.add("media/white.png");
+        names.add("media/textures/worldMap/Paper.png");
         names.add("media/hairStyles/hairStyles.xml");
         names.add("media/hairStyles/beardStyles.xml");
         SortedSet<String> direct = new TreeSet<>();
