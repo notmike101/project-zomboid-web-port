@@ -1,5 +1,11 @@
 # Toward a playable original-bytecode port
 
+## Preserve original native implementations where practical
+
+Alongside original Java execution, a private WebAssembly CPU experiment now runs an unchanged installed x86-64 ZNet setter and its suppressed-log path in a real browser. Preserve this as a narrowly scoped feasibility result. Before expanding it, inspect the next original operation's initialization and imports with REA and investigate reusable runtime services. A few successful calls do not establish a Windows/JNI environment or whole-library performance. Do not replace the current browser JVM route or publish emulated-library readiness from this result.
+
+The real Bullet candidate now preserves the inspected original vehicle raycaster group2/mask13 filter and all primitive collision opcodes 1–10 in private native comparisons. The filter correction does not resolve the later contact-motion discrepancy: three records still have 0, 9 and 10 differing fields. Keep dynamics equivalence failing and retain exact original observations; do not normalize the output or introduce a tolerance to hide this difference.
+
 ## Genuine display startup boundary
 
 The original windowed `GameWindow.InitDisplay` closure passes using an options file written by original Core code. Its earlier `Display.init → Keyboard.create` entry passes the public `verify-display-init.mjs` gate with 33 Java assertions and eleven real keyboard queue phases. The public `verify-render-thread-init.mjs` now also passes 66 Java checks through unchanged original RenderThread initialization, including its actual display, controller and clipboard producers. Preserve the original initialized guards, portable names, actual surface descriptor, owner assignment and display cache branches; full render-loop execution and shutdown remain separate work.

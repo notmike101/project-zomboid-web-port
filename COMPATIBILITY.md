@@ -1,5 +1,11 @@
 # Incremental original-bytecode compatibility
 
+## Original native instruction reuse experiment
+
+A private browser experiment executes five calls to the unchanged installed `ZNetNoSteam64.dll` log-level setter through the WebAssembly CPU engine from [Unicorn.js](https://github.com/AlexAltea/unicorn.js). The original PE sections are mapped directly at their preferred address; the actual x86-64 entry and callees update the original threshold and return normally. All executable section bytes and three audited inputs remain unchanged, with no captured browser errors or denied requests and normal browser/server closure.
+
+The chosen values exercise the original suppressed-log branch. DLL initialization, Windows imports, JNI callbacks, networking, physics and whole-library performance remain unqualified. This is an isolated feasibility result, not a public reproducible gate or an integrated game service. The main port still runs original Java bytecode in the browser JVM; this experiment investigates retaining original native instructions rather than recreating their algorithms.
+
 ## Original windowed display initialization
 
 A private browser component now passes the actual `Core.saveOptions → GameWindow.InitDisplay → Core.init → SpriteRenderer.create` closure with 26 Java assertions and 42 unchanged inputs. Original options writing/loading selects the windowed branch without option setters. Real WebGL supplies the 1280×720 surface, vendor/version strings and VBO capability selection. Original display caches follow successful creation and real resize to 320×240 and back. Unsupported fullscreen, borderless and recreation requests throw genuine Java exceptions without publishing false state.
