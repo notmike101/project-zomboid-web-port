@@ -170,17 +170,18 @@ export async function createMediaHandler(mediaRoot, beforeRead) {
                 headers['Content-Range'] = `bytes ${start}-${end}/${info.size}`;
             }
 
+            if (!checked.has(target)) {
+                checked.set(target, Promise.resolve().then(() => beforeRead(target)));
+            }
+
+            await checked.get(target);
+
             if (request.method === 'HEAD' || !info.size) {
                 response.writeHead(request.headers.range ? 206 : 200, headers).end();
 
                 return true;
             }
 
-            if (!checked.has(target)) {
-                checked.set(target, Promise.resolve().then(() => beforeRead(target)));
-            }
-
-            await checked.get(target);
             response.writeHead(request.headers.range ? 206 : 200, headers);
             await pipeline(createReadStream(target, { start, end }), response);
         } catch {

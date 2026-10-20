@@ -40,6 +40,7 @@ try {
     await writeFile(path.join(media, 'alpha.txt'), '0123456789');
     await writeFile(path.join(media, 'empty.bin'), '');
     await writeFile(path.join(media, 'denied.txt'), 'must not be served');
+    await writeFile(path.join(media, 'denied-empty.bin'), '');
     await writeFile(path.join(media, 'nested', 'payload.bin'), 'nested payload');
     await writeFile(path.join(fixture, 'secret.txt'), 'outside secret');
     await symlink(fixture, path.join(media, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
@@ -48,7 +49,7 @@ try {
     const handle = await createMediaHandler(media, async (file) => {
         checks.set(file, (checks.get(file) || 0) + 1);
 
-        if (file.endsWith('denied.txt')) {
+        if (['denied.txt', 'denied-empty.bin'].includes(path.basename(file))) {
             throw new Error('Integrity check failed');
         }
 
@@ -77,7 +78,7 @@ try {
 
     assert.equal(listing.status, 200);
     assert.match(listing.headers['content-type'], /^text\/plain; charset=utf-8$/);
-    assert.deepEqual(listing.body.toString().trim().split('\n').sort(), ['alpha.txt', 'denied.txt', 'empty.bin', 'escape', 'nested']);
+    assert.deepEqual(listing.body.toString().trim().split('\n').sort(), ['alpha.txt', 'denied-empty.bin', 'denied.txt', 'empty.bin', 'escape', 'nested']);
     assert.equal(checks.size, 0);
     assert.equal((await get(port, '/media/nested/index.list')).body.toString(), 'payload.bin\n');
     const head = await get(port, '/media/alpha.txt', { method: 'HEAD' });
@@ -85,7 +86,7 @@ try {
     assert.equal(head.status, 200);
     assert.equal(head.headers['content-length'], '10');
     assert.equal(head.body.length, 0);
-    assert.equal(checks.size, 0);
+    assert.equal(checks.get(alpha), 1);
     const concurrent = await Promise.all(Array.from({ length: 3 }, () => get(port, '/media/alpha.txt')));
 
     assert.ok(concurrent.every((result) => result.body.toString() === '0123456789'));
@@ -109,11 +110,25 @@ try {
         assert.equal(invalid.status, 416);
         assert.equal(invalid.headers['content-range'], 'bytes */10');
     }));
-    assert.equal((await get(port, '/media/denied.txt')).status, 404);
+    assert.equal((await get(port, '/media/denied.txt', { method: 'HEAD' })).status, 404);
     assert.equal((await get(port, '/media/denied.txt')).status, 404);
     assert.equal(checks.get(await realpath(path.join(media, 'denied.txt'))), 1);
-    assert.equal((await get(port, '/media/empty.bin')).body.length, 0);
+    const empty = await realpath(path.join(media, 'empty.bin'));
+
     assert.equal((await get(port, '/media/empty.bin', { headers: { Range: 'bytes=0-' } })).status, 416);
+    assert.equal(checks.has(empty), false);
+    const emptyResponses = await Promise.all(['GET', 'HEAD', 'GET'].map((method) => get(port, '/media/empty.bin', { method })));
+
+    assert.ok(emptyResponses.every((response) => response.status === 200 && response.headers['content-length'] === '0' && response.body.length === 0));
+    assert.equal(checks.get(empty), 1);
+    const deniedEmpty = await realpath(path.join(media, 'denied-empty.bin'));
+
+    assert.equal((await get(port, '/media/denied-empty.bin', { headers: { Range: 'bytes=0-' } })).status, 416);
+    assert.equal(checks.has(deniedEmpty), false);
+    const deniedEmptyResponses = await Promise.all(['HEAD', 'GET'].map((method) => get(port, '/media/denied-empty.bin', { method })));
+
+    assert.ok(deniedEmptyResponses.every((response) => response.status === 404 && response.body.length === 0));
+    assert.equal(checks.get(deniedEmpty), 1);
     assert.equal((await get(port, '/media/nested/payload.bin')).body.toString(), 'nested payload');
     assert.equal((await get(port, '/other')).status, 418);
     assert.equal((await get(port, '/media/alpha.txt', { method: 'POST' })).status, 405);
