@@ -54,6 +54,8 @@ public final class BrowserModelBootstrap {
         long end = System.currentTimeMillis() + 30000;
         while ((Boolean) pending.invoke(ModelManager.instance) && System.currentTimeMillis() < end) pump();
         if ((Boolean) pending.invoke(ModelManager.instance)) throw new AssertionError("Original mesh preload timed out");
+        // Asset READY can precede completion of its queued VBO upload.
+        zombie.core.opengl.RenderThread.invokeOnRenderContext(() -> {});
         var human = ScriptManager.instance.getAnimationsMesh("Human").modelMesh;
         if (!human.isReady() || human.vb == null) throw new AssertionError("Original Human GPU mesh is not ready");
         progress.accept("original-client-create");
@@ -66,6 +68,7 @@ public final class BrowserModelBootstrap {
         for (Model body : bodies) {
             if (body == null) throw new AssertionError("Original body model not assigned");
             while (!body.isReady() && !body.isFailure() && System.currentTimeMillis() < end) pump();
+            zombie.core.opengl.RenderThread.invokeOnRenderContext(() -> {});
             if (!body.isReady() || body.mesh.vb == null)
                 throw new AssertionError("Original GPU body model not ready: " + body.getPath() + " " + body.getState());
         }
