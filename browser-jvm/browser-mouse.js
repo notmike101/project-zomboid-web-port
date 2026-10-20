@@ -53,7 +53,7 @@ export function createBrowserMouse(canvas) {
             return;
         }
 
-        canvas.focus();
+        canvas.focus({ preventScroll: true });
         move(e);
         held.add(map[e.button]);
         events.push(`B,${map[e.button]},1`);

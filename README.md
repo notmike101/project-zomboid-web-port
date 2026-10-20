@@ -4,7 +4,7 @@ An in-development browser port built around the installed game's original Java c
 
 This repository contains authored platform adapters, preparation tools and verification code. It does not distribute the game's JAR, assets, native libraries, downloaded toolchains or generated runtime files. Supply your own local installation.
 
-Whole-game integration diagnostics now complete original `GameWindow.enter()` and register three states and fifteen texture packs. The original Terms of Service UI renders through the actual original render thread: 173 observed frames report GL error zero. A browser click at the observed acceptance-button bounds does not produce a state transition; the original mouse polling/sample boundary is being investigated. No main-menu or whole-game playability pass is claimed. The animated-PNG copy adapter separately matches all 81 tested frames against the original native JVM decoder. See [current compatibility evidence](COMPATIBILITY.md#latest-genuine-startup-attempt).
+Whole-game integration diagnostics now complete original `GameWindow.enter()` and render the original Terms UI. The latest run confirms original mouse sampling, then exposes a 50-pixel coordinate shift during button down. A separate browser reproduction isolates canvas focus scrolling as the host defect; the shared mouse adapter now prevents that scroll, and its original-vendor regression passes. The original Terms-to-menu transition with this fix remains unverified. No main-menu or whole-game playability pass is claimed. The animated-PNG copy adapter separately matches all 81 tested frames against the original native JVM decoder. See [current compatibility evidence](COMPATIBILITY.md#latest-genuine-startup-attempt).
 
 ## How it works
 
