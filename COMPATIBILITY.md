@@ -1,5 +1,15 @@
 # Incremental original-bytecode compatibility
 
+## Current original player UI integration frontier
+
+The latest private browser attempt executes 240 original player UI frames with the complete initUISystem/OnCreatePlayer producer and zero caught original Java exceptions. Real MainThread and RenderThread owners consume the original UI command queue. Genuine startup ordering now initializes global systems before player UI construction and chunk activation; earlier erosion callbacks no longer encounter an absent global-system instance. Seven original UI packs, including RadioIcons, supply the dashboard texture dependency through the existing client asset archive. The archive's 2,319 entries match installed inputs and manifest hashes, and repeated preparation is deterministic.
+
+The real quality-zero puddles branch selects puddles_hq. Supplying its original HQ roots passes the existing texture, compiled-effect, nullable-buffer and GL assertions without changing quality or performance settings. Earlier source notes inferred LQ by confusing an invokedynamic index with a lambda suffix; the original bootstrap-method mapping corrects that inference. The historical standalone shader pass supplied all shader inputs and did not identify the selected shader.
+
+The complete attempt remains **FAIL**: its rapid trusted inventory-key press was not observed before the test's first-toggle timeout, while the independent 240-frame limit reached final capture. It does not establish inventory interaction, successful final capture or clean Java/VM shutdown. Browser/server closure, zero denied requests, 226 unchanged monitored sources and the unchanged installed JAR are separately observed. The test driver is being corrected to wait for the original key-cache transition and let the existing host stop own the run lifetime.
+
+The original Piano crafting diagnostic remains outside the admitted input diagnostics. Its installed definition lacks UiConfig and selects recreational_01_28 through the original SpriteConfig fallback; that tile exists in Tiles2x and is absent from the bounded 1x fixture. Neither fallback texture success nor the full configured pack/renderer closure is qualified. These findings do not establish whole-game playability.
+
 ## Original pure-fluid query SDK compatibility
 
 The existing SDK preparer now also redirects the original `FluidContainer.isPureFluid(Fluid)` collection call at BCI15 to the unchanged `ListFirstSupport`. The actual Java 17 browser baseline raises `NoSuchMethodError` for a one-entry list; freshly prepared output matches the original JDK25 for empty, one-water and mixed water/tainted-water containers. Original factory creation, fluid insertion and disposal execute normally, and the existing eight collection-helper checks pass in both runtimes.
