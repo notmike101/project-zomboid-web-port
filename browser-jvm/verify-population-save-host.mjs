@@ -20,9 +20,10 @@ Date.now = () => {
 /**
  * Creates a transport-level owner using the actual candidate service and codecs.
  *
+ * @param {Array<number>} [bounds] - Original metadata x, y, width and height.
  * @returns {Promise<object>} Service calls and in-memory IO observations.
  */
-async function fixture() {
+async function fixture(bounds = [0, 0, 1, 1]) {
     const files = new Map();
     const writes = [];
     let failure;
@@ -85,6 +86,24 @@ async function fixture() {
         names(values) {
             return values.join('\n');
         },
+        /**
+         * Carries authored integer-array arguments in the actual transport format.
+         *
+         * @param {Array<number>} values - Ordered integers.
+         * @returns {string} Comma-delimited integers.
+         */
+        integers(values) {
+            return values.join(',');
+        },
+        /**
+         * Carries authored float-array arguments in the actual transport format.
+         *
+         * @param {Array<number>} values - Ordered float values.
+         * @returns {string} Comma-delimited values.
+         */
+        floats(values) {
+            return values.join(',');
+        },
     };
     const lib = { port: { host: { PopulationBuffers: transport } }, java: { lang: { UnsupportedOperationException: Error } } };
     /**
@@ -110,9 +129,9 @@ async function fixture() {
     await m('setGameState', 'Core.noSave', false);
     await m('setGameState', 'PAUSED', true);
     await m('setGameState', 'SandboxOptions.Distribution', 1);
-    await m('initMetaGrid', 0, 0, 1, 1);
-    await m('init', 0, 0, 1, 1);
-    await z('init', false, false, 0, 0, 1, 1);
+    await m('initMetaGrid', ...bounds);
+    await m('init', ...bounds);
+    await z('init', false, false, ...bounds);
     await z('setOutfitNames', []);
 
     return {
@@ -192,6 +211,75 @@ try {
     assert.equal(await mainOutput.z('getAddZombieData', 0, delivered), 1);
     assert.equal(delivered.readInt32BE(29), 12);
     await assert.rejects(mainOutput.z('getAddZombieData', 0, delivered), /re-reading freed native record/u);
+
+    // Selected saves preserve cell binding order and exclude pending registrations.
+    const selected = await fixture([0, 0, 2, 1]);
+
+    await selected.z('configFloat', 'RedistributeHours', 12);
+    await selected.z('updateMain', 1, 0);
+    await selected.z('loadChunk', 0, 0, false);
+    await selected.z('loadChunk', 32, 0, false);
+    await selected.z('hasDataForThread');
+    await selected.z('updateThread');
+    await selected.z('registerZombie', 1, 2, 0, 0, 0, 0, 300);
+    await selected.z('registerZombie', 3, 4, 0, 0, 0, 0, 301);
+    await selected.z('hasDataForThread');
+    await selected.z('updateThread');
+    await selected.z('save');
+    const otherCell = selected.files.get('zpop/zpop_1_0.bin');
+    /**
+     * Reads actual serialized cell order from the existing codec.
+     *
+     * @returns {Array<number>} Ordered persistent record IDs.
+     */
+    const selectedIDs = () => decodeCell(Buffer.from(selected.files.get('zpop/zpop_0_0.bin'), 'hex')).chunks.flatMap((chunk) => chunk.records).map((record) => record.id);
+
+    await selected.z('updateRealZombies', 1, [300, 0], [5, 6, 0]);
+    await selected.z('hasDataForThread');
+    await selected.z('updateThread');
+    await selected.z('saveCell', 0, 0);
+    assert.deepEqual(selectedIDs(), [300, 301]);
+    await selected.z('updateRealZombies', 1, [300, 0], [6, 7, 0]);
+    await selected.z('save');
+    await selected.z('hasDataForThread');
+    await selected.z('updateThread');
+    await selected.z('saveCell', 0, 0);
+    assert.deepEqual(selectedIDs(), [300, 301]);
+    await selected.z('updateRealZombies', 1, [300, 0], [257, 2, 0]);
+    await selected.z('hasDataForThread');
+    await selected.z('updateThread');
+    await selected.z('updateRealZombies', 1, [300, 0], [1, 2, 0]);
+    await selected.z('hasDataForThread');
+    await selected.z('updateThread');
+    await selected.z('saveCell', 0, 0);
+    assert.deepEqual(selectedIDs(), [301, 300]);
+    await selected.z('registerZombie', 7, 7, 0, 0, 0, 0, 900);
+    await selected.z('hasDataForThread');
+    await selected.z('updateThread');
+    const queuedID = await selected.z('registerZombie', 5, 5, 0, 0, 0, 0, 0);
+
+    selected.writes.length = 0;
+    await selected.z('saveCell', 0, 0);
+    assert.deepEqual(selected.writes.map((entry) => entry.file), ['zpop/zpop_ids.bin', 'zpop/zpop_0_0.bin']);
+    assert.deepEqual(selectedIDs(), [301, 300, 900]);
+    assert.equal(selectedIDs().includes(queuedID), false);
+    assert.equal(selected.service.diagnostics().pending, 1);
+    assert.equal(selected.files.get('zpop/zpop_1_0.bin'), otherCell);
+    selected.writes.length = 0;
+    await selected.z('saveCell', 0, 0);
+    await selected.z('saveCell', 2, 0);
+    assert.deepEqual(selected.writes, []);
+
+    // Selected dirty clears before allocator I/O, and the real failure poisons the owner.
+    await selected.z('hasDataForThread');
+    await selected.z('updateThread');
+    await selected.z('registerZombie', 6, 6, 0, 0, 0, 0, 0);
+    const selectedFailure = new Error('selected allocator replacement failed');
+
+    selected.fail(selectedFailure);
+    await assert.rejects(selected.z('saveCell', 0, 0), (error) => error === selectedFailure);
+    assert.equal(selected.service.diagnostics().dirtyPopulationCells.includes('0,0'), false);
+    await assert.rejects(selected.z('saveCell', 0, 0), /terminal persistence owner/u);
 
     // Cached clean allocator/virtual state avoids unconditional writes.
     const clean = await fixture();

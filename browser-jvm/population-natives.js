@@ -590,6 +590,22 @@ export function createPopulationNatives() {
     }
 
     /**
+     * Preserves native016f50 cell-vector order unless the actual cell binding changes.
+     *
+     * @param {object} record - Existing registered wrapper record.
+     * @param {object} value - Actual feedback position.
+     */
+    function rebindRegisteredRecord(record, value) {
+        const previous = metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered;
+        const next = metadata(Math.floor(value.x / 256), Math.floor(value.y / 256)).registered;
+
+        if (previous !== next) {
+            previous.delete(record.id);
+            next.add(record.id);
+        }
+    }
+
+    /**
      * Builds and writes the original snapshot under its existing serialized owner.
      *
      * @param {object} lib - Actual Java transport namespace.
@@ -613,10 +629,9 @@ export function createPopulationNatives() {
 
                     if (record) {
                         dirtyRecord(record);
-                        metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered.delete(record.id);
+                        rebindRegisteredRecord(record, value);
                         Object.assign(record, value);
                         dirtyRecord(record);
-                        metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered.add(record.id);
                     }
                 }
             }
@@ -660,34 +675,55 @@ export function createPopulationNatives() {
         const transport = await helper(lib);
 
         try {
-            // Native020080 caches IDs only after real replacement succeeds.
-            if (state.lastSavedID !== state.nextID) {
-                await transport.writeOwned('zpop/zpop_ids.bin', hex(encodeIDs(state.nextID)), true);
-                state.lastSavedID = state.nextID;
-            }
+            await writePopulationGlobals(transport);
 
-            if (state.virtualDirty) {
-                await transport.writeOwned('zpop/zpop_virtual.bin', hex(encodeEmptyVirtual(state.outfits)), false);
-                state.virtualDirty = false;
-            }
-
-            await sequence([...state.cells].filter(([name]) => state.populationDirty.has(name)), async ([name, cell]) => {
-                const chunks = cell.chunks.map((records, index) => ({ intensity: cell.targets[index], records: records.map((record) => ({ ...record })), scalars: [cell.lastSeen[index], cell.lastRespawn[index]] }));
-
-                for (const record of temporary.get(name) ?? []) {
-                    const index = ((Math.floor(record.x / 8) % 32 + 32) % 32) + ((Math.floor(record.y / 8) % 32 + 32) % 32) * 32;
-
-                    chunks[index].records.push({ ...record });
-                }
-
-                state.populationDirty.delete(name);
-                await transport.writeOwned(`zpop/zpop_${name.replace(',', '_')}.bin`, hex(encodeCell({ names: [...state.outfits], scalars: [cell.createdAge, cell.lastRedistribution], chunks })), false);
-            });
+            await sequence([...state.cells].filter(([name]) => state.populationDirty.has(name)), ([name, cell]) => writePopulationCell(transport, name, cell, temporary.get(name) ?? []));
             state.successfulSaves = (state.successfulSaves ?? 0) + 1;
         } catch (error) {
             state.terminalFailure = String(error?.message ?? error);
             throw error;
         }
+    }
+
+    /**
+     * Writes the unchanged original allocator and virtual cache in native order.
+     *
+     * @param {object} transport - Actual Java owned-file transport.
+     * @returns {Promise<void>} Completes the original global writes.
+     */
+    async function writePopulationGlobals(transport) {
+        // Native020080 caches IDs only after real replacement succeeds.
+        if (state.lastSavedID !== state.nextID) {
+            await transport.writeOwned('zpop/zpop_ids.bin', hex(encodeIDs(state.nextID)), true);
+            state.lastSavedID = state.nextID;
+        }
+
+        if (state.virtualDirty) {
+            await transport.writeOwned('zpop/zpop_virtual.bin', hex(encodeEmptyVirtual(state.outfits)), false);
+            state.virtualDirty = false;
+        }
+    }
+
+    /**
+     * Writes one original loaded cell with caller-selected owned extra records.
+     *
+     * @param {object} transport - Actual Java owned-file transport.
+     * @param {string} name - Existing global cell key.
+     * @param {object} cell - Actual loaded population cell.
+     * @param {Array<object>} extra - Source-qualified temporary or processed registry records.
+     * @returns {Promise<void>} Completes this cell's write only.
+     */
+    async function writePopulationCell(transport, name, cell, extra) {
+        const chunks = cell.chunks.map((records, index) => ({ intensity: cell.targets[index], records: records.map((record) => ({ ...record })), scalars: [cell.lastSeen[index], cell.lastRespawn[index]] }));
+
+        for (const record of extra) {
+            const index = ((Math.floor(record.x / 8) % 32 + 32) % 32) + ((Math.floor(record.y / 8) % 32 + 32) % 32) * 32;
+
+            chunks[index].records.push({ ...record });
+        }
+
+        state.populationDirty.delete(name);
+        await transport.writeOwned(`zpop/zpop_${name.replace(',', '_')}.bin`, hex(encodeCell({ names: [...state.outfits], scalars: [cell.createdAge, cell.lastRedistribution], chunks })), false);
     }
 
     const collisionService = {
@@ -1300,10 +1336,9 @@ export function createPopulationNatives() {
 
                     if (record) {
                         dirtyRecord(record);
-                        metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered.delete(record.id);
+                        rebindRegisteredRecord(record, value);
                         Object.assign(record, value);
                         dirtyRecord(record);
-                        metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered.add(record.id);
                     }
                 }
 
@@ -1340,6 +1375,49 @@ export function createPopulationNatives() {
          */
         getAddZombieCount() {
             return state.front.length;
+        },
+        /**
+         * Saves only the original already-loaded dirty cell, excluding pending queue owners.
+         *
+         * @param {object} lib - Actual Java class namespace.
+         * @param {number} x - Original global cell x.
+         * @param {number} y - Original global cell y.
+         * @returns {Promise<void>} Completes the selected native cell operation.
+         */
+        async saveCell(lib, x, y) {
+            integer(x, 'save cell x');
+            integer(y, 'save cell y');
+            requireActive();
+
+            if (!state.pop) {
+                unsupported('selected population save before initialization');
+            }
+
+            const name = key(x, y);
+            const cell = state.cells.get(name);
+
+            if (!inGrid(x, y) || !cell || !state.populationDirty.has(name)) {
+                return;
+            }
+
+            // Native020030 clears dirty before the flag-zero writer's global caches.
+            state.populationDirty.delete(name);
+
+            if (state.gameState.get('Core.noSave')) {
+                return;
+            }
+
+            try {
+                const transport = await helper(lib);
+
+                await writePopulationGlobals(transport);
+                const records = [...metadata(x, y).registered].map((id) => state.registry.get(id));
+
+                await writePopulationCell(transport, name, cell, records);
+            } catch (error) {
+                state.terminalFailure = String(error?.message ?? error);
+                throw error;
+            }
         },
         /**
          * Copies original publication records once into the caller-owned direct buffer.
