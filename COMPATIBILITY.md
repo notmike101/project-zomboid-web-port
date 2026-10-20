@@ -2,6 +2,8 @@
 
 ## Latest genuine-startup attempt
 
+After restoring that exact parser closure, a second attempt reaches original Java initialization and reads 5,744 installed media files. It still fails strictly on an aborted runtime localtime request; additional retained events include atomic-view.jar and jaxp.properties cancellations, /media/anims 404 responses and a range rejection for the empty AnimSets/base.xml file. The driver begins failure shutdown at the first cancellation, so these logs do not establish completed initialization, importer consumption, menu pixels or normal Java shutdown. No requests were denied; all 2,326 frozen inputs and 5,744 demanded-media hashes were unchanged, and browser/watch owners closed. Investigate request ownership and actual filesystem consumers before changing HTTP behavior or classifying expected probes.
+
 The private original-initial-menu attempt failed during browser module loading, before original Java initialization. Three GLSL parser entry-point requests were rejected because the isolated profile omitted the public graphics runner's existing sixteen-module parser route closure. This is an unresolved hosting-profile defect, not evidence of a game-code or shader-translation failure. Browser exit and watcher disposal were observed; all 2,310 frozen artifact/source hashes were unchanged, with no served-media reads. No main-menu or whole-game pass is claimed.
 
 ## Current original player UI integration frontier
