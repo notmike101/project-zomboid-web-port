@@ -117,6 +117,14 @@ export function createFileWatchNatives() {
 
     let packetLosses = 0;
 
+    let vmExitDisposal;
+
+    let vmExited = false;
+
+    let cancelledSubscriptions = 0;
+
+    let unsettledNativePromises = 0;
+
     /**
      * Counts every operation while retaining only a copied, bounded recent trace.
      *
@@ -132,6 +140,8 @@ export function createFileWatchNatives() {
     }
 
     const readiness = new Set();
+
+    const pendingPolls = new Map();
 
     const paths = new WeakMap();
 
@@ -501,6 +511,10 @@ export function createFileWatchNatives() {
      * @returns {object} New queue owner and actual descriptor identity.
      */
     function allocate(kind) {
+        if (vmExited) {
+            throw new Error('Watch allocation after VM exit');
+        }
+
         if (!descriptors) {
             throw new Error('No actual descriptor namespace');
         }
@@ -597,9 +611,11 @@ export function createFileWatchNatives() {
             throw new TypeError('Missing actual OS descriptor allocator');
         }
 
-        const fd = globalThis.cheerpOSAllocateFd(descriptors, { mount, refCount: 1, length: 0, dirty: 0 });
+        const fileData = { mount, refCount: 1, length: 0, dirty: 0 };
+        const fd = globalThis.cheerpOSAllocateFd(descriptors, fileData);
 
         state.fd = fd;
+        state.fileData = fileData;
 
         owned.set(fd, state);
 
@@ -615,6 +631,10 @@ export function createFileWatchNatives() {
      * @returns {object} Actual live queue owner.
      */
     const requireFd = (fd) => {
+        if (vmExited) {
+            throw new Error('Watch native call after VM exit');
+        }
+
         const state = owned.get(fd);
 
         if (!state || state.closed) {
@@ -630,7 +650,7 @@ export function createFileWatchNatives() {
          * Restores OS observers after original Java closes all watch services.
          */
         dispose() {
-            if (owned.size || readiness.size) {
+            if (owned.size || readiness.size || pendingPolls.size) {
                 throw new Error('Original watch owners remain');
             }
 
@@ -643,6 +663,63 @@ export function createFileWatchNatives() {
             originals.clear();
         },
         /**
+         * Releases actual host descriptors after the sole page VM has exited.
+         * The caller must first observe cheerpjRunMain resolution; this is not Java watch closure.
+         * Detached native promises stay unsettled until this VM's page is destroyed.
+         *
+         * @returns {Promise<void>} Actual descriptor closure and strict observer disposal.
+         */
+        disposeAfterVmExit() {
+            vmExitDisposal ??= (async () => {
+                vmExited = true;
+
+                if (typeof globalThis.cheerpOSClose !== 'function') {
+                    throw new TypeError('Missing actual OS descriptor close');
+                }
+
+                const fileData = new Set([...owned.values()].map((state) => state.fileData));
+                const slots = [];
+
+                for (const [wake] of pendingPolls) {
+                    readiness.delete(wake);
+                    pendingPolls.delete(wake);
+                    cancelledSubscriptions++;
+                    unsettledNativePromises++;
+                    record({ op: 'vm-exit-poll-abandoned' });
+                }
+
+                for (const [fd, descriptor] of (descriptors ?? []).entries()) {
+                    if (descriptor && fileData.has(descriptor.fileData)) {
+                        slots.push({ fd, fileData: descriptor.fileData });
+                    }
+                }
+
+                for (const { fd, fileData: expected } of slots) {
+                    if (descriptors[fd]?.fileData !== expected) {
+                        throw new Error(`Watch descriptor owner changed at VM exit: ${fd}`);
+                    }
+
+                    // eslint-disable-next-line no-await-in-loop -- Close aliases in descriptor order before checking their actual slots.
+                    await new Promise((resolve) => {
+                        globalThis.cheerpOSClose(descriptors, fd, resolve);
+                    });
+
+                    if (descriptors[fd] !== null) {
+                        throw new Error(`Watch descriptor remains after actual close: ${fd}`);
+                    }
+                }
+
+                if ((descriptors ?? []).some((descriptor) => descriptor && fileData.has(descriptor.fileData))) {
+                    throw new Error('Owned watch descriptor alias remains after VM exit');
+                }
+
+                this.dispose();
+                record({ op: 'vm-exit-dispose', descriptors: slots.length });
+            })();
+
+            return vmExitDisposal;
+        },
+        /**
          * Copies lifecycle counters without exposing mutable owner state.
          *
          * @returns {object} Actual descriptor, poll and server event state.
@@ -650,6 +727,8 @@ export function createFileWatchNatives() {
         diagnostics: () => ({
             owned: owned.size,
             polls: readiness.size,
+            cancelledSubscriptions,
+            unsettledNativePromises,
             remoteEvents,
             remoteFailure,
             remoteState: remote?.readyState,
@@ -824,26 +903,36 @@ export function createFileWatchNatives() {
                 const state = requireFd(ifd);
                 const socket = requireFd(socketfd);
 
-                return new Promise((resolve) => {
+                let wake;
+                const promise = new Promise((resolve, reject) => {
                     /**
                      * Resolves a blocked native poll only when a real descriptor is readable.
                      */
-                    const wake = () => {
+                    wake = () => {
                         if (state.closed || socket.closed) {
-                            throw new Error('Poll descriptors closed');
+                            readiness.delete(wake);
+                            pendingPolls.delete(wake);
+                            record({ op: 'poll-closed', ifd, socketfd });
+                            reject(new Error('Poll descriptors closed'));
+
+                            return;
                         }
 
                         const ready = (state.packets.length ? 1 : 0) + (socket.queue.length ? 1 : 0);
 
                         if (ready) {
                             readiness.delete(wake);
+                            pendingPolls.delete(wake);
                             resolve(ready);
                         }
                     };
-
-                    readiness.add(wake);
-                    wake();
                 });
+
+                pendingPolls.set(wake, promise);
+                readiness.add(wake);
+                wake();
+
+                return promise;
             },
         },
     };

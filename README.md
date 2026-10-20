@@ -151,6 +151,7 @@ node browser-jvm/verify-native-long.mjs
 node browser-jvm/verify-clock.mjs
 node browser-jvm/verify-mouse.mjs
 node browser-jvm/verify-sqlite.mjs
+node browser-jvm/verify-file-watch.mjs
 ~~~
 
 The shader qualification uses the `PZ_BROWSER` executable set above. Nine cases check actual WebGL2 compilation and exact pixels with Chromium's SwiftShader backend, including overload selection, integer arithmetic, legacy color varyings, uniform-dependent globals across composed units and legacy texture sampling with an original sampler named `texture`. A separate source check now compiles and links twelve original scene shader pairs, including both cutaway shaders. These checks do not establish physical-GPU or complete GLSL conformance.
@@ -161,7 +162,9 @@ The viewport/frame qualification checks the actual 16-entry viewport/depth-range
 
 The native-memory qualification also uses `PZ_JDK` and requires the prepared play profile's `sprite-view.jar`. It checks immediate native storage release for owned byte/float/integer buffers, rejects foreign and repeated frees, and verifies the prepared archive is unchanged. The graphics host explicitly relies on the qualified Java 17 runtime's `sun.misc.Unsafe.invokeCleaner` support; unavailable support fails initialization.
 
-The Clipper qualification uses `PZ_JDK`, `PZ_BROWSER`, `PZ_GAME_JAR`, the prepared play archive and the pinned local Clipper2 JAR. It runs bounded polygon calculations through the matching installation-root `PZClipper64.dll`, then compares the same 134 cases in a fresh browser using the production adapter: 46 each for intersection and difference, plus 42 primitive cases covering native AABB/polygon insertion, accumulated clip rectangles and the original Java bevel method. It checks source hashes and releases owned resources without starting the installed game or server. Open paths, offsets and other polygon operations remain unsupported.
+The Clipper qualification uses `PZ_JDK`, `PZ_BROWSER`, `PZ_GAME_JAR`, the prepared play archive and the pinned local Clipper2 JAR. It runs bounded polygon calculations through the matching installation-root `PZClipper64.dll`, then compares the same 134 cases in a fresh browser using the production adapter: 46 each for intersection and difference, plus 42 primitive cases covering native AABB/polygon insertion, accumulated clip rectangles and the original Java bevel method. It also checks 32 admitted highway-offset cases, 11 triangulation comparisons and both original Clipper.init calls through the real browser library descriptor. It checks source hashes and releases owned resources without starting the installed game or server. Open paths and offsets/operations beyond the documented admitted cases remain unsupported.
+
+The file-watch qualification uses the same Java/browser/game-JAR environment and prepared play archives. Its default mode checks original JDK and game watcher behavior, including callbacks, debounce and normal closure. Setting `PZ_WATCH_VM_EXIT=1` selects a separate authored System.exit case that verifies real descriptor cleanup after observed VM exit. That terminal mode explicitly leaves an abandoned native promise unsettled and requires page destruction; it does not establish graceful original shutdown or reusable-VM cleanup. Unset the variable to return to the normal regression.
 
 Lint runs ESLint with **--max-warnings 0**, using the actual @notmike101/eslint-config-js and @notmike101/eslint-config-jsdoc configurations. Authored Node, browser and inline HTML scripts are included. Package provenance is recorded in [vendor/eslint-configs/README.md](vendor/eslint-configs/README.md).
 

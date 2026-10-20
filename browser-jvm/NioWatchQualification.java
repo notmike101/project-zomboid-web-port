@@ -43,6 +43,19 @@ public final class NioWatchQualification {
         check(pending.isEmpty(), "Missing event batch " + pending);
     }
     public static void main(String[] args) {
+        if (args[0].equals("vm-exit")) {
+            try {
+                WatchService watch = FileSystems.getDefault().newWatchService();
+                WatchKey key = Path.of(args[1]).register(watch, StandardWatchEventKinds.ENTRY_CREATE);
+                check(key.isValid(), "Actual process-lifetime watch registered");
+                Thread.sleep(100);
+                report("{\"pass\":true,\"stage\":\"before-system-exit\",\"watchOpen\":true}");
+                System.exit(0);
+                throw new AssertionError("System.exit returned");
+            } catch (Exception error) {
+                throw new RuntimeException("Actual process-lifetime watch qualification failed", error);
+            }
+        }
         browser = args[0].equals("browser");
         Path root = Path.of(args[1]).toAbsolutePath().normalize();
         String provider = FileSystems.getDefault().provider().getClass().getName();

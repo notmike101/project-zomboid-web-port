@@ -8,7 +8,8 @@ import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { createFileWatchService } from './file-watch-service.mjs';
 
-const { PZ_JDK: jdk, PZ_BROWSER: executablePath, PZ_GAME_JAR: gameJar } = process.env;
+const { PZ_JDK: jdk, PZ_BROWSER: executablePath, PZ_GAME_JAR: gameJar, PZ_WATCH_VM_EXIT: vmExitMode } = process.env;
+const vmExitQualification = vmExitMode === '1';
 
 assert.ok(jdk && executablePath && gameJar, 'Set PZ_JDK, PZ_BROWSER and PZ_GAME_JAR; prepare the play SDK first.');
 const root = path.resolve(import.meta.dirname, '..');
@@ -17,7 +18,7 @@ const output = path.join(root, 'target/browser-jvm/file-watch', randomUUID());
 const inputs = new Map();
 const routes = new Map();
 const archives = ['play-entry.jar', 'animation-entry.jar', 'animation-view.jar', 'animation-sdk-view.jar', 'path-view.jar', 'float-bridge.jar', 'memory-bridge.jar', 'world-entry.jar', 'atomic-view.jar'];
-const evidence = { pass: false, output, startedUtc: new Date().toISOString(), logs: [], denied: [], forcedTermination: false, deadlineExceeded: false };
+const evidence = { pass: false, vmExitQualification, output, startedUtc: new Date().toISOString(), logs: [], denied: [], forcedTermination: false, deadlineExceeded: false };
 let server;
 let service;
 let owner;
@@ -350,7 +351,11 @@ async function mutate(page) {
 
 try {
     await prepare();
-    await nativeReference();
+
+    if (!vmExitQualification) {
+        await nativeReference();
+    }
+
     await mkdir(path.join(output, 'media/sub'), { recursive: true });
     service = createFileWatchService({ mounts: [{ virtualPrefix: '/app/media', root: path.join(output, 'media') }] });
     const owned = `/files/file-watch/${randomUUID()}`;
@@ -359,15 +364,32 @@ try {
         import {startSchedulerRuntime} from '/scheduler-runtime.js';
         import {createFileWatchNatives} from '/file-watch-natives.js';
         const watch=createFileWatchNatives();globalThis.reports=[];globalThis.watchDiagnostics=()=>watch.diagnostics();
+        globalThis.unhandledRejections=[];
+        addEventListener('unhandledrejection',event=>globalThis.unhandledRejections.push(String(event.reason?.stack||event.reason)));
         try {
             await startSchedulerRuntime({version:17,status:'none',javaProperties:['user.home=${owned}/home','user.dir=/app','java.io.tmpdir=${owned}/tmp'],natives:{...watch.natives,
-                Java_NioWatchQualification_report(lib,text){reports.push({kind:'jdk',...JSON.parse(String(text))});},
+                Java_NioWatchQualification_report(lib,text){
+                    const report={kind:'jdk',...JSON.parse(String(text))};reports.push(report);
+                    if(report.stage==='before-system-exit'){
+                        const before=watch.diagnostics();globalThis.beforeVmExit=before;
+                        let rejected=false;try{watch.dispose();}catch(error){rejected=String(error).includes('Original watch owners remain');}
+                        globalThis.strictDisposeRejected=rejected;
+                        const after=watch.diagnostics();
+                        if(!rejected||before.owned!==3||before.polls!==1||JSON.stringify(before)!==JSON.stringify(after))throw new Error('Actual live watch ownership/strict disposal failed');
+                    }
+                },
                 Java_FileWatchQualification_report(lib,text){reports.push({kind:'original',...JSON.parse(String(text))});},
                 Java_FileWatchQualification_remoteMutation(lib,phase){globalThis.phase=phase;return new Promise(resolve=>{globalThis.resume=resolve;});}
             }});
             watch.install();
-            globalThis.exit=await cheerpjRunMain('FileWatchQualification','/app/qualification.jar:${archives.map((name) => `/app/${name}`).join(':')}','browser','${owned}','/app/media');
-            watch.dispose();
+            globalThis.exit=await cheerpjRunMain('${vmExitQualification ? 'NioWatchQualification' : 'FileWatchQualification'}','/app/qualification.jar:${archives.map((name) => `/app/${name}`).join(':')}','${vmExitQualification ? 'vm-exit' : 'browser'}','${vmExitQualification ? '/app/media/sub' : owned}','/app/media');
+            globalThis.vmExitObserved=true;
+            if(${vmExitQualification}){
+                globalThis.beforeVmExitDispose=watch.diagnostics();
+                await watch.disposeAfterVmExit();
+                await watch.disposeAfterVmExit();
+                await new Promise(resolve=>setTimeout(resolve,100));
+            }else{watch.dispose();}
         } catch(error){globalThis.error=String(error.stack||error);}
         finally{globalThis.diagnostics=watch.diagnostics();globalThis.done=true;}
     </script>`));
@@ -404,24 +426,49 @@ try {
     page = await context.newPage();
 
     page.on('console', (message) => evidence.logs.push(message.text()));
-    page.on('pageerror', (error) => evidence.logs.push(String(error)));
+    page.on('pageerror', (error) => evidence.logs.push(`PAGEERROR: ${String(error)}`));
     await page.goto(origin);
-    await mutate(page);
+
+    if (!vmExitQualification) {
+        await mutate(page);
+    }
+
     await page.waitForFunction(() => globalThis.done, null, { timeout: 20_000 });
-    evidence.browser = await page.evaluate(() => ({ exit: globalThis.exit, reports: globalThis.reports, diagnostics: globalThis.diagnostics, error: globalThis.error }));
+    evidence.browser = await page.evaluate(() => ({
+        exit: globalThis.exit, reports: globalThis.reports, diagnostics: globalThis.diagnostics, error: globalThis.error,
+        vmExitObserved: globalThis.vmExitObserved, beforeVmExit: globalThis.beforeVmExit, beforeVmExitDispose: globalThis.beforeVmExitDispose,
+        strictDisposeRejected: globalThis.strictDisposeRejected, unhandledRejections: globalThis.unhandledRejections,
+    }));
     assert.equal(evidence.browser.exit, 0);
     assert.equal(evidence.browser.error, undefined);
-    assert.equal(evidence.browser.reports.length, 2);
+    assert.equal(evidence.browser.vmExitObserved, true);
+    assert.deepEqual(evidence.browser.unhandledRejections, []);
     assert.ok(evidence.browser.reports.every((report) => report.pass));
-    assert.ok(evidence.browser.reports[0].checks >= 17);
-    assert.equal(evidence.browser.reports[1].checks, 20);
-    assert.equal(evidence.browser.reports[1].callbacks, 4);
-    assert.equal(evidence.browser.reports[1].registered, 4);
+
+    if (vmExitQualification) {
+        assert.equal(evidence.browser.reports.length, 1);
+        assert.equal(evidence.browser.strictDisposeRejected, true);
+        assert.equal(evidence.browser.beforeVmExitDispose.owned, 3);
+        assert.equal(evidence.browser.beforeVmExitDispose.polls, 1);
+        assert.equal(evidence.browser.diagnostics.callCounts.close, 3);
+        assert.equal(evidence.browser.diagnostics.callCounts['poll-closed'], undefined);
+        assert.equal(evidence.browser.diagnostics.callCounts['vm-exit-poll-abandoned'], 1);
+        assert.equal(evidence.browser.diagnostics.cancelledSubscriptions, 1);
+        assert.equal(evidence.browser.diagnostics.unsettledNativePromises, 1);
+        assert.equal(evidence.browser.diagnostics.callCounts['vm-exit-dispose'], 1);
+    } else {
+        assert.equal(evidence.browser.reports.length, 2);
+        assert.ok(evidence.browser.reports[0].checks >= 17);
+        assert.equal(evidence.browser.reports[1].checks, 20);
+        assert.equal(evidence.browser.reports[1].callbacks, 4);
+        assert.equal(evidence.browser.reports[1].registered, 4);
+    }
+
     assert.equal(evidence.browser.diagnostics.owned, 0);
     assert.equal(evidence.browser.diagnostics.polls, 0);
     assert.equal(evidence.browser.diagnostics.remoteState, 2);
     assert.equal(evidence.browser.diagnostics.remoteFailure, undefined);
-    assert.deepEqual(evidence.logs.filter((line) => /Exception|Error:|SEVERE/u.test(line)), []);
+    assert.deepEqual(evidence.logs.filter((line) => /Exception|Error:|SEVERE|PAGEERROR:/u.test(line)), []);
     evidence.pass = true;
 } catch (error) {
     evidence.pass = false;
