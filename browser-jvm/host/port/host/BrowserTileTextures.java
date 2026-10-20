@@ -50,6 +50,8 @@ public final class BrowserTileTextures {
             GameWindow.fileSystem.updateAsyncTransactions();
             Thread.sleep(1);
         }
+        // Asset READY can precede completion of its queued texture upload.
+        zombie.core.opengl.RenderThread.invokeOnRenderContext(() -> {});
         if (!texture.isReady() || texture.getID() <= 0)
             throw new AssertionError("Original atlas texture did not become GPU ready: " + texture.getState());
         return texture;
