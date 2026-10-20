@@ -35,6 +35,7 @@ public final class NativeMemoryQualification {
     private static void qualify() throws Exception {
         ByteBuffer warm = SpriteGraphics.memAlloc(16);
         SpriteGraphics.memFree(warm);
+        qualifyCopy();
         new zombie.worldMap.WorldMapCell().dispose();
         BufferPoolMXBean pool = ManagementFactory.getPlatformMXBeans(BufferPoolMXBean.class).stream()
                 .filter(candidate -> candidate.getName().equals("direct")).findFirst().orElseThrow();
@@ -195,6 +196,38 @@ public final class NativeMemoryQualification {
         cell.dispose();
         rejected(() -> SpriteGraphics.memFree(grown));
         cell.dispose();
+    }
+
+    private static void qualifyCopy() {
+        ByteBuffer source = SpriteGraphics.memAlloc(16);
+        ByteBuffer destination = SpriteGraphics.memAlloc(16);
+        try {
+            for (int i = 0; i < 16; i++) {
+                source.put(i, (byte) (i + 20));
+                destination.put(i, (byte) -1);
+            }
+            source.limit(9).position(3).mark().position(5);
+            destination.limit(12).position(4).mark().position(6);
+            org.lwjgl.system.MemoryUtil.memCopy(source, destination);
+            if (source.position() != 5 || source.limit() != 9
+                    || destination.position() != 6 || destination.limit() != 12)
+                throw new AssertionError("Copy changed original buffer state");
+            for (int i = 0; i < 12; i++) {
+                byte expected = i >= 6 && i < 10 ? (byte) (i + 19) : (byte) -1;
+                if (destination.get(i) != expected) throw new AssertionError("Copy bytes or sentinels differ");
+            }
+            source.reset(); destination.reset();
+            if (source.position() != 3 || destination.position() != 4)
+                throw new AssertionError("Copy changed original marks");
+            destination.limit(5);
+            rejected(() -> org.lwjgl.system.MemoryUtil.memCopy(source, destination));
+            if (destination.get(4) != -1) throw new AssertionError("Rejected copy mutated destination");
+            source.position(source.limit()); destination.position(destination.limit());
+            org.lwjgl.system.MemoryUtil.memCopy(source, destination);
+        } finally {
+            SpriteGraphics.memFree(destination);
+            SpriteGraphics.memFree(source);
+        }
     }
 
     private static void exact(BufferPoolMXBean pool, long used, long capacity, long count) {

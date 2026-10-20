@@ -194,6 +194,18 @@ public final class SpriteGraphics {
             allocations.remove(value);
         }
     }
+    public static void memCopy(ByteBuffer source, ByteBuffer destination) {
+        int count = source.remaining();
+        if (destination.remaining() < count)
+            throw new IllegalArgumentException("Number of remaining elements is " + destination.remaining()
+                    + ", must be at least " + count);
+        if (!source.isDirect() || !destination.isDirect())
+            throw new UnsupportedOperationException("Native memory copy requires direct buffers");
+        // shortcut: Native writes through read-only views are unsupported; expand when an original consumer requires them.
+        if (destination.isReadOnly()) throw new UnsupportedOperationException("Read-only native copy destination");
+        destination.duplicate().put(source.duplicate());
+    }
+
     public static void memSet(ByteBuffer value,int fill){if(!value.isDirect())throw new IllegalArgumentException("Direct buffer required");if(value.isReadOnly())throw new ReadOnlyBufferException();for(int i=value.position();i<value.limit();i++)value.put(i,(byte)fill);}
 
     public static native int bufferCreate();
