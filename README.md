@@ -4,7 +4,7 @@ An in-development browser port built around the installed game's original Java c
 
 This repository contains authored platform adapters, preparation tools and verification code. It does not distribute the game's JAR, assets, native libraries, downloaded toolchains or generated runtime files. Supply your own local installation.
 
-Whole-game integration diagnostics now render the original main menu and use its actual Solo, mode, spawn and profession controls to reach appearance setup. The mouse focus fix preserves the original Terms press and release. Appearance setup still captures as black, and the bounded original asynchronous shutdown drain fails; final Play remains unpressed. This is original frontend progress, not whole-game playability. The animated-PNG copy adapter separately matches all 81 tested frames against the original native JVM decoder. See [current compatibility evidence](COMPATIBILITY.md#latest-genuine-startup-attempt).
+Whole-game integration diagnostics now render the original main menu and use its actual Solo, mode, spawn and profession controls to reach appearance setup. The mouse focus fix preserves the original Terms press and release. Samples taken after actual presentation now visibly show the original Customise Character controls and artwork; the model preview remains empty. The bounded original asynchronous shutdown drain still fails, and final Play remains unpressed. This is original frontend progress, not whole-game playability. The animated-PNG copy adapter separately matches all 81 tested frames against the original native JVM decoder. See [current compatibility evidence](COMPATIBILITY.md#latest-genuine-startup-attempt).
 
 ## How it works
 
