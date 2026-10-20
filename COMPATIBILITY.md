@@ -1,5 +1,9 @@
 # Incremental original-bytecode compatibility
 
+## Latest genuine-startup attempt
+
+The private original-initial-menu attempt failed during browser module loading, before original Java initialization. Three GLSL parser entry-point requests were rejected because the isolated profile omitted the public graphics runner's existing sixteen-module parser route closure. This is an unresolved hosting-profile defect, not evidence of a game-code or shader-translation failure. Browser exit and watcher disposal were observed; all 2,310 frozen artifact/source hashes were unchanged, with no served-media reads. No main-menu or whole-game pass is claimed.
+
 ## Current original player UI integration frontier
 
 The latest private browser attempt executes 240 original player UI frames with the complete initUISystem/OnCreatePlayer producer and zero caught original Java exceptions. Real MainThread and RenderThread owners consume the original UI command queue. Genuine startup ordering now initializes global systems before player UI construction and chunk activation; earlier erosion callbacks no longer encounter an absent global-system instance. Seven original UI packs, including RadioIcons, supply the dashboard texture dependency through the existing client asset archive. The archive's 2,319 entries match installed inputs and manifest hashes, and repeated preparation is deterministic.
