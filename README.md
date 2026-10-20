@@ -4,7 +4,7 @@ An in-development browser port built around the installed game's original Java c
 
 This repository contains authored platform adapters, preparation tools and verification code. It does not distribute the game's JAR, assets, native libraries, downloaded toolchains or generated runtime files. Supply your own local installation.
 
-Whole-game integration diagnostics now complete original `GameWindow.enter()` and report boot ready, with three original states, fifteen registered texture packs and 75 distinct prepared snapshots requested by the original asset consumer. The ninth run exposes the caught exception: original animated PNG loading reaches an unadapted LWJGL ByteBuffer-copy operation. The new host copy passes JVM/browser memory checks; original APNG decoding and full startup still need integration verification. This is startup progress, not a menu or whole-game playability pass. See [current compatibility evidence](COMPATIBILITY.md#latest-genuine-startup-attempt).
+Whole-game integration diagnostics now complete original `GameWindow.enter()` and report boot ready, with three original states, fifteen registered texture packs and 75 distinct prepared snapshots requested by the original asset consumer. The ninth run exposes the caught exception: original animated PNG loading reaches an unadapted LWJGL ByteBuffer-copy operation. The new host copy passes JVM/browser memory checks, and all 81 frames of the three affected APNGs match the original native JVM decoder exactly. Integration into the full startup classpath remains next. This is startup progress, not a menu or whole-game playability pass. See [current compatibility evidence](COMPATIBILITY.md#latest-genuine-startup-attempt).
 
 ## How it works
 
