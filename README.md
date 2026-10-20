@@ -4,6 +4,8 @@ An in-development browser port built around the installed game's original Java c
 
 This repository contains authored platform adapters, preparation tools and verification code. It does not distribute the game's JAR, assets, native libraries, downloaded toolchains or generated runtime files. Supply your own local installation.
 
+Whole-game integration diagnostics now complete original `GameWindow.enter()` and report boot ready, with three original states, fifteen registered texture packs and 75 distinct prepared snapshots requested by the original asset consumer. The latest run stops before consumed menu frames because the original caught-exception counter changes; its underlying exception is the next investigation. This is startup progress, not a menu or whole-game playability pass. See [current compatibility evidence](COMPATIBILITY.md#latest-genuine-startup-attempt).
+
 ## How it works
 
 The connected route runs original Java bytecode in **CheerpJ 4.3's Java 17 browser JVM**. Original player/world updates, action states, animation blending and movement remain original game code. Browser adapters provide keyboard input, WebGL calls, local asset access and session ownership. The current camera and floor/body composition are authored presentation code.
