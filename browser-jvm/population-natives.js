@@ -207,10 +207,21 @@ export function createPopulationNatives() {
         outfits: [],
         trace: [],
         updates: 0,
+        populationDirty: new Set(),
+        lastSavedID: 0,
+        virtualDirty: true,
+        terminalFailure: null,
     };
 
     let lock = Promise.resolve();
     let rng;
+    const nativeDefaults = new Map([
+        ['PopulationMultiplier', 1], ['PopulationStartMultiplier', Math.fround(0.8)],
+        ['PopulationPeakMultiplier', Math.fround(1.2)], ['PopulationPeakDay', 28],
+        ['RespawnHours', 1], ['RespawnUnseenHours', 1], ['RespawnMultiplier', 10],
+        ['FollowSoundDistance', 100], ['MinZombiesPerChunk', Math.fround(0.038_4)],
+        ['MaxZombiesPerChunk', Math.fround(7.68)], ['UniformZombiesPerChunk', Math.fround(0.2)],
+    ]);
 
     /**
      * Initializes the native MT algorithm from actual browser crypto entropy.
@@ -408,10 +419,8 @@ export function createPopulationNatives() {
             return state.cells.get(name);
         }
 
-        if (!state.workerTime) {
-            unsupported('worker time absent');
-        }
-
+        // Native DAT131928 starts at zero; queued time is not applied by full-save.
+        const age = state.workerTime?.[1] ?? 0;
         const data = metadata(x, y);
         const saved = String(await (await helper(lib)).readOwned(`zpop/zpop_${x}_${y}.bin`));
 
@@ -484,7 +493,7 @@ export function createPopulationNatives() {
             constants,
             directions: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
             idStart: state.nextID,
-            age: state.workerTime[1],
+            age,
         });
 
         state.nextID += result.generated;
@@ -492,10 +501,10 @@ export function createPopulationNatives() {
             chunks: Array.from({ length: 1_024 }, () => []),
             loaded: new Set(),
             lastSeen: new Float32Array(1_024),
-            lastRedistribution: Math.fround(state.workerTime[1]),
-            createdAge: Math.fround(state.workerTime[1]),
+            lastRedistribution: Math.fround(age),
+            createdAge: Math.fround(age),
             targets: new Uint16Array(1_024),
-            lastRespawn: new Float32Array(1_024).fill(Math.fround(state.workerTime[1])),
+            lastRespawn: new Float32Array(1_024).fill(Math.fround(age)),
         };
 
         for (const entry of result.entries) {
@@ -504,6 +513,7 @@ export function createPopulationNatives() {
         }
 
         state.cells.set(name, cell);
+        state.populationDirty.add(name);
 
         return cell;
     }
@@ -543,6 +553,141 @@ export function createPopulationNatives() {
         }
 
         unsupported('uniform distribution target branch not qualified');
+    }
+
+    /** Rejects use after a failed persistence operation; native EH recovery is unqualified. */
+    function requireActive() {
+        if (state.terminalFailure) {
+            unsupported(`terminal persistence owner: ${state.terminalFailure}`);
+        }
+    }
+
+    /**
+     * Marks the original metadata cell dirty without forcing it loaded.
+     *
+     * @param {object} record - Original positioned record.
+     */
+    function dirtyRecord(record) {
+        state.populationDirty.add(key(Math.floor(record.x / 256), Math.floor(record.y / 256)));
+    }
+
+    /**
+     * Persists the original full-save snapshot without consuming simulation queues.
+     *
+     * @param {object} lib - Actual Java transport namespace.
+     * @returns {Promise<void>} Completed actual writes, or a terminal persistence failure.
+     */
+    async function persistPopulation(lib) {
+        requireActive();
+
+        try {
+            await persistPopulationSnapshot(lib);
+        } catch (error) {
+            state.terminalFailure = String(error?.message ?? error);
+
+            throw error;
+        }
+    }
+
+    /**
+     * Builds and writes the original snapshot under its existing serialized owner.
+     *
+     * @param {object} lib - Actual Java transport namespace.
+     * @returns {Promise<void>} Actual persistence completion.
+     */
+    async function persistPopulationSnapshot(lib) {
+        requireActive();
+
+        if (!state.pop || state.gameState.get('Core.noSave')) {
+            unsupported('population save lifecycle/NoSave');
+        }
+
+        const tasks = [...state.worker, ...state.producer];
+        const released = new Set(tasks.filter((task) => task.type === 'release').map((task) => task.id));
+
+        // Native01d370 applies feedback but does not run config/load/generation commands.
+        for (const task of tasks) {
+            if (task.type === 'real') {
+                for (const value of task.records) {
+                    const record = state.registry.get(value.id);
+
+                    if (record) {
+                        dirtyRecord(record);
+                        metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered.delete(record.id);
+                        Object.assign(record, value);
+                        dirtyRecord(record);
+                        metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered.add(record.id);
+                    }
+                }
+            }
+        }
+
+        for (const id of released) {
+            const record = state.registry.get(id);
+
+            if (record) {
+                dirtyRecord(record);
+                metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered.delete(id);
+                state.registry.delete(id);
+            }
+        }
+
+        const candidates = [...state.pendingOutput,
+            ...tasks.filter((task) => task.type === 'add').map((task) => task.record),
+            ...tasks.filter((task) => task.type === 'register' && !released.has(task.record.id)).map((task) => task.record)];
+        const temporary = new Map();
+
+        /**
+         * Stages an actual record in the original temporary per-cell save view.
+         *
+         * @param {object} record - Original record to serialize.
+         * @returns {Promise<void>} Genuine cell preparation completion.
+         */
+        async function stage(record) {
+            await ensureCell(lib, Math.floor(record.x / 8), Math.floor(record.y / 8));
+            const name = key(Math.floor(record.x / 256), Math.floor(record.y / 256));
+
+            if (!temporary.has(name)) {
+                temporary.set(name, []);
+            }
+
+            temporary.get(name).push(record);
+            dirtyRecord(record);
+        }
+
+        await sequence(candidates.filter((record) => !state.registry.has(record.id)), stage);
+        await sequence([...state.registry.values()], stage);
+        const transport = await helper(lib);
+
+        try {
+            // Native020080 caches IDs only after real replacement succeeds.
+            if (state.lastSavedID !== state.nextID) {
+                await transport.writeOwned('zpop/zpop_ids.bin', hex(encodeIDs(state.nextID)), true);
+                state.lastSavedID = state.nextID;
+            }
+
+            if (state.virtualDirty) {
+                await transport.writeOwned('zpop/zpop_virtual.bin', hex(encodeEmptyVirtual(state.outfits)), false);
+                state.virtualDirty = false;
+            }
+
+            await sequence([...state.cells].filter(([name]) => state.populationDirty.has(name)), async ([name, cell]) => {
+                const chunks = cell.chunks.map((records, index) => ({ intensity: cell.targets[index], records: records.map((record) => ({ ...record })), scalars: [cell.lastSeen[index], cell.lastRespawn[index]] }));
+
+                for (const record of temporary.get(name) ?? []) {
+                    const index = ((Math.floor(record.x / 8) % 32 + 32) % 32) + ((Math.floor(record.y / 8) % 32 + 32) % 32) * 32;
+
+                    chunks[index].records.push({ ...record });
+                }
+
+                state.populationDirty.delete(name);
+                await transport.writeOwned(`zpop/zpop_${name.replace(',', '_')}.bin`, hex(encodeCell({ names: [...state.outfits], scalars: [cell.createdAge, cell.lastRedistribution], chunks })), false);
+            });
+            state.successfulSaves = (state.successfulSaves ?? 0) + 1;
+        } catch (error) {
+            state.terminalFailure = String(error?.message ?? error);
+            throw error;
+        }
     }
 
     const collisionService = {
@@ -815,6 +960,7 @@ export function createPopulationNatives() {
                 unsupported('fresh browser save root required');
             }
 
+            state.autoSaveDeadline = Date.now() + 300_000;
             await (await helper(lib)).openOwnedRoot(`${mode}/${world}`);
             const ids = String(await (await helper(lib)).readOwned('zpop/zpop_ids.bin'));
             const virtual = String(await (await helper(lib)).readOwned('zpop/zpop_virtual.bin'));
@@ -825,8 +971,8 @@ export function createPopulationNatives() {
 
             state.reopenID = ids ? decodeIDs(decoder(ids)) : 1;
             state.pop = true;
-            state.autoSaveDeadline = performance.now() + 300_000;
-            state.config.clear();
+            state.lastSavedID = ids ? decodeIDs(decoder(ids)) : 0;
+            state.config = new Map(nativeDefaults);
             state.nextID = state.reopenID;
             state.producer = [];
             state.worker = [];
@@ -881,7 +1027,13 @@ export function createPopulationNatives() {
          * @param {Array<string>} names - Actual persistent-outfit names in original order.
          */
         async setOutfitNames(lib, names) {
-            state.outfits = String(await (await helper(lib)).names(names)).split('\n').filter(Boolean);
+            const next = String(await (await helper(lib)).names(names)).split('\n').filter(Boolean);
+
+            if (state.successfulSaves && JSON.stringify(next) !== JSON.stringify(state.outfits)) {
+                unsupported('outfit table mutation after initial save');
+            }
+
+            state.outfits = next;
         },
         /**
          * Accepts the qualified empty-origin input and rejects unsupported nonempty origins.
@@ -987,9 +1139,7 @@ export function createPopulationNatives() {
                 unsupported('population not initialized');
             }
 
-            if (performance.now() >= state.autoSaveDeadline) {
-                unsupported('native automatic-save scheduling not yet qualified');
-            }
+            requireActive();
 
             const batch = state.worker.slice();
 
@@ -1038,6 +1188,8 @@ export function createPopulationNatives() {
                 unsupported('worker time absent before generation');
             }
 
+            const sampledTime = Date.now();
+
             await sequence(generation, (coordinates) => validateGeneration(lib, coordinates));
 
             await sequence(areaCells(nextAreas), ([cx, cy]) => cellCollision(lib, cx, cy));
@@ -1076,7 +1228,12 @@ export function createPopulationNatives() {
                         const ly = ty - cy * 32;
 
                         if (lx >= 0 && lx < 32 && ly >= 0 && ly < 32) {
-                            cell.lastSeen[lx + ly * 32] = Math.fround(state.workerTime[1]);
+                            const seen = Math.fround(state.workerTime[1]);
+
+                            if (cell.lastSeen[lx + ly * 32] !== seen) {
+                                state.populationDirty.add(key(cx, cy));
+                                cell.lastSeen[lx + ly * 32] = seen;
+                            }
                         }
                     }
                 }
@@ -1088,6 +1245,11 @@ export function createPopulationNatives() {
 
                 if (task.loaded) {
                     cell.loaded.add(index);
+
+                    if (cell.chunks[index].length) {
+                        state.populationDirty.add(key(Math.floor(task.x / 32), Math.floor(task.y / 32)));
+                    }
+
                     state.pendingOutput.push(...cell.chunks[index].splice(0));
                 } else {
                     cell.loaded.delete(index);
@@ -1100,6 +1262,7 @@ export function createPopulationNatives() {
                 const index = ((Math.floor(r.x / 8) % 32 + 32) % 32) + ((Math.floor(r.y / 8) % 32 + 32) % 32) * 32;
 
                 cell.chunks[index].push(r);
+                dirtyRecord(r);
             });
 
             for (const task of batch) {
@@ -1107,9 +1270,11 @@ export function createPopulationNatives() {
                     const old = state.registry.get(task.record.id);
 
                     if (old) {
+                        dirtyRecord(old);
                         metadata(Math.floor(old.x / 256), Math.floor(old.y / 256)).registered.delete(old.id);
                     }
 
+                    dirtyRecord(task.record);
                     state.registry.set(task.record.id, task.record);
                     metadata(Math.floor(task.record.x / 256), Math.floor(task.record.y / 256)).registered.add(task.record.id);
                 }
@@ -1120,6 +1285,7 @@ export function createPopulationNatives() {
                     const old = state.registry.get(task.id);
 
                     if (old) {
+                        dirtyRecord(old);
                         metadata(Math.floor(old.x / 256), Math.floor(old.y / 256)).registered.delete(old.id);
                         state.registry.delete(task.id);
                     }
@@ -1133,8 +1299,10 @@ export function createPopulationNatives() {
                     const record = state.registry.get(value.id);
 
                     if (record) {
+                        dirtyRecord(record);
                         metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered.delete(record.id);
                         Object.assign(record, value);
+                        dirtyRecord(record);
                         metadata(Math.floor(record.x / 256), Math.floor(record.y / 256)).registered.add(record.id);
                     }
                 }
@@ -1149,6 +1317,12 @@ export function createPopulationNatives() {
             }
 
             state.updates++;
+
+            // Native1800218e0: after queued work, unpaused, strict deadline<now.
+            if (!state.gameState.get('PAUSED') && state.autoSaveDeadline < sampledTime) {
+                state.autoSaveDeadline = sampledTime + 300_000;
+                await persistPopulation(lib);
+            }
         },
         /**
          * Writes the qualified original collision or population persistence through its Java owner.
@@ -1156,53 +1330,8 @@ export function createPopulationNatives() {
          * @param {object} lib - Actual CheerpJ Java class namespace.
          */
         async save(lib) {
-            if (!state.pop || state.gameState.get('Core.noSave')) {
-                unsupported('population save lifecycle/NoSave');
-            }
-
-            if (state.pendingOutput.length || state.front.some((r, i) => !state.consumed.has(i))) {
-                unsupported('save with unconsumed publication');
-            }
-
-            if (state.producer.length) {
-                state.worker.push(...state.producer.splice(0));
-            }
-
-            if (state.worker.length) {
-                await populationService.updateThread(lib);
-            }
-
-            const cells = new Map();
-
-            for (const [name, cell] of state.cells) {
-                const chunks = cell.chunks.map((records, index) => ({ intensity: cell.targets[index], records: records.map((record) => ({ ...record })), scalars: [cell.lastSeen[index], cell.lastRespawn[index]] }));
-
-                cells.set(name, { names: [...state.outfits], scalars: [cell.createdAge, cell.lastRedistribution], chunks });
-            }
-
-            for (const record of state.registry.values()) {
-                const x = Math.floor(record.x / 256);
-                const y = Math.floor(record.y / 256);
-                const name = key(x, y);
-
-                if (!cells.has(name)) {
-                    cells.set(name, { names: [...state.outfits], scalars: [0, 0], chunks: Array.from({ length: 1_024 }, () => ({ intensity: 0, records: [], scalars: [0, 0] })) });
-                }
-
-                const index = ((Math.floor(record.x / 8) % 32 + 32) % 32) + ((Math.floor(record.y / 8) % 32 + 32) % 32) * 32;
-
-                cells.get(name).chunks[index].records.push({ ...record });
-            }
-
-            const outputs = [...cells].map(([name, cell]) => [`zpop/zpop_${name.replace(',', '_')}.bin`, hex(encodeCell(cell))]);
-
-            outputs.push(['zpop/zpop_virtual.bin', hex(encodeEmptyVirtual(state.outfits))], ['zpop/zpop_ids.bin', hex(encodeIDs(state.nextID))]);
-
-            const transport = await helper(lib);
-
-            await sequence(outputs, ([file, bytes]) => transport.writeOwned(file, bytes, file.endsWith('zpop_ids.bin')));
-
-            state.successfulSaves = (state.successfulSaves ?? 0) + 1;
+            requireActive();
+            await persistPopulation(lib);
         },
         /**
          * Returns the count of the original published record buffer.
@@ -1369,7 +1498,7 @@ export function createPopulationNatives() {
             state.pendingOutput = [];
             state.registry.clear();
             state.consumed.clear();
-            state.config.clear();
+            state.config = new Map(nativeDefaults);
             state.outfits = [];
             state.areas = [];
             state.time = null;
@@ -1431,9 +1560,17 @@ export function createPopulationNatives() {
                 }
 
                 try {
+                    if (!name.endsWith('stop')) {
+                        requireActive();
+                    }
+
                     return await method(lib, ...args);
                 } catch (error) {
                     if (!(error instanceof RangeError)) {
+                        if (/save|updateThread/u.test(name)) {
+                            state.terminalFailure = String(error?.message ?? error);
+                        }
+
                         throw error;
                     }
 
@@ -1562,6 +1699,12 @@ export function createPopulationNatives() {
             registered: state.registry.size,
 
             successfulSaves: state.successfulSaves ?? 0,
+            saveDeadline: state.autoSaveDeadline,
+            terminalFailure: state.terminalFailure,
+            dirtyPopulationCells: [...state.populationDirty],
+            pendingOutput: state.pendingOutput.length,
+            mainFront: state.front.length,
+            lastSavedID: state.lastSavedID,
 
             nextID: state.nextID,
 
