@@ -18,6 +18,30 @@ import com.github.micycle1.clipper2.engine.PolyTree64;
 
 /** Real Clipper2 engine and qualified original JNI byte-buffer contract. */
 public final class ClipperSupport {
+    private static java.lang.reflect.Field originalAddress;
+    private static java.lang.reflect.Method originalStdErr;
+
+    /** Resolves the actual original JNI class/field/method contract without fabricating native addresses. */
+    public static synchronized void initializeOriginalBindings() throws ReflectiveOperationException {
+        Class<?> type = zombie.vehicles.Clipper.class;
+        java.lang.reflect.Field address = type.getDeclaredField("address");
+        java.lang.reflect.Method writer = type.getDeclaredMethod("writeToStdErr", String.class);
+        if (address.getType() != long.class || java.lang.reflect.Modifier.isStatic(address.getModifiers())
+                || writer.getReturnType() != void.class || !java.lang.reflect.Modifier.isStatic(writer.getModifiers()))
+            throw new IllegalStateException("Unexpected original Clipper JNI bindings");
+        originalAddress = address;
+        originalStdErr = writer;
+    }
+
+    /** Reports actual resolved descriptors for the focused original-init qualification. */
+    public static synchronized String originalBindingDescription() {
+        if (originalAddress == null || originalStdErr == null)
+            throw new IllegalStateException("Original Clipper JNI bindings were not resolved");
+        return originalAddress.getDeclaringClass().getName() + "." + originalAddress.getName() + ":"
+                + originalAddress.getType().getName() + ";" + originalStdErr.getName() + "("
+                + originalStdErr.getParameterTypes()[0].getName() + "):" + originalStdErr.getReturnType().getName();
+    }
+
     // Original static Clipper instances survive world replacement; ownership lasts for this browser JVM.
     private static final IdentityHashMap<Object, State> states = new IdentityHashMap<>();
 

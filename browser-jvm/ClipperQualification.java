@@ -143,8 +143,12 @@ public final class ClipperQualification {
                 + "],\"operation\":" + operation + ",\"count\":" + count + ",\"polygons\":" + polygons + "}");
     }
     public static void main(String[] args) {
-        if (args.length > 0 && args[0].equals("native")) {
-            Clipper.init();
+        Clipper.init();
+        if (args.length == 0 || !args[0].equals("native")) {
+            String bindings = ClipperSupport.originalBindingDescription();
+            if (!bindings.equals("zombie.vehicles.Clipper.address:long;writeToStdErr(java.lang.String):void"))
+                throw new AssertionError("Wrong original Clipper bindings: " + bindings);
+            System.out.println("CLIPPER_ORIGINAL_INIT_BINDINGS_PASS " + bindings);
         }
         clipper = new Clipper();
         AdapterChecks.run();

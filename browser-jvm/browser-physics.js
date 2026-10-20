@@ -53,6 +53,7 @@ function integer(value, name) {
  * @returns {object} Native callbacks and inspectable owned geometry state.
  */
 export function createBrowserPhysics() {
+    let clipperInitializations = 0;
     let earcutEngine;
     const triangulation = { loaded: false, calls: 0, transportAllocations: 0, transportBytes: 0, peakTransportBytes: 0 };
 
@@ -459,6 +460,7 @@ export function createBrowserPhysics() {
             collision: [...collision].map(([square, flags]) => ({ square, flags })),
             populationChunks: [...populationChunks],
             clipperContainers: { allocations: clipperAllocations, clears: clipperClears },
+            clipperBindings: { initializations: clipperInitializations },
             triangulation: { ...triangulation },
             maps: [...maps.values()].map((value) => ({ ...value })),
             chunks: [...chunks.values()].map((chunk) => ({
@@ -816,6 +818,18 @@ export function createBrowserPhysics() {
                 }
 
                 revision++;
+            },
+            /**
+             * Resolves the original native initializer's actual Java class and typed field/method bindings.
+             *
+             * @param {object} lib - Actual browser JVM class namespace.
+             * @returns {Promise<void>} Completion after real Java binding resolution.
+             */
+            async Java_zombie_vehicles_Clipper_n_1init(lib) {
+                const helper = await clipperSupport(lib);
+
+                await helper.initializeOriginalBindings();
+                clipperInitializations++;
             },
             /**
              * Allocates an actual empty polygon container owned by the Java Clipper instance.

@@ -217,7 +217,9 @@ await mkdir(classes, { recursive: true });
 try {
     evidence.earcutBuild = await prepareEarcutRuntime(path.join(output, 'earcut'));
     const inputs = [path.resolve(gameJar), nativeLibrary, dependency, prepared, import.meta.filename,
-        ...['host/port/host/ClipperSupport.java', 'ClipperQualification.java', 'ClipperTriangulationQualification.java', 'browser-physics.js', 'prepare-earcut-runtime.mjs', 'earcut-engine.cpp', 'earcut-sources.json'].map((name) => path.join(root, 'browser-jvm', name))];
+        ...['host/port/host/ClipperSupport.java', 'ClipperQualification.java', 'ClipperTriangulationQualification.java', 'browser-physics.js',
+            'PZClipper64.js', 'clipper-native-owner.js', 'native-library-loader.js',
+            'prepare-earcut-runtime.mjs', 'earcut-engine.cpp', 'earcut-sources.json'].map((name) => path.join(root, 'browser-jvm', name))];
 
     inputs.push(...['earcut-engine.mjs', 'earcut-engine.wasm', 'EARCUT-LICENSE.txt', 'earcut-manifest.json'].map((name) => path.join(output, 'earcut', name)));
     const snapshots = await Promise.all(inputs.map(async (file) => ({ file, sha256: hash(await readFile(file)) })));
@@ -270,12 +272,16 @@ try {
     assert.equal(evidence.triangulationNativeRows.length, 11);
     const html = `<link rel="icon" href="data:,"><script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script><script type="module">
         import { createBrowserPhysics } from '/browser-physics.js';
+        import { publishClipperOwner } from '/clipper-native-owner.js';
+        import { installNativeLibraryLoader } from '/native-library-loader.js';
         try {
             const physics = createBrowserPhysics();
-            await cheerpjInit({version:17,status:'none',javaProperties:['user.dir=/files/clipper-qualification'],natives:physics.natives});
+            publishClipperOwner(physics);
+            await cheerpjInit({version:17,status:'none',javaProperties:['user.dir=/files/clipper-qualification','java.library.path=/app/'],natives:physics.natives});
+            installNativeLibraryLoader(globalThis.cj3Module);
             const code = await cheerpjRunMain('ClipperQualification','/app/qualification.jar:/app/clipper2.jar:/app/clipper-view.jar');
             const triangles = code === 0 ? await cheerpjRunMain('ClipperTriangulationQualification','/app/qualification.jar:/app/clipper2.jar:/app/clipper-view.jar') : -1;
-            globalThis.result = {pass:code===0&&triangles===0,code,triangles,containers:physics.snapshot().clipperContainers,triangulation:physics.snapshot().triangulation};
+            globalThis.result = {pass:code===0&&triangles===0,code,triangles,bindings:physics.snapshot().clipperBindings,containers:physics.snapshot().clipperContainers,triangulation:physics.snapshot().triangulation};
         } catch (error) { globalThis.result={pass:false,error:String(error.stack||error)}; }
         finally { globalThis.completed=true; }
     </script>`;
@@ -284,6 +290,7 @@ try {
         ['/clipper-view.jar', await readFile(viewArchive)], ['/clipper2.jar', await readFile(dependency)],
         ['/browser-physics.js', await readFile(path.join(root, 'browser-jvm/browser-physics.js'))],
         ['/ragdoll-definitions.js', await readFile(path.join(root, 'browser-jvm/ragdoll-definitions.js'))],
+        ...await Promise.all(['PZClipper64.js', 'clipper-native-owner.js', 'native-library-loader.js'].map(async (name) => [`/${name}`, await readFile(path.join(root, 'browser-jvm', name))])),
     ]);
 
     await Promise.all(['earcut-engine.mjs', 'earcut-engine.wasm', 'EARCUT-LICENSE.txt'].map(async (name) => files.set(`/browser-jvm/earcut/${name}`, await readFile(path.join(output, 'earcut', name)))));
@@ -382,6 +389,8 @@ try {
     evidence.result = await page.evaluate(() => globalThis.result);
     assert.equal(evidence.result.pass, true, evidence.result.error);
     assert.equal(evidence.browserRows.length, 134, 'Missing browser cases');
+    assert(evidence.logs.some((line) => line.startsWith('CLIPPER_ORIGINAL_INIT_BINDINGS_PASS ')), 'Actual original Clipper.init bindings were not resolved');
+    assert.deepEqual(evidence.result.bindings, { initializations: 2 });
     assert(evidence.logs.some((line) => line.includes('CLIPPER_ADAPTER_CHECKS_PASS')), 'Browser adapter boundary assertions did not complete');
     assert.deepEqual(canonical(evidence.browserRows), canonical(evidence.nativeRows));
     assert.equal(evidence.offsetBrowserRows.length, 32, 'Missing browser highway offset cases');

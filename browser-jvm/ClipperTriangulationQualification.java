@@ -94,7 +94,7 @@ public final class ClipperTriangulationQualification {
 
     public static void main(String[] args) {
         boolean nativeMode = args.length > 0 && args[0].equals("native");
-        if (nativeMode) Clipper.init();
+        Clipper.init();
         clipper = new Clipper();
         test("rectangle", new float[][] {rectangle(0, 0, 10, 10)}, new float[0][], false);
         test("rectangle-le-tag", new float[][] {rectangle(0, 0, 10, 10)}, new float[0][], true);
