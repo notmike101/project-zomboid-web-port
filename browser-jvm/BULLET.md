@@ -2,7 +2,7 @@
 
 This component runs original `Bullet.init()` and original Java native declarations against a real double-precision Bullet engine compiled to WASM. It is a prerequisite for the whole-game port. The walking and menu profiles still select their existing static geometry service; this component does not yet replace it.
 
-The original JVM and browser comparison covers the original direct command buffer, all 35 original bone-name callbacks, Java float-array transport, convex hulls, compound shapes, native bounding boxes, empty Dynamics-world gravity and cleanup. It does not qualify `WorldSimulation.create`, chunk activation, asset physics loading, simulation steps, vehicles or ragdolls. The accepted world header remains exactly `[0,0,0,0,1,1,false]`; other headers reject before creating a world.
+The original JVM and browser comparison covers the original direct command buffer, all 35 original bone-name callbacks, Java float-array transport, convex hulls, compound shapes, native bounding boxes, empty Dynamics-world gravity and cleanup. This default foundation gate does not qualify `WorldSimulation.create`, asset physics loading, simulation steps, vehicles or ragdolls. The separate opt-in vehicle qualification below covers its own bounded dynamic fixture. The legacy shape-only case uses `[0,0,0,0,1,1,false]`; the mapped-world cases use the original six-integer header described below.
 
 ## Dependencies
 
@@ -57,4 +57,43 @@ Generated modules, WASM, manifests, the upstream license, immutable served gener
 
 The public comparison now also covers the original normal-world six-integer header and four chunk-map owners. Activating a genuine 13×13 area creates 169 chunk records; overlapping another player by one chunk produces 182 distinct chunks with 156 shared identities. Deactivating one owner retains the other's 169 chunks, deactivating both releases all chunks, and reactivation/destruction repeats correctly. Coordinates, level records, flags and ownership are compared against the installed DLL. These are actual shared C++ objects over the real Bullet world, not readiness flags.
 
-The fresh combined browser run passed all twelve stages with 27 unchanged inputs and normal cleanup. A subsequent diagnostic-only check verifies that legacy shape-only worlds report no mapped-world header. Geometry upload, collider construction, the original WorldSimulation owner and dynamic world simulation remain separate, unqualified boundaries.
+The fresh combined browser run passed all twelve stages with 27 unchanged inputs and normal cleanup. A subsequent diagnostic-only check verifies that legacy shape-only worlds report no mapped-world header. Those foundation checks do not establish geometry upload, collider construction, the original WorldSimulation owner or dynamic world simulation. The opt-in vehicle fixture below covers its separate controlled publication/simulation scope.
+
+
+## Opt-in vehicle component
+
+`prepareBulletRuntime(outputDirectory, { profile: 'vehicle' })` builds the real vehicle adapter without changing the default foundation profile or the walking/menu backend selection. Use a fresh output directory: the two generated solver files use exclusive creation and reject preexisting files. The vehicle build replaces one of the 153 translation units with a hash-verified, single-function lateral-friction warm-start derivative. All 397 original upstream files remain unchanged and are checked before and after compilation. Vehicle bodies use the observed native physics flags zero; their separate collision flags are preserved.
+
+The qualification runs the existing foundation checks and original Java three-step `Base.CarNormal` fixture through the real JNI bridge. It compares all 90 published Float32 values with an original native result, requires exactly 27 original publication callbacks, checks original worker termination and exception count, and verifies empty owners and normal browser cleanup. The prior private candidate additionally passed the retained 18-primitive, 13-body publication and negative-owner regressions. Positive wheel-ray hits, two-direction friction, nonunit factors, two dynamic contact bodies, other vehicle definitions and whole-game integration remain unqualified. Raw double observations retain last-bit differences and a known ERP2 setting difference; exact publication agreement in this fixture does not establish universal engine equivalence.
+
+This is a developer component gate, not a complete game launcher. It requires the same pinned tools and matching original installation described above, a prepared SDK containing the eight animation/path/bridge/world/atomic archives, and four locally collected original-derived inputs:
+
+| Local file | Required evidence |
+|---|---|
+| `carnormal-original.bin` | The original 200-float, 800-byte vehicle definition |
+| `chunk-packet.bin` | The original complete chunk command packet, including its terminator |
+| `vehicle-native.json` | Successful original native result with `pass: true`, `exit: 0`, `closed: true` and three `VEHICLE_CONTACT` stdout rows |
+| `foundation-native.json` | Original foundation result with empty stderr and actual foundation/chunk reference stdout rows |
+
+The input directory also contains `fixtures-manifest.json`: `installedJarSHA256` and `installedDllSHA256` must match the pinned installed inputs, and `files` maps each of the four names above to its actual SHA-256. These caller-trusted reference files are not supplied by the repository and must come from original native execution, not browser-generated expected values. Proprietary inputs and generated artifacts stay untracked. The optional native mode in `VehicleContactQualification` is source/compile checked; it is not yet a separately qualified native-oracle launcher.
+
+With the earlier environment variables set, select your real local fixture directory and create a fresh owned generation:
+
+```powershell
+$env:PZ_BULLET_VEHICLE_FIXTURES = 'D:/local-original-vehicle-references'
+$env:PZ_BULLET_VEHICLE_GENERATION = Join-Path (Get-Location) ('target/browser-jvm/vehicle-' + [guid]::NewGuid())
+New-Item -ItemType Directory $env:PZ_BULLET_VEHICLE_GENERATION | Out-Null
+node --input-type=module -e '
+import { prepareBulletVehicleQualification } from "./browser-jvm/prepare-bullet-vehicle-qualification.mjs";
+await prepareBulletVehicleQualification({
+  outputDirectory: process.env.PZ_BULLET_VEHICLE_GENERATION,
+  gameDirectory: process.env.PZ_GAME_DIR,
+  sdkDirectory: process.env.PZ_BULLET_SDK,
+  fixtureDirectory: process.env.PZ_BULLET_VEHICLE_FIXTURES,
+  jdkDirectory: process.env.PZ_JDK
+});
+'
+node browser-jvm/verify-bullet-vehicle.mjs
+```
+
+Preparation builds the explicit vehicle profile, compiles only authored qualification sources, verifies original class bodies apart from the approved version header, and freezes source/served-file hashes. It does not execute the installed game or server. An optional `engineDirectory` can reuse only an artifact matching the current vehicle profile, source/compiler/patch and output manifest; arbitrary unbound WASM is rejected. The verifier retains exact inputs, results and owner cleanup under the selected ignored target generation. Full JavaScript lint remains `npm run lint` with `--max-warnings 0`.

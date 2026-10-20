@@ -9,7 +9,9 @@ const repository = path.resolve(import.meta.dirname, '..');
 const sourceRoot = path.join(repository, '.tools/bullet3-2c204c49');
 const sdk = path.join(repository, '.tools/emsdk-3.1.74-source/emsdk-3d6d8ee910466516a53e665b86458faa81dae9ba');
 const compiler = path.join(sdk, 'upstream/emscripten/emcc.py');
-const exports = ['scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'create_world', 'world_state', 'destroy_world', 'create_mapped_world', 'activate_map', 'world_header', 'deactivate_map', 'map_info', 'map_chunk', 'destroy_mapped_world', 'malloc', 'free'];
+const foundationExports = ['scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'create_world', 'world_state', 'destroy_world', 'create_mapped_world', 'activate_map', 'world_header', 'deactivate_map', 'map_info', 'map_chunk', 'destroy_mapped_world', 'malloc', 'free'];
+
+const vehicleExports = ['observe_vehicle_contacts', 'apply_central_force', 'vehicle_control_history', 'scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'world_state', 'create_mapped_world', 'destroy_mapped_world', 'build_geometry', 'clear_geometry', 'geometry_count', 'geometry_body', 'define_vehicle', 'define_vehicle_named', 'vehicle_definition_count', 'select_vehicle_definition', 'add_vehicle', 'vehicle_state', 'vehicle_child', 'vehicle_wheel', 'set_vehicle_active', 'set_vehicle_mass', 'set_vehicle_static', 'set_tire_inflation', 'set_tire_removed', 'set_vehicle_params', 'set_vehicle_velocity_multiplier', 'control_vehicle', 'step_vehicle_freefall', 'get_vehicle_physics', 'replace_chunk_level', 'begin_vehicle_publication', 'finish_vehicle_publication', 'step_mapped_vehicle', 'chunk_level_state', 'vehicle_material', 'set_chunk_levels', 'registered_vehicle_count', 'object_registry_count', 'remove_vehicle', 'world_header', 'activate_map', 'deactivate_map', 'map_info', 'map_chunk', 'malloc', 'free', 'create_world'];
 
 /**
  * Computes a byte-exact source or generated artifact fingerprint.
@@ -76,9 +78,16 @@ async function createOutput(parts, parent, target) {
  * No source, SDK, dependency, or game asset is downloaded by this helper.
  *
  * @param {string} outputDirectory - Owned directory under the workspace target directory.
+ * @param {object} [options] - Explicit component selection; foundation remains the default.
+ * @param {string} [options.profile] - Foundation or vehicle component.
  * @returns {Promise<object>} Source and output hashes for the compiled component.
  */
-export async function prepareBulletRuntime(outputDirectory) {
+export async function prepareBulletRuntime(outputDirectory, { profile = 'foundation' } = {}) {
+    if (!['foundation', 'vehicle'].includes(profile)) {
+        throw new Error('Unknown Bullet component profile');
+    }
+
+    const exports = profile === 'vehicle' ? vehicleExports : foundationExports;
     const output = path.resolve(outputDirectory);
     const targetPath = path.join(repository, 'target');
 
@@ -109,16 +118,73 @@ export async function prepareBulletRuntime(outputDirectory) {
 
     await verifySources(inputs);
 
-    const bridge = path.join(import.meta.dirname, 'bullet-engine.cpp');
+    const bridge = path.join(import.meta.dirname, profile === 'vehicle' ? 'bullet-vehicle-engine.cpp' : 'bullet-engine.cpp');
     const bridgeSha = digest(await readFile(bridge));
     const cpp = inputs.filter(([name]) => name.endsWith('.cpp')).map(([name]) => path.join(sourceRoot, name));
+    let solverOverlay = null;
 
-    await execute('py', ['-3', compiler, '-std=c++17', '-O1', '-DBT_USE_DOUBLE_PRECISION', `-I${path.join(sourceRoot, 'src')}`, bridge, ...cpp,
+    if (profile === 'vehicle') {
+        const original = path.join(sourceRoot, 'src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp');
+        const header = path.join(sourceRoot, 'src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.h');
+        const originalBytes = await readFile(original);
+        const headerBytes = await readFile(header);
+        const patchBytes = await readFile(path.join(import.meta.dirname, 'bullet-vehicle-warmstart.patch'));
+
+        if (digest(originalBytes) !== '5b0a5553fbf0aa3c57fd9af431775613f0a6c7da46a7efe78443d1eb2563daa6'
+            || digest(headerBytes) !== '3b0ffd801b3aeb630de963ea7e22893e585314bf3eb5fee49cb28c2c3e618f56') {
+            throw new Error('Unqualified original sequential solver source/header');
+        }
+
+        // This component has exactly one reviewed function hunk, never a general patch interpreter.
+        const lines = patchBytes.toString('utf8').replaceAll('\r\n', '\n').split('\n');
+        const hunks = lines.filter((line) => line.startsWith('@@'));
+
+        if (hunks.length !== 1) {
+            throw new Error('Vehicle compatibility patch must contain exactly one hunk');
+        }
+
+        const body = lines.slice(lines.findIndex((line) => line.startsWith('@@')) + 1).filter((line) => /^[ +-]/u.test(line));
+        const before = `${body.filter((line) => !line.startsWith('+')).map((line) => line.slice(1)).join('\n')}\n`;
+        const after = `${body.filter((line) => !line.startsWith('-')).map((line) => line.slice(1)).join('\n')}\n`;
+        const originalText = originalBytes.toString('utf8');
+
+        if (originalText.split(before).length !== 2) {
+            throw new Error('Vehicle solver patch context is absent or ambiguous');
+        }
+
+        const overlayBytes = Buffer.from(originalText.replace(before, after));
+
+        if (digest(overlayBytes) !== '60b2b900e7d43187443f636429acb19acaa436e2b4bbc79018f2ca28f103b456') {
+            throw new Error('Vehicle solver derivative differs from qualified bytes');
+        }
+
+        const overlay = path.join(output, 'btSequentialImpulseConstraintSolver.cpp');
+        const copiedHeader = path.join(output, 'btSequentialImpulseConstraintSolver.h');
+        const index = cpp.indexOf(original);
+
+        if (cpp.length !== 153 || index === -1 || cpp.lastIndexOf(original) !== index) {
+            throw new Error('Vehicle component requires exactly one original solver among153 translation units');
+        }
+
+        await writeFile(overlay, overlayBytes, { flag: 'wx' });
+        await writeFile(copiedHeader, headerBytes, { flag: 'wx' });
+        cpp[index] = overlay;
+        solverOverlay = {
+            originalSha: digest(originalBytes), patchSha: digest(patchBytes), overlaySha: digest(overlayBytes), headerSha: digest(headerBytes),
+            original, overlay, copiedHeader, replacements: 1,
+        };
+    }
+
+    const compilerArguments = ['-3', compiler, '-std=c++17', '-O1', '-DBT_USE_DOUBLE_PRECISION', `-I${path.join(sourceRoot, 'src')}`, bridge, ...cpp,
         '-sMODULARIZE=1', '-sEXPORT_ES6=1', '-sENVIRONMENT=web,node', '-sALLOW_MEMORY_GROWTH=1',
-        `-sEXPORTED_FUNCTIONS=${JSON.stringify(exports.map((name) => `_${name}`))}`, '-o', path.join(output, 'bullet-engine.mjs')],
-    { env: { ...process.env, EM_CONFIG: path.join(sdk, '.emscripten') }, timeout: 180_000, maxBuffer: 4_194_304 });
+        `-sEXPORTED_FUNCTIONS=${JSON.stringify(exports.map((name) => `_${name}`))}`, '-o', path.join(output, 'bullet-engine.mjs')];
+
+    await execute('py', compilerArguments,
+        { env: { ...process.env, EM_CONFIG: path.join(sdk, '.emscripten') }, timeout: 180_000, maxBuffer: 4_194_304 });
 
     const manifest = {
+        profile, exports, solverOverlay, compilerArguments, sourceInventorySha: digest(JSON.stringify(inputs)),
+        compilerSha: digest(await readFile(compiler)), compilerConfigSha: digest(await readFile(path.join(sdk, '.emscripten'))),
         candidateCommit: '2c204c49e56ed15ec5fcfa71d199ab6d6570b3f5', candidateVersion: '3.25', installedCoreVersion: 'unknown', versionMatchVerified: false,
         compilerVersion: '3.1.74', scalarBytes: 8, bridgeSha, sources: cpp.length,
         compilerVerification: 'emcc.py SHA-256; SDK release provenance is documented separately', upstreamLicense: 'BULLET-LICENSE.txt',
@@ -127,6 +193,12 @@ export async function prepareBulletRuntime(outputDirectory) {
 
     if (digest(await readFile(bridge)) !== bridgeSha) {
         throw new Error('Bullet bridge changed during compilation');
+    }
+
+    if (solverOverlay && (digest(await readFile(solverOverlay.overlay)) !== solverOverlay.overlaySha
+        || digest(await readFile(solverOverlay.copiedHeader)) !== solverOverlay.headerSha
+        || digest(await readFile(path.join(import.meta.dirname, 'bullet-vehicle-warmstart.patch'))) !== solverOverlay.patchSha)) {
+        throw new Error('Vehicle solver derivative changed during compilation');
     }
 
     await verifySources(inputs);

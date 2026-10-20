@@ -1,0 +1,54 @@
+--- a/src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp
++++ b/src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp
+@@ -982,17 +982,40 @@
+ 	int solverBodyIdA, int solverBodyIdB,
+ 	btManifoldPoint& cp, const btContactSolverInfo& infoGlobal)
+ {
+-	{
+-		btSolverConstraint& frictionConstraint1 = m_tmpSolverContactFrictionConstraintPool[solverConstraint.m_frictionIndex];
+-		
+-		frictionConstraint1.m_appliedImpulse = 0.f;
+-	}
+-
+-	if ((infoGlobal.m_solverMode & SOLVER_USE_2_FRICTION_DIRECTIONS))
+-	{
+-		btSolverConstraint& frictionConstraint2 = m_tmpSolverContactFrictionConstraintPool[solverConstraint.m_frictionIndex + 1];
+-		
+-		frictionConstraint2.m_appliedImpulse = 0.f;
++	// Altered compatibility overlay: preserve installed PZBullet64.dll's
++	// source-recovered lateral warm-start path (0x180063790), without settings changes.
++	btSolverBody& bodyA = m_tmpSolverBodyPool[solverBodyIdA];
++	btSolverBody& bodyB = m_tmpSolverBodyPool[solverBodyIdB];
++	btSolverConstraint& friction1 = m_tmpSolverContactFrictionConstraintPool[solverConstraint.m_frictionIndex];
++	if (infoGlobal.m_solverMode & SOLVER_USE_WARMSTARTING)
++	{
++		friction1.m_appliedImpulse = cp.m_appliedImpulseLateral1 * infoGlobal.m_warmstartingFactor;
++		if (bodyA.m_originalBody)
++			bodyA.internalApplyImpulse(friction1.m_contactNormal1 * bodyA.internalGetInvMass(), friction1.m_angularComponentA, friction1.m_appliedImpulse);
++		if (bodyB.m_originalBody)
++			bodyB.internalApplyImpulse(-friction1.m_contactNormal2 * bodyB.internalGetInvMass(), -friction1.m_angularComponentB, -(btScalar)friction1.m_appliedImpulse);
++	}
++	else
++	{
++		friction1.m_appliedImpulse = 0.f;
++	}
++	if (infoGlobal.m_solverMode & SOLVER_USE_2_FRICTION_DIRECTIONS)
++	{
++		btSolverConstraint& friction2 = m_tmpSolverContactFrictionConstraintPool[solverConstraint.m_frictionIndex + 1];
++		if (infoGlobal.m_solverMode & SOLVER_USE_WARMSTARTING)
++		{
++			friction2.m_appliedImpulse = cp.m_appliedImpulseLateral2 * infoGlobal.m_warmstartingFactor;
++			// Original second-direction path uses scalar inverse mass here;
++			// internalApplyImpulse still applies the actual solver-body linear factor.
++			if (bodyA.m_originalBody)
++				bodyA.internalApplyImpulse(friction2.m_contactNormal1 * bodyA.m_originalBody->getInvMass(), friction2.m_angularComponentA, friction2.m_appliedImpulse);
++			if (bodyB.m_originalBody)
++				bodyB.internalApplyImpulse(-friction2.m_contactNormal2 * bodyB.m_originalBody->getInvMass(), -friction2.m_angularComponentB, -(btScalar)friction2.m_appliedImpulse);
++		}
++		else
++		{
++			friction2.m_appliedImpulse = 0.f;
++		}
+ 	}
+ }
+ 
