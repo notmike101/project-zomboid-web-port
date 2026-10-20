@@ -19,6 +19,7 @@ import zombie.Lua.LuaManager;
 import zombie.ZomboidGlobals;
 import zombie.inventory.ItemPickerJava;
 import zombie.scripting.ScriptManager;
+import zombie.GameWindow;
 
 /** Loads genuine vanilla definitions and complete shared/client Lua before models and world creation. */
 public final class BrowserContentBootstrap {
@@ -112,7 +113,10 @@ public final class BrowserContentBootstrap {
     }
 
     private static boolean isClientAsset(String name) {
-        return (name.startsWith("media/lua/client/") && (name.endsWith(".lua") || name.endsWith(".png")))
+        return Set.of("media/texturepacks/IconsMoveables.pack", "media/texturepacks/RadioIcons.pack",
+                        "media/texturepacks/ApComUI.pack", "media/texturepacks/Mechanics.pack",
+                        "media/texturepacks/WeatherFx.pack").contains(name)
+                || (name.startsWith("media/lua/client/") && (name.endsWith(".lua") || name.endsWith(".png")))
                 || (name.startsWith("media/ui/") && name.endsWith(".png"))
                 || (name.startsWith("media/lua/shared/Translate/EN/")
                         && (name.endsWith(".json") || name.endsWith(".tbx")));
@@ -166,6 +170,9 @@ public final class BrowserContentBootstrap {
         zombie.core.Languages.instance.init();
         zombie.core.Translator.loadFiles();
         BrowserFontBootstrap.initialize();
+        // Original initShared pack order preserves UI2/radio/ApCom sprite overrides.
+        for (String pack : new String[]{"UI2", "IconsMoveables", "RadioIcons", "ApComUI", "Mechanics", "WeatherFx"})
+            GameWindow.fileSystem.mountTexturePack(pack, GameWindow.texturePackTextures, 2);
         // Same definition prerequisites as GameWindow.initShared, before ScriptManager.Load.
         zombie.characters.skills.PerkFactory.init();
         zombie.characters.skills.CustomPerks.instance.init();

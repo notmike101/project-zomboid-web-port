@@ -118,7 +118,6 @@ public final class BrowserMenuSession implements AutoCloseable {
         BrowserContentBootstrap.gameBoot();
         zombie.core.skinnedmodel.population.HairStyles.init();
         zombie.core.skinnedmodel.population.BeardStyles.init();
-        GameWindow.fileSystem.mountTexturePack("UI2", GameWindow.texturePackTextures, 2);
         org.lwjglx.input.Keyboard.create();
         Core.getInstance().initGlobalShader();
         zombie.core.SpriteRenderer.instance.create();

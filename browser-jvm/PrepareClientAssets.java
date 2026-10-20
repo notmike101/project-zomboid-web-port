@@ -45,6 +45,10 @@ public final class PrepareClientAssets {
                 }
             }
         }
+        for (String pack : List.of("IconsMoveables", "RadioIcons", "ApComUI", "Mechanics", "WeatherFx")) {
+            String name = "media/texturepacks/" + pack + ".pack";
+            files.put(name, installation.resolve(name));
+        }
         List<Path> inputs = new ArrayList<>();
         Map<String, byte[]> contents = new TreeMap<>();
         long totalBytes = 0;
@@ -83,7 +87,10 @@ public final class PrepareClientAssets {
     }
 
     private static boolean allowed(String name) {
-        return (name.startsWith("media/lua/client/") && (name.endsWith(".lua") || name.endsWith(".png")))
+        return Set.of("media/texturepacks/IconsMoveables.pack", "media/texturepacks/RadioIcons.pack",
+                        "media/texturepacks/ApComUI.pack", "media/texturepacks/Mechanics.pack",
+                        "media/texturepacks/WeatherFx.pack").contains(name)
+                || (name.startsWith("media/lua/client/") && (name.endsWith(".lua") || name.endsWith(".png")))
                 || (name.startsWith("media/ui/") && name.endsWith(".png"))
                 || (name.startsWith("media/lua/shared/Translate/EN/")
                         && (name.endsWith(".json") || name.endsWith(".tbx")));
