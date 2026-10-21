@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { NativeMT } from './population-kernel.js';
 import { createPopulationNatives } from './population-natives.js';
 import { decodeCell } from './population-save-codec.js';
 
@@ -27,6 +28,7 @@ async function fixture(bounds = [0, 0, 1, 1]) {
     const files = new Map();
     const writes = [];
     let failure;
+    let reads = 0;
     const service = createPopulationNatives();
     const transport = {
         /**
@@ -44,6 +46,8 @@ async function fixture(bounds = [0, 0, 1, 1]) {
          * @returns {string} Actual fixture hex bytes or genuine absence.
          */
         readOwned(file) {
+            reads++;
+
             return files.get(file) ?? '';
         },
         /**
@@ -135,11 +139,19 @@ async function fixture(bounds = [0, 0, 1, 1]) {
     await z('setOutfitNames', []);
 
     return {
-        service, m, z, files, writes, /**
-                                       * Selects the actual transport failure object for subsequent IO.
-                                       *
-                                       * @param {Error} error - Error whose identity must propagate.
-                                       */
+        service, m, z, files, writes,
+        /**
+         * Counts actual owned-file reads without exposing service state.
+         *
+         * @returns {number} Transport read count.
+         */
+        reads() {
+            return reads;
+        }, /**
+            * Selects the actual transport failure object for subsequent IO.
+            *
+            * @param {Error} error - Error whose identity must propagate.
+            */
         fail(error) {
             failure = error;
         },
@@ -347,6 +359,86 @@ try {
     } finally {
         observeClock = undefined;
         globalThis.Map = OriginalMap;
+    }
+
+    // Authored codec seed; later-age replay admits only cells already loaded at age2.
+    const originalNext = NativeMT.prototype.next;
+    let draws = 0;
+
+    /**
+     * Counts actual draws while preserving the native recurrence operation.
+     *
+     * @returns {number} Original recurrence output.
+     */
+    NativeMT.prototype.next = function () {
+        draws++;
+
+        return originalNext.call(this);
+    };
+
+    /**
+     * Checks one rejected worker destination with a separate transport owner.
+     *
+     * @param {string} mode - Register or known feedback destination.
+     * @returns {Promise<void>} Completion of actual service assertions.
+     */
+    async function lateAgeGuard(mode) {
+        const owner = await fixture([0, 0, 2, 1]);
+
+        try {
+            owner.files.set('zpop/zpop_0_0.bin', pending.files.get('zpop/zpop_0_0.bin'));
+            await owner.z('configFloat', 'RedistributeHours', 12);
+            await owner.z('updateMain', 1, 2);
+            await owner.z('loadChunk', 0, 0, false);
+            await owner.z('registerZombie', 1, 2, 0, 0, 0, 0, 30);
+            await owner.z('hasDataForThread');
+            await owner.z('updateThread');
+            await owner.z('updateMain', 1, 3);
+            await owner.z('loadChunk', 0, 0, false);
+            await owner.z('hasDataForThread');
+            await owner.z('updateThread');
+            assert.equal(owner.service.diagnostics().cells, 1, 'Loaded age3 cell accepted');
+            const beforeTime = owner.service.diagnostics();
+
+            await assert.rejects(owner.z('updateMain', 1, 3.01), /time outside qualified/u);
+            const afterTime = owner.service.diagnostics();
+
+            for (const field of ['cells', 'metadataCells', 'nextID', 'pending', 'updates']) {
+                assert.deepEqual(afterTime[field], beforeTime[field], field);
+            }
+
+            if (mode === 'register') {
+                await owner.z('registerZombie', 257, 2, 0, 0, 0, 0, 31);
+            } else {
+                await owner.z('updateRealZombies', 1, [30, 0], [257, 2, 0]);
+            }
+
+            await owner.z('hasDataForThread');
+            const before = owner.service.diagnostics();
+            const readCount = owner.reads();
+            const files = [...owner.files];
+
+            await assert.rejects(owner.z('updateThread'), /later-age replay requires an already-loaded cell/u);
+            const after = owner.service.diagnostics();
+
+            for (const field of ['cells', 'metadataCells', 'registered', 'nextID', 'pending', 'updates', 'dirtyPopulationCells', 'successfulSaves']) {
+                assert.deepEqual(after[field], before[field], `${mode}:${field}`);
+            }
+
+            assert.equal(owner.reads(), readCount);
+            assert.equal(draws, 0);
+            assert.deepEqual([...owner.files], files);
+        } finally {
+            await owner.z('stop');
+            await owner.m('stop');
+        }
+    }
+
+    try {
+        await lateAgeGuard('register');
+        await lateAgeGuard('feedback');
+    } finally {
+        NativeMT.prototype.next = originalNext;
     }
 
     // Actual transport exception is propagated unchanged, never a successful partial save/retry.
