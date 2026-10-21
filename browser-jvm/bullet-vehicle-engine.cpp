@@ -392,6 +392,7 @@ public:
 };
 struct OwnedVehicle {
     int id;
+    VehicleDefinition* definition=nullptr;
     bool active=false, isStatic=false, hasPublishedStep=false, collisionEvent=false;
     double velocityThreshold=100000, velocityMultiplier=1;
     btVector3 previousLinear{0,0,0}, previousAngular{0,0,0};
@@ -404,14 +405,18 @@ struct OwnedVehicle {
     std::unique_ptr<NativeVehicleRaycaster> raycaster;
     std::unique_ptr<btRaycastVehicle> vehicle;
 };
-static std::unique_ptr<OwnedVehicle> ownedVehicle;
-static bool vehicle_region_published();
+static std::map<int,std::unique_ptr<OwnedVehicle>> ownedVehicles;
+static std::vector<int> vehicleReadback;
+static bool vehicleReadbackValid=false;
+static OwnedVehicle* findVehicle(int id){auto found=ownedVehicles.find(id);return found==ownedVehicles.end()?nullptr:found->second.get();}
+static OwnedVehicle* singleVehicle(){return ownedVehicles.size()==1?ownedVehicles.begin()->second.get():nullptr;}
+static OwnedVehicle* vehicleForBody(const btCollisionObject* body){for(const auto& entry:ownedVehicles)if(entry.second->body.get()==body)return entry.second.get();return nullptr;}
+static bool vehicle_region_published(const OwnedVehicle& owner);
 // Original PZBullet callback at 0x18002e690, decoded instruction-for-instruction.
 // It acts only when contact object A is the vehicle root, preserving Bullet order.
 static bool nativeContactAdded(btManifoldPoint& point,const btCollisionObjectWrapper* first,int,int,const btCollisionObjectWrapper* second,int,int){
-    if(!ownedVehicle)return false;
     const auto* a=first->getCollisionObject();const auto* b=second->getCollisionObject();
-    if(a!=ownedVehicle->body.get())return false;
+    auto* ownedVehicle=vehicleForBody(a);if(!ownedVehicle)return false;
     bool known=false;for(const auto& entry:geometryBodies)if(entry->body.get()==b){known=true;break;}
     if(!known)return false;
     ownedVehicle->collisionEvent=true;
@@ -422,8 +427,8 @@ static bool nativeContactAdded(btManifoldPoint& point,const btCollisionObjectWra
 
 // Native pre-tick callback 0x1800323f0. History is stored before multiplier scaling.
 static void nativeVehiclePreTick(btDynamicsWorld*,btScalar){
-    if(!ownedVehicle)return;
-    auto& owner=*ownedVehicle;auto& body=*owner.body;
+    for(const auto& entry:ownedVehicles){
+    auto& owner=*entry.second;auto& body=*owner.body;
     auto linear=body.getLinearVelocity();auto angular=body.getAngularVelocity();
     auto magnitude=[](const btVector3& value){return std::sqrt(value.y()*value.y()+value.x()*value.x()+value.z()*value.z());};
     if(!owner.isStatic&&magnitude(linear)>double(0.10000000149011612)&&magnitude(linear)-magnitude(owner.previousLinear)>3.5){
@@ -435,13 +440,17 @@ static void nativeVehiclePreTick(btDynamicsWorld*,btScalar){
     }
     owner.previousAngular=angular;
     if(magnitude(linear)>owner.velocityThreshold)body.setLinearVelocity(linear*owner.velocityMultiplier);
+    }
 }
 extern "C" int set_vehicle_velocity_multiplier(int id,float threshold,float multiplier){
+    auto* ownedVehicle=findVehicle(id);
     if(!ownedVehicle||ownedVehicle->id!=id||!std::isfinite(threshold)||!std::isfinite(multiplier)||threshold<0||multiplier<0||multiplier>1)return 0;
     ownedVehicle->velocityThreshold=threshold;ownedVehicle->velocityMultiplier=multiplier;return 1;
 }
 // Original control helper 0x1800126b0; typed native definition fields remain owned.
 extern "C" int control_vehicle(int id,float engineForce,float brakingForce,float steering){
+    auto* ownedVehicle=findVehicle(id);
+    auto* vehicleDefinition=ownedVehicle?ownedVehicle->definition:nullptr;
     if(!ownedVehicle||ownedVehicle->id!=id||!vehicleDefinition)return 0;
     for(float value:{engineForce,brakingForce,steering})if(!std::isfinite(value))return 0;
     if(brakingForce<0)return 0;
@@ -461,6 +470,7 @@ extern "C" int control_vehicle(int id,float engineForce,float brakingForce,float
     return 1;
 }
 extern "C" int apply_central_force(int id,float x,float y,float z){
+    auto* ownedVehicle=findVehicle(id);
     if(!ownedVehicle||ownedVehicle->id!=id||!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(z))return 0;
     // Original JNI0x180009760 accumulates force with actual per-axis linear factors.
     ownedVehicle->body->applyCentralForce(btVector3(double(x),double(y),double(z)));return 1;
@@ -472,7 +482,7 @@ static btQuaternion nativeEuler(const btVector3& degrees){
 }
 extern "C" {
 int define_vehicle_named(int key,const float* values,int count){
-    if(!values||count!=200||key<0||ownedVehicle)return 0;
+    if(!values||count!=200||key<0||!ownedVehicles.empty())return 0;
     for(int i=0;i<count;i++)if(!std::isfinite(values[i]))return 0;
     if(values[10]<0||values[10]>8||std::floor(values[10])!=values[10])return 0;
     int wheels=int(values[10]);
@@ -508,17 +518,17 @@ int define_vehicle_named(int key,const float* values,int count){
 int define_vehicle(const float* values,int count){return define_vehicle_named(0,values,count);}
 int vehicle_definition_count(){return vehicleDefinitions.size();}
 int select_vehicle_definition(int key){
-    auto found=vehicleDefinitions.find(key);if(found==vehicleDefinitions.end()||ownedVehicle)return 0;
+    auto found=vehicleDefinitions.find(key);if(found==vehicleDefinitions.end())return 0;
     vehicleDefinition=found->second.get();return 1;
 }
 
 int add_vehicle(int id,float x,float y,float z,float qx,float qy,float qz,float qw){
     if(!vehicleDefinition && vehicleDefinitions.count(0))vehicleDefinition=vehicleDefinitions.at(0).get();
-    if(!ownedWorld||!vehicleDefinition||ownedVehicle||id<0)return 0;
+    if(!ownedWorld||!vehicleDefinition||ownedVehicles.count(id)||id<0)return 0;
     for(float value:{x,y,z,qx,qy,qz,qw})if(!std::isfinite(value))return 0;
     const btQuaternion rotation{double(qx),double(qy),double(qz),double(qw)};
     if(rotation.length2()==0)return 0; // Zero-quaternion native arithmetic is outside this component.
-    auto pending=std::make_unique<OwnedVehicle>();pending->id=id;
+    auto pending=std::make_unique<OwnedVehicle>();pending->id=id;pending->definition=vehicleDefinition;
     // Original 0x180011090 initializes each admitted tire inflation1/present1/removed0.
     for(int index=0;index<int(vehicleDefinition->wheels.size());index++){pending->inflation[index]=1;pending->present[index]=true;}
     pending->compound=std::make_unique<btCompoundShape>(true);
@@ -552,22 +562,28 @@ int add_vehicle(int id,float x,float y,float z,float qx,float qy,float qz,float 
         wheel.m_frictionSlip=vehicleDefinition->values[8];wheel.m_rollInfluence=vehicleDefinition->values[2];
         if(!input.front)pending->vehicle->setBrake(10000,index);
     }
-    ownedWorld->world.addRigidBody(pending->body.get(),2,15);ownedWorld->world.addVehicle(pending->vehicle.get());
-    ownedVehicle=std::move(pending);gContactAddedCallback=nativeContactAdded;ownedWorld->world.setInternalTickCallback(nativeVehiclePreTick,nullptr,true);return 1;
+    // Allocate the registry node before attaching borrowed body/action pointers to Bullet.
+    auto inserted=ownedVehicles.emplace(id,std::move(pending));auto& owner=*inserted.first->second;
+    ownedWorld->world.addRigidBody(owner.body.get(),2,15);ownedWorld->world.addVehicle(owner.vehicle.get());
+    vehicleReadbackValid=false;gContactAddedCallback=nativeContactAdded;ownedWorld->world.setInternalTickCallback(nativeVehiclePreTick,nullptr,true);return 1;
 }
 int set_vehicle_active(int id,int active){
+    auto* ownedVehicle=findVehicle(id);
     if(!ownedVehicle||ownedVehicle->id!=id||(active!=0&&active!=1)||ownedVehicle->isStatic)return 0;
     ownedVehicle->active=active;ownedVehicle->body->forceActivationState(active?DISABLE_DEACTIVATION:ACTIVE_TAG);return 1;
 }
 int set_vehicle_mass(int id,float mass){
+    auto* ownedVehicle=findVehicle(id);
     if(!ownedVehicle||ownedVehicle->id!=id||!std::isfinite(mass)||mass<=0)return 0;
     btVector3 inertia;ownedVehicle->compound->calculateLocalInertia(mass,inertia);
     ownedVehicle->body->setMassProps(mass,inertia);return 1;
 }
 int set_vehicle_static(int id,int value){
+    auto* ownedVehicle=findVehicle(id);
+    auto* vehicleDefinition=ownedVehicle?ownedVehicle->definition:nullptr;
     if(!ownedVehicle||ownedVehicle->id!=id||(value!=0&&value!=1))return 0;
     if(ownedVehicle->isStatic==bool(value))return 1;
-    bool regionPublished=vehicle_region_published();
+    bool regionPublished=vehicle_region_published(*ownedVehicle);
     auto& owner=*ownedVehicle;auto& body=*owner.body;
     if(!owner.isStatic)ownedWorld->world.removeVehicle(owner.vehicle.get());
     ownedWorld->world.removeRigidBody(&body);
@@ -580,16 +596,22 @@ int set_vehicle_static(int id,int value){
     if(!value)ownedWorld->world.addVehicle(owner.vehicle.get());return 1;
 }
 int set_tire_inflation(int id,int index,float value){
+    auto* ownedVehicle=findVehicle(id);
+    auto* vehicleDefinition=ownedVehicle?ownedVehicle->definition:nullptr;
     if(!ownedVehicle||ownedVehicle->id!=id||index<0||index>=int(vehicleDefinition->wheels.size())||!std::isfinite(value))return 0;
     ownedVehicle->inflation[index]=value;return 1;
 }
 int set_tire_removed(int id,int index,int removed){
+    auto* ownedVehicle=findVehicle(id);
+    auto* vehicleDefinition=ownedVehicle?ownedVehicle->definition:nullptr;
     if(!ownedVehicle||ownedVehicle->id!=id||index<0||index>=int(vehicleDefinition->wheels.size())||(removed!=0&&removed!=1))return 0;
     auto& owner=*ownedVehicle;owner.removed[index]=removed;auto& wheel=owner.vehicle->getWheelInfo(index);
     wheel.m_wheelsRadius=vehicleDefinition->wheels[index].radius*(removed?0.66:1);
     wheel.m_frictionSlip=removed?0.4:vehicleDefinition->values[8];owner.vehicle->updateWheelTransform(index,false);return 1;
 }
 int set_vehicle_params(int id,const float* values,int count){
+    auto* ownedVehicle=findVehicle(id);
+    auto* vehicleDefinition=ownedVehicle?ownedVehicle->definition:nullptr;
     if(!ownedVehicle||ownedVehicle->id!=id||!values||count<int(vehicleDefinition->wheels.size())*6)return 0;
     for(int i=0;i<int(vehicleDefinition->wheels.size())*6;i++)if(!std::isfinite(values[i]))return 0;
     for(int i=0;i<int(vehicleDefinition->wheels.size());i++){
@@ -602,6 +624,7 @@ int set_vehicle_params(int id,const float* values,int count){
     }return 1;
 }
 int vehicle_state(double* output){
+    auto* ownedVehicle=singleVehicle();
     if(!ownedVehicle||!output)return 0;
     auto& body=*ownedVehicle->body;auto origin=body.getWorldTransform().getOrigin();auto inertia=body.getInvInertiaDiagLocal();
     output[0]=ownedVehicle->id;output[1]=body.getInvMass();
@@ -612,45 +635,40 @@ int vehicle_state(double* output){
     return 1;
 }
 int vehicle_basis(double* output,int count){
+    auto* ownedVehicle=singleVehicle();
     if(!ownedVehicle||!output||count<9)return 0;
     const auto& basis=ownedVehicle->body->getWorldTransform().getBasis();
     for(int row=0;row<3;row++)for(int column=0;column<3;column++)output[row*3+column]=basis[row][column];
     return 1;
 }
 int vehicle_child(int index,double* output){
+    auto* ownedVehicle=singleVehicle();
     if(!ownedVehicle||!output||index<0||index>=ownedVehicle->compound->getNumChildShapes())return 0;
     const auto& transform=ownedVehicle->compound->getChildTransform(index);
     for(int row=0;row<3;row++){for(int column=0;column<3;column++)output[row*4+column]=transform.getBasis()[row][column];output[row*4+3]=0;output[12+row]=transform.getOrigin()[row];}output[15]=0;
     btVector3 min,max;ownedVehicle->shapes[index]->getAabb(transform,min,max);for(int axis=0;axis<3;axis++){output[16+axis]=min[axis];output[19+axis]=max[axis];}return 1;
 }
 int vehicle_wheel(int index,double* output){
+    auto* ownedVehicle=singleVehicle();
     if(!ownedVehicle||!output||index<0||index>=ownedVehicle->vehicle->getNumWheels())return 0;
     auto& w=ownedVehicle->vehicle->getWheelInfo(index);int cursor=0;
     for(const auto& vector:{w.m_chassisConnectionPointCS,w.m_wheelDirectionCS,w.m_wheelAxleCS})for(int axis=0;axis<3;axis++)output[cursor++]=vector[axis];
     for(double value:{w.m_suspensionRestLength1,w.m_maxSuspensionTravelCm,w.m_wheelsRadius,w.m_suspensionStiffness,w.m_wheelsDampingCompression,w.m_wheelsDampingRelaxation,w.m_frictionSlip,w.m_steering,w.m_rotation,w.m_rollInfluence,w.m_maxSuspensionForce,w.m_engineForce,w.m_brake})output[cursor++]=value;
     output[cursor]=w.m_bIsFrontWheel;return 1;
 }
-int remove_vehicle(int id){if(!ownedVehicle||ownedVehicle->id!=id)return 0;ownedWorld->world.removeVehicle(ownedVehicle->vehicle.get());ownedWorld->world.removeRigidBody(ownedVehicle->body.get());ownedVehicle.reset();return 1;}
+int remove_vehicle(int id){if(!ownedWorld)return 0;auto* owner=findVehicle(id);if(!owner)return 1;ownedWorld->world.removeVehicle(owner->vehicle.get());ownedWorld->world.removeRigidBody(owner->body.get());ownedVehicles.erase(id);vehicleReadbackValid=false;return 1;}
 }
 
 extern "C" int clear_registered_vehicle(){
-    int result=ownedVehicle?remove_vehicle(ownedVehicle->id):1;
+    int result=1;while(!ownedVehicles.empty())if(!remove_vehicle(ownedVehicles.begin()->first)){result=0;break;}
+    vehicleReadback.clear();vehicleReadbackValid=false;
     vehicleDefinition=nullptr;
     vehicleDefinitions.clear();
     return result;
 }
 
-// Isolated real solver/readback closure. Mapped publication callbacks are a separate frontier.
-extern "C" int step_vehicle_freefall(float delta){
-    if(!ownedWorld||!ownedVehicle||!std::isfinite(delta)||delta!=0.01f||ownedVehicle->isStatic)return 0;
-    for(const auto& map:activeMaps)if(map)return 0;
-    if(!geometryBodies.empty()||ownedWorld->world.getNumCollisionObjects()!=1)return 0;
-    ownedWorld->world.stepSimulation(double(delta),0,0);
-    ownedVehicle->hasPublishedStep=true;return 1;
-}
-extern "C" int get_vehicle_physics(float* output,int count){
-    if(!output||count<30||!ownedVehicle||!ownedVehicle->hasPublishedStep||ownedVehicle->vehicle->getNumWheels()!=4)return 0;
-    auto& owner=*ownedVehicle;auto& body=*owner.body;auto& vehicle=*owner.vehicle;
+static int packVehicle(OwnedVehicle& owner,float* output){
+    auto& body=*owner.body;auto& vehicle=*owner.vehicle;
     const auto& transform=body.getWorldTransform();auto quaternion=transform.getRotation();auto velocity=body.getLinearVelocity();
     output[0]=float(owner.id)+0.1f;
     for(int axis=0;axis<3;axis++)output[1+axis]=transform.getOrigin()[axis];
@@ -664,13 +682,26 @@ extern "C" int get_vehicle_physics(float* output,int count){
         output[cursor+2]=wheel.m_skidInfo;output[cursor+3]=wheel.m_raycastInfo.m_suspensionLength;
     }return 1;
 }
+// Isolated real solver/readback closure. Mapped publication callbacks are a separate frontier.
+extern "C" int step_vehicle_freefall(float delta){
+    auto* ownedVehicle=singleVehicle();
+    if(!ownedWorld||!ownedVehicle||!std::isfinite(delta)||delta!=0.01f||ownedVehicle->isStatic)return 0;
+    for(const auto& map:activeMaps)if(map)return 0;
+    if(!geometryBodies.empty()||ownedWorld->world.getNumCollisionObjects()!=1)return 0;
+    ownedWorld->world.stepSimulation(double(delta),0,0);
+    ownedVehicle->hasPublishedStep=true;return 1;
+}
+extern "C" int get_vehicle_physics(float* output,int count){
+    auto* ownedVehicle=singleVehicle();
+    if(!output||count<30||!ownedVehicle||!ownedVehicle->hasPublishedStep||ownedVehicle->vehicle->getNumWheels()!=4)return 0;
+    return packVehicle(*ownedVehicle,output);
+}
 
 static std::shared_ptr<Chunk> find_chunk(int x,int y){
     for(const auto& map:activeMaps)if(map){auto chunk=map->at(x,y);if(chunk)return chunk;}return nullptr;
 }
-static bool vehicle_region_published(){
-    if(!ownedVehicle)return false;
-    auto origin=ownedVehicle->body->getWorldTransform().getOrigin();
+static bool vehicle_region_published(const OwnedVehicle& owner){
+    auto origin=owner.body->getWorldTransform().getOrigin();
     int x=int(std::floor(origin.x()+worldHeader[4])),y=int(std::floor(origin.z()+worldHeader[5]));
     int level=int(std::floor(origin.y()/2.449490010738373));
     int wx=int(std::floor(float(x)*0.125f)),wy=int(std::floor(float(y)*0.125f));
@@ -700,18 +731,20 @@ extern "C" int replace_chunk_level(int wx,int wy,int min,int max,int level,const
     auto& record=*chunk->records[level-min];std::copy(cells,cells+256,record.cells.begin());record.loaded=true;record.published=false;return 1;
 }
 extern "C" int begin_vehicle_publication(int* output,int capacity){
-    if(!ownedWorld||!ownedVehicle||!output||capacity<169*64)return -1;
+    if(!ownedWorld||ownedVehicles.empty()||!output||capacity<169*64)return -1;
     int maps=0;for(const auto& map:activeMaps)if(map)maps++;if(maps!=1)return -1;
     // Native world-boundary chunks expand to0..63. This component rejects that separate boundary before mutation.
     for(const auto& map:activeMaps)if(map)for(const auto& chunk:map->cells){
         if(chunk->x+1==worldHeader[0]*32||chunk->x==(worldHeader[2]+1)*32||chunk->y+1==worldHeader[1]*32||chunk->y==(worldHeader[3]+1)*32)return -1;
     }
-    auto origin=ownedVehicle->body->getWorldTransform().getOrigin();
+    for(const auto& entry:ownedVehicles){
+    auto origin=entry.second->body->getWorldTransform().getOrigin();
     int x=int(std::floor(origin.x()+worldHeader[4])),y=int(std::floor(origin.z()+worldHeader[5]));
     int level=int(std::floor(origin.y()/2.449490010738373));
     int wx=int(std::floor(float(x)*0.125f)),wy=int(std::floor(float(y)*0.125f));
     for(int dx=-1;dx<=1;dx++)for(int dy=-1;dy<=1;dy++)if(auto chunk=find_chunk(wx+dx,wy+dy)){
         for(int z=level-1;z<=level+1;z++)if(z>=chunk->minLevel&&z<=chunk->maxLevel)chunk->records[z-chunk->minLevel]->needed=true;
+    }
     }
     int count=0;
     for(const auto& map:activeMaps)if(map)for(const auto& chunk:map->cells)for(int z=chunk->minLevel;z<=chunk->maxLevel;z++){
@@ -719,7 +752,7 @@ extern "C" int begin_vehicle_publication(int* output,int capacity){
     }return count;
 }
 extern "C" int finish_vehicle_publication(){
-    if(!ownedWorld||!ownedVehicle)return 0;
+    if(!ownedWorld||ownedVehicles.empty())return 0;
     for(const auto& map:activeMaps)if(map)for(const auto& chunk:map->cells)for(int z=chunk->minLevel;z<=chunk->maxLevel;z++){
         auto& record=*chunk->records[z-chunk->minLevel];
         if(record.needed&&!record.published){if(!build_geometry(chunk->x,chunk->y,z,record.cells.data()))return 0;record.published=true;}
@@ -731,10 +764,11 @@ extern "C" int finish_vehicle_publication(){
     }return 1;
 }
 extern "C" int step_mapped_vehicle(float delta){
-    if(!ownedWorld||!ownedVehicle||!std::isfinite(delta)||delta!=0.01f)return 0;
-    ownedWorld->world.stepSimulation(double(delta),0,0);ownedVehicle->hasPublishedStep=true;return 1;
+    if(!ownedWorld||ownedVehicles.empty()||!std::isfinite(delta)||delta!=0.01f)return 0;
+    ownedWorld->world.stepSimulation(double(delta),0,0);for(auto& entry:ownedVehicles)entry.second->hasPublishedStep=true;return 1;
 }
 extern "C" int vehicle_control_history(double* output){
+    auto* ownedVehicle=singleVehicle();
     if(!ownedVehicle||!output)return 0;
     auto& owner=*ownedVehicle;output[0]=owner.velocityThreshold;output[1]=owner.velocityMultiplier;
     auto linear=owner.body->getLinearVelocity(),angular=owner.body->getAngularVelocity();
@@ -753,6 +787,7 @@ static void clear_chunk_geometry(int x,int y){
     }
 }
 extern "C" int vehicle_material(double* output){
+    auto* ownedVehicle=singleVehicle();
     if(!ownedVehicle||!output)return 0;auto& body=*ownedVehicle->body;
     output[0]=body.getFriction();output[1]=body.getRestitution();output[2]=body.getRollingFriction();output[3]=body.getSpinningFriction();output[4]=body.getActivationState();return 1;
 }
@@ -768,13 +803,13 @@ extern "C" int set_chunk_levels(int wx,int wy,int min,int max){
     }
     chunk->minLevel=min;chunk->maxLevel=max;chunk->records=std::move(pending);return 1;
 }
-extern "C" int registered_vehicle_count(){return ownedWorld?(ownedVehicle?1:0):-1;}
+extern "C" int registered_vehicle_count(){return ownedWorld?int(ownedVehicles.size()):-1;}
 
 extern "C" int object_registry_count(){
     if(!ownedWorld)return -1;
     const auto& objects=ownedWorld->world.getCollisionObjectArray();
     for(int i=0;i<objects.size();i++){
-        if(ownedVehicle&&objects[i]==ownedVehicle->body.get())continue;
+        if(vehicleForBody(objects[i]))continue;
         bool geometry=false;for(const auto& body:geometryBodies)if(objects[i]==body->body.get()){geometry=true;break;}
         if(!geometry)return -1; // No other dynamic-object owner has been admitted.
     }return 0;
@@ -782,6 +817,7 @@ extern "C" int object_registry_count(){
 
 // Read-only observation of existing three ticks; no solver/callback/settings change.
 extern "C" int observe_vehicle_contacts(double* output,int capacity){
+    auto* ownedVehicle=singleVehicle();
  if(!ownedWorld||!ownedVehicle||!output||capacity<8192)return -1;
  int manifolds=ownedWorld->dispatcher.getNumManifolds();if(manifolds<0||manifolds>64)return -1;
  int cursor=0;auto add=[&](double value){if(!std::isfinite(value)||cursor>=capacity)return false;output[cursor++]=value;return true;};
@@ -800,4 +836,22 @@ extern "C" int observe_vehicle_contacts(double* output,int capacity){
   }
  }
  return cursor;
+}
+
+extern "C" int vehicle_count_snapshot(){
+    if(!ownedWorld)return -1;
+    vehicleReadback.clear();for(const auto& entry:ownedVehicles)vehicleReadback.push_back(entry.first);
+    vehicleReadbackValid=true;return vehicleReadback.size();
+}
+extern "C" int get_vehicle_physics_batch(int offset,float* output,int count){
+    if(!ownedWorld||!vehicleReadbackValid||offset<0)return -1;
+    if(offset>=int(vehicleReadback.size()))return 0;
+    if(!output||count<30)return -1;
+    int records=btMin(count/30,int(vehicleReadback.size())-offset);
+    for(int index=0;index<records;index++){
+        auto* owner=findVehicle(vehicleReadback[offset+index]);
+        if(!owner||owner->vehicle->getNumWheels()!=4)return -1;
+    }
+    for(int index=0;index<records;index++)packVehicle(*findVehicle(vehicleReadback[offset+index]),output+index*30);
+    return records;
 }

@@ -10,7 +10,8 @@ export function createVehicleWorldNatives(engine) {
     const base = createBulletNatives(engine, { registeredStaticMeshes: true });
     const definitions = new Map();
     const calls = [];
-    let vehicleId = null;
+    const vehicleIds = new Set();
+    let readbackCount = null;
 
     /**
      * Rejects unsupported input before changing engine state.
@@ -177,10 +178,11 @@ export function createVehicleWorldNatives(engine) {
 
             expect(definition?.wheels === 4, 'Original owner component requires a registered four-wheel definition');
 
-            expect(Number.isInteger(id) && vehicleId === null, 'Unsupported vehicle owner or definition');
+            expect(Number.isInteger(id) && !vehicleIds.has(id), 'Unsupported duplicate vehicle owner');
 
             expect(engine._select_vehicle_definition(definition.key) === 1 && engine._add_vehicle(id, x, y, z, qx, qy, qz, qw) === 1, 'Actual vehicle creation rejected');
-            vehicleId = id;
+            vehicleIds.add(id);
+            readbackCount = null;
             calls.push({ method: 'addVehicle', id, name: String(name), x, y, z, qx, qy, qz, qw });
         },
         /**
@@ -191,7 +193,10 @@ export function createVehicleWorldNatives(engine) {
          */
         removeVehicle(lib, id) {
             expect(engine._remove_vehicle(id) === 1, 'Actual vehicle removal rejected');
-            vehicleId = null;
+
+            if (vehicleIds.delete(id)) {
+                readbackCount = null;
+            }
         },
         /**
          * Dispatches setVehicleActive to the actual qualified engine operation.
@@ -266,10 +271,10 @@ export function createVehicleWorldNatives(engine) {
 
             expect(count >= 0, 'Physics world not initialized');
 
-            expect(count === 0 ? vehicleId === null : count === 1 && vehicleId !== null, 'Actual vehicle registry ownership mismatch');
+            expect(count === vehicleIds.size, 'Actual vehicle registry ownership mismatch');
 
             // Native 0x18000e390 looks up the owner before accessing even a null array.
-            if (count === 0 || id !== vehicleId) {
+            if (!vehicleIds.has(id)) {
                 calls.push({ method: 'setVehicleParams', id, outcome: 'lookup-miss', result: -1 });
 
                 return -1;
@@ -390,9 +395,10 @@ export function createVehicleWorldNatives(engine) {
          * @returns {number} Actual operation result.
          */
         getVehicleCount() {
-            const count = engine._registered_vehicle_count();
+            const count = engine._vehicle_count_snapshot();
 
-            expect(count >= 0, 'Original world is not initialized');
+            expect(count === vehicleIds.size, 'Actual vehicle snapshot ownership mismatch');
+            readbackCount = count;
 
             return count;
         },
@@ -402,26 +408,42 @@ export function createVehicleWorldNatives(engine) {
          * @param {object} lib - Original Java namespace supplied by the runtime.
          * @param {number} offset - Original numeric native argument.
          * @param {Float32Array} values - Original typed parameter values.
-         * @returns {number} Actual operation result.
+         * @returns {Promise<number>} Actual operation result.
          */
-        getVehiclePhysics(lib, offset, values) {
-            expect(Number.isInteger(offset) && offset >= 0, 'Invalid original vehicle offset');
-            const count = engine._registered_vehicle_count();
+        async getVehiclePhysics(lib, offset, values) {
+            expect(Number.isInteger(offset), 'Invalid original vehicle offset');
 
-            expect(count >= 0, 'Original world is not initialized');
+            if (offset < 0) {
+                const Exception = await lib.java.lang.IllegalArgumentException;
 
-            if (offset >= count) {
+                throw await new Exception('Invalid original vehicle offset');
+            }
+
+            expect(readbackCount !== null, 'Original vehicle count snapshot required after owner changes');
+
+            if (offset >= readbackCount) {
                 return 0;
             }
 
-            expect(values instanceof Float32Array && values.length >= 30, 'Original readback array too small');
-            const pointer = engine._malloc(120);
+            expect(values instanceof Float32Array, 'Original typed readback array required');
+
+            if (values.length < 30) {
+                const Exception = await lib.java.lang.IllegalArgumentException;
+
+                throw await new Exception('Original readback array too small');
+            }
+
+            const pointer = engine._malloc(values.byteLength);
+
+            expect(pointer !== 0, 'Actual readback allocation failed');
 
             try {
-                expect(engine._get_vehicle_physics(pointer, 30) === 1, 'Unsupported owner or unpublished vehicle readback');
-                values.set(engine.HEAPF32.subarray(pointer / 4, pointer / 4 + 30));
+                const written = engine._get_vehicle_physics_batch(offset, pointer, values.length);
 
-                return 1;
+                expect(written >= 0 && written <= Math.floor(values.length / 30), 'Actual ordered vehicle snapshot readback rejected');
+                values.set(engine.HEAPF32.subarray(pointer / 4, pointer / 4 + written * 30));
+
+                return written;
             } finally {
                 engine._free(pointer);
             }
@@ -447,7 +469,8 @@ export function createVehicleWorldNatives(engine) {
         async destroyWorld(lib) {
             await base.natives.Java_zombie_core_physics_Bullet_destroyWorld(lib);
             definitions.clear();
-            vehicleId = null;
+            vehicleIds.clear();
+            readbackCount = null;
         },
     };
 
@@ -495,7 +518,7 @@ export function createVehicleWorldNatives(engine) {
                 }
             }
 
-            return { ...observed, definitionCount: definitions.size, vehicleId, calls: calls.slice() };
+            return { ...observed, definitionCount: definitions.size, vehicleId: vehicleIds.size === 1 ? vehicleIds.values().next().value : null, vehicleIds: [...vehicleIds], calls: calls.slice() };
         },
     };
 }
