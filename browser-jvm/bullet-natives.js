@@ -171,9 +171,15 @@ function readMaps(engine, world) {
  * PZ's embedded upstream revision and dynamic simulation remain unqualified.
  *
  * @param {object} engine - Actual initialized double-precision WASM module.
+ * @param {object} [options] - Explicit engine profile capabilities.
+ * @param {boolean} [options.registeredStaticMeshes] - Require actual shared registered-mesh consumers.
  * @returns {object} Original JNI callbacks and detached diagnostic snapshots.
  */
-export function createBulletNatives(engine) {
+export function createBulletNatives(engine, { registeredStaticMeshes = false } = {}) {
+    if (registeredStaticMeshes && ['_bind_static_mesh', '_has_static_mesh', '_registered_mesh_references'].some((name) => typeof engine[name] !== 'function')) {
+        throw new Error('Actual registered-mesh consumer engine exports are required');
+    }
+
     if (engine._scalar_bytes() !== 8) {
         throw new Error('Bullet requires the qualified double-precision core');
     }
@@ -191,6 +197,10 @@ export function createBulletNatives(engine) {
 
     /** Destroys every owned shape, including compound children. */
     function clearMeshes() {
+        if (registeredStaticMeshes && engine._registered_mesh_references(0) !== 0) {
+            throw new Error('Registered Bullet meshes still have actual chunk or body consumers');
+        }
+
         for (const handle of meshes.values()) {
             if (engine._clear_mesh(handle) !== 1) {
                 throw new Error('Actual Bullet shape destruction failed');
@@ -335,6 +345,10 @@ export function createBulletNatives(engine) {
                     throw new Error('Actual Bullet hull registration failed');
                 }
 
+                if (registeredStaticMeshes && engine._bind_static_mesh(index, handle) !== 1) {
+                    throw new Error('Actual Bullet mesh registry binding failed');
+                }
+
                 meshes.set(index, handle);
             } catch (error) {
                 if (created) {
@@ -353,14 +367,22 @@ export function createBulletNatives(engine) {
         },
         /** Destroys owned shapes and the actual empty Dynamics world. */
         destroyWorld() {
-            clearMeshes();
+            if (!registeredStaticMeshes) {
+                clearMeshes();
+            }
 
             if (world) {
                 if (engine._destroy_mapped_world() !== 1) {
                     throw new Error('Actual Bullet Dynamics destruction failed');
                 }
 
+                if (registeredStaticMeshes) {
+                    clearMeshes();
+                }
+
                 world = null;
+            } else if (registeredStaticMeshes) {
+                clearMeshes();
             }
         },
     };

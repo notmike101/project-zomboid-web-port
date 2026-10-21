@@ -7,7 +7,7 @@ import { createBulletNatives } from './bullet-natives.js';
  * @returns {object} Actual operation result.
  */
 export function createVehicleWorldNatives(engine) {
-    const base = createBulletNatives(engine);
+    const base = createBulletNatives(engine, { registeredStaticMeshes: true });
     const definitions = new Map();
     const calls = [];
     let vehicleId = null;
@@ -119,7 +119,7 @@ export function createVehicleWorldNatives(engine) {
             for (let index = 0; index < count; index++) {
                 const encoded = bytes[cursor++];
 
-                expect(encoded >= 1 && encoded <= 10, `Unsupported original static geometry ID ${encoded}`);
+                expect(encoded >= 1 && (encoded <= 10 || engine._has_static_mesh(encoded - 11) === 1), `Unsupported original static geometry ID ${encoded}`);
 
                 cells[(sx * 8 + sy) * 4 + index] = encoded;
             }

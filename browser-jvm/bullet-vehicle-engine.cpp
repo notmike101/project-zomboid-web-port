@@ -13,6 +13,7 @@ extern "C" int clear_geometry();
 // Candidate real Bullet collision core. PZ's embedded upstream revision is unknown.
 struct Mesh {
     btCollisionShape* root = nullptr;
+    int bodyReferences = 0;
     std::vector<btConvexHullShape*> hulls;
     ~Mesh() {
         if (root && root->isCompound()) delete root;
@@ -20,6 +21,8 @@ struct Mesh {
     }
 };
 static std::vector<Mesh*> owned;
+static std::map<int,int> registeredMeshes;
+extern "C" int registered_mesh_references(int handle);
 struct World {
     btDefaultCollisionConfiguration configuration;
     btCollisionDispatcher dispatcher{&configuration};
@@ -54,7 +57,7 @@ int create_mesh(int compound) {
 int add_hull(int handle, const float* points, int count) {
     if (handle < 1 || handle > int(owned.size()) || !owned[handle-1] || count < 1 || count > 10000 || !points) return 0;
     Mesh* mesh = owned[handle-1];
-    if (mesh->root && !mesh->root->isCompound()) return 0;
+    if (registered_mesh_references(handle) || (mesh->root && !mesh->root->isCompound())) return 0;
     for (int i=0;i<count*3;i++) if (!std::isfinite(points[i])) return 0;
     auto* hull = new btConvexHullShape(nullptr,0,32);
     for (int i=0;i<count;i++) hull->addPoint(btVector3(double(points[i*3]),double(points[i*3+1]),double(points[i*3+2])),i==count-1);
@@ -88,6 +91,8 @@ int get_point(int handle,int child,int point,double* output) {
 }
 int clear_mesh(int handle) {
     if(handle<1 || handle>int(owned.size()) || !owned[handle-1]) return 0;
+    if(registered_mesh_references(handle))return 0;
+    for(auto it=registeredMeshes.begin();it!=registeredMeshes.end();)if(it->second==handle)it=registeredMeshes.erase(it);else ++it;
     delete owned[handle-1]; owned[handle-1]=nullptr; return 1;
 }
 int live_meshes() { int count=0; for(auto* mesh:owned) if(mesh) count++; return count; }
@@ -121,6 +126,26 @@ struct ChunkMap {
 };
 static std::array<std::unique_ptr<ChunkMap>,4> activeMaps;
 static std::array<int,6> worldHeader;
+static Mesh* registeredMesh(int index){
+    auto it=registeredMeshes.find(index);
+    return it!=registeredMeshes.end()&&it->second>=1&&it->second<=int(owned.size())?owned[it->second-1]:nullptr;
+}
+static bool validCell(int encoded){return encoded>=0&&encoded<=255&&(encoded<=10||registeredMesh(encoded-11));}
+extern "C" int bind_static_mesh(int index,int handle){
+    if(!ownedWorld||index<0||index>10000||handle<1||handle>int(owned.size())||!owned[handle-1]||!owned[handle-1]->root||owned[handle-1]->hulls.empty())return 0;
+    auto it=registeredMeshes.find(index);if(it!=registeredMeshes.end()&&it->second!=handle)return 0;
+    registeredMeshes[index]=handle;return 1;
+}
+extern "C" int has_static_mesh(int index){return ownedWorld&&registeredMesh(index)?1:0;}
+extern "C" int registered_mesh_references(int handle){
+    int count=0;
+    for(int i=0;i<int(owned.size());i++)if(owned[i]&&(handle==0||handle==i+1))count+=owned[i]->bodyReferences;
+    for(auto& map:activeMaps)if(map)for(auto& chunk:map->cells)for(auto& record:chunk->records)for(int encoded:record->cells)if(encoded>=11){
+        auto it=registeredMeshes.find(encoded-11);if(it!=registeredMeshes.end()&&(handle==0||it->second==handle))count++;
+    }
+    return count;
+}
+
 extern "C" {
 int create_mapped_world(const int* header){
     if(!header||ownedWorld||header[0]<-250||header[1]<-250||header[2]>250||header[3]>250||header[2]<header[0]||header[3]<header[1]||header[4]!=header[0]*256||header[5]!=header[1]*256)return 0;
@@ -197,6 +222,15 @@ struct GeometryBody {
     std::vector<std::unique_ptr<btBoxShape>> children;
     std::unique_ptr<btCollisionObject> body;
     bool rigid=true;
+    Mesh* borrowedMesh=nullptr;
+    std::unique_ptr<btMotionState> motionState;
+    ~GeometryBody(){body.reset();motionState.reset();if(borrowedMesh)borrowedMesh->bodyReferences--;}
+    GeometryBody(double x,double y,double z,Mesh* mesh):borrowedMesh(mesh){
+        btTransform transform;transform.setIdentity();transform.setOrigin(btVector3(x,y,z));
+        motionState=std::make_unique<btDefaultMotionState>(transform);
+        btRigidBody::btRigidBodyConstructionInfo info(0,motionState.get(),mesh->root,btVector3(0,0,0));
+        body=std::make_unique<btRigidBody>(info);mesh->bodyReferences++;
+    }
     GeometryBody(double x,double y,double z,double hx,double hy,double hz) {
         shape=std::make_unique<btBoxShape>(btVector3(hx,hy,hz));
         btRigidBody::btRigidBodyConstructionInfo info(0,nullptr,shape.get(),btVector3(0,0,0));
@@ -247,7 +281,7 @@ int build_geometry(int wx,int wy,int level,const int* cells){
     std::shared_ptr<Chunk> chunk;
     for(auto& map:activeMaps)if(map){chunk=map->at(wx,wy);if(chunk)break;}
     if(!chunk)return 0;
-    for(int i=0;i<256;i++)if(cells[i]<0||cells[i]>10)return 0;
+    for(int i=0;i<256;i++)if(!validCell(cells[i]))return 0;
     for(int square=0;square<64;square++){int stairs=0;for(int slot=0;slot<4;slot++)if(cells[square*4+slot]==8||cells[square*4+slot]==9)stairs++;if(stairs>1)return 0;}
     bool floor[8][8]{};bool west[8][8]{};bool north[8][8]{};bool south[8][8]{};bool east[8][8]{};
     std::vector<std::unique_ptr<GeometryBody>> pending;
@@ -257,6 +291,11 @@ int build_geometry(int wx,int wy,int level,const int* cells){
     auto add=[&](double x,double y,double z,double hx,double hy,double hz){auto body=std::make_unique<GeometryBody>(x,y,z,hx,hy,hz);body->chunkX=wx;body->chunkY=wy;body->level=level;pending.push_back(std::move(body));};
     for(int x=0;x<8;x++)for(int y=0;y<8;y++)for(int slot=0;slot<4;slot++){
         int id=cells[(x*8+y)*4+slot];
+        if(id>=11){
+            // Native 0x18002ef20 uses float world-relative square centers and float(level)*3 height.
+            auto body=std::make_unique<GeometryBody>(double(float(wx*8+x)-float(worldHeader[4])+.5f),height,double(float(wy*8+y)-float(worldHeader[5])+.5f),registeredMesh(id-11));
+            body->chunkX=wx;body->chunkY=wy;body->level=level;pending.push_back(std::move(body));
+        }
         if(id==1||id==10){
             add(baseX+x+0.5,height+1,baseY+y+0.5,0.5,1,0.5);
             if(id==10)pending.back()->mask=6; // Native SolidStairs 0x18002db90 uses group1/mask6.
@@ -315,8 +354,8 @@ int geometry_count(){return geometryBodies.size();}
 int geometry_body(int index,double* output){
     if(index<0||index>=int(geometryBodies.size())||!output)return 0;
     auto& entry=*geometryBodies[index];
-    auto transform=entry.body->getWorldTransform();btVector3 min,max;entry.shape->getAabb(transform,min,max);
-    output[0]=entry.shape->getShapeType();
+    auto transform=entry.body->getWorldTransform();btVector3 min,max;auto* actualShape=entry.body->getCollisionShape();actualShape->getAabb(transform,min,max);
+    output[0]=actualShape->getShapeType();
     for(int axis=0;axis<3;axis++){output[1+axis]=transform.getOrigin()[axis];output[4+axis]=min[axis];output[7+axis]=max[axis];}
     return 1;
 }
@@ -637,7 +676,7 @@ static bool vehicle_region_published(){
 extern "C" int replace_chunk_level(int wx,int wy,int min,int max,int level,const int* cells){
     auto chunk=find_chunk(wx,wy);
     if(!chunk||!cells||min<0||max>63||min>max||level<min||level>max)return 0;
-    for(int i=0;i<256;i++)if(cells[i]<0||cells[i]>10)return 0;
+    for(int i=0;i<256;i++)if(!validCell(cells[i]))return 0;
     for(int square=0;square<64;square++){int stairs=0;for(int slot=0;slot<4;slot++)if(cells[square*4+slot]==8||cells[square*4+slot]==9)stairs++;if(stairs>1)return 0;}
     std::vector<std::unique_ptr<ChunkRecord>> pending(max-min+1);
     for(int z=min;z<=max;z++)if(z<chunk->minLevel||z>chunk->maxLevel)pending[z-min]=std::make_unique<ChunkRecord>(chunk.get());
