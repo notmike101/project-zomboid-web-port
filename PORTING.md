@@ -507,3 +507,10 @@ Next, select this pinned union together with the qualified Reader and explicit f
 The first private two-vehicle stepping browser comparison failed four of 732 packed float32 fields. The separated CarNormal linear Y velocity differs by one ULP at steps one and two in both reads; all overlapping-case packed values and collision dirty consumption match the native reference. Preserve this result and compare actual native body velocities, serialization and browser integration operations before changing the implementation. Do not adjust timestep or introduce a tolerance merely to pass.
 
 All six original step calls and twelve reads completed, the VM exited zero, all 481 frozen inputs remained unchanged and cleanup completed normally. The private vehicle-contact and zero-map publication candidate remains unpromoted. The existing whole-startup generation continues with its explicitly pinned earlier physics implementation.
+
+
+## Qualified metadata optimization awaiting full integration
+
+The small same-owner eager-publication/positive-metadata fixture passes its actual Java and content assertions. A cold canonical regular-file metadata lookup avoids the original one-byte HTTP probe while content reads still use the genuine payload request. Aliases, directories, empty files and unknown paths retain original delegation. All 31 pinned inputs remain unchanged and cleanup completes; 11 strict network events remain failures.
+
+Prepare this as a new immutable whole-startup derivative only. Publish and certify the finite namespace through the same active media owner before Java, install the qualified hook against the actual runtime mount, preserve content routing and all lifecycle/input/save gates, and account for publication within the existing total owner deadline. Do not adopt historical snapshots or reset the whole-run budget after preparation. The current whole-game run and its frozen inputs are unchanged; full-scale startup performance and world loading remain unqualified.
