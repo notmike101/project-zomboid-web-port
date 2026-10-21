@@ -45,8 +45,11 @@ public final class AiSceneSnapshot {
   final DataInputStream in;final Map<Integer,Object> seen=new HashMap<>();Reader(DataInputStream in){this.in=in;}
   Class<?> type(String name)throws Exception{return switch(name){case "int"->int.class;case "byte"->byte.class;case "short"->short.class;case "long"->long.class;case "float"->float.class;case "double"->double.class;case "boolean"->boolean.class;case "char"->char.class;default->{if(!name.startsWith("jassimp.")&&!name.equals("java.lang.String")&&!name.equals("java.nio.ByteBuffer")&&!name.equals("java.lang.Object"))throw new IOException("Unexpected snapshot type "+name);yield Class.forName(name);}};}
   Object construct(Class<?> type)throws Exception{
+   // These original wrappers only store their buffer; decoded real fields replace it before return.
+   // Original AiLightType.<clinit> assigns DIRECTIONAL raw 1; raw 0 is rejected.
+   boolean bufferWrapper=type==AiVector.class||type==AiQuaternion.class||type==AiColor.class;
    var constructors=type.getDeclaredConstructors();Arrays.sort(constructors,Comparator.comparingInt(Constructor::getParameterCount));
-   for(var c:constructors){c.setAccessible(true);Object[] args=new Object[c.getParameterCount()];var types=c.getParameterTypes();for(int i=0;i<args.length;i++){var t=types[i];args[i]=t==String.class?"":t==int.class?0:t==long.class?0L:t==float.class?0f:t==double.class?0d:t==boolean.class?false:t.isArray()?Array.newInstance(t.getComponentType(),16):null;}if(type.getName().equals("jassimp.AiMaterial$Property"))args[3]=1;try{return c.newInstance(args);}catch(InvocationTargetException e){}}
+   for(var c:constructors){c.setAccessible(true);Object[] args=new Object[c.getParameterCount()];var types=c.getParameterTypes();for(int i=0;i<args.length;i++){var t=types[i];args[i]=type==AiLight.class&&i==1?1:bufferWrapper&&t==ByteBuffer.class?ByteBuffer.allocate(0):t==String.class?"":t==int.class?0:t==long.class?0L:t==float.class?0f:t==double.class?0d:t==boolean.class?false:t.isArray()?Array.newInstance(t.getComponentType(),16):null;}if(type.getName().equals("jassimp.AiMaterial$Property"))args[3]=1;try{return c.newInstance(args);}catch(InvocationTargetException e){}}
    throw new IOException("No usable importer constructor: "+type.getName());
   }
   @SuppressWarnings({"unchecked","rawtypes"}) Object value()throws Exception{
