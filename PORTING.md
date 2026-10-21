@@ -500,3 +500,10 @@ Carry the qualified ordered per-ID Bullet collection and count-snapshot/batch ex
 The 2,915-model native conversion and separate 6,034-entry index assembly have completed. The union retains every prior identity, both original plans, exact source/flag/snapshot hashes and the observed missing Cockerel skeleton identity. Its snapshots total 1,072,956,068 bytes. The converter's per-plan 4,096-record limit remains unchanged; the existing runtime index cache supports the separately assembled union.
 
 Next, select this pinned union together with the qualified Reader and explicit float-access helper in a fresh original-game startup generation. Its preflight must require the actual 6,034-entry inventory and helper route while preserving the existing physics, media, UI actions and lifecycle bounds. Exercise the genuine original FinalPlay/GameLoading path before making any browser world-loading claim. The new index has not yet been exercised in that path.
+
+
+## Two-vehicle stepping: investigate before promotion
+
+The first private two-vehicle stepping browser comparison failed four of 732 packed float32 fields. The separated CarNormal linear Y velocity differs by one ULP at steps one and two in both reads; all overlapping-case packed values and collision dirty consumption match the native reference. Preserve this result and compare actual native body velocities, serialization and browser integration operations before changing the implementation. Do not adjust timestep or introduce a tolerance merely to pass.
+
+All six original step calls and twelve reads completed, the VM exited zero, all 481 frozen inputs remained unchanged and cleanup completed normally. The private vehicle-contact and zero-map publication candidate remains unpromoted. The existing whole-startup generation continues with its explicitly pinned earlier physics implementation.
