@@ -417,9 +417,11 @@ static bool vehicle_region_published(const OwnedVehicle& owner);
 static bool nativeContactAdded(btManifoldPoint& point,const btCollisionObjectWrapper* first,int,int,const btCollisionObjectWrapper* second,int,int){
     const auto* a=first->getCollisionObject();const auto* b=second->getCollisionObject();
     auto* ownedVehicle=vehicleForBody(a);if(!ownedVehicle)return false;
-    bool known=false;for(const auto& entry:geometryBodies)if(entry->body.get()==b){known=true;break;}
+    auto* otherVehicle=vehicleForBody(b);
+    bool known=otherVehicle!=nullptr;if(!known)for(const auto& entry:geometryBodies)if(entry->body.get()==b){known=true;break;}
     if(!known)return false;
     ownedVehicle->collisionEvent=true;
+    if(otherVehicle)otherVehicle->collisionEvent=true;
     point.m_combinedFriction=btMin(btScalar(10),btMax(btScalar(-10),a->getFriction()*double(0.8999999761581421)));
     point.m_combinedRestitution=a->getRestitution()*0.1;
     return true;
@@ -732,7 +734,7 @@ extern "C" int replace_chunk_level(int wx,int wy,int min,int max,int level,const
 }
 extern "C" int begin_vehicle_publication(int* output,int capacity){
     if(!ownedWorld||ownedVehicles.empty()||!output||capacity<169*64)return -1;
-    int maps=0;for(const auto& map:activeMaps)if(map)maps++;if(maps!=1)return -1;
+    int maps=0;for(const auto& map:activeMaps)if(map)maps++;if(maps==0)return 0;if(maps!=1)return -1;
     // Native world-boundary chunks expand to0..63. This component rejects that separate boundary before mutation.
     for(const auto& map:activeMaps)if(map)for(const auto& chunk:map->cells){
         if(chunk->x+1==worldHeader[0]*32||chunk->x==(worldHeader[2]+1)*32||chunk->y+1==worldHeader[1]*32||chunk->y==(worldHeader[3]+1)*32)return -1;

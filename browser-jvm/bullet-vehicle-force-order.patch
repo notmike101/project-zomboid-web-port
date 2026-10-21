@@ -1,0 +1,16 @@
+--- warmstart/solver.cpp
++++ force-order/solver.cpp
+@@ -475,5 +475,12 @@
+ 		solverBody->m_linearVelocity = rb->getLinearVelocity();
+ 		solverBody->m_angularVelocity = rb->getAngularVelocity();
+-		solverBody->m_externalForceImpulse = rb->getTotalForce() * rb->getInvMass() * timeStep;
++		// Original PZBullet64 0x180062a98: scalar X, paired Y/Z use distinct multiply grouping.
++		const btScalar inverseMass = rb->getInvMass();
++		const btScalar inverseMassTimeStep = inverseMass * timeStep;
++		const btVector3& force = rb->getTotalForce();
++		solverBody->m_externalForceImpulse.setValue(
++			(inverseMass * force.x()) * timeStep,
++			inverseMassTimeStep * force.y(),
++			inverseMassTimeStep * force.z());
+ 		solverBody->m_externalTorqueImpulse = rb->getTotalTorque() * rb->getInvInertiaTensorWorld() * timeStep;
+ 	}

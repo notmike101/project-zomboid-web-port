@@ -152,10 +152,32 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
             throw new Error('Vehicle solver patch context is absent or ambiguous');
         }
 
-        const overlayBytes = Buffer.from(originalText.replace(before, after));
+        let overlayBytes = Buffer.from(originalText.replace(before, after));
 
         if (digest(overlayBytes) !== '60b2b900e7d43187443f636429acb19acaa436e2b4bbc79018f2ca28f103b456') {
             throw new Error('Vehicle solver derivative differs from qualified bytes');
+        }
+
+        const forcePatchBytes = await readFile(path.join(import.meta.dirname, 'bullet-vehicle-force-order.patch'));
+        const forceLines = forcePatchBytes.toString('utf8').replaceAll('\r\n', '\n').split('\n');
+
+        if (forceLines.filter((line) => line.startsWith('@@')).length !== 1) {
+            throw new Error('Force-order compatibility patch must contain exactly one hunk');
+        }
+
+        const forceBody = forceLines.slice(forceLines.findIndex((line) => line.startsWith('@@')) + 1).filter((line) => /^[ +-]/u.test(line));
+        const forceBefore = `${forceBody.filter((line) => !line.startsWith('+')).map((line) => line.slice(1)).join('\n')}\n`;
+        const forceAfter = `${forceBody.filter((line) => !line.startsWith('-')).map((line) => line.slice(1)).join('\n')}\n`;
+        const warmstartText = overlayBytes.toString('utf8');
+
+        if (warmstartText.split(forceBefore).length !== 2) {
+            throw new Error('Force-order patch context is absent or ambiguous');
+        }
+
+        overlayBytes = Buffer.from(warmstartText.replace(forceBefore, forceAfter));
+
+        if (digest(overlayBytes) !== 'e780c1c6c0900625e14d51c6c6de697882b8d64d326133a308d6d5498c8b9b27') {
+            throw new Error('Force-order solver derivative differs from reviewed bytes');
         }
 
         const overlay = path.join(output, 'btSequentialImpulseConstraintSolver.cpp');
@@ -171,7 +193,7 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
         cpp[index] = overlay;
         solverOverlay = {
             originalSha: digest(originalBytes), patchSha: digest(patchBytes), overlaySha: digest(overlayBytes), headerSha: digest(headerBytes),
-            original, overlay, copiedHeader, replacements: 1,
+            original, overlay, copiedHeader, replacements: 2, forcePatchSha: digest(forcePatchBytes),
         };
     }
 
@@ -197,7 +219,8 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
 
     if (solverOverlay && (digest(await readFile(solverOverlay.overlay)) !== solverOverlay.overlaySha
         || digest(await readFile(solverOverlay.copiedHeader)) !== solverOverlay.headerSha
-        || digest(await readFile(path.join(import.meta.dirname, 'bullet-vehicle-warmstart.patch'))) !== solverOverlay.patchSha)) {
+        || digest(await readFile(path.join(import.meta.dirname, 'bullet-vehicle-warmstart.patch'))) !== solverOverlay.patchSha
+        || digest(await readFile(path.join(import.meta.dirname, 'bullet-vehicle-force-order.patch'))) !== solverOverlay.forcePatchSha)) {
         throw new Error('Vehicle solver derivative changed during compilation');
     }
 

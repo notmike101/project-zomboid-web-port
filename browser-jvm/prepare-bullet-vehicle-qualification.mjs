@@ -106,12 +106,13 @@ export async function prepareBulletVehicleQualification({ outputDirectory, gameD
     assert.equal(manifest.profile, 'vehicle');
     assert.equal(manifest.bridgeSha, bridgeSha);
     assert.equal(manifest.solverOverlay.patchSha, patchSha);
-    assert.equal(manifest.solverOverlay.overlaySha, '60b2b900e7d43187443f636429acb19acaa436e2b4bbc79018f2ca28f103b456');
+    assert.equal(manifest.solverOverlay.overlaySha, 'e780c1c6c0900625e14d51c6c6de697882b8d64d326133a308d6d5498c8b9b27');
+    assert.equal(manifest.solverOverlay.forcePatchSha, digest(await capture(path.join(import.meta.dirname, 'bullet-vehicle-force-order.patch'))));
     assert.equal(manifest.solverOverlay.headerSha, '3b0ffd801b3aeb630de963ea7e22893e585314bf3eb5fee49cb28c2c3e618f56');
     assert.equal(manifest.solverOverlay.originalSha, '5b0a5553fbf0aa3c57fd9af431775613f0a6c7da46a7efe78443d1eb2563daa6');
     assert.equal(manifest.sources, 153);
     assert.equal(manifest.sourceInventorySha, '63048c5718d2c086889682f6f40d79f6b599b90bd029a3acfb22fc06a1455273');
-    assert.equal(manifest.solverOverlay.replacements, 1);
+    assert.equal(manifest.solverOverlay.replacements, 2);
     assert.equal(manifest.compilerSha, 'fa058b37c97812c47c71abf337e315e37001abe239655514459af391d988cbcd');
     assert.equal(manifest.scalarBytes, 8);
     assert.equal(manifest.compilerVersion, '3.1.74');
