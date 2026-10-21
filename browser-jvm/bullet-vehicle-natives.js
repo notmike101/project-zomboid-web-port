@@ -153,10 +153,10 @@ export function createVehicleWorldNatives(engine) {
 
             expect(values instanceof Float32Array && values.length === 200, 'Original200-float definition required');
 
-            const key = definitions.get(name) ?? definitions.size + 1;
+            const key = definitions.get(name)?.key ?? definitions.size + 1;
 
             floats(values, (pointer) => expect(engine._define_vehicle_named(key, pointer, 200) === 1, `Unsupported original typed definition ${name}`));
-            definitions.set(name, key);
+            definitions.set(name, { key, wheels: values[10] });
         },
         /**
          * Constructs the supported vehicle in the real engine.
@@ -173,13 +173,13 @@ export function createVehicleWorldNatives(engine) {
          * @param {string} name - Original vehicle definition name.
          */
         addVehicle(lib, id, x, y, z, qx, qy, qz, qw, name) {
-            expect(String(name) === 'Base.CarNormal', 'Original owner component currently admits genuine CarNormal only');
+            const definition = definitions.get(String(name));
 
-            const key = definitions.get(String(name));
+            expect(definition?.wheels === 4, 'Original owner component requires a registered four-wheel definition');
 
-            expect(key !== undefined && Number.isInteger(id) && vehicleId === null, 'Unsupported vehicle owner or definition');
+            expect(Number.isInteger(id) && vehicleId === null, 'Unsupported vehicle owner or definition');
 
-            expect(engine._select_vehicle_definition(key) === 1 && engine._add_vehicle(id, x, y, z, qx, qy, qz, qw) === 1, 'Actual vehicle creation rejected');
+            expect(engine._select_vehicle_definition(definition.key) === 1 && engine._add_vehicle(id, x, y, z, qx, qy, qz, qw) === 1, 'Actual vehicle creation rejected');
             vehicleId = id;
             calls.push({ method: 'addVehicle', id, name: String(name), x, y, z, qx, qy, qz, qw });
         },

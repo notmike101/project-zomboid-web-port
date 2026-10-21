@@ -516,7 +516,8 @@ int add_vehicle(int id,float x,float y,float z,float qx,float qy,float qz,float 
     if(!vehicleDefinition && vehicleDefinitions.count(0))vehicleDefinition=vehicleDefinitions.at(0).get();
     if(!ownedWorld||!vehicleDefinition||ownedVehicle||id<0)return 0;
     for(float value:{x,y,z,qx,qy,qz,qw})if(!std::isfinite(value))return 0;
-    if(qx!=0||qy!=0||qz!=0||qw!=1)return 0; // Initial component only; original-owner poses are not yet admitted.
+    const btQuaternion rotation{double(qx),double(qy),double(qz),double(qw)};
+    if(rotation.length2()==0)return 0; // Zero-quaternion native arithmetic is outside this component.
     auto pending=std::make_unique<OwnedVehicle>();pending->id=id;
     // Original 0x180011090 initializes each admitted tire inflation1/present1/removed0.
     for(int index=0;index<int(vehicleDefinition->wheels.size());index++){pending->inflation[index]=1;pending->present[index]=true;}
@@ -530,6 +531,7 @@ int add_vehicle(int id,float x,float y,float z,float qx,float qy,float qz,float 
         pending->compound->addChildShape(transform,shape.get());pending->shapes.push_back(std::move(shape));
     }
     btTransform transform;transform.setIdentity();transform.setOrigin(btVector3(double(x-float(worldHeader[4])),z,double(y-float(worldHeader[5]))));
+    transform.setRotation(rotation); // Original 0x180007c40 uses the same scalar 2/normSquared basis.
     pending->motion=std::make_unique<btDefaultMotionState>(transform);
     btVector3 inertia;pending->compound->calculateLocalInertia(vehicleDefinition->values[1],inertia);
     btRigidBody::btRigidBodyConstructionInfo info(vehicleDefinition->values[1],pending->motion.get(),pending->compound.get(),inertia);
@@ -607,6 +609,12 @@ int vehicle_state(double* output){
     output[8]=ownedVehicle->active;output[9]=ownedVehicle->compound->getNumChildShapes();output[10]=ownedVehicle->vehicle->getNumWheels();
     btVector3 min,max;ownedVehicle->compound->getAabb(body.getWorldTransform(),min,max);
     for(int axis=0;axis<3;axis++){output[11+axis]=min[axis];output[14+axis]=max[axis];}
+    return 1;
+}
+int vehicle_basis(double* output,int count){
+    if(!ownedVehicle||!output||count<9)return 0;
+    const auto& basis=ownedVehicle->body->getWorldTransform().getBasis();
+    for(int row=0;row<3;row++)for(int column=0;column<3;column++)output[row*3+column]=basis[row][column];
     return 1;
 }
 int vehicle_child(int index,double* output){
