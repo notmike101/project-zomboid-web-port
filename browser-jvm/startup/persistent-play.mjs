@@ -124,7 +124,7 @@ try {
     $match=[regex]::Match($root.CommandLine, '--user-data-dir=(?:"([^"]+)"|(\S+))')
     $actualProfile=if($match.Groups[1].Success){$match.Groups[1].Value}else{$match.Groups[2].Value}
     if($root.Name -ne 'chrome.exe' -or !$match.Success -or $actualProfile -cne $env:PZ_PLAY_PROFILE){throw 'Unowned browser'}
-    if($env:PZ_PLAY_CREATION -and ($root.CreationDate.ToString('o') -cne $env:PZ_PLAY_CREATION -or $root.CommandLine -cne $env:PZ_PLAY_COMMAND)){throw 'Browser identity changed'}
+    if($env:PZ_PLAY_CREATION -and ($root.CreationDate.ToUniversalTime().ToString('o') -cne ([DateTime]::Parse($env:PZ_PLAY_CREATION).ToUniversalTime().ToString('o')) -or $root.CommandLine -cne $env:PZ_PLAY_COMMAND)){throw 'Browser identity changed'}
     & taskkill.exe /PID $idValue /T /F
     exit $LASTEXITCODE
 } finally {$handle.Dispose()}`;

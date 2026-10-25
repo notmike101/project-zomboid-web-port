@@ -27,6 +27,7 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
     let pending = '';
     let stderr = '';
     let lastSeen = Date.now();
+    let lastStage = null;
     let terminal = false;
     let closed = false;
     let ready;
@@ -69,11 +70,11 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
             try {
                 const value = JSON.parse(line);
 
-                lastSeen = Date.now();
                 appendFileSync(path.join(output, 'memory-samples.jsonl'), `${line}\n`);
 
                 switch (value.event) {
                     case 'sample': {
+                        lastSeen = Date.now();
                         latest = value;
                         peakPrivateBytes = Math.max(peakPrivateBytes, value.privateBytes);
                         ready();
@@ -82,6 +83,11 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
                             pressure = value;
                             onPressure(value);
                         }
+
+                        break;
+                    }
+                    case 'stage': {
+                        lastStage = { stage: value.stage, receivedAt: new Date().toISOString() };
 
                         break;
                     }
@@ -114,7 +120,7 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
     });
     const heartbeat = setInterval(() => {
         if (Date.now() - lastSeen > 15_000) {
-            fail(new Error('Memory observer stopped reporting'));
+            fail(new Error(`Memory observer stopped reporting fresh samples; last stage: ${JSON.stringify(lastStage)}`));
         }
     }, 5_000);
 
@@ -126,7 +132,7 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
          * @returns {object} Bounded observer state.
          */
         snapshot() {
-            return { latest, peakPrivateBytes, pressure, disposed };
+            return { latest, peakPrivateBytes, pressure, lastStage, disposed };
         },
         /** Closes this observer after the owned browser has been stopped. */
         dispose() {
