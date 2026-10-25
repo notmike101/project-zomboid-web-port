@@ -145,3 +145,15 @@ extern "C" int ragdoll_capsule_support(int part,double x,double y,double z,doubl
     btTransform transform;transform.setIdentity();btVector3 lo,hi;shape->getAabbNonVirtual(transform,lo,hi);
     for(int axis=0;axis<3;axis++){output[axis]=first[axis];output[3+axis]=second[axis];output[6+axis]=lo[axis];output[9+axis]=hi[axis];}return 1;
 }
+
+// Original World::step 0x180031eeb..31f65 includes every registered ragdoll, using body0 only.
+static void mark_ragdoll_publication(ChunkMap& map){
+    for(const auto& entry:ownedRagdolls)mark_body_publication(map,*entry.second->bodies[0]);
+}
+extern "C" int ragdoll_contact_count(){
+    if(!ownedWorld)return -1;int count=0;
+    for(int i=0;i<ownedWorld->dispatcher.getNumManifolds();i++){
+        const auto* manifold=ownedWorld->dispatcher.getManifoldByIndexInternal(i);
+        if(ragdoll_body_contains(manifold->getBody0())||ragdoll_body_contains(manifold->getBody1()))count+=manifold->getNumContacts();
+    }return count;
+}

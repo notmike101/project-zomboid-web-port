@@ -1251,3 +1251,9 @@ The real ragdoll owner now derives the original additive linear and angular impu
 The real owner now reconstructs original skeletal output and optional rigid-body output, including the original speed clamp on the rigid-output call only. Before and after a real constrained 0.01-second step, 720 of 1,050 gameplay floats matched exactly as float32; the remaining 330 near-zero values differed by at most 2.585e-16. Both 77-float rigid-body arrays matched exactly, and all 28 spare-capacity sentinels remained unchanged. This is numerical agreement, not bit-exact parity. Original speed limiting reduced the observed maximum from 60.0801 to 10.
 
 Ragdoll terrain publication remains the next required integration: the host currently requests collision geometry around vehicles only. Free-space readback does not establish terrain contact or combat playability. The active audio startup generation retains the earlier actions-only physics closure.
+
+### Ragdoll terrain publication
+
+The existing per-map terrain publication now includes every registered ragdoll body-0 center, matching the original native worker without an active/sleep filter. Six bounded scenarios match the original ordered callbacks, including off-world registration, shared ragdolls and removal. The actual native and WASM worlds both generate 14 ragdoll/terrain contact points.
+
+Contact dynamics remain discrepant: 194 of 198 compared body transform/velocity fields differ by more than 1e-6, with a maximum angular-velocity difference of 1.1732. The publication and real-contact result does not qualify collision response or combat parity; the solver/contact mismatch is the next physics blocker.

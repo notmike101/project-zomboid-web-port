@@ -853,18 +853,21 @@ extern "C" int replace_chunk_level(int wx,int wy,int min,int max,int level,const
     auto& record=*chunk->records[level-min];std::copy(cells,cells+256,record.cells.begin());record.loaded=true;record.published=false;return 1;
 }
 extern "C" int set_chunk_levels(int wx,int wy,int min,int max);
-extern "C" int begin_vehicle_publication(int* output,int capacity,int id){
-    if(!ownedWorld||!output||capacity<169*64||id<0||id>=4||!activeMaps[id])return -1;
-    auto& map=*activeMaps[id];
-    for(const auto& entry:ownedVehicles){
-    auto origin=entry.second->body->getWorldTransform().getOrigin();
+static void mark_body_publication(ChunkMap& map,const btRigidBody& body){
+    auto origin=body.getWorldTransform().getOrigin();
     int x=int(std::floor(origin.x()+worldHeader[4])),y=int(std::floor(origin.z()+worldHeader[5]));
     int level=int(std::floor(origin.y()/2.449490010738373));
     int wx=int(std::floor(float(x)*0.125f)),wy=int(std::floor(float(y)*0.125f));
     for(int dx=-1;dx<=1;dx++)for(int dy=-1;dy<=1;dy++)if(auto chunk=map.at(wx+dx,wy+dy)){
         for(int z=level-1;z<=level+1;z++)if(z>=chunk->minLevel&&z<=chunk->maxLevel)chunk->records[z-chunk->minLevel]->needed=true;
     }
-    }
+}
+static void mark_ragdoll_publication(ChunkMap& map);
+extern "C" int begin_vehicle_publication(int* output,int capacity,int id){
+    if(!ownedWorld||!output||capacity<169*64||id<0||id>=4||!activeMaps[id])return -1;
+    auto& map=*activeMaps[id];
+    for(const auto& entry:ownedVehicles)mark_body_publication(map,*entry.second->body);
+    mark_ragdoll_publication(map);
     int count=0;
     for(int y=0;y<map.width;y++)for(int x=0;x<map.width;x++){
         auto& chunk=map.cells[x*map.width+y];
