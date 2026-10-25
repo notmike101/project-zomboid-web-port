@@ -733,7 +733,7 @@ extern "C" int replace_chunk_level(int wx,int wy,int min,int max,int level,const
     auto& record=*chunk->records[level-min];std::copy(cells,cells+256,record.cells.begin());record.loaded=true;record.published=false;return 1;
 }
 extern "C" int begin_vehicle_publication(int* output,int capacity){
-    if(!ownedWorld||ownedVehicles.empty()||!output||capacity<169*64)return -1;
+    if(!ownedWorld||!output||capacity<169*64)return -1;
     int maps=0;for(const auto& map:activeMaps)if(map)maps++;if(maps==0)return 0;if(maps!=1)return -1;
     // Native world-boundary chunks expand to0..63. This component rejects that separate boundary before mutation.
     for(const auto& map:activeMaps)if(map)for(const auto& chunk:map->cells){
@@ -754,7 +754,7 @@ extern "C" int begin_vehicle_publication(int* output,int capacity){
     }return count;
 }
 extern "C" int finish_vehicle_publication(){
-    if(!ownedWorld||ownedVehicles.empty())return 0;
+    if(!ownedWorld)return 0;
     for(const auto& map:activeMaps)if(map)for(const auto& chunk:map->cells)for(int z=chunk->minLevel;z<=chunk->maxLevel;z++){
         auto& record=*chunk->records[z-chunk->minLevel];
         if(record.needed&&!record.published){if(!build_geometry(chunk->x,chunk->y,z,record.cells.data()))return 0;record.published=true;}
@@ -766,7 +766,7 @@ extern "C" int finish_vehicle_publication(){
     }return 1;
 }
 extern "C" int step_mapped_vehicle(float delta){
-    if(!ownedWorld||ownedVehicles.empty()||!std::isfinite(delta)||delta!=0.01f)return 0;
+    if(!ownedWorld||!std::isfinite(delta)||delta!=0.01f)return 0;
     ownedWorld->world.stepSimulation(double(delta),0,0);for(auto& entry:ownedVehicles)entry.second->hasPublishedStep=true;return 1;
 }
 extern "C" int vehicle_control_history(double* output){
