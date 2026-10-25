@@ -44,14 +44,20 @@ public final class BrowserLifecycleBoot {
         require(cache.startsWith(root) && !cache.equals(root), "Existing cache must be inside owned root");
 
         // Original mainThreadInit producers, selected original audio branch.
+        if (!Core.soundDisabled) {
+            phase("FMODManager.init.before");
+            fmod.fmod.FMODManager.instance.init();
+            phase("FMODManager.init.after");
+        }
         zombie.debug.DebugOptions.instance.init();
         zombie.debug.DebugOptions.instance.pathfindUseNativeCode.setValue(false);
         require(!zombie.debug.DebugOptions.instance.pathfindUseNativeCode.getValue(),
                 "Original Java backend option must actually read false in release mode");
         GameProfiler.init();
-        SoundManager.instance = new DummySoundManager();
-        AmbientStreamManager.instance = new DummyAmbientStreamManager();
-        zombie.audio.BaseSoundBank.instance = new zombie.audio.DummySoundBank();
+        SoundManager.instance = Core.soundDisabled ? new DummySoundManager() : new SoundManager();
+        AmbientStreamManager.instance = Core.soundDisabled ? new DummyAmbientStreamManager() : new AmbientStreamManager();
+        zombie.audio.BaseSoundBank.instance = Core.soundDisabled
+                ? new zombie.audio.DummySoundBank() : new fmod.fmod.FMODSoundBank();
         zombie.core.raknet.VoiceManager.instance.loadConfig();
         zombie.core.textures.TextureID.useCompressionOption = Core.safeModeForced
                 || Core.getInstance().getOptionTextureCompression();
