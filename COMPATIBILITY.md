@@ -1295,3 +1295,9 @@ The connected host comparison confirms no IDs before the next collision-worker t
 Ballistic targets now own their separate non-response aggregate box and an actual detached eleven-body, ten-joint controller, reusing the existing qualified body constructor. Original-DLL comparison matches all 165 initial body float32 fields and the aggregate box AABB; collision flags 4, group 16 and mask -1 follow the original source. Add, duplicate add, removal, absent removal and pooled ownership follow original results. World destruction releases targets before the world.
 
 Target axis/skeleton/root updates and target queries remain unimplemented. This construction increment does not establish firearm hit detection or combat playability.
+
+### Original optional sound-bank failures
+
+The original FMOD bank loop requests eight banks absent from the installed media namespace. The JNI implementation returns the negated FMOD result for those failures; the host now preserves that result instead of throwing on absent metadata. The verified complete positive certificate distinguishes an absent optional bank from a broken route or read for a present bank. Present-file metadata/read failures remain errors.
+
+The actual Node SDK executes the full twelve-name original loop: four present banks load and eight absent banks return -18, with zero open files after cleanup. A guarded real-browser operation loads the absent Animal bank first and gets -18, then loads the actual strings bank successfully, reading exactly 171,228 bytes in 59 bounded ranges. AudioWorklet operation and disposal also succeed. This resolves the captured early bank-loop failure; original full initialization, sample preload memory and audible gameplay still require the next run.

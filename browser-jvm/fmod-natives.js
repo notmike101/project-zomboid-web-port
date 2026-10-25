@@ -10,7 +10,7 @@ const arrayLength = async (lib, destination) => destination instanceof BigInt64A
  *
  * @param {object} FMOD - Initialized supplied official HTML5 FMOD module.
  * @param {object} files - Actual bounded file-range provider.
- * @param {function(string): Promise<number>} files.size - Actual original file length.
+ * @param {function(string): Promise<number|null>} files.size - Actual length, or certified file absence.
  * @param {function(string, number, number): Promise<Uint8Array>} files.read - Actual requested bytes.
  * @param {number|null} [output] - Explicit data-only oracle output; browser default is unchanged.
  * @param {Array<object>|null} [reverbPresets] - Verified original-compatible SDK preset definitions.
@@ -136,13 +136,17 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
     const fileCallbacks = async (path) => {
         const length = await files.size(path);
 
-        if (!Number.isSafeInteger(length) || length < 0 || length > 0xFF_FF_FF_FF) {
+        if (length !== null && (!Number.isSafeInteger(length) || length < 0 || length > 0xFF_FF_FF_FF)) {
             throw new Error('Invalid actual FMOD file length');
         }
 
         return {
             userdata: path,
             opencallback() {
+                if (length === null) {
+                    return { filesize: 0, handle: null, result: FMOD.ERR_FILE_NOTFOUND };
+                }
+
                 openFiles++;
 
                 return { filesize: length, handle: { position: 0, closed: false }, result: FMOD.OK };
@@ -212,7 +216,9 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                     const callbacks = await fileCallbacks(String(name));
                     const opened = callbacks.opencallback();
 
-                    opened.handle.callbacks = callbacks;
+                    if (opened.result === FMOD.OK) {
+                        opened.handle.callbacks = callbacks;
+                    }
 
                     return opened;
                 } catch (error) {
@@ -260,6 +266,14 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             const path = String(name);
             const info = await fileCallbacks(path);
             const bank = await requireSystem().loadBankCustom(info, FMOD.STUDIO_LOAD_BANK_NORMAL);
+            const result = FMOD.getLastError();
+
+            // Original JNI 0x18000b922..b92b returns negated FMOD_RESULT, not a Java exception.
+            if (result !== FMOD.OK) {
+                FMOD.setLastError(FMOD.OK);
+
+                return -BigInt(result);
+            }
 
             return retain('bank', bank);
         },

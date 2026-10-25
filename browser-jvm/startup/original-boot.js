@@ -191,7 +191,9 @@ try {
     if (admission.audioRuntime) {
         const { loadFmodRuntime } = await import('./fmod-runtime.js');
 
-        audioOwner = await loadFmodRuntime(admission.audioRuntime.manifestSHA);
+        audioOwner = await loadFmodRuntime(admission.audioRuntime.manifestSHA,
+            positiveCertificate.files.filter((entry) => /\.bank$/iu.test(entry.path))
+                .map(({ path, bytes }) => ({ path, bytes })));
         globalThis.originalBoot.audio = audioOwner.snapshot();
     }
 

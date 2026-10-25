@@ -22,9 +22,10 @@ export function getFmodOwner() {
  * Loads only the explicitly admitted official runtime, without changing its output backend.
  *
  * @param {string} manifestSHA - Frozen generation's SDK manifest identity.
+ * @param {Array<object>|null} [bankFiles] - Bank entries from the verified complete media namespace.
  * @returns {Promise<object>} Real FMOD JNI owner.
  */
-export function loadFmodRuntime(manifestSHA) {
+export function loadFmodRuntime(manifestSHA, bankFiles = null) {
     if (owner) {
         return owner;
     }
@@ -87,6 +88,7 @@ export function loadFmodRuntime(manifestSHA) {
         }
 
         const presets = JSON.parse(new TextDecoder().decode(presetBytes));
+        const bankCatalog = bankFiles === null ? null : new Map(bankFiles.map(({ path, bytes }) => [path.toLowerCase(), { path, bytes }]));
         const bankURL = (name) => {
             const path = String(name).replace(/^\/app(?=\/media\/)/u, '');
 
@@ -94,18 +96,37 @@ export function loadFmodRuntime(manifestSHA) {
                 throw new Error('Unowned FMOD bank path');
             }
 
-            return new URL(path.startsWith('/') ? path : `/${path}`, location.origin).href;
+            const url = new URL(path.startsWith('/') ? path : `/${path}`, location.origin);
+            const known = bankCatalog?.get(decodeURIComponent(url.pathname).toLowerCase());
+
+            return known ? new URL(known.path, location.origin).href : url.href;
         };
 
         const audio = createFmodNatives(FMOD, {
             async size(name) {
-                const response = await fetch(bankURL(name), { method: 'HEAD', cache: 'no-store' });
+                const url = bankURL(name);
+                const path = decodeURIComponent(new URL(url).pathname);
+                const known = bankCatalog?.get(path.toLowerCase());
+
+                /* The already-verified complete namespace distinguishes missing optional banks
+                 * from a present bank whose route/read has actually failed. */
+                if (bankCatalog && path.toLowerCase().endsWith('.bank') && !known) {
+                    return null;
+                }
+
+                const response = await fetch(url, { method: 'HEAD', cache: 'no-store' });
 
                 if (!response.ok) {
                     throw new Error(`Original bank metadata unavailable: ${name}`);
                 }
 
-                return Number(response.headers.get('Content-Length'));
+                const length = Number(response.headers.get('Content-Length'));
+
+                if (known && length !== known.bytes) {
+                    throw new Error('Original bank metadata differs from the verified namespace');
+                }
+
+                return length;
             },
             async read(name, start, length) {
                 const response = await fetch(bankURL(name), { headers: { Range: `bytes=${start}-${start + length - 1}` }, cache: 'no-store' });
