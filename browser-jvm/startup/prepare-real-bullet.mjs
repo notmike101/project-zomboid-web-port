@@ -79,8 +79,8 @@ generation.bullet = { profile: 'vehicle', bridgeSha: manifest.bridgeSha, manifes
 const runnerFile = path.join(output, 'run-real-bullet.mjs');
 let runner = await readFile(path.join(import.meta.dirname, 'run.mjs'), 'utf8');
 
-assert.ok(runner.includes('assert.equal(generation.hostSources.length, 10);'));
-runner = runner.replace('assert.equal(generation.hostSources.length, 10);', 'assert.equal(generation.hostSources.length, 12);');
+assert.ok(runner.includes('assert.equal(generation.hostSources.length, 11);'));
+runner = runner.replace('assert.equal(generation.hostSources.length, 11);', 'assert.equal(generation.hostSources.length, 13);');
 runner = runner.replaceAll(/from '\.\/([^']+)'/gu, (_match, name) => `from '${pathToFileURL(path.join(import.meta.dirname, name === 'profile-routes.mjs' ? 'bullet-profile-routes.mjs' : name)).href}'`);
 const cleanup = 'assert.equal(result.afterDispose?.physics.dynamicBodies.objects, 0);';
 

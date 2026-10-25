@@ -96,7 +96,7 @@ generation.recoveredFrom = { file: path.resolve(sourceFile), sha256: digest(awai
 generation.root = output;
 generation.hostSources = [];
 
-for (const name of ['run.mjs', 'profile-routes.mjs', 'network-observer.mjs', 'closed-media.mjs', 'certify-published.mjs', 'map-four.mjs', 'memory-guard.mjs', 'memory-watch.ps1', '../file-watch-service.mjs', '../media-files.mjs']) {
+for (const name of ['run.mjs', 'profile-routes.mjs', 'network-observer.mjs', 'closed-media.mjs', 'certify-published.mjs', 'map-four.mjs', 'persistent-play.mjs', 'memory-guard.mjs', 'memory-watch.ps1', '../file-watch-service.mjs', '../media-files.mjs']) {
     const file = path.resolve(import.meta.dirname, name);
     const bytes = await readFile(file);
     const evidenceFile = path.join(output, 'host-source-evidence', path.basename(name));

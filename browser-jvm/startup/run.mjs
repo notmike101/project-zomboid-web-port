@@ -10,6 +10,7 @@ import { certifyPublished } from './certify-published.mjs';
 import { startMemoryGuard } from './memory-guard.mjs';
 import { isPositiveMetadataEntry } from './negative-stat.js';
 import { createGateNetworkObserver } from './network-observer.mjs';
+import { launchPersistentPlay, playPort } from './persistent-play.mjs';
 import { createOriginalBootRoutes, hash } from './profile-routes.mjs';
 
 const ownerStartedAt = Date.now();
@@ -52,14 +53,16 @@ process.stderr.write(`${JSON.stringify({ ...deadlineRecord, event: 'owner-deadli
 // Admission is checked before HTTP, browser, or filesystem-watch owners are created.
 const generationFile = process.argv[2];
 const executablePath = process.argv[3];
+const persistentPlay = process.argv[4] === '--play';
 const interactive = process.argv[4] === '--interactive';
+let playOwner;
 
 assert.ok(generationFile && executablePath && process.argv.length <= 5
-    && (process.argv[4] === undefined || interactive), 'Usage: node run.mjs GENERATION_JSON CHROMIUM_EXECUTABLE [--interactive]');
+    && (process.argv[4] === undefined || interactive || persistentPlay), 'Usage: node run.mjs GENERATION_JSON CHROMIUM_EXECUTABLE [--interactive|--play]');
 const generation = JSON.parse(await readFile(generationFile, 'utf8'));
 
 assert.equal(generation.executionAdmitted, true, 'Root review must explicitly admit the exact frozen generation');
-assert.equal(generation.hostSources.length, 10);
+assert.equal(generation.hostSources.length, 11);
 
 for (const record of generation.hostSources) {
     // These small source identities precede all owner creation.
@@ -279,7 +282,7 @@ try {
     });
     await new Promise((resolve, reject) => {
         server.once('error', reject);
-        server.listen(0, '127.0.0.1', resolve);
+        server.listen(persistentPlay ? playPort : 0, '127.0.0.1', resolve);
     });
     const origin = `http://127.0.0.1:${server.address().port}`;
 
@@ -290,7 +293,14 @@ try {
         throw new Error('At least 5 GiB available system memory is required before browser startup');
     }
 
-    browserServer = await chromium.launchServer({ executablePath, headless: false });
+    if (persistentPlay) {
+        playOwner = await launchPersistentPlay(executablePath);
+        browserServer = playOwner;
+        evidence.persistentPlay = { profile: playOwner.profile, root: playOwner.root, origin };
+    } else {
+        browserServer = await chromium.launchServer({ executablePath, headless: false });
+    }
+
     memoryGuard = startMemoryGuard({
         pid: browserServer.process().pid, output,
         /**
@@ -320,10 +330,30 @@ try {
         },
     });
     await bounded(memoryGuard.ready, 10_000, 'memory-guard-initialization');
+
+    if (persistentPlay) {
+        playOwner.bindIdentity(memoryGuard.snapshot().latest);
+    }
+
     ownerPhase = 'original-browser';
     assert.ok(Date.now() < outerDeadlineAt, 'Original owner deadline already elapsed');
-    browser = await chromium.connect(browserServer.wsEndpoint());
-    const context = await browser.newContext({ serviceWorkers: 'block' });
+    browser = persistentPlay
+        ? await chromium.connectOverCDP(await bounded(playOwner.endpoint, 15_000, 'persistent-browser-endpoint'))
+        : await chromium.connect(browserServer.wsEndpoint());
+
+    if (persistentPlay) {
+        playOwner.attach(browser);
+    }
+
+    const context = persistentPlay ? browser.contexts()[0] : await browser.newContext({ serviceWorkers: 'block' });
+
+    assert.ok(context, 'Actual browser context required');
+
+    if (persistentPlay) {
+        await context.addInitScript((root) => {
+            globalThis.originalBootOwnedHome = root;
+        }, playOwner.root);
+    }
 
     await context.route('**/*', async (route) => {
         const request = route.request();
@@ -391,380 +421,389 @@ try {
                 checkpointPending = null;
             });
     }, 5_000);
+
+    /* eslint-disable max-depth -- Preserve the existing diagnostic flow inside the alternate play branch. */
+    if (persistentPlay) {
+        process.stdout.write(`${JSON.stringify({ output, event: 'persistent-original-menu', origin, root: playOwner.root })}\n`);
+        // All New/Load/Continue decisions remain with the original menu and human player.
+        await Promise.race([hostFailure, page.waitForFunction(() => globalThis.originalBoot?.completed
+            || globalThis.originalBoot?.failures?.length, undefined, { timeout: Math.max(1, outerDeadlineAt - Date.now()) })]);
+    } else {
     // Original logo timers proceed naturally; only the real visible original terms accept control is clicked.
-    await Promise.race([hostFailure, page.waitForFunction(() => globalThis.originalBoot?.completed || globalThis.originalBoot?.failures?.length
-        || globalThis.originalBoot?.termsControl?.visible
-        || (globalThis.originalBoot?.termsControl?.visible === false
-            && globalThis.originalBoot?.lastConsumedUi?.producerState === 'zombie.gameStates.MainScreenState'
-            && globalThis.originalBoot.lastConsumedUi.mainMenuConsumed >= 3), undefined, { timeout: 2_400_000 })]);
-    const initial = await page.evaluate(() => globalThis.originalBoot);
+        await Promise.race([hostFailure, page.waitForFunction(() => globalThis.originalBoot?.completed || globalThis.originalBoot?.failures?.length
+            || globalThis.originalBoot?.termsControl?.visible
+            || (globalThis.originalBoot?.termsControl?.visible === false
+                && globalThis.originalBoot?.lastConsumedUi?.producerState === 'zombie.gameStates.MainScreenState'
+                && globalThis.originalBoot.lastConsumedUi.mainMenuConsumed >= 3), undefined, { timeout: 2_400_000 })]);
+        const initial = await page.evaluate(() => globalThis.originalBoot);
 
-    assert.equal(initial.completed, false, 'Original startup completed before menu admission');
-    assert.equal(initial.failures.length, 0);
-    assert.ok(initial.termsControl?.visible || (initial.termsControl?.visible === false
-        && initial.lastConsumedUi?.producerState === 'zombie.gameStates.MainScreenState' && initial.lastConsumedUi.mainMenuConsumed >= 3));
-    const terms = await page.evaluate(() => globalThis.originalBoot.termsControl);
-    const consumedBeforeInput = await page.evaluate(() => globalThis.originalBoot.lastConsumedUi?.mainMenuConsumed || 0);
+        assert.equal(initial.completed, false, 'Original startup completed before menu admission');
+        assert.equal(initial.failures.length, 0);
+        assert.ok(initial.termsControl?.visible || (initial.termsControl?.visible === false
+            && initial.lastConsumedUi?.producerState === 'zombie.gameStates.MainScreenState' && initial.lastConsumedUi.mainMenuConsumed >= 3));
+        const terms = await page.evaluate(() => globalThis.originalBoot.termsControl);
+        const consumedBeforeInput = await page.evaluate(() => globalThis.originalBoot.lastConsumedUi?.mainMenuConsumed || 0);
 
-    const termsDeadline = Date.now() + 60_000;
-    /**
-     * Returns the remaining shared terms input and transition budget.
-     *
-     * @returns {number} Remaining milliseconds, rejecting an exhausted phase.
-     */
-    const termsRemaining = () => {
-        const milliseconds = termsDeadline - Date.now();
+        const termsDeadline = Date.now() + 60_000;
+        /**
+         * Returns the remaining shared terms input and transition budget.
+         *
+         * @returns {number} Remaining milliseconds, rejecting an exhausted phase.
+         */
+        const termsRemaining = () => {
+            const milliseconds = termsDeadline - Date.now();
 
-        assert.ok(milliseconds > 0, 'Shared original terms input deadline exceeded');
+            assert.ok(milliseconds > 0, 'Shared original terms input deadline exceeded');
 
-        return milliseconds;
-    };
+            return milliseconds;
+        };
 
-    if (terms.visible) {
-        assert.equal(terms.identity, 'ISTermsOfServiceUI.instance.buttonAccept');
-        assert.equal(terms.enabled, true);
-        assert.ok(Number.isInteger(terms.buttonIdentity));
-        assert.ok([terms.x, terms.y, terms.width, terms.height, terms.screenWidth, terms.screenHeight].every(Number.isFinite));
-        assert.ok(terms.width > 0 && terms.height > 0 && terms.x >= 0 && terms.y >= 0
-            && terms.x + terms.width <= terms.screenWidth && terms.y + terms.height <= terms.screenHeight);
-        const box = await page.locator('#graphics-canvas').boundingBox();
+        if (terms.visible) {
+            assert.equal(terms.identity, 'ISTermsOfServiceUI.instance.buttonAccept');
+            assert.equal(terms.enabled, true);
+            assert.ok(Number.isInteger(terms.buttonIdentity));
+            assert.ok([terms.x, terms.y, terms.width, terms.height, terms.screenWidth, terms.screenHeight].every(Number.isFinite));
+            assert.ok(terms.width > 0 && terms.height > 0 && terms.x >= 0 && terms.y >= 0
+                && terms.x + terms.width <= terms.screenWidth && terms.y + terms.height <= terms.screenHeight);
+            const box = await page.locator('#graphics-canvas').boundingBox();
 
-        assert.ok(box && box.width > 0 && box.height > 0);
-        evidence.trustedTermsInput = { control: terms, canvas: box, phaseStartedUtc: new Date(termsDeadline - 60_000).toISOString(), moveIssuedUtc: new Date().toISOString() };
-        await bounded(page.mouse.move(box.x + (terms.x + terms.width / 2) * box.width / terms.screenWidth,
-            box.y + (terms.y + terms.height / 2) * box.height / terms.screenHeight), termsRemaining(), 'trusted-terms-move');
-        await Promise.race([hostFailure, page.waitForFunction(({ after, buttonIdentity }) => {
-            const boot = globalThis.originalBoot;
-            const value = boot?.termsControl;
-
-            return boot?.completed || boot?.failures?.length || (value?.visible && value.enabled === true && value.sequence > after && value.buttonIdentity === buttonIdentity
-                && value.mouseX > value.x + 1 && value.mouseX < value.x + value.width - 1
-                && value.mouseY > value.y + 1 && value.mouseY < value.y + value.height - 1);
-        }, { after: terms.sequence, buttonIdentity: terms.buttonIdentity }, { timeout: termsRemaining() })]);
-        const moved = await page.evaluate(() => globalThis.originalBoot);
-
-        assert.equal(moved.completed, false);
-        assert.equal(moved.failures.length, 0);
-        assert.equal(moved.termsControl.buttonIdentity, terms.buttonIdentity);
-        assert.equal(moved.termsControl.enabled, true);
-        assert.ok(moved.termsControl.mouseX > moved.termsControl.x + 1
-            && moved.termsControl.mouseX < moved.termsControl.x + moved.termsControl.width - 1
-            && moved.termsControl.mouseY > moved.termsControl.y + 1
-            && moved.termsControl.mouseY < moved.termsControl.y + moved.termsControl.height - 1);
-        evidence.trustedTermsInput.browserVisibilityBeforeDown = await page.evaluate(() => ({
-            documentHidden: document.hidden, documentHasFocus: document.hasFocus(),
-            activeElementId: document.activeElement?.id || null,
-        }));
-        evidence.trustedTermsInput.moveObserved = moved.termsControl;
-        evidence.trustedTermsInput.moveObservedUtc = new Date().toISOString();
-        let inputFailure;
-
-        try {
-            evidence.trustedTermsInput.downIssuedUtc = new Date().toISOString();
-            await bounded(page.mouse.down(), termsRemaining(), 'trusted-terms-down');
+            assert.ok(box && box.width > 0 && box.height > 0);
+            evidence.trustedTermsInput = { control: terms, canvas: box, phaseStartedUtc: new Date(termsDeadline - 60_000).toISOString(), moveIssuedUtc: new Date().toISOString() };
+            await bounded(page.mouse.move(box.x + (terms.x + terms.width / 2) * box.width / terms.screenWidth,
+                box.y + (terms.y + terms.height / 2) * box.height / terms.screenHeight), termsRemaining(), 'trusted-terms-move');
             await Promise.race([hostFailure, page.waitForFunction(({ after, buttonIdentity }) => {
                 const boot = globalThis.originalBoot;
                 const value = boot?.termsControl;
 
                 return boot?.completed || boot?.failures?.length || (value?.visible && value.enabled === true && value.sequence > after && value.buttonIdentity === buttonIdentity
                     && value.mouseX > value.x + 1 && value.mouseX < value.x + value.width - 1
-                    && value.mouseY > value.y + 1 && value.mouseY < value.y + value.height - 1
-                    && value.leftDown === true && value.buttonPressed === true);
-            }, { after: moved.termsControl.sequence, buttonIdentity: terms.buttonIdentity }, { timeout: termsRemaining() })]);
-            const pressed = await page.evaluate(() => globalThis.originalBoot);
+                    && value.mouseY > value.y + 1 && value.mouseY < value.y + value.height - 1);
+            }, { after: terms.sequence, buttonIdentity: terms.buttonIdentity }, { timeout: termsRemaining() })]);
+            const moved = await page.evaluate(() => globalThis.originalBoot);
 
-            assert.equal(pressed.completed, false);
-            assert.equal(pressed.failures.length, 0);
-            assert.equal(pressed.termsControl.leftDown, true);
-            assert.equal(pressed.termsControl.buttonPressed, true);
-            assert.equal(pressed.termsControl.buttonIdentity, terms.buttonIdentity);
-            evidence.trustedTermsInput.downObserved = pressed.termsControl;
-            evidence.trustedTermsInput.downObservedUtc = new Date().toISOString();
-        } catch (error) {
-            inputFailure = error;
-        } finally {
+            assert.equal(moved.completed, false);
+            assert.equal(moved.failures.length, 0);
+            assert.equal(moved.termsControl.buttonIdentity, terms.buttonIdentity);
+            assert.equal(moved.termsControl.enabled, true);
+            assert.ok(moved.termsControl.mouseX > moved.termsControl.x + 1
+                && moved.termsControl.mouseX < moved.termsControl.x + moved.termsControl.width - 1
+                && moved.termsControl.mouseY > moved.termsControl.y + 1
+                && moved.termsControl.mouseY < moved.termsControl.y + moved.termsControl.height - 1);
+            evidence.trustedTermsInput.browserVisibilityBeforeDown = await page.evaluate(() => ({
+                documentHidden: document.hidden, documentHasFocus: document.hasFocus(),
+                activeElementId: document.activeElement?.id || null,
+            }));
+            evidence.trustedTermsInput.moveObserved = moved.termsControl;
+            evidence.trustedTermsInput.moveObservedUtc = new Date().toISOString();
+            let inputFailure;
+
             try {
-                // A real release is attempted even if a prior observation or transport fails.
-                evidence.trustedTermsInput.releaseIssuedUtc = new Date().toISOString();
-                // Release cleanup has its existing owner-close bound; it does not extend input observation.
-                await bounded(page.mouse.up(), 5_000, 'trusted-terms-release-cleanup');
-                evidence.trustedTermsInput.releaseCompleted = true;
-                evidence.trustedTermsInput.releaseCompletedUtc = new Date().toISOString();
-            } catch (error) {
-                evidence.trustedTermsInput.releaseError = String(error.stack || error);
-
-                inputFailure ??= error;
-            }
-        }
-
-        if (inputFailure) {
-            throw inputFailure;
-        }
-    }
-
-    await Promise.race([hostFailure, page.waitForFunction((minimum) => globalThis.originalBoot?.completed || globalThis.originalBoot?.failures?.length
-        || (globalThis.originalBoot?.termsControl?.visible === false
-            && globalThis.originalBoot?.lastConsumedUi?.producerState === 'zombie.gameStates.MainScreenState'
-            && globalThis.originalBoot.lastConsumedUi.mainMenuConsumed >= minimum), consumedBeforeInput + 3, { timeout: termsRemaining() })]);
-    evidence.beforeStop = await page.evaluate(() => globalThis.originalBoot);
-    evidence.termsTransitionObservedUtc = new Date().toISOString();
-    assert.equal(evidence.beforeStop.completed, false);
-    assert.equal(evidence.beforeStop.failures.length, 0);
-    assert.equal(evidence.beforeStop.termsControl.visible, false);
-    assert.equal(evidence.beforeStop.lastConsumedUi.producerState, 'zombie.gameStates.MainScreenState');
-    assert.ok(evidence.beforeStop.lastConsumedUi.mainMenuConsumed >= consumedBeforeInput + 3);
-    await page.locator('#graphics-canvas').screenshot({ path: path.join(output, 'initial-main-menu.png') });
-    /**
-     * Uses only the remaining original outer owner budget; never resets its deadline.
-     *
-     * @returns {number} Remaining owner time.
-     */
-    const loadingRemaining = () => {
-        const remaining = outerDeadlineAt - Date.now();
-
-        assert.ok(remaining > 0, 'Original owner deadline exceeded');
-
-        return remaining;
-    };
-
-    const frontendDeadline = Date.now() + 60_000;
-
-    evidence.frontendInput = [];
-    /**
-     * Bounds the genuine frontend setup phase independently of the preserved Terms phase.
-     *
-     * @returns {number} Remaining setup time.
-     */
-    const frontendRemaining = () => {
-        const remaining = frontendDeadline - Date.now();
-
-        assert.ok(remaining > 0, 'Original frontend setup deadline exceeded');
-
-        return remaining;
-    };
-
-    /**
-     * Waits for an actual visible original control without invoking Lua code.
-     *
-     * @param {string[]} ids - Original panel controls accepted at this branch.
-     * @returns {Promise<object>} Original observation and selected control.
-     */
-    const waitFrontend = async (ids) => {
-        await Promise.race([hostFailure, page.waitForFunction((wanted) => {
-            const boot = globalThis.originalBoot;
-
-            return boot?.completed || boot?.failures?.length || boot?.frontend?.controls.some((control) => wanted.includes(control.id) && control.enabled);
-        }, ids, { timeout: frontendRemaining() })]);
-        const boot = await page.evaluate(() => globalThis.originalBoot);
-
-        assert.equal(boot.completed, false);
-        assert.equal(boot.failures.length, 0);
-        const control = boot.frontend.controls.find((value) => ids.includes(value.id) && value.enabled);
-
-        assert.ok(control, 'Original enabled frontend control required');
-
-        return { observation: boot.frontend, control };
-    };
-
-    /**
-     * Uses trusted input and fresh original samples; final appearance Play is excluded.
-     *
-     * @param {object} selected - Actual original control and observation.
-     * @param {object} selected.observation - Actual original post-UI observation.
-     * @param {object} selected.control - Actual visible original control.
-     * @param {string[]} next - Expected original next-screen controls.
-     * @returns {Promise<object>} Actual next screen.
-     */
-    const pressFrontend = async ({ observation, control }, next) => {
-        if (['spawn', 'appearance'].includes(control.id)) {
-            assert.equal(observation.ownedPaths?.valid, true);
-            assert.equal(observation.ownedPaths.noSave, false);
-
-            if (control.id === 'spawn') {
-                assert.ok(observation.prospectiveSave?.name);
-                assert.equal(observation.prospectiveSave.exists, false);
-            }
-        }
-
-        const canvas = await page.locator('#graphics-canvas').boundingBox();
-
-        assert.ok(canvas && control.width > 2 && control.height > 2);
-        const action = { control, before: observation, issuedUtc: new Date().toISOString() };
-
-        evidence.frontendInput.push(action);
-        await bounded(page.mouse.move(canvas.x + (control.x + control.width / 2) * canvas.width / control.screenWidth,
-            canvas.y + (control.y + control.height / 2) * canvas.height / control.screenHeight), frontendRemaining());
-        await Promise.race([hostFailure, page.waitForFunction(({ id, identity, after }) => {
-            const boot = globalThis.originalBoot;
-            const value = boot?.frontend;
-            const target = value?.controls.find((item) => item.id === id && item.identity === identity && item.enabled);
-
-            return boot?.completed || boot?.failures?.length || (target && value.sequence > after
-                && value.mouseX > target.x + 1 && value.mouseX < target.x + target.width - 1
-                && value.mouseY > target.y + 1 && value.mouseY < target.y + target.height - 1);
-        }, { id: control.id, identity: control.identity, after: observation.sequence }, { timeout: frontendRemaining() })]);
-        const moved = await page.evaluate(() => globalThis.originalBoot);
-
-        assert.equal(moved.completed, false);
-        assert.equal(moved.failures.length, 0);
-        action.moveObserved = moved.frontend;
-        let primary;
-
-        try {
-            await bounded(page.mouse.down(), frontendRemaining());
-
-            if (control.button) {
-                await Promise.race([hostFailure, page.waitForFunction(({ id, identity, after }) => {
+                evidence.trustedTermsInput.downIssuedUtc = new Date().toISOString();
+                await bounded(page.mouse.down(), termsRemaining(), 'trusted-terms-down');
+                await Promise.race([hostFailure, page.waitForFunction(({ after, buttonIdentity }) => {
                     const boot = globalThis.originalBoot;
-                    const value = boot?.frontend;
-                    const target = value?.controls.find((item) => item.id === id && item.identity === identity && item.enabled);
+                    const value = boot?.termsControl;
 
-                    return boot?.completed || boot?.failures?.length || (target?.pressed && value.leftDown && value.sequence > after
-                        && value.mouseX > target.x + 1 && value.mouseX < target.x + target.width - 1
-                        && value.mouseY > target.y + 1 && value.mouseY < target.y + target.height - 1);
-                }, { id: control.id, identity: control.identity, after: moved.frontend.sequence }, { timeout: frontendRemaining() })]);
+                    return boot?.completed || boot?.failures?.length || (value?.visible && value.enabled === true && value.sequence > after && value.buttonIdentity === buttonIdentity
+                        && value.mouseX > value.x + 1 && value.mouseX < value.x + value.width - 1
+                        && value.mouseY > value.y + 1 && value.mouseY < value.y + value.height - 1
+                        && value.leftDown === true && value.buttonPressed === true);
+                }, { after: moved.termsControl.sequence, buttonIdentity: terms.buttonIdentity }, { timeout: termsRemaining() })]);
                 const pressed = await page.evaluate(() => globalThis.originalBoot);
 
                 assert.equal(pressed.completed, false);
                 assert.equal(pressed.failures.length, 0);
-                action.downObserved = pressed.frontend;
-            } else {
-                // Original Solo is an ISLabel whose genuine action runs on mouse down.
-                action.downObserved = (await waitFrontend(next)).observation;
+                assert.equal(pressed.termsControl.leftDown, true);
+                assert.equal(pressed.termsControl.buttonPressed, true);
+                assert.equal(pressed.termsControl.buttonIdentity, terms.buttonIdentity);
+                evidence.trustedTermsInput.downObserved = pressed.termsControl;
+                evidence.trustedTermsInput.downObservedUtc = new Date().toISOString();
+            } catch (error) {
+                inputFailure = error;
+            } finally {
+                try {
+                // A real release is attempted even if a prior observation or transport fails.
+                    evidence.trustedTermsInput.releaseIssuedUtc = new Date().toISOString();
+                    // Release cleanup has its existing owner-close bound; it does not extend input observation.
+                    await bounded(page.mouse.up(), 5_000, 'trusted-terms-release-cleanup');
+                    evidence.trustedTermsInput.releaseCompleted = true;
+                    evidence.trustedTermsInput.releaseCompletedUtc = new Date().toISOString();
+                } catch (error) {
+                    evidence.trustedTermsInput.releaseError = String(error.stack || error);
+
+                    inputFailure ??= error;
+                }
             }
+
+            if (inputFailure) {
+                throw inputFailure;
+            }
+        }
+
+        await Promise.race([hostFailure, page.waitForFunction((minimum) => globalThis.originalBoot?.completed || globalThis.originalBoot?.failures?.length
+            || (globalThis.originalBoot?.termsControl?.visible === false
+                && globalThis.originalBoot?.lastConsumedUi?.producerState === 'zombie.gameStates.MainScreenState'
+                && globalThis.originalBoot.lastConsumedUi.mainMenuConsumed >= minimum), consumedBeforeInput + 3, { timeout: termsRemaining() })]);
+        evidence.beforeStop = await page.evaluate(() => globalThis.originalBoot);
+        evidence.termsTransitionObservedUtc = new Date().toISOString();
+        assert.equal(evidence.beforeStop.completed, false);
+        assert.equal(evidence.beforeStop.failures.length, 0);
+        assert.equal(evidence.beforeStop.termsControl.visible, false);
+        assert.equal(evidence.beforeStop.lastConsumedUi.producerState, 'zombie.gameStates.MainScreenState');
+        assert.ok(evidence.beforeStop.lastConsumedUi.mainMenuConsumed >= consumedBeforeInput + 3);
+        await page.locator('#graphics-canvas').screenshot({ path: path.join(output, 'initial-main-menu.png') });
+        /**
+         * Uses only the remaining original outer owner budget; never resets its deadline.
+         *
+         * @returns {number} Remaining owner time.
+         */
+        const loadingRemaining = () => {
+            const remaining = outerDeadlineAt - Date.now();
+
+            assert.ok(remaining > 0, 'Original owner deadline exceeded');
+
+            return remaining;
+        };
+
+        const frontendDeadline = Date.now() + 60_000;
+
+        evidence.frontendInput = [];
+        /**
+         * Bounds the genuine frontend setup phase independently of the preserved Terms phase.
+         *
+         * @returns {number} Remaining setup time.
+         */
+        const frontendRemaining = () => {
+            const remaining = frontendDeadline - Date.now();
+
+            assert.ok(remaining > 0, 'Original frontend setup deadline exceeded');
+
+            return remaining;
+        };
+
+        /**
+         * Waits for an actual visible original control without invoking Lua code.
+         *
+         * @param {string[]} ids - Original panel controls accepted at this branch.
+         * @returns {Promise<object>} Original observation and selected control.
+         */
+        const waitFrontend = async (ids) => {
+            await Promise.race([hostFailure, page.waitForFunction((wanted) => {
+                const boot = globalThis.originalBoot;
+
+                return boot?.completed || boot?.failures?.length || boot?.frontend?.controls.some((control) => wanted.includes(control.id) && control.enabled);
+            }, ids, { timeout: frontendRemaining() })]);
+            const boot = await page.evaluate(() => globalThis.originalBoot);
+
+            assert.equal(boot.completed, false);
+            assert.equal(boot.failures.length, 0);
+            const control = boot.frontend.controls.find((value) => ids.includes(value.id) && value.enabled);
+
+            assert.ok(control, 'Original enabled frontend control required');
+
+            return { observation: boot.frontend, control };
+        };
+
+        /**
+         * Uses trusted input and fresh original samples; final appearance Play is excluded.
+         *
+         * @param {object} selected - Actual original control and observation.
+         * @param {object} selected.observation - Actual original post-UI observation.
+         * @param {object} selected.control - Actual visible original control.
+         * @param {string[]} next - Expected original next-screen controls.
+         * @returns {Promise<object>} Actual next screen.
+         */
+        const pressFrontend = async ({ observation, control }, next) => {
+            if (['spawn', 'appearance'].includes(control.id)) {
+                assert.equal(observation.ownedPaths?.valid, true);
+                assert.equal(observation.ownedPaths.noSave, false);
+
+                if (control.id === 'spawn') {
+                    assert.ok(observation.prospectiveSave?.name);
+                    assert.equal(observation.prospectiveSave.exists, false);
+                }
+            }
+
+            const canvas = await page.locator('#graphics-canvas').boundingBox();
+
+            assert.ok(canvas && control.width > 2 && control.height > 2);
+            const action = { control, before: observation, issuedUtc: new Date().toISOString() };
+
+            evidence.frontendInput.push(action);
+            await bounded(page.mouse.move(canvas.x + (control.x + control.width / 2) * canvas.width / control.screenWidth,
+                canvas.y + (control.y + control.height / 2) * canvas.height / control.screenHeight), frontendRemaining());
+            await Promise.race([hostFailure, page.waitForFunction(({ id, identity, after }) => {
+                const boot = globalThis.originalBoot;
+                const value = boot?.frontend;
+                const target = value?.controls.find((item) => item.id === id && item.identity === identity && item.enabled);
+
+                return boot?.completed || boot?.failures?.length || (target && value.sequence > after
+                    && value.mouseX > target.x + 1 && value.mouseX < target.x + target.width - 1
+                    && value.mouseY > target.y + 1 && value.mouseY < target.y + target.height - 1);
+            }, { id: control.id, identity: control.identity, after: observation.sequence }, { timeout: frontendRemaining() })]);
+            const moved = await page.evaluate(() => globalThis.originalBoot);
+
+            assert.equal(moved.completed, false);
+            assert.equal(moved.failures.length, 0);
+            action.moveObserved = moved.frontend;
+            let primary;
+
+            try {
+                await bounded(page.mouse.down(), frontendRemaining());
+
+                if (control.button) {
+                    await Promise.race([hostFailure, page.waitForFunction(({ id, identity, after }) => {
+                        const boot = globalThis.originalBoot;
+                        const value = boot?.frontend;
+                        const target = value?.controls.find((item) => item.id === id && item.identity === identity && item.enabled);
+
+                        return boot?.completed || boot?.failures?.length || (target?.pressed && value.leftDown && value.sequence > after
+                            && value.mouseX > target.x + 1 && value.mouseX < target.x + target.width - 1
+                            && value.mouseY > target.y + 1 && value.mouseY < target.y + target.height - 1);
+                    }, { id: control.id, identity: control.identity, after: moved.frontend.sequence }, { timeout: frontendRemaining() })]);
+                    const pressed = await page.evaluate(() => globalThis.originalBoot);
+
+                    assert.equal(pressed.completed, false);
+                    assert.equal(pressed.failures.length, 0);
+                    action.downObserved = pressed.frontend;
+                } else {
+                // Original Solo is an ISLabel whose genuine action runs on mouse down.
+                    action.downObserved = (await waitFrontend(next)).observation;
+                }
+            } catch (error) {
+                primary = error;
+            } finally {
+                try {
+                    await bounded(page.mouse.up(), 5_000);
+                    action.releaseCompleted = true;
+                } catch (error) {
+                    action.releaseError = String(error.stack || error);
+                    primary ??= error;
+                }
+            }
+
+            if (primary) {
+                throw primary;
+            }
+
+            if (control.id === 'appearance') {
+                action.finalPlayReleased = true;
+
+                return { observation, control };
+            }
+
+            const result = await waitFrontend(next);
+
+            action.nextObserved = result;
+
+            return result;
+        };
+
+        let setup = await pressFrontend(await waitFrontend(['solo']), ['mode']);
+
+        setup = await pressFrontend(setup, ['world', 'spawn']);
+
+        if (setup.control.id === 'world') {
+            setup = await pressFrontend(setup, ['spawn']);
+        }
+
+        setup = await pressFrontend(setup, ['profession']);
+        const appearanceBefore = await page.evaluate(() => globalThis.originalBoot.lastConsumedUi?.appearanceConsumed || 0);
+
+        setup = await pressFrontend(setup, ['appearance']);
+        await Promise.race([hostFailure, page.waitForFunction(({ after, before }) => {
+            const boot = globalThis.originalBoot;
+
+            return boot?.completed || boot?.failures?.length || (boot?.lastConsumedUi?.originalUiConsumed > after
+                && boot.lastConsumedUi.appearanceVisible === true && boot.lastConsumedUi.appearanceConsumed >= before + 3);
+        }, { after: setup.observation.sequence, before: appearanceBefore }, { timeout: frontendRemaining() })]);
+        await Promise.race([hostFailure, page.waitForFunction(() => {
+            const boot = globalThis.originalBoot;
+
+            return boot?.completed || boot?.failures?.length || boot?.presentation?.presents?.length === 3;
+        }, undefined, { timeout: frontendRemaining() })]);
+        const appearance = await page.evaluate(() => globalThis.originalBoot);
+
+        assert.equal(appearance.completed, false);
+        assert.equal(appearance.failures.length, 0);
+        assert.ok(appearance.frontend.controls.some((control) => control.id === 'appearance' && control.identity === setup.control.identity));
+        evidence.frontendAppearance = setup;
+        evidence.frontendAppearanceConsumed = appearance.lastConsumedUi;
+        evidence.actualPresentation = appearance.presentation;
+
+        for (const [index, sample] of appearance.presentation.presents.entries()) {
+            assert.match(sample.png, /^data:image\/png;base64,/u);
+            // Write the three bounded PNG samples sequentially to keep output ordering explicit.
+            // eslint-disable-next-line no-await-in-loop
+            await writeFile(path.join(output, `appearance-present-${index + 1}.png`), Buffer.from(sample.png.split(',')[1], 'base64'));
+        }
+
+        evidence.finalPlayUnpressed = false;
+        await page.locator('#graphics-canvas').screenshot({ path: path.join(output, 'original-character-creation.png') });
+        evidence.pixelReviewRequired = true;
+        await pressFrontend(await waitFrontend(['appearance']), []);
+        await Promise.race([hostFailure, page.waitForFunction(() => {
+            const boot = globalThis.originalBoot;
+            const loading = boot?.loading;
+
+            return boot?.completed || boot?.failures?.length || (loading?.readyForPhysicalClick
+                && boot.presentation.actualPresents > loading.actualPresentsAtObservation);
+        }, undefined, { timeout: loadingRemaining() })]);
+        const loadingBoot = await page.evaluate(() => globalThis.originalBoot);
+
+        assert.equal(loadingBoot.completed, false);
+        assert.equal(loadingBoot.failures.length, 0);
+        evidence.loadingReady = loadingBoot.loading;
+        assert.equal(evidence.loadingReady.readyForPhysicalClick, true);
+        await page.locator('#graphics-canvas').screenshot({ path: path.join(output, 'original-loading-ready.png') });
+        let loadingPrimary;
+
+        try {
+            await bounded(page.mouse.down(), loadingRemaining());
+            await Promise.race([hostFailure, page.waitForFunction(() => {
+                const boot = globalThis.originalBoot;
+
+                return boot?.completed || boot?.failures?.length
+                    || boot?.currentOriginalState?.name === 'zombie.gameStates.IngameState';
+            }, undefined, { timeout: loadingRemaining() })]);
+            evidence.loadingClickObserved = await page.evaluate(() => globalThis.originalBoot.observations.slice(-20));
         } catch (error) {
-            primary = error;
+            loadingPrimary = error;
         } finally {
             try {
                 await bounded(page.mouse.up(), 5_000);
-                action.releaseCompleted = true;
             } catch (error) {
-                action.releaseError = String(error.stack || error);
-                primary ??= error;
+                loadingPrimary ??= error;
             }
         }
 
-        if (primary) {
-            throw primary;
+        if (loadingPrimary) {
+            throw loadingPrimary;
         }
 
-        if (control.id === 'appearance') {
-            action.finalPlayReleased = true;
-
-            return { observation, control };
-        }
-
-        const result = await waitFrontend(next);
-
-        action.nextObserved = result;
-
-        return result;
-    };
-
-    let setup = await pressFrontend(await waitFrontend(['solo']), ['mode']);
-
-    setup = await pressFrontend(setup, ['world', 'spawn']);
-
-    if (setup.control.id === 'world') {
-        setup = await pressFrontend(setup, ['spawn']);
-    }
-
-    setup = await pressFrontend(setup, ['profession']);
-    const appearanceBefore = await page.evaluate(() => globalThis.originalBoot.lastConsumedUi?.appearanceConsumed || 0);
-
-    setup = await pressFrontend(setup, ['appearance']);
-    await Promise.race([hostFailure, page.waitForFunction(({ after, before }) => {
-        const boot = globalThis.originalBoot;
-
-        return boot?.completed || boot?.failures?.length || (boot?.lastConsumedUi?.originalUiConsumed > after
-            && boot.lastConsumedUi.appearanceVisible === true && boot.lastConsumedUi.appearanceConsumed >= before + 3);
-    }, { after: setup.observation.sequence, before: appearanceBefore }, { timeout: frontendRemaining() })]);
-    await Promise.race([hostFailure, page.waitForFunction(() => {
-        const boot = globalThis.originalBoot;
-
-        return boot?.completed || boot?.failures?.length || boot?.presentation?.presents?.length === 3;
-    }, undefined, { timeout: frontendRemaining() })]);
-    const appearance = await page.evaluate(() => globalThis.originalBoot);
-
-    assert.equal(appearance.completed, false);
-    assert.equal(appearance.failures.length, 0);
-    assert.ok(appearance.frontend.controls.some((control) => control.id === 'appearance' && control.identity === setup.control.identity));
-    evidence.frontendAppearance = setup;
-    evidence.frontendAppearanceConsumed = appearance.lastConsumedUi;
-    evidence.actualPresentation = appearance.presentation;
-
-    for (const [index, sample] of appearance.presentation.presents.entries()) {
-        assert.match(sample.png, /^data:image\/png;base64,/u);
-        // Write the three bounded PNG samples sequentially to keep output ordering explicit.
-        // eslint-disable-next-line no-await-in-loop
-        await writeFile(path.join(output, `appearance-present-${index + 1}.png`), Buffer.from(sample.png.split(',')[1], 'base64'));
-    }
-
-    evidence.finalPlayUnpressed = false;
-    await page.locator('#graphics-canvas').screenshot({ path: path.join(output, 'original-character-creation.png') });
-    evidence.pixelReviewRequired = true;
-    await pressFrontend(await waitFrontend(['appearance']), []);
-    await Promise.race([hostFailure, page.waitForFunction(() => {
-        const boot = globalThis.originalBoot;
-        const loading = boot?.loading;
-
-        return boot?.completed || boot?.failures?.length || (loading?.readyForPhysicalClick
-            && boot.presentation.actualPresents > loading.actualPresentsAtObservation);
-    }, undefined, { timeout: loadingRemaining() })]);
-    const loadingBoot = await page.evaluate(() => globalThis.originalBoot);
-
-    assert.equal(loadingBoot.completed, false);
-    assert.equal(loadingBoot.failures.length, 0);
-    evidence.loadingReady = loadingBoot.loading;
-    assert.equal(evidence.loadingReady.readyForPhysicalClick, true);
-    await page.locator('#graphics-canvas').screenshot({ path: path.join(output, 'original-loading-ready.png') });
-    let loadingPrimary;
-
-    try {
-        await bounded(page.mouse.down(), loadingRemaining());
         await Promise.race([hostFailure, page.waitForFunction(() => {
             const boot = globalThis.originalBoot;
 
             return boot?.completed || boot?.failures?.length
-                || boot?.currentOriginalState?.name === 'zombie.gameStates.IngameState';
+                || (boot?.currentOriginalState?.name === 'zombie.gameStates.IngameState'
+                    && boot.presentation.actualPresents > boot.currentOriginalState.actualPresentsAtObservation);
         }, undefined, { timeout: loadingRemaining() })]);
-        evidence.loadingClickObserved = await page.evaluate(() => globalThis.originalBoot.observations.slice(-20));
-    } catch (error) {
-        loadingPrimary = error;
-    } finally {
-        try {
-            await bounded(page.mouse.up(), 5_000);
-        } catch (error) {
-            loadingPrimary ??= error;
+        const entered = await page.evaluate(() => globalThis.originalBoot);
+
+        assert.equal(entered.completed, false);
+        assert.equal(entered.failures.length, 0);
+        assert.ok(entered.currentOriginalState?.name === 'zombie.gameStates.IngameState');
+        evidence.originalIngameObserved = true;
+        await page.locator('#graphics-canvas').screenshot({ path: path.join(output, 'original-ingame.png') });
+
+        if (interactive) {
+            evidence.interactiveStartedAt = new Date().toISOString();
+            process.stdout.write(`${JSON.stringify({ output, event: 'original-ingame-interactive' })}\n`);
+            await Promise.race([hostFailure, page.waitForFunction(() => globalThis.originalBoot?.completed
+                || globalThis.originalBoot?.failures?.length, undefined, { timeout: Math.max(1, outerDeadlineAt - Date.now()) })]);
+        } else {
+            await page.locator('#stop').click();
         }
-    }
-
-    if (loadingPrimary) {
-        throw loadingPrimary;
-    }
-
-    await Promise.race([hostFailure, page.waitForFunction(() => {
-        const boot = globalThis.originalBoot;
-
-        return boot?.completed || boot?.failures?.length
-            || (boot?.currentOriginalState?.name === 'zombie.gameStates.IngameState'
-                && boot.presentation.actualPresents > boot.currentOriginalState.actualPresentsAtObservation);
-    }, undefined, { timeout: loadingRemaining() })]);
-    const entered = await page.evaluate(() => globalThis.originalBoot);
-
-    assert.equal(entered.completed, false);
-    assert.equal(entered.failures.length, 0);
-    assert.ok(entered.currentOriginalState?.name === 'zombie.gameStates.IngameState');
-    evidence.originalIngameObserved = true;
-    await page.locator('#graphics-canvas').screenshot({ path: path.join(output, 'original-ingame.png') });
-
-    if (interactive) {
-        evidence.interactiveStartedAt = new Date().toISOString();
-        process.stdout.write(`${JSON.stringify({ output, event: 'original-ingame-interactive' })}\n`);
-        await Promise.race([hostFailure, page.waitForFunction(() => globalThis.originalBoot?.completed
-            || globalThis.originalBoot?.failures?.length, undefined, { timeout: Math.max(1, outerDeadlineAt - Date.now()) })]);
-    } else {
-        await page.locator('#stop').click();
     }
 
     await page.waitForFunction(() => globalThis.originalBoot?.completed, undefined, { timeout: 30_000 });

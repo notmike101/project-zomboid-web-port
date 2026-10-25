@@ -154,7 +154,15 @@ try {
 
     owners = { graphics, keyboard, text, mouse, display, controllers, clock, physics, watch, processes };
     await reserveSqliteNamespace();
-    const root = `/files/sqlite-owned/${crypto.randomUUID()}`;
+    let root = `/files/sqlite-owned/${crypto.randomUUID()}`;
+
+    if (globalThis.originalBootOwnedHome !== undefined) {
+        if (!/^\/files\/sqlite-owned\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(globalThis.originalBootOwnedHome)) {
+            throw new Error('Invalid persistent owned home');
+        }
+
+        root = globalThis.originalBootOwnedHome;
+    }
 
     await startSchedulerRuntime({
         version: 17,
