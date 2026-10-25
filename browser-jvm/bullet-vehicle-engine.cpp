@@ -1,6 +1,8 @@
 #include <map>
 extern "C" int clear_registered_vehicle();
 extern "C" int clear_geometry();
+extern "C" int clear_vehicle_constraints();
+static int nextConstraintId=0;
 #include <array>
 #include <memory>
 #include <cstdint>
@@ -34,7 +36,7 @@ static World* ownedWorld=nullptr;
 extern "C" {
 int create_world() {
     if(ownedWorld) return 0;
-    ownedWorld=new World;
+    ownedWorld=new World;nextConstraintId=0;
     ownedWorld->world.setGravity(btVector3(0,-10,0));
     ownedWorld->world.getSolverInfo().m_erp2=btScalar(0.8); // Original Dynamics constructor 0x180059f90 stores double 0.8.
     ownedWorld->world.getSolverInfo().m_restitutionVelocityThreshold=0; // Original 0x18006447a..0x180064482 multiplies restitution then max(0), without a velocity cutoff.
@@ -232,6 +234,7 @@ uintptr_t map_chunk(int id,int x,int y,int* output){
 }
 int destroy_mapped_world(){
     if(!ownedWorld)return 0;
+    clear_vehicle_constraints();
     clear_registered_vehicle();
     clear_geometry();
     for(int player=0;player<4;player++)deactivate_map(player);
@@ -715,7 +718,64 @@ int vehicle_wheel(int index,double* output){
     for(double value:{w.m_suspensionRestLength1,w.m_maxSuspensionTravelCm,w.m_wheelsRadius,w.m_suspensionStiffness,w.m_wheelsDampingCompression,w.m_wheelsDampingRelaxation,w.m_frictionSlip,w.m_steering,w.m_rotation,w.m_rollInfluence,w.m_maxSuspensionForce,w.m_engineForce,w.m_brake})output[cursor++]=value;
     output[cursor]=w.m_bIsFrontWheel;return 1;
 }
-int remove_vehicle(int id){if(!ownedWorld)return 0;auto* owner=findVehicle(id);if(!owner)return 1;ownedWorld->world.removeVehicle(owner->vehicle.get());ownedWorld->world.removeRigidBody(owner->body.get());ownedVehicles.erase(id);vehicleReadbackValid=false;return 1;}
+struct VehicleConstraint {
+    int a,b;
+    std::unique_ptr<btGeneric6DofConstraint> constraint;
+};
+static std::map<int,VehicleConstraint> vehicleConstraints;
+extern "C" int remove_vehicle_constraint(int id){
+    if(!ownedWorld)return 0;
+    auto entry=vehicleConstraints.find(id);if(entry==vehicleConstraints.end())return 1;
+    ownedWorld->world.removeConstraint(entry->second.constraint.get());vehicleConstraints.erase(entry);return 1;
+}
+extern "C" int clear_vehicle_constraints(){
+    if(!ownedWorld)return vehicleConstraints.empty()?1:0;
+    while(!vehicleConstraints.empty())remove_vehicle_constraint(vehicleConstraints.begin()->first);return 1;
+}
+static void detachVehicleConstraints(int id){
+    for(auto entry=vehicleConstraints.begin();entry!=vehicleConstraints.end();){
+        if(entry->second.a==id||entry->second.b==id){auto removed=entry++;remove_vehicle_constraint(removed->first);}else ++entry;
+    }
+}
+extern "C" int add_vehicle_constraint(int a,int b,const float* values,int rope){
+    auto* first=findVehicle(a);auto* second=findVehicle(b);
+    if(!ownedWorld||!first||!second||!values||(rope!=0&&rope!=1)||nextConstraintId==INT32_MAX)return -1;
+    for(int i=0;i<(rope?7:18);i++)if(!std::isfinite(values[i]))return -1;
+    if(rope){
+        if(values[6]<0||!set_vehicle_static(a,0)||!set_vehicle_static(b,0)||!set_vehicle_active(a,1)||!set_vehicle_active(b,1))return -1;
+    }
+    btTransform frameA,frameB;frameA.setIdentity();frameB.setIdentity();
+    frameA.setOrigin(btVector3(values[0],values[1],values[2]));frameB.setOrigin(btVector3(values[3],values[4],values[5]));
+    auto constraint=std::make_unique<btGeneric6DofConstraint>(*first->body,*second->body,frameA,frameB,true);
+    if(rope){
+        constraint->setLinearLowerLimit(btVector3(-double(values[6]),-double(values[6]),-double(values[6])));
+        constraint->setLinearUpperLimit(btVector3(values[6],values[6],values[6]));
+    }else{
+        constraint->setLinearLowerLimit(btVector3(values[6],values[7],values[8]));constraint->setLinearUpperLimit(btVector3(values[9],values[10],values[11]));
+        constraint->setAngularLowerLimit(btVector3(values[12],values[13],values[14]));constraint->setAngularUpperLimit(btVector3(values[15],values[16],values[17]));
+    }
+    constraint->enableFeedback(true);
+    const int id=nextConstraintId+1;
+    auto inserted=vehicleConstraints.emplace(id,VehicleConstraint{a,b,std::move(constraint)});
+    ownedWorld->world.addConstraint(inserted.first->second.constraint.get(),false);nextConstraintId=id;return id;
+}
+extern "C" int vehicle_constraint_count(){return ownedWorld?int(vehicleConstraints.size()):-1;}
+extern "C" int vehicle_constraint_feedback(double* output,int capacity){
+    if(!ownedWorld||capacity<int(vehicleConstraints.size())||(!output&&!vehicleConstraints.empty()))return -1;
+    int count=0;
+    for(const auto& entry:vehicleConstraints){
+        double impulse=entry.second.constraint->getAppliedImpulse();
+        if(impulse>0){
+            output[count*4]=entry.first;output[count*4+1]=entry.second.a;output[count*4+2]=entry.second.b;output[count*4+3]=float(impulse);count++;
+        }
+    }return count;
+}
+extern "C" int set_vehicle_constraint_erp(int id,float value,int axis){
+    auto entry=vehicleConstraints.find(id);
+    if(!ownedWorld||entry==vehicleConstraints.end()||!std::isfinite(value)||axis<0||axis>5)return 0;
+    entry->second.constraint->setParam(BT_CONSTRAINT_STOP_ERP,double(value),axis);return 1;
+}
+int remove_vehicle(int id){if(!ownedWorld)return 0;auto* owner=findVehicle(id);if(!owner)return 1;detachVehicleConstraints(id);ownedWorld->world.removeVehicle(owner->vehicle.get());ownedWorld->world.removeRigidBody(owner->body.get());ownedVehicles.erase(id);vehicleReadbackValid=false;return 1;}
 }
 
 extern "C" int clear_registered_vehicle(){

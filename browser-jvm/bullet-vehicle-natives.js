@@ -348,6 +348,66 @@ export function createVehicleWorldNatives(engine) {
             expect(engine._teleport_vehicle(id, x, y, z, qx, qy, qz, qw) === 1, 'Unsupported actual vehicle relocation');
         },
         /**
+         * Creates the original generic six-axis towing constraint.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} first - First vehicle identity.
+         * @param {number} second - Second vehicle identity.
+         * @param {...number} values - Original pivots and axis limits.
+         * @returns {number} Actual constraint identity.
+         */
+        add6DofConstraint(lib, first, second, ...values) {
+            expect(values.length === 18, 'Original six-axis constraint extent');
+
+            return floats(new Float32Array(values), (pointer) => {
+                const id = engine._add_vehicle_constraint(first, second, pointer, 0);
+
+                expect(id > 0, 'Actual six-axis constraint creation rejected');
+
+                return id;
+            });
+        },
+        /**
+         * Creates original rope towing as a generic constraint with cubic linear bounds.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} first - First vehicle identity.
+         * @param {number} second - Second vehicle identity.
+         * @param {...number} values - Original pivots and length.
+         * @returns {number} Actual constraint identity.
+         */
+        addRopeConstraint(lib, first, second, ...values) {
+            expect(values.length === 7, 'Original rope constraint extent');
+
+            return floats(new Float32Array(values), (pointer) => {
+                const id = engine._add_vehicle_constraint(first, second, pointer, 1);
+
+                expect(id > 0, 'Actual rope constraint creation rejected');
+
+                return id;
+            });
+        },
+        /**
+         * Sets the original stop ERP for one towing axis.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Constraint identity.
+         * @param {number} value - Original ERP.
+         * @param {number} axis - Axis zero through five.
+         */
+        setConstraintERP(lib, id, value, axis) {
+            expect(engine._set_vehicle_constraint_erp(id, value, axis) === 1, 'Actual constraint ERP rejected');
+        },
+        /**
+         * Removes the owned towing constraint before releasing its storage.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Constraint identity.
+         */
+        removeConstraint(lib, id) {
+            expect(engine._remove_vehicle_constraint(id) === 1, 'Actual constraint removal rejected');
+        },
+        /**
          * Dispatches setChunkMinMaxLevel to the actual qualified engine operation.
          *
          * @param {object} lib - Original Java namespace supplied by the runtime.
@@ -425,6 +485,33 @@ export function createVehicleWorldNatives(engine) {
             }
 
             expect(engine._step_mapped_vehicle(delta) === 1, 'Actual mapped Dynamics step rejected');
+
+            const constraintCount = engine._vehicle_constraint_count();
+
+            expect(constraintCount >= 0, 'Actual constraint owner missing');
+
+            if (constraintCount > 0) {
+                const feedbackPointer = engine._malloc(constraintCount * 4 * 8);
+                let feedback;
+
+                try {
+                    expect(feedbackPointer !== 0, 'Actual constraint feedback allocation failed');
+
+                    const count = engine._vehicle_constraint_feedback(feedbackPointer, constraintCount);
+
+                    expect(count >= 0 && count <= constraintCount, 'Actual constraint feedback extent');
+                    feedback = Array.from(engine.HEAPF64.subarray(feedbackPointer / 8, feedbackPointer / 8 + count * 4));
+                } finally {
+                    engine._free(feedbackPointer);
+                }
+
+                const Bullet = await lib.zombie.core.physics.Bullet;
+
+                for (let offset = 0; offset < feedback.length; offset += 4) {
+                    // eslint-disable-next-line no-await-in-loop -- Original positive feedback reaches Java in constraint identity order.
+                    await Bullet.onVehicleConstraintImpulse(...feedback.slice(offset, offset + 4));
+                }
+            }
 
             const state = engine._malloc(40);
             let dynamics;
