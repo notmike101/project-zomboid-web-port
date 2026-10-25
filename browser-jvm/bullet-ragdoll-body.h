@@ -8,6 +8,12 @@ struct OwnedRagdoll {
     std::vector<std::unique_ptr<btRigidBody>> bodies;
     std::vector<std::unique_ptr<btTypedConstraint>> joints;
     bool active=false;
+    btTransform root=btTransform::getIdentity();
+    std::array<btTransform,11> initialBody;
+    std::array<int,11> anchorBones{};
+    std::array<btTransform,11> anchorOffsets;
+    bool anchorsReady=false;
+    std::vector<btTransform> poseLocal,poseWorld;
 };
 static std::map<int,std::unique_ptr<OwnedRagdoll>> ownedRagdolls;
 static double ragdollMass=70;
@@ -57,6 +63,7 @@ extern "C" int add_ragdoll(int id,const float* partData,const float* dynamics,co
         btVector3 direction=first.getOrigin()-second.getOrigin();if(pending->definition->parents[a]==b)direction=-direction;
         btQuaternion rotation;if(direction.length2()==0)rotation=btQuaternion(0,0,0,1);else rotation=shortestArcQuat(btVector3(0,1,0),direction.normalized());
         btTransform transform(rotation,(first.getOrigin()+second.getOrigin())*.5);
+        pending->initialBody[part]=transform;
         pending->massFractions[part]=parts[part][6];double mass=ragdollMass*pending->massFractions[part];btVector3 inertia;pending->definition->parts[part]->calculateLocalInertia(mass,inertia);
         auto motion=std::make_unique<btDefaultMotionState>(transform);btRigidBody::btRigidBodyConstructionInfo info(mass,motion.get(),pending->definition->parts[part].get(),inertia);
         auto body=std::make_unique<btRigidBody>(info);body->setFlags(0);const float* config=tuning[part];body->setDamping(config[1],config[2]);body->setDeactivationTime(config[3]);body->setSleepingThresholds(config[4],config[5]);body->setFriction(config[6]);body->setRollingFriction(config[7]);
@@ -79,4 +86,58 @@ extern "C" int ragdoll_body_state(int id,int part,double* output){
     auto* owner=findRagdoll(id);if(!owner||part<0||part>=11||!output)return 0;const auto& body=*owner->bodies[part];const auto& transform=body.getWorldTransform();
     int cursor=0;for(int row=0;row<3;row++)for(int col=0;col<3;col++)output[cursor++]=transform.getBasis()[row][col];for(int axis=0;axis<3;axis++)output[cursor++]=transform.getOrigin()[axis];
     output[12]=body.getInvMass();for(int axis=0;axis<3;axis++)output[13+axis]=body.getInvInertiaDiagLocal()[axis];output[16]=body.getFriction();output[17]=body.getRestitution();output[18]=body.getRollingFriction();output[19]=body.getLinearDamping();output[20]=body.getAngularDamping();output[21]=body.getCollisionFlags();output[22]=body.getActivationState();output[23]=body.getDeactivationTime();output[24]=body.getLinearSleepingThreshold();return 1;
+}
+
+// Original enabled anchor constructor 0x180015e70: inverse bone times the bone/body midpoint frame.
+extern "C" int configure_ragdoll_anchors(int id,const float* records,int count){
+    auto* owner=findRagdoll(id);if(!owner||!records||count<0||count>4096)return 0;
+    const std::array<int,11> bones={2,4,6,20,21,24,25,8,9,14,15};
+    std::vector<btTransform> boneOffsets(owner->definition->world.size(),btTransform::getIdentity());
+    std::vector<bool> present(boneOffsets.size());std::array<btTransform,11> offsets;
+    for(int row=0;row<count;row++){
+        const float* r=records+row*5;for(int j=0;j<5;j++)if(!std::isfinite(r[j]))return 0;
+        if(r[0]<0||r[0]>=owner->definition->world.size()||std::floor(r[0])!=r[0]||r[1]<0||r[1]>=11||std::floor(r[1])!=r[1])return 0;
+        for(int j=2;j<5;j++)if(r[j]!=0&&r[j]!=1)return 0;
+        if(!r[4])continue;
+        // The installed enabled anchors use midpoint frames; original=true uses a distinct native branch.
+        if(r[3])return 0;
+        int bone=int(r[0]),part=int(r[1]);if(present[bone])return 0;
+        const auto& bind=owner->definition->world[bone];const auto& body=owner->initialBody[part];
+        btVector3 direction=body.getOrigin()-bind.getOrigin();if(r[2])direction=-direction;
+        btQuaternion rotation=direction.length2()==0?btQuaternion(0,0,0,1):shortestArcQuat(btVector3(0,1,0),direction.normalized());
+        btTransform frame(rotation,(bind.getOrigin()+body.getOrigin())*.5);boneOffsets[bone]=bind.inverse()*frame;present[bone]=true;
+    }
+    for(int part=0;part<11;part++)offsets[part]=boneOffsets[bones[part]];
+    owner->anchorBones=bones;owner->anchorOffsets=offsets;owner->anchorsReady=true;return 1;
+}
+extern "C" int update_ragdoll_root(int id,float x,float y,float z,float qx,float qy,float qz,float qw){
+    if(!ownedWorld)return 0;auto* owner=findRagdoll(id);if(!owner)return 1;
+    for(float value:{x,y,z,qx,qy,qz,qw})if(!std::isfinite(value))return 0;
+    btQuaternion rotation(qx,qy,qz,qw);if(rotation.length2()==0)return 0;
+    owner->root=btTransform(rotation,btVector3(double(x-float(worldHeader[4])),double(y),double(z-float(worldHeader[5]))));return 1;
+}
+extern "C" int update_ragdoll_pose(int id,int count,const float* records){
+    if(!ownedWorld)return 0;auto* owner=findRagdoll(id);if(!owner)return 1;
+    if(!owner->anchorsReady||!records||count!=owner->definition->parents.size())return 0;
+    std::vector<btTransform> local(count),world(count);
+    for(int i=0;i<count;i++){
+        const float* r=records+i*7;for(int j=0;j<7;j++)if(!std::isfinite(r[j]))return 0;
+        btQuaternion rotation(r[3],r[4],r[5],r[6]);if(rotation.length2()==0)return 0;
+        local[i]=btTransform(rotation,btVector3(r[0],r[1],r[2]));world[i]=i==0?local[i]:world[owner->definition->parents[i]]*local[i];
+    }
+    for(int part=0;part<11;part++){
+        auto& body=*owner->bodies[part];if(owner->active)ownedWorld->world.removeRigidBody(&body);
+        body.setWorldTransform(owner->root*world[owner->anchorBones[part]]*owner->anchorOffsets[part]);
+        body.setLinearVelocity(btVector3(0,0,0));body.setAngularVelocity(btVector3(0,0,0));
+        if(owner->active)ownedWorld->world.addRigidBody(&body,8,7);
+    }
+    owner->poseLocal=std::move(local);owner->poseWorld=std::move(world);return 1;
+}
+
+extern "C" int ragdoll_capsule_support(int part,double x,double y,double z,double* output){
+    if(!ragdollTemplate||!output||part<0||part>=11||ragdollTemplate->children[part]->getShapeType()!=CAPSULE_SHAPE_PROXYTYPE)return 0;
+    auto* shape=static_cast<btConvexShape*>(ragdollTemplate->children[part].get());btVector3 direction(x,y,z);
+    btVector3 first=shape->localGetSupportingVertexWithoutMargin(direction),second=shape->localGetSupportVertexWithoutMarginNonVirtual(direction);
+    btTransform transform;transform.setIdentity();btVector3 lo,hi;shape->getAabbNonVirtual(transform,lo,hi);
+    for(int axis=0;axis<3;axis++){output[axis]=first[axis];output[3+axis]=second[axis];output[6+axis]=lo[axis];output[9+axis]=hi[axis];}return 1;
 }

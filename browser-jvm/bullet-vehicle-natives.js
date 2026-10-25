@@ -465,6 +465,44 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             })));
         },
         /**
+         * Stores the original world-relative ragdoll root transform.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {...number} transform - Original position/quaternion.
+         */
+        updateRagdoll(lib, id, ...transform) {
+            expect(transform.length === 7 && transform.every(Number.isFinite), 'Original ragdoll root required');
+            expect(engine._update_ragdoll_root(id, ...transform) === 1, 'Actual ragdoll root rejected');
+        },
+        /**
+         * Places real bodies through original hierarchy and enabled anchor frames.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {number} count - Original bone count.
+         * @param {Float32Array} values - Original local position/quaternion records.
+         */
+        updateRagdollSkeletonTransforms(lib, id, count, values) {
+            expect(Number.isInteger(count) && count >= 27 && count <= 4_096
+                && values instanceof Float32Array && values.length >= count * 7, 'Original skeleton pose required');
+
+            if (engine._ragdoll_simulation_state(id) === -1) {
+                return;
+            }
+
+            const anchors = ragdollDefinitions().find((entry) => entry.kind === 'anchors');
+
+            expect(anchors && anchors.values.length % 5 === 0, 'Original anchor definitions required');
+            floats(new Float32Array(anchors.values), (records) => {
+                expect(engine._configure_ragdoll_anchors(id, records, anchors.values.length / 5) === 1,
+                    'Actual original anchor construction rejected');
+            });
+            floats(values.subarray(0, count * 7), (records) => {
+                expect(engine._update_ragdoll_pose(id, count, records) === 1, 'Actual original body pose rejected');
+            });
+        },
+        /**
          * Attaches or detaches the actual bodies and linked constraints.
          *
          * @param {object} lib - Original Java namespace.

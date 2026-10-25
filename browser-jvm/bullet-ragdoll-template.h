@@ -1,7 +1,7 @@
 // Original ragdoll template geometry. Live body simulation is a separate owner.
 #include "BulletCollision/CollisionShapes/btCapsuleShape.h"
 struct NativeRagdollCapsule final:btCapsuleShape {
-    NativeRagdollCapsule(double radius,double height):btCapsuleShape(radius,height){m_collisionMargin=.04;}
+    NativeRagdollCapsule(double radius,double height):btCapsuleShape(radius,height){m_collisionMargin=.04;setUserIndex2(0x505a5244);}
     btVector3 localGetSupportingVertexWithoutMargin(const btVector3& input)const override{
         btVector3 direction=input;double length=direction.length2();
         if(length<.0001)direction=btVector3(1,0,0);else direction*=1/std::sqrt(length);
