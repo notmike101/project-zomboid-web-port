@@ -633,3 +633,6 @@ The next audio provider also includes the bounded per-open-file read-ahead cache
 The bullet-ballistics-reticle-qualified aggregate closes ordinary size/reticle setters. Continue source-qualified CRT random ownership for spread and temporary real-body attachment/query/cleanup for camera operations; do not substitute Math.random or empty results. Bind matching target header and JNI adapter in the next generation.
 
 The population pair now supports original uniform distribution without a separate generator. Freeze both updated files together in the next generation; the current default-world run remains unchanged. Continue genuine world interaction/save checks and remaining concrete population boundaries rather than broadening dormant API work.
+
+The same run recorded a separate memory-observer process-exit race during teardown, so its complete post-run audit was not completed. The observer now skips wrapped property-access failures only when the acquired process confirms it has exited; live-process failures remain fatal. Its native Windows PowerShell self-check passes, with no budget, identity or watchdog changes.
+

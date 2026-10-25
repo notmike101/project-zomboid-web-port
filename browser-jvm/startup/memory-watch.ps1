@@ -109,8 +109,11 @@ while ($true) {
             if ($ownedProcess.StartTime.ToUniversalTime().Ticks -eq $ownedIdentities[$row.ProcessId]) {
                 [pscustomobject]@{ pid=$row.ProcessId; parent=$row.ParentProcessId; name=$row.Name; commandLine=[StartupMemoryNative]::CommandLine($ownedProcess.Handle); privateBytes=$ownedProcess.PrivateMemorySize64; workingSetBytes=$ownedProcess.WorkingSet64; creation=$ownedProcess.StartTime.ToUniversalTime().ToString('o') }
             }
-        } catch [ArgumentException] { } catch [InvalidOperationException] {
+        } catch [ArgumentException] {
             if ($ownedProcess -and -not $ownedProcess.HasExited) { throw }
+        } catch {
+            # PowerShell can wrap a process-exit property race as MethodException.
+            if (-not $ownedProcess -or -not $ownedProcess.HasExited) { throw }
         } finally { if ($ownedProcess) { $ownedProcess.Dispose() } }
     })
     [Console]::Out.WriteLine('{"event":"stage","stage":"system-memory-start"}')
