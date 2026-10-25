@@ -32,7 +32,7 @@ Rebuild the authored Java entry against the supplied generation's ordered JAR ov
 node browser-jvm/startup/build-entry.mjs PATH/TO/generation-admitted.json D:/zomboid-web/.tools/jdk-25.0.1+8 D:/zomboid-web/target/browser-jvm/startup-built-entry.jar
 ```
 
-The build verifies the recorded classpath hashes, compiles the three startup sources and avatar diagnostic targeting Java 17, and updates a copy of the generation's entry JAR. It verifies every original archive entry remains byte-identical, including the corrected prepared-scene Reader, and rejects an existing output file. Bind the resulting JAR and its printed size/hash into a newly frozen generation before running it. The build never runs original game initializers.
+The build verifies the recorded classpath hashes, compiles the three startup sources, avatar diagnostic and two memory adapters (`SpriteGraphics` and `SpriteBuffers`) targeting Java 17, and updates a copy of the generation's entry JAR. It verifies every original archive entry remains byte-identical, including the corrected prepared-scene Reader, and rejects an existing output file. Bind the resulting JAR and its printed size/hash into a newly frozen generation before running it. The build never runs original game initializers.
 
 Focused source checks:
 

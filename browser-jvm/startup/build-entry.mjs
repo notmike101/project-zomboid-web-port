@@ -49,7 +49,7 @@ function command(tool, args, cwd = work) {
     return result.stdout;
 }
 
-const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|port\/host\/BrowserAvatarDiagnostics)\.class$/u;
+const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|port\/host\/(?:BrowserAvatarDiagnostics|Sprite(?:Graphics|Buffers)(?:\$[^/]+)?))\.class$/u;
 
 try {
     const classes = path.join(work, 'classes');
@@ -58,6 +58,7 @@ try {
         .map((name) => path.join(java, name));
 
     sources.push(path.resolve(import.meta.dirname, '../host/port/host/BrowserAvatarDiagnostics.java'));
+    sources.push(...['SpriteGraphics.java', 'SpriteBuffers.java'].map((name) => path.resolve(import.meta.dirname, '../host/port/host', name)));
     await mkdir(classes);
     command('javac', ['--release', '17', '-classpath', classpath.map((record) => path.resolve(record.file)).join(path.delimiter),
         '-d', classes, ...sources]);
