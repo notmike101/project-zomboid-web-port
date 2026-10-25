@@ -44,20 +44,20 @@ extern "C" int clear_ragdolls(){
 extern "C" int ragdoll_body_contains(const btCollisionObject* body){
     for(const auto& entry:ownedRagdolls)for(const auto& candidate:entry.second->bodies)if(candidate.get()==body)return 1;return 0;
 }
-extern "C" int add_ragdoll(int id,const float* partData,const float* dynamics,const float* joints,int jointCount){
-    if(!ownedWorld||!ragdollTemplate||!partData||!dynamics||!joints||id<0||ownedRagdolls.count(id)||jointCount!=10)return 0;
+static std::unique_ptr<OwnedRagdoll> construct_ragdoll(const float* partData,const float* dynamics,const float* joints,int jointCount){
+    if(!ownedWorld||!ragdollTemplate||!partData||!dynamics||!joints||jointCount!=10)return nullptr;
     std::array<const float*,11> parts{},tuning{};std::array<const float*,10> jointData{};
     for(int row=0;row<11;row++){
         const float* part=partData+row*10;const float* dynamic=dynamics+row*8;
-        for(int i=0;i<10;i++)if(!std::isfinite(part[i]))return 0;
-        for(int i=0;i<8;i++)if(!std::isfinite(dynamic[i]))return 0;
-        if(part[0]<0||part[0]>=11||std::floor(part[0])!=part[0]||dynamic[0]<0||dynamic[0]>=11||std::floor(dynamic[0])!=dynamic[0]||part[6]<=0)return 0;
-        int p=int(part[0]),d=int(dynamic[0]);if(parts[p]||tuning[d])return 0;parts[p]=part;tuning[d]=dynamic;
+        for(int i=0;i<10;i++)if(!std::isfinite(part[i]))return nullptr;
+        for(int i=0;i<8;i++)if(!std::isfinite(dynamic[i]))return nullptr;
+        if(part[0]<0||part[0]>=11||std::floor(part[0])!=part[0]||dynamic[0]<0||dynamic[0]>=11||std::floor(dynamic[0])!=dynamic[0]||part[6]<=0)return nullptr;
+        int p=int(part[0]),d=int(dynamic[0]);if(parts[p]||tuning[d])return nullptr;parts[p]=part;tuning[d]=dynamic;
     }
     for(int row=0;row<jointCount;row++){
-        const float* joint=joints+row*22;for(int i=0;i<22;i++)if(!std::isfinite(joint[i]))return 0;
-        if(joint[0]<0||joint[0]>=10||std::floor(joint[0])!=joint[0]||(joint[1]!=4&&joint[1]!=5)||joint[2]<0||joint[2]>=11||std::floor(joint[2])!=joint[2]||joint[3]<0||joint[3]>=11||std::floor(joint[3])!=joint[3])return 0;
-        int index=int(joint[0]);if(jointData[index])return 0;jointData[index]=joint;
+        const float* joint=joints+row*22;for(int i=0;i<22;i++)if(!std::isfinite(joint[i]))return nullptr;
+        if(joint[0]<0||joint[0]>=10||std::floor(joint[0])!=joint[0]||(joint[1]!=4&&joint[1]!=5)||joint[2]<0||joint[2]>=11||std::floor(joint[2])!=joint[2]||joint[3]<0||joint[3]>=11||std::floor(joint[3])!=joint[3])return nullptr;
+        int index=int(joint[0]);if(jointData[index])return nullptr;jointData[index]=joint;
     }
     auto pending=std::make_unique<OwnedRagdoll>();pending->definition=ragdollTemplate;
     for(int part=0;part<11;part++){
@@ -78,6 +78,11 @@ extern "C" int add_ragdoll(int id,const float* partData,const float* dynamics,co
         if(record[1]==4){auto joint=std::make_unique<btHingeConstraint>(a,b,first,second,false);joint->setLimit(record[16],record[17],double(float(.9)),double(float(.3)),1);pending->joints.push_back(std::move(joint));}
         else{auto joint=std::make_unique<btConeTwistConstraint>(a,b,first,second);joint->setLimit(record[16],record[17],record[18],1,double(float(.3)),1);pending->joints.push_back(std::move(joint));}
     }
+    return pending;
+}
+extern "C" int add_ragdoll(int id,const float* partData,const float* dynamics,const float* joints,int jointCount){
+    if(id<0||ownedRagdolls.count(id))return 0;
+    auto pending=construct_ragdoll(partData,dynamics,joints,jointCount);if(!pending)return 0;
     ownedRagdolls.emplace(id,std::move(pending));return 1;
 }
 extern "C" int ragdoll_simulation_state(int id){

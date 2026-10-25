@@ -1289,3 +1289,9 @@ The original ragdoll controller can now override damping, deactivation timing, s
 Actual due respawn now schedules the original edge-to-target collision request and allocates records only after its successful collision-worker result. The source-derived wall-following path routine matches nine original DLL cases for status, endpoint, movements and worker ticks. A complete original ten-zombie operation matches its request, all resulting IDs/positions/directions/state, all 1,024 chunk clocks and all 1,250 RNG-state words.
 
 The connected host comparison confirms no IDs before the next collision-worker turn, then exactly ten original records on success. Save/reopen retains IDs 1 through 10 and next ID 11. Quota, budget retention and the unchanged 0.1 configuration value follow the original Java/JNI/native instructions, including the native percentage calculation and minimum batch size. Focused ownership review found no introduced defect. The previous due-placement guard is removed for this implemented internal path; the separate public MCD path-task API remains unsupported, and full-world browser respawn is not yet observed.
+
+### Original ballistic-target ownership
+
+Ballistic targets now own their separate non-response aggregate box and an actual detached eleven-body, ten-joint controller, reusing the existing qualified body constructor. Original-DLL comparison matches all 165 initial body float32 fields and the aggregate box AABB; collision flags 4, group 16 and mask -1 follow the original source. Add, duplicate add, removal, absent removal and pooled ownership follow original results. World destruction releases targets before the world.
+
+Target axis/skeleton/root updates and target queries remain unimplemented. This construction increment does not establish firearm hit detection or combat playability.

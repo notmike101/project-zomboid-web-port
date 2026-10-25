@@ -2,6 +2,7 @@
 extern "C" int clear_registered_vehicle();
 extern "C" int clear_geometry();
 extern "C" int clear_ragdolls();
+extern "C" int clear_ballistics_targets();
 extern "C" int clear_vehicle_constraints();
 static int nextConstraintId=0;
 #include <array>
@@ -242,6 +243,7 @@ uintptr_t map_chunk(int id,int x,int y,int* output){
 }
 int destroy_mapped_world(){
     if(!ownedWorld)return 0;
+    clear_ballistics_targets();
     clear_ragdolls();
     clear_vehicle_constraints();
     clear_registered_vehicle();
@@ -998,3 +1000,4 @@ extern "C" int get_vehicle_physics_batch(int offset,float* output,int count){
 #include "bullet-ragdoll-body.h"
 #include "bullet-ragdoll-actions.h"
 #include "bullet-ragdoll-readback.h"
+#include "bullet-ballistics-target.h"

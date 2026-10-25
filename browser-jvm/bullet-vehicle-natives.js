@@ -480,6 +480,45 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             }
         },
         /**
+         * Owns the original separate target box and detached eleven-body controller.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original character identity.
+         * @returns {number} Original zero added or one already attached result.
+         */
+        addBallisticsTarget(lib, id) {
+            const definitions = ragdollDefinitions();
+            const parts = definitions.find((entry) => entry.kind === 'bodyParts');
+            const dynamics = definitions.find((entry) => entry.kind === 'bodyDynamics');
+            const constraints = definitions.find((entry) => entry.kind === 'constraints');
+
+            expect(parts?.values.length === 110 && dynamics?.values.length === 88 && constraints?.values.length === 220,
+                'Complete original ballistics body/constraint definitions required');
+
+            let result;
+
+            floats(new Float32Array(parts.values), (bodyParts) => floats(new Float32Array(dynamics.values), (bodyDynamics) => floats(new Float32Array(constraints.values), (joints) => {
+                result = engine._add_ballistics_target(id, bodyParts, bodyDynamics, joints);
+                expect(result === 0 || result === 1, 'Actual ballistics target construction rejected');
+            })));
+
+            return result;
+        },
+        /**
+         * Detaches the original aggregate target and returns its owner to the reusable pool.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original character identity.
+         * @returns {number} Original absent or removed result.
+         */
+        removeBallisticsTarget(lib, id) {
+            const result = engine._remove_ballistics_target(id);
+
+            expect(result === 0, 'Actual ballistics target removal rejected');
+
+            return result;
+        },
+        /**
          * Allocates real off-world body/joint ownership from the original template.
          *
          * @param {object} lib - Original Java namespace.
