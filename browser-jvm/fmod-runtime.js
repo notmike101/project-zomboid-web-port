@@ -65,7 +65,17 @@ export function loadFmodRuntime(manifestSHA) {
         try {
             const { default: createFMOD } = await import(url);
 
-            FMOD = await createFMOD({ wasmBinary: wasm, INITIAL_MEMORY: 64 * 1_024 * 1_024 });
+            FMOD = await createFMOD({
+                wasmBinary: wasm,
+                INITIAL_MEMORY: 64 * 1_024 * 1_024,
+                locateFile(name) {
+                    if (name !== 'fmodstudioL.wasm') {
+                        throw new Error(`Unadmitted FMOD runtime file: ${name}`);
+                    }
+
+                    return new URL(`/fmod-runtime/${name}`, location.origin).href;
+                },
+            });
         } finally {
             URL.revokeObjectURL(url);
         }
@@ -111,10 +121,16 @@ export function loadFmodRuntime(manifestSHA) {
         let resumeFailure = null;
         let trustedResumeAt = null;
         const resume = (event) => {
-            // context is the actual AudioContext exposed by this pinned supplied SDK.
-            if (event.isTrusted && FMOD.context?.state === 'suspended') {
+            // The pinned SDK uses mContext for AudioWorklet and context for ScriptProcessor.
+            const context = FMOD.mContext ?? FMOD.context;
+
+            if (event.isTrusted && context && (context.state === 'suspended' || FMOD.mInputRegistered)) {
                 trustedResumeAt = Date.now();
-                void FMOD.context.resume().catch((error) => {
+                const resumeDriver = FMOD.OutputAudioWorklet_resumeAudio ?? FMOD.OutputWebAudio_resumeAudio;
+
+                // The SDK hook also installs/connects its actual output processor.
+                resumeDriver?.();
+                void context.resume().catch((error) => {
                     resumeFailure = String(error);
                 });
             }
@@ -125,7 +141,14 @@ export function loadFmodRuntime(manifestSHA) {
         const snapshot = audio.snapshot;
         const dispose = audio.dispose;
 
-        audio.snapshot = () => ({ ...snapshot(), audioContextState: FMOD.context?.state ?? 'uninitialized', trustedResumeAt, resumeFailure });
+        audio.snapshot = () => ({
+            ...snapshot(),
+            audioContextState: (FMOD.mContext ?? FMOD.context)?.state ?? 'uninitialized',
+            audioBackend: (FMOD.mContext && 'AudioWorklet') || (FMOD.context && 'ScriptProcessor') || 'uninitialized',
+            workletReady: Boolean(FMOD.mWorkletNode) && !FMOD.mModulePolling,
+            trustedResumeAt,
+            resumeFailure,
+        });
         audio.dispose = async () => {
             globalThis.removeEventListener('pointerdown', resume);
             globalThis.removeEventListener('keydown', resume);

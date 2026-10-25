@@ -1257,3 +1257,7 @@ Ragdoll terrain publication remains the next required integration: the host curr
 The existing per-map terrain publication now includes every registered ragdoll body-0 center, matching the original native worker without an active/sleep filter. Six bounded scenarios match the original ordered callbacks, including off-world registration, shared ragdolls and removal. The actual native and WASM worlds both generate 14 ragdoll/terrain contact points.
 
 Contact dynamics remain discrepant: 194 of 198 compared body transform/velocity fields differ by more than 1e-6, with a maximum angular-velocity difference of 1.1732. The publication and real-contact result does not qualify collision response or combat parity; the solver/contact mismatch is the next physics blocker.
+
+### FMOD browser initialization and trusted audio resume
+
+The supplied 2.04.00 browser SDK now receives its admitted WASM URL through locateFile, retaining verified bytes when the JavaScript module is imported through a blob URL. The host uses the SDK's actual AudioWorklet context and resume hook, which connects its output processor. A bounded guarded browser run initialized the real Core engine, recorded trusted input, observed AudioContext running with the worklet ready, and closed that context during disposal. Owned Chrome closed afterward. This clears the early loader/output setup failures; original Java initialization, banks, callbacks and audible gameplay remain unverified.
