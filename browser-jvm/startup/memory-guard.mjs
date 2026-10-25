@@ -19,7 +19,7 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
 
     const helper = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
         path.join(import.meta.dirname, 'memory-watch.ps1'), '-RootProcessId', String(pid),
-        '-MaxPrivateBytes', String(10 * 1_024 ** 3), '-MinAvailableBytes', String(6 * 1_024 ** 3)], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        '-MaxPrivateBytes', String(10 * 1_024 ** 3), '-MinAvailableBytes', String(4 * 1_024 ** 3)], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let latest;
     let peakPrivateBytes = 0;
     let pressure;

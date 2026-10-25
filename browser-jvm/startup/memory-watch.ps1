@@ -154,6 +154,6 @@ while ($true) {
         } finally { foreach ($target in $targets) { $target.Dispose() } }
         exit 0
     }
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 2
 }
 } finally { $rootHandle.Dispose() }
