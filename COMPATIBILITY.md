@@ -1243,3 +1243,6 @@ Actual SDK identity checks additionally cover repeated bank/instance enumeration
 ### Original ragdoll forces and joint disabling
 
 The real owner now applies the original force/relative-position torque and impulse operations, preserves joint attachment when disabling a constraint, and applies the original root local-pose rotation. The original DLL comparison matched 23 action-state fields and 132 float32 body-transform fields with nonidentity rotation. Previous-pose velocity initialization and skeleton/rigid-body readback remain incomplete; this does not establish combat playability.
+### Previous animation pose initialization
+
+The real ragdoll owner now derives the original additive linear and angular impulses from the previous animation pose for positive time intervals. The bounded original-DLL comparison matched 251 of 253 float32 action fields exactly; two near-zero fields differed by less than 4e-13, with maximum internal double difference 2.772e-12. This is not a bit-exact pass. Nonpositive intervals remain guarded, and complete simulation readback/combat integration remains unverified.

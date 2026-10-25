@@ -503,6 +503,24 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             });
         },
         /**
+         * Derives original starting impulses from the previous animation pose.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {number} count - Original bone count.
+         * @param {number} seconds - Positive original animation pose interval.
+         * @param {Float32Array} values - Original previous local position/quaternion records.
+         */
+        updateRagdollSkeletonPreviousTransforms(lib, id, count, seconds, values) {
+            expect(Number.isInteger(count) && count >= 27 && count <= 4_096
+                && values instanceof Float32Array && values.length >= count * 7
+                && Number.isFinite(seconds) && seconds > 0, 'Original previous pose and positive interval required');
+            floats(values.subarray(0, count * 7), (records) => {
+                expect(engine._update_ragdoll_previous_pose(id, count, seconds, records) === 1,
+                    'Actual original starting impulses rejected');
+            });
+        },
+        /**
          * Sets the original root local-pose postrotation.
          *
          * @param {object} lib - Original Java namespace.
