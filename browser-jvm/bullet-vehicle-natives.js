@@ -4,9 +4,11 @@ import { createBulletNatives } from './bullet-natives.js';
  * Creates the real vehicle JNI adapter with explicit qualification boundaries.
  *
  * @param {object} engine - Initialized real Bullet module.
+ * @param {object} [options] - Same-owner definition access.
+ * @param {function(): object[]} [options.ragdollDefinitions] - Detached original ragdoll definitions.
  * @returns {object} Actual operation result.
  */
-export function createVehicleWorldNatives(engine) {
+export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [] } = {}) {
     const base = createBulletNatives(engine, { registeredStaticMeshes: true });
     const definitions = new Map();
     const calls = [];
@@ -406,6 +408,39 @@ export function createVehicleWorldNatives(engine) {
          */
         removeConstraint(lib, id) {
             expect(engine._remove_vehicle_constraint(id) === 1, 'Actual constraint removal rejected');
+        },
+        /**
+         * Constructs original bone transforms and owned template collision shapes.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} count - Original bone count.
+         * @param {Float32Array} values - Original seven-float local bone records.
+         * @param {number} qx - Root quaternion X.
+         * @param {number} qy - Root quaternion Y.
+         * @param {number} qz - Root quaternion Z.
+         * @param {number} qw - Root quaternion W.
+         */
+        initializeRagdollPose(lib, count, values, qx, qy, qz, qw) {
+            const definitions = ragdollDefinitions();
+            const skeleton = definitions.find((entry) => entry.kind === 'skeleton');
+            const bodyParts = definitions.find((entry) => entry.kind === 'bodyParts');
+
+            expect(Number.isInteger(count) && count >= 27 && count <= 4_096 && skeleton?.values.length === count
+                && bodyParts?.values.length === 110 && values instanceof Float32Array && values.length >= count * 7,
+            'Original ragdoll template prerequisites missing');
+
+            const parents = engine._malloc(count * 4);
+
+            try {
+                expect(parents !== 0, 'Actual ragdoll parent allocation failed');
+                engine.HEAP32.set(skeleton.values, parents / 4);
+                floats(new Float32Array(bodyParts.values), (records) => floats(values.subarray(0, count * 7), (pose) => {
+                    expect(engine._initialize_ragdoll_template(parents, count, pose, qx, qy, qz, qw, records, 11) === 1,
+                        'Actual original ragdoll template construction rejected');
+                }));
+            } finally {
+                engine._free(parents);
+            }
         },
         /**
          * Dispatches setChunkMinMaxLevel to the actual qualified engine operation.

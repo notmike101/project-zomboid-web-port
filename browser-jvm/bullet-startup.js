@@ -25,7 +25,17 @@ export async function createBrowserPhysics() {
     }
 
     const engine = await createEngine({ wasmBinary: new Uint8Array(await response.arrayBuffer()) });
-    const bullet = createVehicleWorldNatives(engine);
+
+    /**
+     * Reads the existing same-owner template inputs only when pose construction requests them.
+     *
+     * @returns {object[]} Detached original definition records.
+     */
+    function ragdollDefinitions() {
+        return platform.snapshot().ragdollDefinitions;
+    }
+
+    const bullet = createVehicleWorldNatives(engine, { ragdollDefinitions });
     const natives = Object.fromEntries(Object.entries(platform.natives).filter(([name]) => !name.startsWith(bulletPrefix)
         || retainedDefinitions.has(name.slice(bulletPrefix.length))));
 

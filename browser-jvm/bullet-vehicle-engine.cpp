@@ -980,3 +980,5 @@ extern "C" int get_vehicle_physics_batch(int offset,float* output,int count){
     for(int index=0;index<records;index++)packVehicle(*findVehicle(vehicleReadback[offset+index]),output+index*30);
     return records;
 }
+
+#include "bullet-ragdoll-template.h"
