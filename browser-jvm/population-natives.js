@@ -190,6 +190,7 @@ export function createPopulationNatives() {
         cells: new Map(),
         populationCache: new Map(),
         respawnJobs: [],
+        origins: [],
         metadata: new Map(),
         gameState: new Map(),
         producer: [],
@@ -1097,7 +1098,7 @@ export function createPopulationNatives() {
             unseen: state.config.get('RespawnUnseenHours'), multiplier: state.config.get('RespawnMultiplier'),
             start: state.config.get('PopulationStartMultiplier'), peak: state.config.get('PopulationPeakMultiplier'),
             peakDay: state.config.get('PopulationPeakDay'), bounds: [gx * 256, gy * 256, w * 256, h * 256],
-            cellX, cellY, deficit, rng, loaded: respawnLoaded,
+            cellX, cellY, deficit, rng, origins: state.origins, loaded: respawnLoaded,
             valid: populationSpawnable.bind(null, flags),
             ...(cell.respawnState ?? {}),
         }));
@@ -1525,6 +1526,7 @@ export function createPopulationNatives() {
 
             state.reopenID = ids ? decodeIDs(decoder(ids)) : 1;
             state.pop = true;
+            state.origins = [];
             state.lastSavedID = ids ? decodeIDs(decoder(ids)) : 0;
             state.config = new Map(nativeDefaults);
             state.nextID = state.reopenID;
@@ -1623,7 +1625,7 @@ export function createPopulationNatives() {
             }
         },
         /**
-         * Accepts the qualified empty-origin input and rejects unsupported nonempty origins.
+         * Appends the original spawn-origin rectangles without replacing existing native origins.
          *
          * @param {object} lib - Actual CheerpJ Java class namespace.
          * @param {object} origins - Original Java spawn-origin array.
@@ -1631,11 +1633,22 @@ export function createPopulationNatives() {
         async setSpawnOrigins(lib, origins) {
             const values = await ints(lib, origins);
 
-            if (values.length) {
-                unsupported('nonempty spawn origins');
+            if (values.length % 4 || values.some((value, index) => !Number.isInteger(value) || value < -2_147_483_648
+                || value > 2_147_483_647 || (index % 4 >= 2 && value < 0))) {
+                unsupported('spawn-origin rectangle layout/range');
             }
 
-            state.origins = [];
+            for (let i = 0; i < values.length; i += 4) {
+                const rectangle = values.slice(i, i + 4);
+
+                if (rectangle[0] + rectangle[2] > 2_147_483_647 || rectangle[1] + rectangle[3] > 2_147_483_647) {
+                    unsupported('spawn-origin coordinate overflow');
+                }
+            }
+
+            for (let i = 0; i < values.length; i += 4) {
+                state.origins.push(values.slice(i, i + 4));
+            }
         },
         /**
          * Queues actual original loaded-area rectangles after input validation.
@@ -2140,6 +2153,7 @@ export function createPopulationNatives() {
          */
         stop() {
             state.pop = false;
+            state.origins = [];
             state.producer = [];
             state.worker = [];
             state.front = [];

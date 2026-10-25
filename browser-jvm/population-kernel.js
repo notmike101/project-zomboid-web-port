@@ -103,7 +103,7 @@ function populationSpawnable(flags, x, y) {
 function respawnRequest(input) {
     const {
         chunks, targets, seen, lastSpawn, age, hours, unseen, multiplier, rng, bounds, cellX, cellY,
-        start, peak, peakDay, deficit, valid, loaded, last,
+        start, peak, peakDay, deficit, valid, loaded, last, origins = [],
     } = input;
     const clocks = Float32Array.from(lastSpawn, (last) => Math.min(age, last));
     const eligible = [];
@@ -143,31 +143,38 @@ function respawnRequest(input) {
             let x;
             let y;
 
-            switch (rng.bounded(4)) {
-                case 0: {
-                    x = 0;
-                    y = rng.bounded(height);
-                    break;
-                }
-                case 1: {
-                    x = rng.bounded(width);
-                    y = 0;
-                    break;
-                }
-                case 2: {
-                    x = width - 1;
-                    y = rng.bounded(height);
-                    break;
+            if (origins.length) {
+                const [ox, oy, w, h] = origins[rng.bounded(origins.length)];
+
+                x = ox + rng.bounded(w);
+                y = oy + rng.bounded(h);
+            } else {
+                switch (rng.bounded(4)) {
+                    case 0: {
+                        x = 0;
+                        y = rng.bounded(height);
+                        break;
+                    }
+                    case 1: {
+                        x = rng.bounded(width);
+                        y = 0;
+                        break;
+                    }
+                    case 2: {
+                        x = width - 1;
+                        y = rng.bounded(height);
+                        break;
+                    }
+
+                    default: {
+                        x = rng.bounded(width);
+                        y = height - 1;
+                    }
                 }
 
-                default: {
-                    x = rng.bounded(width);
-                    y = height - 1;
-                }
+                x += left;
+                y += top;
             }
-
-            x += left;
-            y += top;
 
             if (valid(x, y)) {
                 origin = [x, y];
