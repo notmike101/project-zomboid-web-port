@@ -583,3 +583,9 @@ The optional original FMOD composition command now freezes the supplied HTML5 ru
 
 
 The next qualified aggregate is `target/browser-jvm/bullet-ragdoll-body-qualified/bullet-manifest.json`, extending the real vehicle engine with owned ragdoll construction/activation/removal. The bounded original DLL comparison passed all 275 float32 initialization fields and all 275 fields after a real constrained 0.01-second step, plus lifecycle attachment/state checks. The manifest binds both template and body headers. Continue with original root/pose uploads and simulation readback, then capsule collision/publication semantics; do not infer combat/playability from this free-space component result or replace a running generation in place.
+
+
+Ordinary FMOD Core loose-sound/channel/reverb and SoundManager callback dispatch now have real engine implementations and bounded Node operation evidence. Compose the updated nine-route audio SDK closure before its first browser attempt. The next audio gate is the original Java initialization and eager preloads with real trusted-input resume, followed by actual audible output and Java callback/array transport; the current full-world run remains on its unchanged nonaudio generation. Broader recording/raw-PCM APIs remain unimplemented.
+
+
+The next aggregate `target/browser-jvm/bullet-ragdoll-pose-marked/bullet-manifest.json` adds qualified nonzero root/current-pose placement and the pinned capsule nonvirtual fastpath derivative. Its focused original DLL replay passes 132 float32 body-transform fields and five actual capsule support vectors. Both capsule source hashes and the body-header hash are manifest-bound. Continue with previous-pose velocity derivation, local rotation, skeleton/rigid-body output reconstruction, impulses and detach before claiming a connected original combat path; preserve the still-unqualified ragdoll terrain/publication boundary.

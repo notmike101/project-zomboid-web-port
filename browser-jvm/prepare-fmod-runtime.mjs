@@ -44,9 +44,31 @@ for (const name of ['fmodstudioL.js', 'fmodstudioL.wasm']) {
     inputs.push({ file: source, bytes: bytes.length, sha256: sha(bytes) });
 }
 
+const headerFile = path.join(sdk, 'api/core/inc/fmod_common.h');
+const header = await readFile(headerFile, 'utf8');
+const fields = ['DecayTime', 'EarlyDelay', 'LateDelay', 'HFReference', 'HFDecayRatio', 'Diffusion', 'Density',
+    'LowShelfFrequency', 'LowShelfGain', 'HighCut', 'EarlyLateMix', 'WetLevel'];
+const presets = [...header.matchAll(/#define FMOD_PRESET_(\w+)\s+\{([^}]+)\}/gu)].map((match) => {
+    const values = match[2].split(',').map((value) => Math.fround(Number(value.trim().replace(/f$/u, ''))));
+
+    assert.equal(values.length, fields.length);
+    assert.ok(values.every(Number.isFinite));
+
+    return { name: match[1], properties: Object.fromEntries(fields.map((field, index) => [field, values[index]])) };
+});
+
+assert.equal(presets.length, 24);
+assert.equal(presets[0].name, 'OFF');
+assert.equal(presets[1].name, 'GENERIC');
+const presetBytes = Buffer.from(JSON.stringify(presets));
+const presetFile = path.join(output, 'fmod-runtime/reverb-presets.json');
+
+await writeFile(presetFile, presetBytes, { flag: 'wx' });
+routes.push({ url: '/fmod-runtime/reverb-presets.json', file: presetFile, bytes: presetBytes.length, sha256: sha(presetBytes), type: 'application/json' });
+inputs.push({ file: headerFile, bytes: Buffer.byteLength(header), sha256: sha(Buffer.from(header)) });
 const manifest = {
     schema: 'fmod-html5-runtime-v1', version: '2.04.00',
-    scriptSHA: routes[0].sha256, wasmSHA: routes[1].sha256,
+    scriptSHA: routes[0].sha256, wasmSHA: routes[1].sha256, presetSHA: sha(presetBytes),
 };
 const bytes = Buffer.from(JSON.stringify(manifest));
 const file = path.join(output, 'fmod-runtime/manifest.json');

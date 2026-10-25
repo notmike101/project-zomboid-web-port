@@ -5,7 +5,7 @@ import path from 'node:path';
 import { hash } from './profile-routes.mjs';
 
 const additions = ['/fmod-runtime.js', '/fmod-natives.js', '/fmod.js', '/fmodstudio.js', '/fmodintegration64.js',
-    '/fmod-runtime/fmodstudioL.js', '/fmod-runtime/fmodstudioL.wasm', '/fmod-runtime/manifest.json'];
+    '/fmod-runtime/fmodstudioL.js', '/fmod-runtime/fmodstudioL.wasm', '/fmod-runtime/manifest.json', '/fmod-runtime/reverb-presets.json'];
 
 /**
  * Verifies the optional real FMOD closure before composing existing original route owners.
@@ -41,6 +41,7 @@ export async function createOriginalBootRoutes(generation) {
     assert.equal(manifest.schema, 'fmod-html5-runtime-v1');
     assert.equal(manifest.scriptSHA, selected.find((record) => record.url === '/fmod-runtime/fmodstudioL.js').sha256);
     assert.equal(manifest.wasmSHA, selected.find((record) => record.url === '/fmod-runtime/fmodstudioL.wasm').sha256);
+    assert.equal(manifest.presetSHA, selected.find((record) => record.url === '/fmod-runtime/reverb-presets.json').sha256);
     const { createOriginalBootRoutes: createBase } = await import(generation.bullet ? './bullet-profile-routes.mjs' : './profile-routes.mjs');
     const owners = await createBase({ ...generation, routes: generation.routes.filter((record) => !additions.includes(record.url)) });
 

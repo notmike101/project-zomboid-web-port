@@ -70,10 +70,17 @@ export function loadFmodRuntime(manifestSHA) {
             URL.revokeObjectURL(url);
         }
 
+        const presetBytes = await get('reverb-presets.json');
+
+        if (await digest(presetBytes) !== manifest.presetSHA) {
+            throw new Error('FMOD preset identity mismatch');
+        }
+
+        const presets = JSON.parse(new TextDecoder().decode(presetBytes));
         const bankURL = (name) => {
             const path = String(name).replace(/^\/app(?=\/media\/)/u, '');
 
-            if (!/^\/?media\/sound\/banks\/[A-Za-z0-9_./-]+\.bank$/u.test(path) || path.split('/').includes('..')) {
+            if (!/^\/?media\/(?:sound|music)\/[A-Za-z0-9_./ -]+\.(?:bank|ogg|wav|mp3|flac)$/iu.test(path) || path.split('/').includes('..')) {
                 throw new Error('Unowned FMOD bank path');
             }
 
@@ -100,7 +107,7 @@ export function loadFmodRuntime(manifestSHA) {
 
                 return new Uint8Array(await response.arrayBuffer());
             },
-        });
+        }, null, presets);
         let resumeFailure = null;
         let trustedResumeAt = null;
         const resume = (event) => {
