@@ -56,12 +56,16 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
 
         inodeHelper = helperDescriptor.value;
 
+        const absentFolded = new Set([...absent].map((name) => name.toLowerCase()));
+
         for (const entry of positiveCertificate.files) {
-            if (!isPositiveMetadataEntry(entry) || positives.has(entry.path) || absent.has(entry.path)) {
+            const folded = typeof entry.path === 'string' ? entry.path.toLowerCase() : null;
+
+            if (!isPositiveMetadataEntry(entry) || positives.has(folded) || absentFolded.has(folded)) {
                 throw new Error('Invalid exact materialized file metadata');
             }
 
-            positives.set(entry.path, entry.bytes);
+            positives.set(folded, { path: entry.path, bytes: entry.bytes });
         }
     }
 
@@ -70,6 +74,7 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
     let intercepted = 0;
     let delegated = 0;
     let positiveStats = 0;
+    let positiveAliases = 0;
 
     /**
      * Preserves original calls except individually certified missing fixture paths.
@@ -79,6 +84,9 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
      */
     function wrapped(...args) {
         const [actualMount, name, fileRef, onData, callback] = args;
+        const positive = typeof name === 'string' && name.startsWith('/media/') && /^[\x20-\x7E]+$/u.test(name)
+            ? positives.get(name.toLowerCase())
+            : undefined;
 
         if (active && actualMount === mount && absent.has(name) && mount.inodeMap[name] === undefined) {
             intercepted++;
@@ -90,7 +98,7 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
             return callback();
         }
 
-        if (active && actualMount === mount && !mount.resTrace && onData === null && positives.has(name)
+        if (active && actualMount === mount && !mount.resTrace && onData === null && positive !== undefined
             && mount.inodeMap[name] === undefined) {
             if (host.webGetInode !== inodeHelper) {
                 throw new Error('Pinned inode helper changed before positive stat');
@@ -99,12 +107,13 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
             const inode = Reflect.apply(inodeHelper, host, [mount, name]);
 
             inode.permType = host.CheerpJFileData.S_IFREG | 0o444;
-            inode.fileLength = positives.get(name);
+            inode.fileLength = positive.bytes;
             fileRef.fileLength = inode.fileLength;
             fileRef.inodeId = Math.trunc(inode.inodeId);
             fileRef.permType = Math.trunc(inode.permType);
             fileRef.lastModified = 0;
             positiveStats++;
+            positiveAliases += Number(name !== positive.path);
 
             return callback();
         }
@@ -123,7 +132,7 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
          * @returns {object} Metadata path counts and lifetime.
          */
         snapshot() {
-            return { intercepted, delegated, positiveStats, active, paths: Object.fromEntries(pathCounts) };
+            return { intercepted, delegated, positiveStats, positiveAliases, active, paths: Object.fromEntries(pathCounts) };
         },
         /** Restores only this owner's exact descriptor; a foreign replacement is an error. */
         dispose() {
