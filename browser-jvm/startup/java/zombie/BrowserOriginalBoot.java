@@ -29,6 +29,7 @@ public final class BrowserOriginalBoot {
     private static String lastLoading;
     private static long loadingSequence;
     private static int avatarObservationFrames;
+    private static long lastResourceObservation;
     public static native void report(String json);
     public static native boolean stopRequested();
 
@@ -127,6 +128,12 @@ public final class BrowserOriginalBoot {
     static void observeState() {
         if (GameWindow.gameThread != Thread.currentThread()) throw new IllegalStateException("Actual owner required");
         if (renderFailure != null) throw new IllegalStateException("Original UI consumer failed", renderFailure);
+        long now = System.nanoTime();
+        if (lastResourceObservation == 0 || now - lastResourceObservation >= 5_000_000_000L) {
+            lastResourceObservation = now;
+            report("{\"resourceTelemetry\":{\"observedAt\":" + System.currentTimeMillis()
+                    + ",\"directBuffers\":" + ownedDirectBuffers() + "}}");
+        }
         observeLoading();
         String current = state();
         if (!current.equals(lastState)) {
@@ -135,8 +142,8 @@ public final class BrowserOriginalBoot {
         }
     }
 
-    /** Explicit observation only: no scan on render or producer frames. */
-    public static String ownedDirectBuffers() {
+    /** Scanned only by the original observation producer at the bounded resource cadence. */
+    private static String ownedDirectBuffers() {
         long[] allocation = port.host.SpriteGraphics.allocationSnapshot();
         return "{\"count\":" + allocation[0] + ",\"capacityBytes\":" + allocation[1] + "}";
     }

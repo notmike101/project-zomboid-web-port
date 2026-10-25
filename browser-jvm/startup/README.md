@@ -10,6 +10,8 @@ node browser-jvm/startup/recover.mjs PATH/TO/generation-admitted.json D:/zomboid
 
 Recovery checks each copied file's recorded size and SHA-256, restores the original `stdlib.lua` from the recorded installed input, copies the importer inventory, and binds the current host sources and metadata adapter. The recorded eager specification must identify the exact namespace, original runtime inode helper, positive subset hash and excluded paths. Its argument can be omitted only when the source generation already contains that specification. Existing output directories are rejected. The 6,034 prepared model snapshots remain referenced at their supplied private location. Recovery does not start Java, a browser, the original installed game or a server.
 
+Recovery binds the current population native service, kernel and save codec together under one private `population` directory while retaining their browser route URLs. It records their new hashes and imports the copied native-service module in Node before certification or browser startup, so missing exports or unresolved copied dependencies fail during recovery. Other frozen modules and original binary routes retain their recorded bytes.
+
 Run the existing bounded browser path against the recovered generation:
 
 ```powershell
@@ -32,7 +34,7 @@ Rebuild the authored Java entry against the supplied generation's ordered JAR ov
 node browser-jvm/startup/build-entry.mjs PATH/TO/generation-admitted.json D:/zomboid-web/.tools/jdk-25.0.1+8 D:/zomboid-web/target/browser-jvm/startup-built-entry.jar
 ```
 
-The build verifies the recorded classpath hashes, compiles the three startup sources, avatar diagnostic and two memory adapters (`SpriteGraphics` and `SpriteBuffers`) targeting Java 17, and updates a copy of the generation's entry JAR. It verifies every original archive entry remains byte-identical, including the corrected prepared-scene Reader, and rejects an existing output file. Bind the resulting JAR and its printed size/hash into a newly frozen generation before running it. The build never runs original game initializers.
+The build verifies the recorded classpath hashes, compiles the three startup sources, avatar diagnostic, two memory adapters (`SpriteGraphics` and `SpriteBuffers`) and current population transport targeting Java 17, and updates a copy of the generation's entry JAR. It verifies every original archive entry remains byte-identical, including the corrected prepared-scene Reader, and rejects an existing output file. Bind the resulting JAR and its printed size/hash into a newly frozen generation before running it. The build never runs original game initializers.
 
 Focused source checks:
 

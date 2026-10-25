@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 // Recover only exact recorded bytes; proprietary inputs remain in ignored target.
 const [sourceFile, outputArgument, eagerSpecificationFile] = process.argv.slice(2);
@@ -54,6 +55,8 @@ async function exactCopy(source, destination, record) {
     assert.equal(digest(await readFile(destination)), record.sha256, destination);
 }
 
+const populationURLs = ['/population-natives.js', '/population-kernel.js', '/population-save-codec.js'];
+
 /* eslint-disable no-await-in-loop -- Bound archive memory and file handles during recovery. */
 for (const record of generation.routes) {
     if (record.url.startsWith('/prepared/')) {
@@ -63,14 +66,16 @@ for (const record of generation.routes) {
     const relative = path.relative(originalRoot, record.file);
 
     assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
-    const destination = path.join(output, relative);
+    const destination = populationURLs.includes(record.url)
+        ? path.join(output, 'population', record.url.slice(1))
+        : path.join(output, relative);
     const source = record.url === '/stdlib.lua' ? generation.rootSourceInputs.find((input) => input.url === record.url)?.file : record.file;
 
     await exactCopy(source, destination, record);
     record.file = destination;
 
-    if (['/original-boot.js', '/negative-stat.js'].includes(record.url)) {
-        const selected = path.join(import.meta.dirname, record.url.slice(1));
+    if (['/original-boot.js', '/negative-stat.js', ...populationURLs].includes(record.url)) {
+        const selected = path.join(import.meta.dirname, record.url.startsWith('/population-') ? '..' : '.', record.url.slice(1));
         const bytes = await readFile(selected);
 
         record.recoveredSource = { sha256: record.sha256, bytes: record.bytes };
@@ -79,6 +84,9 @@ for (const record of generation.routes) {
         await writeFile(destination, bytes);
     }
 }
+
+// Resolve the exact frozen trio before expensive asset certification or browser creation.
+await import(pathToFileURL(generation.routes.find((record) => record.url === '/population-natives.js').file).href);
 
 const inventory = { file: generation.importer.inventoryFile, bytes: (await stat(generation.importer.inventoryFile)).size, sha256: generation.importer.inventorySha256 };
 
