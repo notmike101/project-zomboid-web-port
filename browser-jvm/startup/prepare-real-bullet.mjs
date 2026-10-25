@@ -34,7 +34,7 @@ assert.equal(manifest.scalarBytes, 8);
 assert.equal(manifest.compilerVersion, '3.1.74');
 assert.equal(manifest.bridgeSha, digest(await readFile(path.join(import.meta.dirname, '../bullet-vehicle-engine.cpp'))));
 assert.equal(manifest.sourceInventorySha, '63048c5718d2c086889682f6f40d79f6b599b90bd029a3acfb22fc06a1455273');
-assert.equal(manifest.solverOverlay.overlaySha, 'e780c1c6c0900625e14d51c6c6de697882b8d64d326133a308d6d5498c8b9b27');
+assert.equal(manifest.solverOverlay.overlaySha, '2a79dede1585b30244f86201202a53af14255999add3cbc16e0914456ed4012d');
 
 for (const [url, source, expected] of [
     ['/bullet-startup.js', path.join(import.meta.dirname, '../bullet-startup.js')],

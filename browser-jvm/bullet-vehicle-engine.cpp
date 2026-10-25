@@ -36,6 +36,8 @@ int create_world() {
     if(ownedWorld) return 0;
     ownedWorld=new World;
     ownedWorld->world.setGravity(btVector3(0,-10,0));
+    ownedWorld->world.getSolverInfo().m_erp2=btScalar(0.8); // Original Dynamics constructor 0x180059f90 stores double 0.8.
+    ownedWorld->world.getSolverInfo().m_restitutionVelocityThreshold=0; // Original 0x18006447a..0x180064482 multiplies restitution then max(0), without a velocity cutoff.
     return 1;
 }
 int world_state(double* output) {
@@ -336,6 +338,16 @@ int build_geometry(int wx,int wy,int level,const int* cells){
             stair->chunkX=wx;stair->chunkY=wy;stair->level=level;pending.push_back(std::move(stair));
         }
     }
+    bool insideX=wx>=worldHeader[0]*32&&wx<(worldHeader[2]+1)*32;
+    bool insideY=wy>=worldHeader[1]*32&&wy<(worldHeader[3]+1)*32;
+    // Native floor/wall producers seal the outside ring without replacing original chunk data.
+    for(int x=0;x<8;x++)for(int y=0;y<8;y++){
+        if(!insideX||!insideY)floor[x][y]=true;
+        if(insideY&&wx+1==worldHeader[0]*32&&x==7)east[x][y]=true;
+        if(insideY&&wx==(worldHeader[2]+1)*32&&x==0)west[x][y]=true;
+        if(insideX&&wy+1==worldHeader[1]*32&&y==7)south[x][y]=true;
+        if(insideX&&wy==(worldHeader[3]+1)*32&&y==0)north[x][y]=true;
+    }
     // Native floor 0x180002770 forms row runs, then merges matching adjacent runs.
     int widths[8][8]{};
     for(int y=0;y<8;y++)for(int x=0;x<8;){
@@ -348,26 +360,26 @@ int build_geometry(int wx,int wy,int level,const int* cells){
         while(y+length<8&&widths[x][y+length]==width){widths[x][y+length]=0;length++;}
         add(baseX+x+width*0.5,height-0.05000000074505806,baseY+y+length*0.5,(width+0.02)*0.5,0.05000000074505806,(length+0.02)*0.5);
     }
-    // Encoded west/north IDs merge only collinear contiguous cells.
-    for(int x=0;x<8;x++)for(int y=0;y<8;){
-        if(!west[x][y]){y++;continue;}
-        int length=1;while(y+length<8&&west[x][y+length])length++;
-        add(baseX+x+0.05000000074505806,height+1.2247450053691864,baseY+y+length*0.5,0.05000000074505806,1.2247450053691864,length*0.5);y+=length;
-    }
+    // Native 0x180001f10 publishes floor, north(ID2), west(ID3), south(ID4), east(ID5).
     for(int y=0;y<8;y++)for(int x=0;x<8;){
         if(!north[x][y]){x++;continue;}
         int length=1;while(x+length<8&&north[x+length][y])length++;
         add(baseX+x+length*0.5,height+1.2247450053691864,baseY+y+0.05000000074505806,length*0.5,1.2247450053691864,0.05000000074505806);x+=length;
     }
     for(int x=0;x<8;x++)for(int y=0;y<8;){
-        if(!east[x][y]){y++;continue;}
-        int length=1;while(y+length<8&&east[x][y+length])length++;
-        add(baseX+x+0.94999999925494194,height+1.2247450053691864,baseY+y+length*.5,.05000000074505806,1.2247450053691864,length*.5);y+=length;
+        if(!west[x][y]){y++;continue;}
+        int length=1;while(y+length<8&&west[x][y+length])length++;
+        add(baseX+x+0.05000000074505806,height+1.2247450053691864,baseY+y+length*0.5,0.05000000074505806,1.2247450053691864,length*0.5);y+=length;
     }
     for(int y=0;y<8;y++)for(int x=0;x<8;){
         if(!south[x][y]){x++;continue;}
         int length=1;while(x+length<8&&south[x+length][y])length++;
         add(baseX+x+length*.5,height+1.2247450053691864,baseY+y+.94999999925494194,length*.5,1.2247450053691864,.05000000074505806);x+=length;
+    }
+    for(int x=0;x<8;x++)for(int y=0;y<8;){
+        if(!east[x][y]){y++;continue;}
+        int length=1;while(y+length<8&&east[x][y+length])length++;
+        add(baseX+x+0.94999999925494194,height+1.2247450053691864,baseY+y+length*.5,.05000000074505806,1.2247450053691864,length*.5);y+=length;
     }
     for(auto entry=geometryBodies.begin();entry!=geometryBodies.end();){
         if((*entry)->chunkX==wx&&(*entry)->chunkY==wy&&(*entry)->level==level){removeGeometryBody(**entry);entry=geometryBodies.erase(entry);}else ++entry;
@@ -756,30 +768,36 @@ extern "C" int replace_chunk_level(int wx,int wy,int min,int max,int level,const
     chunk->minLevel=min;chunk->maxLevel=max;chunk->records=std::move(pending);
     auto& record=*chunk->records[level-min];std::copy(cells,cells+256,record.cells.begin());record.loaded=true;record.published=false;return 1;
 }
-extern "C" int begin_vehicle_publication(int* output,int capacity){
-    if(!ownedWorld||!output||capacity<169*64)return -1;
-    int maps=0;for(const auto& map:activeMaps)if(map)maps++;if(maps==0)return 0;if(maps!=1)return -1;
-    // Native world-boundary chunks expand to0..63. This component rejects that separate boundary before mutation.
-    for(const auto& map:activeMaps)if(map)for(const auto& chunk:map->cells){
-        if(chunk->x+1==worldHeader[0]*32||chunk->x==(worldHeader[2]+1)*32||chunk->y+1==worldHeader[1]*32||chunk->y==(worldHeader[3]+1)*32)return -1;
-    }
+extern "C" int set_chunk_levels(int wx,int wy,int min,int max);
+extern "C" int begin_vehicle_publication(int* output,int capacity,int id){
+    if(!ownedWorld||!output||capacity<169*64||id<0||id>=4||!activeMaps[id])return -1;
+    auto& map=*activeMaps[id];
     for(const auto& entry:ownedVehicles){
     auto origin=entry.second->body->getWorldTransform().getOrigin();
     int x=int(std::floor(origin.x()+worldHeader[4])),y=int(std::floor(origin.z()+worldHeader[5]));
     int level=int(std::floor(origin.y()/2.449490010738373));
     int wx=int(std::floor(float(x)*0.125f)),wy=int(std::floor(float(y)*0.125f));
-    for(int dx=-1;dx<=1;dx++)for(int dy=-1;dy<=1;dy++)if(auto chunk=find_chunk(wx+dx,wy+dy)){
+    for(int dx=-1;dx<=1;dx++)for(int dy=-1;dy<=1;dy++)if(auto chunk=map.at(wx+dx,wy+dy)){
         for(int z=level-1;z<=level+1;z++)if(z>=chunk->minLevel&&z<=chunk->maxLevel)chunk->records[z-chunk->minLevel]->needed=true;
     }
     }
     int count=0;
-    for(const auto& map:activeMaps)if(map)for(const auto& chunk:map->cells)for(int z=chunk->minLevel;z<=chunk->maxLevel;z++){
-        if(chunk->records[z-chunk->minLevel]->needed){output[count*3]=chunk->x;output[count*3+1]=chunk->y;output[count*3+2]=z;count++;}
+    for(int y=0;y<map.width;y++)for(int x=0;x<map.width;x++){
+        auto& chunk=map.cells[x*map.width+y];
+        if(chunk->x+1==worldHeader[0]*32||chunk->x==(worldHeader[2]+1)*32||chunk->y+1==worldHeader[1]*32||chunk->y==(worldHeader[3]+1)*32){
+            if(!set_chunk_levels(chunk->x,chunk->y,0,63))return -1;
+        }
+        for(int z=chunk->minLevel;z<=chunk->maxLevel;z++)if(chunk->records[z-chunk->minLevel]->needed){
+            output[count*3]=chunk->x;output[count*3+1]=chunk->y;output[count*3+2]=z;count++;
+        }
     }return count;
 }
-extern "C" int finish_vehicle_publication(){
-    if(!ownedWorld)return 0;
-    for(const auto& map:activeMaps)if(map)for(const auto& chunk:map->cells)for(int z=chunk->minLevel;z<=chunk->maxLevel;z++){
+extern "C" int finish_vehicle_publication(int id){
+    if(!ownedWorld||id<0||id>=4||!activeMaps[id])return 0;
+    auto& map=*activeMaps[id];
+    for(int y=0;y<map.width;y++)for(int x=0;x<map.width;x++){
+    auto& chunk=map.cells[x*map.width+y];
+    for(int z=chunk->minLevel;z<=chunk->maxLevel;z++){
         auto& record=*chunk->records[z-chunk->minLevel];
         if(record.needed&&!record.published){if(!build_geometry(chunk->x,chunk->y,z,record.cells.data()))return 0;record.published=true;}
         if(!record.needed&&record.published){
@@ -787,7 +805,7 @@ extern "C" int finish_vehicle_publication(){
                 if(body.chunkX==chunk->x&&body.chunkY==chunk->y&&body.level==z){removeGeometryBody(body);entry=geometryBodies.erase(entry);}else ++entry;}
             record.published=false;
         }record.needed=false;
-    }return 1;
+    }}return 1;
 }
 extern "C" int step_mapped_vehicle(float delta){
     if(!ownedWorld||!std::isfinite(delta)||delta!=0.01f)return 0;

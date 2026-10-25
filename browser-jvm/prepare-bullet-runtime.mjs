@@ -180,6 +180,21 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
             throw new Error('Force-order solver derivative differs from reviewed bytes');
         }
 
+        // Preserve the original solver's shallow/deep ERP selection without changing game classes.
+        const erpBefore = '\tbtScalar erp = infoGlobal.m_erp2;\n';
+        const erpAfter = `${erpBefore}\t// Original DLL 0x1800648eb..0x1800648fb (Bullet 2.82): shallow contacts use ERP.\n\tif (!infoGlobal.m_splitImpulse || cp.getDistance() + infoGlobal.m_linearSlop > infoGlobal.m_splitImpulsePenetrationThreshold)\n\t\terp = infoGlobal.m_erp;\n`;
+        const forceText = overlayBytes.toString('utf8');
+
+        if (forceText.split(erpBefore).length !== 2) {
+            throw new Error('Original contact ERP context is absent or ambiguous');
+        }
+
+        overlayBytes = Buffer.from(forceText.replace(erpBefore, erpAfter));
+
+        if (digest(overlayBytes) !== '2a79dede1585b30244f86201202a53af14255999add3cbc16e0914456ed4012d') {
+            throw new Error('Contact ERP derivative differs from reviewed bytes');
+        }
+
         const overlay = path.join(output, 'btSequentialImpulseConstraintSolver.cpp');
         const copiedHeader = path.join(output, 'btSequentialImpulseConstraintSolver.h');
         const index = cpp.indexOf(original);
@@ -193,7 +208,7 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
         cpp[index] = overlay;
         solverOverlay = {
             originalSha: digest(originalBytes), patchSha: digest(patchBytes), overlaySha: digest(overlayBytes), headerSha: digest(headerBytes),
-            original, overlay, copiedHeader, replacements: 2, forcePatchSha: digest(forcePatchBytes),
+            original, overlay, copiedHeader, replacements: 3, contactErpNativeAddress: '0x1800648eb..0x1800648fb', forcePatchSha: digest(forcePatchBytes),
         };
     }
 

@@ -362,28 +362,39 @@ export function createVehicleWorldNatives(engine) {
             expect(Math.fround(delta) === Math.fround(0.01) && maxSteps === 0 && fixed === 0, 'Unsupported original simulation interval');
 
             const pointer = engine._malloc(169 * 64 * 3 * 4);
-            let callbacks;
+            const mapInfo = engine._malloc(24);
+            let publicationCallbacks = 0;
 
             try {
-                const count = engine._begin_vehicle_publication(pointer, 169 * 64);
+                expect(pointer !== 0 && mapInfo !== 0, 'Actual publication allocation failed');
+                const Bullet = await lib.zombie.core.physics.Bullet;
 
-                expect(count >= 0, 'Unsupported mapped publication domain');
-                callbacks = Array.from(engine.HEAP32.subarray(pointer / 4, pointer / 4 + count * 3));
+                for (let id = 0; id < 4; id++) {
+                    if (engine._map_info(id, mapInfo) !== 1) {
+                        continue;
+                    }
+
+                    const count = engine._begin_vehicle_publication(pointer, 169 * 64, id);
+
+                    expect(count >= 0 && count <= 169 * 64, 'Unsupported mapped publication domain');
+                    const callbacks = Array.from(engine.HEAP32.subarray(pointer / 4, pointer / 4 + count * 3));
+
+                    publicationCallbacks += count;
+
+                    for (let i = 0; i < callbacks.length; i += 3) {
+                        const [x, y, level] = callbacks.slice(i, i + 3);
+                        // eslint-disable-next-line no-await-in-loop -- Original callbacks precede this map's actual body publication.
+                        const uploaded = await Bullet.updatePhysicsForLevelIfNeeded(x, y, level);
+
+                        calls.push({ method: 'original-level-callback', x, y, level, uploaded });
+                    }
+
+                    expect(engine._finish_vehicle_publication(id) === 1, 'Actual level body publication rejected');
+                }
             } finally {
+                engine._free(mapInfo);
                 engine._free(pointer);
             }
-
-            const Bullet = await lib.zombie.core.physics.Bullet;
-
-            for (let i = 0; i < callbacks.length; i += 3) {
-                const [x, y, level] = callbacks.slice(i, i + 3);
-                // eslint-disable-next-line no-await-in-loop -- Original publication callbacks must run in actual request order.
-                const uploaded = await Bullet.updatePhysicsForLevelIfNeeded(x, y, level);
-
-                calls.push({ method: 'original-level-callback', x, y, level, uploaded });
-            }
-
-            expect(engine._finish_vehicle_publication() === 1, 'Actual level body publication rejected');
 
             expect(engine._step_mapped_vehicle(delta) === 1, 'Actual mapped Dynamics step rejected');
 
@@ -397,7 +408,7 @@ export function createVehicleWorldNatives(engine) {
                 engine._free(state);
             }
 
-            calls.push({ method: 'stepSimulation', delta, callbacks: callbacks.length / 3, dynamics, geometryBodies: engine._geometry_count(), registeredVehicles: engine._registered_vehicle_count() });
+            calls.push({ method: 'stepSimulation', delta, callbacks: publicationCallbacks, dynamics, geometryBodies: engine._geometry_count(), registeredVehicles: engine._registered_vehicle_count() });
         },
         /**
          * Dispatches getVehicleCount to the actual qualified engine operation.
