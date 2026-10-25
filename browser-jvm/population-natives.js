@@ -462,10 +462,6 @@ export function createPopulationNatives() {
             return cell;
         }
 
-        if (state.gameState.get('SandboxOptions.Distribution') === 2) {
-            unsupported('uniform distribution target branch not qualified');
-        }
-
         const chunks = await cellCollision(lib, x, y);
         const neighbors = await collisionNeighborhood(lib, x, y);
         /**
@@ -508,6 +504,7 @@ export function createPopulationNatives() {
             directions: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
             idStart: state.nextID,
             age,
+            uniform: state.gameState.get('SandboxOptions.Distribution') === 2,
         });
 
         state.nextID += result.generated;
@@ -534,7 +531,7 @@ export function createPopulationNatives() {
     }
 
     /**
-     * Rejects unqualified new generation before a worker batch changes game state.
+     * Prepares original collision neighbors before a worker batch changes game state.
      *
      * @param {object} lib - Actual CheerpJ Java namespace.
      * @param {Array<number>} coordinates - Original chunk x and y coordinates.
@@ -544,30 +541,12 @@ export function createPopulationNatives() {
         const [cx, cy] = coordinates;
         const x = Math.floor(cx / 32);
         const y = Math.floor(cy / 32);
-        const name = key(x, y);
 
-        if (state.cells.has(name)) {
+        if (state.cells.has(key(x, y))) {
             return;
         }
 
-        const uniform = state.gameState.get('SandboxOptions.Distribution') === 2;
-
-        if (!uniform) {
-            await collisionNeighborhood(lib, x, y);
-
-            return;
-        }
-
-        const transport = await helper(lib);
-        const saved = String(await transport.readOwned(`zpop/zpop_${x}_${y}.bin`));
-
-        if (saved) {
-            decodeCell(decoder(saved));
-
-            return;
-        }
-
-        unsupported('uniform distribution target branch not qualified');
+        await collisionNeighborhood(lib, x, y);
     }
 
     /**

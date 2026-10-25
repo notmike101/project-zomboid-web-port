@@ -627,3 +627,5 @@ Select bullet-ballistics-query-original-cast for actual primary closest-hit quer
 The next audio provider also includes the bounded per-open-file read-ahead cache: 96.82% fewer backing requests for 1.26% additional fetched bytes in the real twelve-bank loop, with identical delivered bytes. Keep the 256 KiB per-file bound and late-read ownership checks; no whole-bank preload or global unbounded cache is introduced.
 
 The bullet-ballistics-reticle-qualified aggregate closes ordinary size/reticle setters. Continue source-qualified CRT random ownership for spread and temporary real-body attachment/query/cleanup for camera operations; do not substitute Math.random or empty results. Bind matching target header and JNI adapter in the next generation.
+
+The population pair now supports original uniform distribution without a separate generator. Freeze both updated files together in the next generation; the current default-world run remains unchanged. Continue genuine world interaction/save checks and remaining concrete population boundaries rather than broadening dormant API work.

@@ -410,10 +410,11 @@ function collision(bytes) {
  * @param {number} root0.cellY - Global y coordinate in the caller API units.
  * @param {number} root0.idStart - Original starting persistent-ID allocator.
  * @param {number} root0.age - Actual original world age in hours.
+ * @param {boolean} [root0.uniform] - Original Distribution=2 density substitution.
  * @param {function(number, number): number} [root0.globalFlags] - Original global square collision lookup.
  * @returns {object} Original target chunks, natural records and allocator totals.
  */
-function generate({ rng, density, chunks, config, constants, directions, cellX, cellY, idStart = 1, age = 0, globalFlags }) {
+function generate({ rng, density, chunks, config, constants, directions, cellX, cellY, idStart = 1, age = 0, globalFlags, uniform = false }) {
     if (!Number.isInteger(cellX) || !Number.isInteger(cellY)) {
         throw new TypeError('cell coordinates required');
     }
@@ -512,7 +513,7 @@ function generate({ rng, density, chunks, config, constants, directions, cellX, 
         let target = 0;
 
         if (!chunks[i].every((value) => (value & 0x19) !== 0)) {
-            let value = density[i];
+            let value = uniform ? at(0x1_90) : density[i];
 
             value = value === 0 ? 0 : f(f(f(f(value * at(0x1_68)) / constant(0xF_A2_6C)) * f(at(0x1_8C) - at(0x1_88))) + at(0x1_88));
 
