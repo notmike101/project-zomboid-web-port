@@ -179,6 +179,24 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
         }
     }
 
+    /**
+     * Obtains the original target owner without attaching its collision box.
+     *
+     * @param {number} id - Original character identity.
+     */
+    function ensureBallisticsTarget(id) {
+        const definitions = ragdollDefinitions();
+        const parts = definitions.find((entry) => entry.kind === 'bodyParts');
+        const dynamics = definitions.find((entry) => entry.kind === 'bodyDynamics');
+        const constraints = definitions.find((entry) => entry.kind === 'constraints');
+
+        expect(parts?.values.length === 110 && dynamics?.values.length === 88 && constraints?.values.length === 220,
+            'Complete original ballistics body/constraint definitions required');
+        floats(new Float32Array(parts.values), (bodyParts) => floats(new Float32Array(dynamics.values), (bodyDynamics) => floats(new Float32Array(constraints.values), (joints) => {
+            expect(engine._ensure_ballistics_target(id, bodyParts, bodyDynamics, joints) === 0, 'Actual target allocation rejected');
+        })));
+    }
+
     const raw = {
         /**
          * Registers an original typed definition.
@@ -480,6 +498,52 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             }
         },
         /**
+         * Stores the original radian axis rotation for the target skeleton root.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original character identity.
+         * @param {number} x - Original X rotation.
+         * @param {number} y - Original Y rotation.
+         * @param {number} z - Original Z rotation.
+         */
+        setBallisticsTargetAxis(lib, id, x, y, z) {
+            expect(engine._set_ballistics_target_axis(id, x, y, z) === 1, 'Actual ballistics target axis rejected');
+        },
+        /**
+         * Applies original animation bones to the target's separate detached bodies.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original character identity.
+         * @param {number} count - Original bone prefix count.
+         * @param {Float32Array} values - Original local translation/quaternion records.
+         */
+        updateBallisticsTargetSkeleton(lib, id, count, values) {
+            expect(values instanceof Float32Array && Number.isInteger(count) && count > 0 && count * 7 <= values.length,
+                'Original ballistics skeleton prefix required');
+
+            ensureBallisticsTarget(id);
+
+            const anchors = ragdollDefinitions().find((entry) => entry.kind === 'anchors');
+
+            expect(anchors?.values.length % 5 === 0, 'Original target anchor definition required');
+            floats(values.subarray(0, count * 7), (records) => floats(new Float32Array(anchors.values), (definitions) => {
+                expect(engine._update_ballistics_target_skeleton(id, count, records, definitions, anchors.values.length / 5) === 1,
+                    'Actual ballistics skeleton update rejected');
+            }));
+        },
+        /**
+         * Publishes the original world-relative target origin and fits its real aggregate box.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original character identity.
+         * @param {...number|boolean} transform - Original XYZ, quaternion and mode arguments.
+         */
+        updateBallisticsTarget(lib, id, ...transform) {
+            expect(transform.length === 8 && transform.slice(0, 7).every(Number.isFinite), 'Original target transform required');
+            ensureBallisticsTarget(id);
+            expect(engine._update_ballistics_target(id, ...transform.slice(0, 3)) === 1, 'Actual ballistics aggregate update rejected');
+        },
+        /**
          * Owns the original separate target box and detached eleven-body controller.
          *
          * @param {object} lib - Original Java namespace.
@@ -514,7 +578,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
         removeBallisticsTarget(lib, id) {
             const result = engine._remove_ballistics_target(id);
 
-            expect(result === 0, 'Actual ballistics target removal rejected');
+            expect(result === 0 || result === 1, 'Actual ballistics target removal rejected');
 
             return result;
         },

@@ -96,8 +96,8 @@ extern "C" int ragdoll_body_state(int id,int part,double* output){
 }
 
 // Original enabled anchor constructor 0x180015e70: inverse bone times the bone/body midpoint frame.
-extern "C" int configure_ragdoll_anchors(int id,const float* records,int count){
-    auto* owner=findRagdoll(id);if(!owner||!records||count<0||count>4096)return 0;
+static int configure_ragdoll_owner_anchors(OwnedRagdoll* owner,const float* records,int count){
+    if(!owner||!records||count<0||count>4096)return 0;
     const std::array<int,11> bones={2,4,6,20,21,24,25,8,9,14,15};
     std::vector<btTransform> boneOffsets(owner->definition->world.size(),btTransform::getIdentity());
     std::vector<int> boneParts(boneOffsets.size(),-1);
@@ -118,6 +118,9 @@ extern "C" int configure_ragdoll_anchors(int id,const float* records,int count){
     for(int part=0;part<11;part++)offsets[part]=boneOffsets[bones[part]];
     owner->boneOffsets=std::move(boneOffsets);owner->boneParts=std::move(boneParts);
     owner->anchorBones=bones;owner->anchorOffsets=offsets;owner->anchorsReady=true;return 1;
+}
+extern "C" int configure_ragdoll_anchors(int id,const float* records,int count){
+    return configure_ragdoll_owner_anchors(findRagdoll(id),records,count);
 }
 extern "C" int update_ragdoll_root(int id,float x,float y,float z,float qx,float qy,float qz,float qw){
     if(!ownedWorld)return 0;auto* owner=findRagdoll(id);if(!owner)return 1;
