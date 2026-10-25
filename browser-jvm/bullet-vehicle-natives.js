@@ -443,6 +443,57 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             }
         },
         /**
+         * Allocates real off-world body/joint ownership from the original template.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {...number} transform - Original position/quaternion arguments; native attachment applies the root separately.
+         */
+        addRagdoll(lib, id, ...transform) {
+            expect(transform.length === 7 && transform.every(Number.isFinite)
+                && transform.slice(3).some((value) => value !== 0), 'Original finite ragdoll transform required');
+
+            const definitions = ragdollDefinitions();
+            const parts = definitions.find((entry) => entry.kind === 'bodyParts');
+            const dynamics = definitions.find((entry) => entry.kind === 'bodyDynamics');
+            const constraints = definitions.find((entry) => entry.kind === 'constraints');
+
+            expect(parts?.values.length === 110 && dynamics?.values.length === 88 && constraints?.values.length === 220,
+                'Complete original ragdoll body/constraint definitions required');
+            floats(new Float32Array(parts.values), (bodyParts) => floats(new Float32Array(dynamics.values), (bodyDynamics) => floats(new Float32Array(constraints.values), (joints) => {
+                expect(engine._add_ragdoll(id, bodyParts, bodyDynamics, joints, 10) === 1, 'Actual ragdoll body construction rejected');
+            })));
+        },
+        /**
+         * Attaches or detaches the actual bodies and linked constraints.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {boolean} active - Original attachment flag.
+         */
+        setRagdollActive(lib, id, active) {
+            expect(engine._set_ragdoll_active(id, active ? 1 : 0) === 1, 'Actual ragdoll activation rejected');
+        },
+        /**
+         * Detaches before releasing owned bodies, motion states and constraints.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         */
+        removeRagdoll(lib, id) {
+            expect(engine._remove_ragdoll(id) === 1, 'Actual ragdoll removal rejected');
+        },
+        /**
+         * Reads original aggregate activation state, zero for mixed states and minus one for absent ownership.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @returns {number} Actual aggregate body activation state.
+         */
+        getRagdollSimulationState(lib, id) {
+            return engine._ragdoll_simulation_state(id);
+        },
+        /**
          * Dispatches setChunkMinMaxLevel to the actual qualified engine operation.
          *
          * @param {object} lib - Original Java namespace supplied by the runtime.

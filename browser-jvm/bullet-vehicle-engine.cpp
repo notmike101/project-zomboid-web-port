@@ -1,6 +1,7 @@
 #include <map>
 extern "C" int clear_registered_vehicle();
 extern "C" int clear_geometry();
+extern "C" int clear_ragdolls();
 extern "C" int clear_vehicle_constraints();
 static int nextConstraintId=0;
 #include <array>
@@ -11,6 +12,7 @@ static int nextConstraintId=0;
 #include <vector>
 #include <cmath>
 #include "btBulletDynamicsCommon.h"
+extern "C" int ragdoll_body_contains(const btCollisionObject* body);
 
 // Candidate real Bullet collision core. PZ's embedded upstream revision is unknown.
 struct Mesh {
@@ -234,6 +236,7 @@ uintptr_t map_chunk(int id,int x,int y,int* output){
 }
 int destroy_mapped_world(){
     if(!ownedWorld)return 0;
+    clear_ragdolls();
     clear_vehicle_constraints();
     clear_registered_vehicle();
     clear_geometry();
@@ -934,7 +937,7 @@ extern "C" int object_registry_count(){
     if(!ownedWorld)return -1;
     const auto& objects=ownedWorld->world.getCollisionObjectArray();
     for(int i=0;i<objects.size();i++){
-        if(vehicleForBody(objects[i]))continue;
+        if(vehicleForBody(objects[i])||ragdoll_body_contains(objects[i]))continue;
         bool geometry=false;for(const auto& body:geometryBodies)if(objects[i]==body->body.get()){geometry=true;break;}
         if(!geometry)return -1; // No other dynamic-object owner has been admitted.
     }return 0;
@@ -982,3 +985,5 @@ extern "C" int get_vehicle_physics_batch(int offset,float* output,int count){
 }
 
 #include "bullet-ragdoll-template.h"
+
+#include "bullet-ragdoll-body.h"

@@ -34,6 +34,7 @@ assert.equal(manifest.scalarBytes, 8);
 assert.equal(manifest.compilerVersion, '3.1.74');
 assert.equal(manifest.bridgeSha, digest(await readFile(path.join(import.meta.dirname, '../bullet-vehicle-engine.cpp'))));
 assert.equal(manifest.ragdollTemplateSha, digest(await readFile(path.join(import.meta.dirname, '../bullet-ragdoll-template.h'))));
+assert.equal(manifest.ragdollBodySha, digest(await readFile(path.join(import.meta.dirname, '../bullet-ragdoll-body.h'))));
 assert.equal(manifest.sourceInventorySha, '63048c5718d2c086889682f6f40d79f6b599b90bd029a3acfb22fc06a1455273');
 assert.equal(manifest.solverOverlay.overlaySha, '2a79dede1585b30244f86201202a53af14255999add3cbc16e0914456ed4012d');
 
