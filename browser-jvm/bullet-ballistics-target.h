@@ -9,6 +9,8 @@ struct OwnedBallisticsTarget {
     std::unique_ptr<NativeBallisticsBox> shape;
     btTransform axis=btTransform::getIdentity();
     btVector3 position=btVector3(0,0,0);
+    bool aggregateHit=false;
+    btVector3 hitPoint=btVector3(0,0,0),hitColor=btVector3(0,0,0);
     std::unique_ptr<btCollisionObject> object;
 };
 static std::map<int,std::unique_ptr<OwnedBallisticsTarget>> ownedBallisticsTargets;
@@ -37,10 +39,17 @@ extern "C" int remove_ballistics_target(int id){
     if(!result)ownedWorld->world.removeCollisionObject(found->second->object.get());
     pooledBallisticsTargets.push_back(std::move(found->second));ownedBallisticsTargets.erase(found);return result;
 }
+struct OwnedBallisticsController {
+    btTransform transform=btTransform::getIdentity();
+    double range=0;
+    btVector3 color=btVector3(0,1,1);
+};
+static std::map<int,std::unique_ptr<OwnedBallisticsController>> ownedBallisticsControllers;
+static std::vector<std::unique_ptr<OwnedBallisticsController>> pooledBallisticsControllers;
 extern "C" int clear_ballistics_targets(){
     if(!ownedWorld)return ownedBallisticsTargets.empty()?1:0;
     while(!ownedBallisticsTargets.empty())if(remove_ballistics_target(ownedBallisticsTargets.begin()->first)<0)return 0;
-    pooledBallisticsTargets.clear();return 1;
+    pooledBallisticsTargets.clear();ownedBallisticsControllers.clear();pooledBallisticsControllers.clear();return 1;
 }
 // Bounded original-DLL comparison of actual ownership, geometry and detached body state.
 extern "C" int ballistics_target_state(int id,int part,double* output){
@@ -100,4 +109,65 @@ extern "C" int ballistics_target_pose_state(int id,double* output){
         for(int axis=0;axis<3;axis++)output[cursor++]=transform.getOrigin()[axis];
     }
     auto half=target.shape->getHalfExtentsWithoutMargin();for(int axis=0;axis<3;axis++)output[cursor++]=half[axis];return 1;
+}
+
+// Original controller allocation is separate from target ownership; a nonpositive range gates position updates.
+extern "C" int update_ballistics_controller(int id,float x,float y,float z){
+    if(!ownedWorld||id<0)return 0;for(float value:{x,y,z})if(!std::isfinite(value))return 0;
+    auto found=ownedBallisticsControllers.find(id);
+    if(found==ownedBallisticsControllers.end()){
+        std::unique_ptr<OwnedBallisticsController> controller;
+        if(pooledBallisticsControllers.empty())controller=std::make_unique<OwnedBallisticsController>();
+        else{controller=std::move(pooledBallisticsControllers.front());pooledBallisticsControllers.erase(pooledBallisticsControllers.begin());}
+        found=ownedBallisticsControllers.emplace(id,std::move(controller)).first;
+    }
+    if(found->second->range>0)found->second->transform.setOrigin(btVector3(double(x-float(worldHeader[4])),double(y),double(z-float(worldHeader[5]))));return 1;
+}
+extern "C" int set_ballistics_range(int id,float value){
+    if(!ownedWorld||!std::isfinite(value))return 0;auto found=ownedBallisticsControllers.find(id);if(found!=ownedBallisticsControllers.end())found->second->range=value;return 1;
+}
+extern "C" int set_ballistics_color(int id,float r,float g,float b){
+    if(!ownedWorld)return 0;for(float value:{r,g,b})if(!std::isfinite(value))return 0;
+    auto found=ownedBallisticsControllers.find(id);if(found!=ownedBallisticsControllers.end())found->second->color=btVector3(r,g,b);return 1;
+}
+// Original 0x180022ef0 uses angle-axis from fixed forward(0,0,1), including its antiparallel branch.
+extern "C" int update_ballistics_direction(int id,float x,float y,float z){
+    if(!ownedWorld)return 0;for(float value:{x,y,z})if(!std::isfinite(value))return 0;
+    auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 1;
+    btVector3 direction(x,y,z),forward(0,0,1);btQuaternion rotation;
+    if((direction+forward).length()<.00001)rotation=btQuaternion(0,std::sin(1.5707963267948966),0,std::cos(1.5707963267948966));
+    else{
+        btVector3 axis=forward.cross(direction);double angle=std::acos(forward.dot(direction))*.5;
+        double multiplier=std::sin(angle)/std::sqrt(axis.length2());
+        rotation=btQuaternion(axis.x()*multiplier,axis.y()*multiplier,axis.z()*multiplier,std::cos(angle));
+    }
+    found->second->transform.setRotation(rotation);return 1;
+}
+extern "C" int remove_ballistics_controller(int id){
+    if(!ownedWorld)return 0;auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 1;
+    pooledBallisticsControllers.push_back(std::move(found->second));ownedBallisticsControllers.erase(found);return 1;
+}
+extern "C" int get_ballistics_targets(int id,float distance,int capacity,float* output){
+    if(!ownedWorld||!std::isfinite(distance)||capacity<1||!output)return -1;
+    auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 0;
+    const auto& controller=*found->second;const btVector3 from=controller.transform.getOrigin(),to=controller.transform*btVector3(0,0,distance);
+    btCollisionWorld::ClosestRayResultCallback hit(from,to);ownedWorld->world.rayTest(from,to,hit);
+    if(!hit.hasHit())return 0;
+    int targetId=-1;OwnedBallisticsTarget* target=nullptr;
+    for(const auto& entry:ownedBallisticsTargets)if(entry.second->object.get()==hit.m_collisionObject){targetId=entry.first;target=entry.second.get();break;}
+    if(!target){for(const auto& entry:ownedVehicles)if(entry.second->body.get()==hit.m_collisionObject){targetId=entry.first;break;}}
+    if(targetId<0)return 0; // Actual closest terrain/non-target collision blocks a target behind it.
+    btVector3 point=from+(to-from)*hit.m_closestHitFraction;
+    point[0]+=worldHeader[4];point[2]+=worldHeader[5];
+    output[0]=float(targetId);for(int axis=0;axis<3;axis++)output[1+axis]=float(point[axis]);
+    if(target){target->aggregateHit=true;target->hitPoint=point;target->hitColor=controller.color;}return 1;
+}
+extern "C" int ballistics_query_state(int id,double* output){
+    if(!output)return 0;auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 0;
+    const auto& controller=*found->second;int cursor=0;for(int row=0;row<3;row++)for(int col=0;col<3;col++)output[cursor++]=controller.transform.getBasis()[row][col];
+    for(int axis=0;axis<3;axis++)output[cursor++]=controller.transform.getOrigin()[axis];output[12]=controller.range;return 1;
+}
+extern "C" int ballistics_target_hit_state(int id,double* output){
+    auto found=ownedBallisticsTargets.find(id);if(found==ownedBallisticsTargets.end()||!output)return 0;const auto& target=*found->second;
+    output[0]=target.aggregateHit?1:0;for(int axis=0;axis<3;axis++){output[1+axis]=target.hitPoint[axis];output[4+axis]=target.hitColor[axis];}return 1;
 }

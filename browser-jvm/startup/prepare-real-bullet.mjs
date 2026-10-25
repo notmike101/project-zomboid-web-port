@@ -38,6 +38,8 @@ assert.equal(manifest.ragdollBodySha, digest(await readFile(path.join(import.met
 assert.equal(manifest.ragdollActionsSha, digest(await readFile(path.join(import.meta.dirname, '../bullet-ragdoll-actions.h'))));
 assert.equal(manifest.ragdollReadbackSha, digest(await readFile(path.join(import.meta.dirname, '../bullet-ragdoll-readback.h'))));
 assert.equal(manifest.ballisticsTargetSha, digest(await readFile(path.join(import.meta.dirname, '../bullet-ballistics-target.h'))));
+assert.equal(manifest.rayOverlay.originalSha, 'e79733f5b8be9fe7df9652f1ccb8b97dcc8b0b313dd52de23b7a9b720eaeb797');
+assert.equal(manifest.rayOverlay.overlaySha, 'b35ee37a959351077717808a9969e42ae465fb75154af69f5b6c74c609a95829');
 assert.equal(manifest.sourceInventorySha, '63048c5718d2c086889682f6f40d79f6b599b90bd029a3acfb22fc06a1455273');
 assert.equal(manifest.solverOverlay.overlaySha, '2a79dede1585b30244f86201202a53af14255999add3cbc16e0914456ed4012d');
 assert.equal(manifest.capsuleOverlay.originalSha, 'a5ca083fd8eaa1a5c7343cbd79d7bdeec52b85c680e492ecec1d9cb3917c02e5');

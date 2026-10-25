@@ -498,6 +498,90 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             }
         },
         /**
+         * Updates the original range-gated world-relative muzzle position.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} x - World X.
+         * @param {number} y - Bullet Y.
+         * @param {number} z - World Z.
+         */
+        updateBallistics(lib, id, x, y, z) {
+            expect(engine._update_ballistics_controller(id, x, y, z) === 1, 'Actual ballistics controller update rejected');
+        },
+        /**
+         * Stores the original controller range without allocating a missing identity.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} range - Original float range.
+         */
+        setBallisticsRange(lib, id, range) {
+            expect(engine._set_ballistics_range(id, range) === 1, 'Actual ballistics range rejected');
+        },
+        /**
+         * Stores original shot highlighting color used by actual hit registration.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} r - Original red value.
+         * @param {number} g - Original green value.
+         * @param {number} b - Original blue value.
+         */
+        setBallisticsColor(lib, id, r, g, b) {
+            expect(engine._set_ballistics_color(id, r, g, b) === 1, 'Actual ballistics color rejected');
+        },
+        /**
+         * Uses the original fixed-forward angle-axis construction for muzzle aim.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} x - Original unit direction X.
+         * @param {number} y - Original unit direction Y.
+         * @param {number} z - Original unit direction Z.
+         */
+        updateBallisticsMuzzleAimDirection(lib, id, x, y, z) {
+            expect(engine._update_ballistics_direction(id, x, y, z) === 1, 'Actual muzzle aim direction rejected');
+        },
+        /**
+         * Traces the actual closest world collision and registers a genuine target or vehicle hit.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} distance - Original forward ray length.
+         * @param {number} capacity - Original maximum output records.
+         * @param {Float32Array} output - Original ID/world hit XYZ records, with spare capacity preserved.
+         * @returns {number} Actual original hit count.
+         */
+        getBallisticsTargets(lib, id, distance, capacity, output) {
+            expect(output instanceof Float32Array && Number.isInteger(capacity) && capacity > 0 && capacity * 4 <= output.length,
+                'Original bounded ballistics target output required');
+
+            const pointer = engine._malloc(capacity * 16);
+
+            expect(pointer !== 0, 'Actual ballistics query allocation failed');
+
+            try {
+                const count = engine._get_ballistics_targets(id, distance, capacity, pointer);
+
+                expect(count >= 0 && count <= capacity, 'Actual ballistics world query rejected');
+                output.set(engine.HEAPF32.subarray(pointer / 4, pointer / 4 + count * 4));
+
+                return count;
+            } finally {
+                engine._free(pointer);
+            }
+        },
+        /**
+         * Releases the original shooter identity into its reusable owner pool.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         */
+        removeBallistics(lib, id) {
+            expect(engine._remove_ballistics_controller(id) === 1, 'Actual ballistics controller removal rejected');
+        },
+        /**
          * Stores the original radian axis rotation for the target skeleton root.
          *
          * @param {object} lib - Original Java namespace.

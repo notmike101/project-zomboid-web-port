@@ -1311,3 +1311,9 @@ Original nonempty spawn-origin rectangles are now appended with the native seman
 A genuine CheerpJ probe preserves high-bit long arrays and Java-to-host arguments but converts a BigInt native return of 4,294,967,296 to Java zero. The pinned runtime conversion code explains the result and supports exact safe-integer Number conversion instead. FMOD JNI results and callbacks now use that representation after safe-range and exact-round-trip checks; internal identities and data-only BigInt results remain unchanged.
 
 The real SDK closure passes with the new marshalling path for 43 global descriptors, 3,494 events and 14,885 per-event parameter descriptions. The corrected adapter has not yet executed through the next original audio-enabled browser initialization. The current original-world attempt uses the sound-disabled branch while audio transport is repaired; it does not count as an audio pass.
+
+### Original closest ballistic queries
+
+The ballistic controller now performs actual closest-world ray queries, returns the original target or vehicle hit record, and records target hit metadata. A nearer terrain collision blocks a target behind it. The vehicle build restores the original GJK-default/Subsimplex-flag selection and native ray-local thresholds through a pinned collision-world derivative.
+
+Four original comparisons match all 83 output floats and spare entries for target hit, blocking vehicle compound hit, short miss and off-axis miss. Hit metadata matches at float32, with maximum internal difference 2.842e-14. The existing 21 vehicle stages remain exact. An explicit original-DLL witness also confirms the unusual exact-forward direction produces a NaN basis and no hit; the host preserves that original behavior. Size, reticle, spread, camera and body-part query closures remain incomplete; connected firearm gameplay is not yet qualified.

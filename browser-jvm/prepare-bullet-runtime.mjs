@@ -11,7 +11,7 @@ const sdk = path.join(repository, '.tools/emsdk-3.1.74-source/emsdk-3d6d8ee91046
 const compiler = path.join(sdk, 'upstream/emscripten/emcc.py');
 const foundationExports = ['scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'create_world', 'world_state', 'destroy_world', 'create_mapped_world', 'activate_map', 'world_header', 'deactivate_map', 'map_info', 'map_chunk', 'destroy_mapped_world', 'malloc', 'free'];
 
-const vehicleExports = ['ensure_ballistics_target', 'set_ballistics_target_axis', 'update_ballistics_target_skeleton', 'update_ballistics_target', 'ballistics_target_pose_state', 'add_ballistics_target', 'remove_ballistics_target', 'ballistics_target_state', 'set_ragdoll_body_dynamics', 'reset_ragdoll_body_dynamics', 'ragdoll_dynamics_state', 'ragdoll_contact_points', 'ragdoll_contact_count', 'ragdoll_bone_count', 'read_ragdoll', 'update_ragdoll_previous_pose', 'apply_ragdoll_force', 'detach_ragdoll_constraint', 'ragdoll_action_state', 'set_ragdoll_local_rotation', 'ragdoll_capsule_support', 'configure_ragdoll_anchors', 'update_ragdoll_root', 'update_ragdoll_pose', 'add_ragdoll', 'remove_ragdoll', 'set_ragdoll_active', 'ragdoll_simulation_state', 'ragdoll_body_state', 'initialize_ragdoll_template', 'ragdoll_template_bone', 'ragdoll_template_shape', 'vehicle_constraint_count', 'vehicle_constraint_feedback', 'add_vehicle_constraint', 'set_vehicle_constraint_erp', 'remove_vehicle_constraint', 'teleport_vehicle', 'apply_torque', 'scroll_map', 'vehicle_count_snapshot', 'get_vehicle_physics_batch', 'vehicle_basis', 'bind_static_mesh', 'has_static_mesh', 'registered_mesh_references', 'observe_vehicle_contacts', 'apply_central_force', 'vehicle_control_history', 'scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'world_state', 'create_mapped_world', 'destroy_mapped_world', 'build_geometry', 'clear_geometry', 'geometry_count', 'geometry_body', 'define_vehicle', 'define_vehicle_named', 'vehicle_definition_count', 'select_vehicle_definition', 'add_vehicle', 'vehicle_state', 'vehicle_child', 'vehicle_wheel', 'set_vehicle_active', 'set_vehicle_mass', 'set_vehicle_static', 'set_tire_inflation', 'set_tire_removed', 'set_vehicle_params', 'set_vehicle_velocity_multiplier', 'control_vehicle', 'step_vehicle_freefall', 'get_vehicle_physics', 'replace_chunk_level', 'begin_vehicle_publication', 'finish_vehicle_publication', 'step_mapped_vehicle', 'chunk_level_state', 'vehicle_material', 'set_chunk_levels', 'registered_vehicle_count', 'object_registry_count', 'remove_vehicle', 'world_header', 'activate_map', 'deactivate_map', 'map_info', 'map_chunk', 'malloc', 'free', 'create_world'];
+const vehicleExports = ['update_ballistics_controller', 'set_ballistics_range', 'set_ballistics_color', 'update_ballistics_direction', 'remove_ballistics_controller', 'get_ballistics_targets', 'ballistics_query_state', 'ballistics_target_hit_state', 'ensure_ballistics_target', 'set_ballistics_target_axis', 'update_ballistics_target_skeleton', 'update_ballistics_target', 'ballistics_target_pose_state', 'add_ballistics_target', 'remove_ballistics_target', 'ballistics_target_state', 'set_ragdoll_body_dynamics', 'reset_ragdoll_body_dynamics', 'ragdoll_dynamics_state', 'ragdoll_contact_points', 'ragdoll_contact_count', 'ragdoll_bone_count', 'read_ragdoll', 'update_ragdoll_previous_pose', 'apply_ragdoll_force', 'detach_ragdoll_constraint', 'ragdoll_action_state', 'set_ragdoll_local_rotation', 'ragdoll_capsule_support', 'configure_ragdoll_anchors', 'update_ragdoll_root', 'update_ragdoll_pose', 'add_ragdoll', 'remove_ragdoll', 'set_ragdoll_active', 'ragdoll_simulation_state', 'ragdoll_body_state', 'initialize_ragdoll_template', 'ragdoll_template_bone', 'ragdoll_template_shape', 'vehicle_constraint_count', 'vehicle_constraint_feedback', 'add_vehicle_constraint', 'set_vehicle_constraint_erp', 'remove_vehicle_constraint', 'teleport_vehicle', 'apply_torque', 'scroll_map', 'vehicle_count_snapshot', 'get_vehicle_physics_batch', 'vehicle_basis', 'bind_static_mesh', 'has_static_mesh', 'registered_mesh_references', 'observe_vehicle_contacts', 'apply_central_force', 'vehicle_control_history', 'scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'world_state', 'create_mapped_world', 'destroy_mapped_world', 'build_geometry', 'clear_geometry', 'geometry_count', 'geometry_body', 'define_vehicle', 'define_vehicle_named', 'vehicle_definition_count', 'select_vehicle_definition', 'add_vehicle', 'vehicle_state', 'vehicle_child', 'vehicle_wheel', 'set_vehicle_active', 'set_vehicle_mass', 'set_vehicle_static', 'set_tire_inflation', 'set_tire_removed', 'set_vehicle_params', 'set_vehicle_velocity_multiplier', 'control_vehicle', 'step_vehicle_freefall', 'get_vehicle_physics', 'replace_chunk_level', 'begin_vehicle_publication', 'finish_vehicle_publication', 'step_mapped_vehicle', 'chunk_level_state', 'vehicle_material', 'set_chunk_levels', 'registered_vehicle_count', 'object_registry_count', 'remove_vehicle', 'world_header', 'activate_map', 'deactivate_map', 'map_info', 'map_chunk', 'malloc', 'free', 'create_world'];
 
 /**
  * Computes a byte-exact source or generated artifact fingerprint.
@@ -136,6 +136,7 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
     let gjkOverlay = null;
     let pairOverlay = null;
     let convexOverlay = null;
+    let rayOverlay = null;
 
     if (profile === 'vehicle') {
         const original = path.join(sourceRoot, 'src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp');
@@ -388,6 +389,47 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
             originalSha: digest(convexBytes), overlaySha: digest(convexDerived), overlay: convexOutput,
             simplexNative: '0x18007854a..78560;0x1800a42d1..a4334',
         };
+        const rayOriginal = path.join(sourceRoot, 'src/BulletCollision/CollisionDispatch/btCollisionWorld.cpp');
+        const rayBytes = await readFile(rayOriginal);
+        const rayChanges = [
+            ['\t\tbtConvexCast::CastResult castResult;\n\t\tcastResult.m_fraction = resultCallback.m_closestHitFraction;', '\t\tbtConvexCast::CastResult castResult;\n\t\t// Altered compatibility: original ray cast 0x180081627/81acb uses double(.0001).\n\t\tcastResult.m_subSimplexCastEpsilon = btScalar(0.0001);\n\t\tcastResult.m_fraction = resultCallback.m_closestHitFraction;'],
+            ['\t\tbtVoronoiSimplexSolver simplexSolver;\n\t\tbtSubsimplexConvexCast subSimplexConvexCaster', '\t\tbtVoronoiSimplexSolver simplexSolver;\n\t\t// Original ray-local simplex threshold at 0x18006ef67..6ef6f.\n\t\tsimplexSolver.setEqualVertexThreshold(btScalar(0.0001f));\n\t\tbtSubsimplexConvexCast subSimplexConvexCaster'],
+            ['\t\tif (resultCallback.m_flags & btTriangleRaycastCallback::kF_UseGjkConvexCastRaytest)', '\t\t// Original 0x18006efb5..6efd2 selects GJK by default and Subsimplex for flag4.\n\t\tif (!(resultCallback.m_flags & btTriangleRaycastCallback::kF_UseGjkConvexCastRaytest))'],
+        ];
+
+        if (digest(rayBytes) !== 'e79733f5b8be9fe7df9652f1ccb8b97dcc8b0b313dd52de23b7a9b720eaeb797') {
+            throw new Error('Unqualified original ray collision source');
+        }
+
+        let rayText = rayBytes.toString('utf8');
+
+        for (const [before, after] of rayChanges) {
+            if (rayText.split(before).length !== 2) {
+                throw new Error('Original ray compatibility context is absent or ambiguous');
+            }
+
+            rayText = rayText.replace(before, after);
+        }
+
+        const rayDerived = Buffer.from(rayText);
+
+        if (digest(rayDerived) !== 'b35ee37a959351077717808a9969e42ae465fb75154af69f5b6c74c609a95829') {
+            throw new Error('Ray cast derivative differs from reviewed bytes');
+        }
+
+        const rayOutput = path.join(output, 'btCollisionWorld.cpp');
+        const rayIndex = cpp.indexOf(rayOriginal);
+
+        if (rayIndex === -1 || cpp.lastIndexOf(rayOriginal) !== rayIndex) {
+            throw new Error('Expected exactly one collision world translation unit');
+        }
+
+        await writeFile(rayOutput, rayDerived, { flag: 'wx' });
+        cpp[rayIndex] = rayOutput;
+        rayOverlay = {
+            originalSha: digest(rayBytes), overlaySha: digest(rayDerived), overlay: rayOutput,
+            native: '0x18006ef67..6ef6f;0x180081627;0x180081acb;0x18006efb5..6efd2',
+        };
     }
 
     const compilerArguments = ['-3', compiler, '-std=c++17', '-O1', '-DBT_USE_DOUBLE_PRECISION', `-I${path.join(sourceRoot, 'src')}`,
@@ -401,7 +443,7 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
         { env: { ...process.env, EM_CONFIG: path.join(sdk, '.emscripten') }, timeout: 180_000, maxBuffer: 4_194_304 });
 
     const manifest = {
-        profile, exports, solverOverlay, capsuleOverlay, gjkOverlay, pairOverlay, convexOverlay, compilerArguments, sourceInventorySha: digest(JSON.stringify(inputs)),
+        profile, exports, solverOverlay, capsuleOverlay, gjkOverlay, pairOverlay, convexOverlay, rayOverlay, compilerArguments, sourceInventorySha: digest(JSON.stringify(inputs)),
         compilerSha: digest(await readFile(compiler)), compilerConfigSha: digest(await readFile(path.join(sdk, '.emscripten'))),
         candidateCommit: '2c204c49e56ed15ec5fcfa71d199ab6d6570b3f5', candidateVersion: '3.25', installedCoreVersion: 'unknown', versionMatchVerified: false,
         compilerVersion: '3.1.74', scalarBytes: 8, bridgeSha, ragdollTemplateSha, ragdollBodySha, ragdollActionsSha, ragdollReadbackSha, ballisticsTargetSha, sources: cpp.length,
@@ -438,6 +480,10 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
 
     if (convexOverlay && digest(await readFile(convexOverlay.overlay)) !== convexOverlay.overlaySha) {
         throw new Error('Contact simplex derivative changed during compilation');
+    }
+
+    if (rayOverlay && digest(await readFile(rayOverlay.overlay)) !== rayOverlay.overlaySha) {
+        throw new Error('Ray cast derivative changed during compilation');
     }
 
     await verifySources(inputs);
