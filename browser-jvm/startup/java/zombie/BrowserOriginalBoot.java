@@ -135,6 +135,12 @@ public final class BrowserOriginalBoot {
         }
     }
 
+    /** Explicit observation only: no scan on render or producer frames. */
+    public static String ownedDirectBuffers() {
+        long[] allocation = port.host.SpriteGraphics.allocationSnapshot();
+        return "{\"count\":" + allocation[0] + ",\"capacityBytes\":" + allocation[1] + "}";
+    }
+
     /** Reads intended writable paths and existing ancestors; creates no directories. */
     static String ownedPaths() {
         try {

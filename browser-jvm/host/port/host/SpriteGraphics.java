@@ -181,6 +181,14 @@ public final class SpriteGraphics {
         }
         return view;
     }
+    /** On-demand owned direct storage only; excludes JVM heap, GPU and foreign buffers. */
+    public static long[] allocationSnapshot() {
+        synchronized (allocations) {
+            long capacity = 0;
+            for (ByteBuffer owner : allocations.values()) capacity += owner.capacity();
+            return new long[]{allocations.size(), capacity};
+        }
+    }
     public static void memFree(ByteBuffer value){free(value);}
     public static void memFree(FloatBuffer value){free(value);}
     public static void memFree(ShortBuffer value){free(value);}

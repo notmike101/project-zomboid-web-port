@@ -130,7 +130,7 @@ public final class SpriteBuffers {
         if (length == 0 || !range(entry, offset, length)) { error(0x0501); return null; }
         if (entry.staging == null || entry.staging.capacity() != length) {
             release(entry);
-            entry.staging = ByteBuffer.allocateDirect((int) length).order(ByteOrder.nativeOrder());
+            entry.staging = SpriteGraphics.memAlloc((int) length);
         }
         entry.staging.clear();
         if ((flags & 1) != 0) {
@@ -152,7 +152,7 @@ public final class SpriteBuffers {
             entireMapping.clear();
             SpriteGraphics.bufferUpload(target, entry.offset, bytes(entireMapping, 0, entry.length));
         }
-        entry.mapped = false; entry.offset = entry.length = entry.flags = 0;
+        release(entry);
         return SpriteGraphics.contextCreated();
     }
 
@@ -213,7 +213,8 @@ public final class SpriteBuffers {
     }
 
     private static void release(Entry entry) {
-        // Dropping the owned view releases direct storage to the browser JVM garbage collector.
+        // Unmapped CPU storage has no remaining GL lifetime; release it instead of retaining a second copy of the GPU buffer.
+        if (entry.staging != null) SpriteGraphics.memFree(entry.staging);
         entry.staging = null; entry.mapped = false; entry.offset = entry.length = entry.flags = 0;
     }
 
