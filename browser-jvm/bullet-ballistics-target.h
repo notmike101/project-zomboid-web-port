@@ -150,10 +150,7 @@ extern "C" int remove_ballistics_controller(int id){
     if(!ownedWorld)return 0;auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 1;
     pooledBallisticsControllers.push_back(std::move(found->second));ownedBallisticsControllers.erase(found);return 1;
 }
-extern "C" int get_ballistics_targets(int id,float distance,int capacity,float* output){
-    if(!ownedWorld||!std::isfinite(distance)||capacity<1||!output)return -1;
-    auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 0;
-    const auto& controller=*found->second;const btVector3 from=controller.transform.getOrigin(),to=controller.transform*btVector3(0,0,distance);
+static int trace_ballistics_target(const btVector3& from,const btVector3& to,const btVector3& color,float* output){
     btCollisionWorld::ClosestRayResultCallback hit(from,to);ownedWorld->world.rayTest(from,to,hit);
     if(!hit.hasHit())return 0;
     int targetId=-1;OwnedBallisticsTarget* target=nullptr;
@@ -163,7 +160,31 @@ extern "C" int get_ballistics_targets(int id,float distance,int capacity,float* 
     btVector3 point=from+(to-from)*hit.m_closestHitFraction;
     point[0]+=worldHeader[4];point[2]+=worldHeader[5];
     output[0]=float(targetId);for(int axis=0;axis<3;axis++)output[1+axis]=float(point[axis]);
-    if(target){target->aggregateHit=true;target->hitPoint=point;target->hitColor=controller.color;}return 1;
+    if(target){target->aggregateHit=true;target->hitPoint=point;target->hitColor=color;}return 1;
+}
+extern "C" int get_ballistics_targets(int id,float distance,int capacity,float* output){
+    if(!ownedWorld||!std::isfinite(distance)||capacity<1||!output)return -1;
+    auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 0;
+    const auto& controller=*found->second;const btVector3 from=controller.transform.getOrigin(),to=controller.transform*btVector3(0,0,distance);
+    return trace_ballistics_target(from,to,controller.color,output);
+}
+// Original statically linked CRT rand: per-Java/native-thread state, default seed1, exact unsigned wrap.
+static uint32_t original_ballistics_rand(uint32_t& state){state=state*214013u+2531011u;return (state>>16)&32767u;}
+extern "C" int get_ballistics_spread(int id,float distance,float spread,float exponent,int count,int capacity,float* output,uint32_t* random){
+    if(!ownedWorld||!output||!random||count<0||capacity<count)return -1;
+    for(float value:{distance,spread,exponent})if(!std::isfinite(value))return -1;
+    auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 0;
+    const auto& controller=*found->second;const auto from=controller.transform.getOrigin();uint32_t state=*random;
+    for(int shot=0;shot<count;shot++){
+        double angle=double(float(original_ballistics_rand(state)))*6.283185307179586/32767.;
+        float unit=float(original_ballistics_rand(state))/32767.f;
+        float radial=std::pow(unit,exponent)*spread;
+        btVector3 local(std::cos(angle)*double(radial),std::sin(angle)*double(radial),double(distance));
+        btVector3 to=controller.transform*local;float* record=output+shot*4;
+        record[0]=0;record[1]=float(to.x()+worldHeader[4]);record[2]=float(to.y());record[3]=float(to.z()+worldHeader[5]);
+        trace_ballistics_target(from,to,btVector3(0,1,0),record);
+    }
+    *random=state;return count;
 }
 extern "C" int ballistics_query_state(int id,double* output){
     if(!output)return 0;auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 0;

@@ -197,6 +197,9 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
         })));
     }
 
+    // The original statically linked CRT owns one random state per Java/native thread, beyond world lifetime.
+    const spreadRandom = new Map();
+
     const raw = {
         /**
          * Registers an original typed definition.
@@ -603,6 +606,46 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
          */
         updateBallisticsMuzzleAimDirection(lib, id, x, y, z) {
             expect(engine._update_ballistics_direction(id, x, y, z) === 1, 'Actual muzzle aim direction rejected');
+        },
+        /**
+         * Generates original per-thread CRT spread and traces every shot through the actual world.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} distance - Original forward distance.
+         * @param {number} spread - Original radial spread scale.
+         * @param {number} exponent - Original float radial exponent.
+         * @param {number} shots - Original shot count.
+         * @param {number} capacity - Original output record capacity.
+         * @param {Float32Array} output - Original ID/hit-or-endpoint records with spare capacity.
+         * @returns {Promise<number>} Original processed shot count.
+         */
+        async getBallisticsTargetsSpreadData(lib, id, distance, spread, exponent, shots, capacity, output) {
+            expect(output instanceof Float32Array && Number.isInteger(shots) && shots >= 0 && Number.isInteger(capacity)
+                && capacity >= shots && capacity * 4 <= output.length, 'Original bounded spread output required');
+
+            const Thread = await lib.java.lang.Thread;
+            const thread = await Thread.currentThread();
+            const threadKey = String(await thread.getId());
+            const bytes = Math.max(4, shots * 16);
+            const pointer = engine._malloc(bytes + 4);
+            const random = pointer + bytes;
+
+            expect(pointer !== 0, 'Actual spread allocation failed');
+
+            try {
+                engine.HEAPU32[random / 4] = spreadRandom.get(threadKey) ?? 1;
+
+                const count = engine._get_ballistics_spread(id, distance, spread, exponent, shots, capacity, pointer, random);
+
+                expect(count >= 0 && count <= shots, 'Actual ballistics spread rejected');
+                spreadRandom.set(threadKey, engine.HEAPU32[random / 4]);
+                output.set(engine.HEAPF32.subarray(pointer / 4, pointer / 4 + count * 4));
+
+                return count;
+            } finally {
+                engine._free(pointer);
+            }
         },
         /**
          * Traces the actual closest world collision and registers a genuine target or vehicle hit.
