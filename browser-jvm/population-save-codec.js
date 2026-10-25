@@ -363,13 +363,46 @@ export function decodeIDs(bytes) {
  * @returns {Uint8Array} Original empty-group virtual bytes.
  */
 export function encodeEmptyVirtual(names) {
+    return encodeVirtual(names, []);
+}
+
+/**
+ * Encodes original v7 moving groups, retaining target and member ordering.
+ *
+ * @param {Array<string>} names - Original outfit names.
+ * @param {Array<object>} groups - Original targetX/targetY and member records.
+ * @returns {Uint8Array} Original virtual-save bytes.
+ */
+export function encodeVirtual(names, groups) {
     const out = writer();
 
     out.put('Uint16', 2, 7);
 
     writeNames(out, names);
 
-    out.put('Int32', 4, 0);
+    out.put('Int32', 4, groups.length);
+
+    for (const group of groups) {
+        if (!group.records.length || group.records.length > 32_767
+            || !Number.isInteger(group.targetX) || !Number.isInteger(group.targetY)) {
+            throw new Error('Invalid original virtual group');
+        }
+
+        out.put('Int16', 2, group.records.length);
+        out.put('Int32', 4, group.targetX);
+        out.put('Int32', 4, group.targetY);
+
+        for (const record of group.records) {
+            out.put('Float32', 4, record.x);
+            out.put('Float32', 4, record.y);
+            out.put('Int8', 1, record.z);
+            out.put('Int8', 1, record.direction);
+
+            for (const key of ['state', 'outfit', 'id']) {
+                out.put('Int32', 4, record[key]);
+            }
+        }
+    }
 
     return out.bytes();
 }
@@ -381,6 +414,22 @@ export function encodeEmptyVirtual(names) {
  * @returns {Array<string>} Saved original outfit names.
  */
 export function decodeEmptyVirtual(bytes) {
+    const decoded = decodeVirtual(bytes);
+
+    if (decoded.groups.length) {
+        throw new Error('Nonempty virtual groups unqualified');
+    }
+
+    return decoded.names;
+}
+
+/**
+ * Restores original v7 targets and grouped virtual records.
+ *
+ * @param {Uint8Array} bytes - Actual original save bytes.
+ * @returns {object} Original outfit names and ordered moving groups.
+ */
+export function decodeVirtual(bytes) {
     const input = reader(bytes);
 
     if (input.get('Uint16', 2) !== 7) {
@@ -389,11 +438,31 @@ export function decodeEmptyVirtual(bytes) {
 
     const names = readNames(input);
 
-    if (input.get('Int32', 4) !== 0) {
-        throw new Error('Nonempty virtual groups unqualified');
+    const count = input.get('Int32', 4);
+
+    if (count < 0 || count > Math.floor(bytes.length / 32)) {
+        throw new Error('Invalid virtual group count');
     }
+
+    const groups = Array.from({ length: count }, () => {
+        const members = input.get('Int16', 2);
+
+        if (members < 1 || members > Math.floor(bytes.length / 22)) {
+            throw new Error('Invalid virtual member count');
+        }
+
+        const targetX = input.get('Int32', 4);
+        const targetY = input.get('Int32', 4);
+        const records = Array.from({ length: members }, () => ({
+            x: input.get('Float32', 4), y: input.get('Float32', 4), z: input.get('Int8', 1),
+            direction: input.get('Int8', 1), state: input.get('Int32', 4),
+            outfit: input.get('Int32', 4), id: input.get('Int32', 4),
+        }));
+
+        return { targetX, targetY, records };
+    });
 
     input.end();
 
-    return names;
+    return { names, groups };
 }

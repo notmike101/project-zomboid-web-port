@@ -1,6 +1,6 @@
-import { NativeMT, collision, generate } from './population-kernel.js';
+import { NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual } from './population-kernel.js';
 
-import { decodeCell, encodeCell, decodeIDs, encodeIDs, decodeEmptyVirtual, encodeEmptyVirtual, encodeCollision, remapOutfit } from './population-save-codec.js';
+import { decodeCell, encodeCell, decodeIDs, encodeIDs, decodeVirtual, encodeVirtual, encodeCollision, remapOutfit } from './population-save-codec.js';
 
 /**
  * Reads an actual Java integer array through the qualified transport.
@@ -210,6 +210,8 @@ export function createPopulationNatives() {
         populationDirty: new Set(),
         lastSavedID: 0,
         virtualDirty: true,
+        virtual: [],
+        savedVirtualNames: null,
         terminalFailure: null,
     };
 
@@ -573,6 +575,121 @@ export function createPopulationNatives() {
     }
 
     /**
+     * Supplies original square flags from a fully prepared collision neighborhood.
+     *
+     * @param {Map<string, Array<Uint8Array>>} neighbors - Actual decoded collision cells.
+     * @returns {function(number, number): number} Original global collision lookup.
+     */
+    function virtualFlags(neighbors) {
+        return (x, y) => {
+            const cx = Math.floor(x / 256);
+            const cy = Math.floor(y / 256);
+
+            if (!inGrid(cx, cy)) {
+                return 1;
+            }
+
+            const chunks = neighbors.get(key(cx, cy));
+
+            if (!chunks) {
+                unsupported('unprepared virtual collision neighbor');
+            }
+
+            const lx = x - cx * 256;
+            const ly = y - cy * 256;
+
+            return chunks[(ly >> 3) * 32 + (lx >> 3)][(ly & 7) * 8 + (lx & 7)];
+        };
+    }
+
+    /**
+     * Tests the original loaded-area border before virtual-to-real publication.
+     *
+     * @param {number} x - Original integer square x.
+     * @param {number} y - Original integer square y.
+     * @returns {boolean} Whether the square lies on an actual loaded rectangle border.
+     */
+    function loadedAreaBorder(x, y) {
+        for (let i = 0; i < state.areas.length; i += 4) {
+            const [ax, ay, w, h] = state.areas.slice(i, i + 4).map((value) => value * 8);
+
+            if ((x >= ax && x < ax + w && (y === ay || y === ay + h - 1))
+                || (y >= ay && y < ay + h && (x === ax || x === ax + w - 1))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Advances original ordinary-game moving groups and transfers ownership exactly once.
+     *
+     * @param {object} lib - Actual Java file transport.
+     * @returns {Promise<void>} Completion of original virtual movement and publication.
+     */
+    async function updateVirtual(lib) {
+        if (!state.workerTime || !state.virtual.length || state.gameState.get('PAUSED')) {
+            return;
+        }
+
+        await sequence(state.virtual.slice(), async (group) => {
+            const leader = group.records[0];
+            const cell = await ensureCell(lib, Math.floor(leader.x / 8), Math.floor(leader.y / 8));
+            const flags = virtualFlags(await collisionNeighborhood(lib, Math.floor(leader.x / 256), Math.floor(leader.y / 256)));
+            const chunkIndex = ((Math.floor(leader.x / 8) % 32 + 32) % 32) + ((Math.floor(leader.y / 8) % 32 + 32) % 32) * 32;
+            let publish = cell.loaded.has(chunkIndex) && !loadedAreaBorder(Math.floor(leader.x), Math.floor(leader.y));
+            let blocked = false;
+
+            if (!publish) {
+                const [gx, gy, w, h] = state.grid;
+                const next = advanceVirtual(group, state.workerTime[0], [gx * 256, gy * 256, (gx + w) * 256, (gy + h) * 256], flags);
+
+                if (leader.x !== next.x || leader.y !== next.y || group.alternate !== next.alternate) {
+                    state.virtualDirty = true;
+                }
+
+                dirtyRecord(leader);
+                Object.assign(leader, { x: next.x, y: next.y });
+                group.alternate = next.alternate;
+                blocked = next.blocked;
+                dirtyRecord(leader);
+            }
+
+            if (!publish && !blocked) {
+                return;
+            }
+
+            const targetCell = await ensureCell(lib, Math.floor(leader.x / 8), Math.floor(leader.y / 8));
+            const targetIndex = ((Math.floor(leader.x / 8) % 32 + 32) % 32) + ((Math.floor(leader.y / 8) % 32 + 32) % 32) * 32;
+            const interior = publish;
+
+            publish ||= targetCell.loaded.has(targetIndex) && loadedAreaBorder(Math.floor(leader.x), Math.floor(leader.y));
+            const records = scatterVirtual(group, rng, flags);
+
+            if (publish) {
+                if (interior) {
+                    for (const record of records) {
+                        Object.assign(record, { px: group.targetX, py: group.targetY });
+                    }
+                }
+
+                state.pendingOutput.push(...records);
+            } else {
+                targetCell.chunks[targetIndex].push(...records);
+            }
+
+            state.virtual.splice(state.virtual.indexOf(group), 1);
+
+            for (const record of records) {
+                dirtyRecord(record);
+            }
+
+            state.virtualDirty = true;
+        });
+    }
+
+    /**
      * Persists the original full-save snapshot without consuming simulation queues.
      *
      * @param {object} lib - Actual Java transport namespace.
@@ -700,7 +817,7 @@ export function createPopulationNatives() {
         }
 
         if (state.virtualDirty) {
-            await transport.writeOwned('zpop/zpop_virtual.bin', hex(encodeEmptyVirtual(state.outfits)), false);
+            await transport.writeOwned('zpop/zpop_virtual.bin', hex(encodeVirtual(state.outfits, state.virtual)), false);
             state.virtualDirty = false;
         }
     }
@@ -1002,15 +1119,29 @@ export function createPopulationNatives() {
             const ids = String(await (await helper(lib)).readOwned('zpop/zpop_ids.bin'));
             const virtual = String(await (await helper(lib)).readOwned('zpop/zpop_virtual.bin'));
 
-            if (virtual) {
-                decodeEmptyVirtual(decoder(virtual));
-            }
+            const restored = virtual ? decodeVirtual(decoder(virtual)) : { names: [], groups: [] };
+
+            state.virtual = restored.groups.map((group) => ({
+                ...group, alternate: false,
+                records: group.records.map((record, index) => ({
+                    ...record,
+                    px: index === 0 ? group.targetX : -2_147_483_648, py: index === 0 ? group.targetY : -2_147_483_648,
+                })),
+            }));
+            state.savedVirtualNames = restored.names;
 
             state.reopenID = ids ? decodeIDs(decoder(ids)) : 1;
             state.pop = true;
             state.lastSavedID = ids ? decodeIDs(decoder(ids)) : 0;
             state.config = new Map(nativeDefaults);
             state.nextID = state.reopenID;
+
+            for (const group of state.virtual) {
+                for (const record of group.records) {
+                    state.nextID = Math.max(state.nextID, record.id + 1);
+                }
+            }
+
             state.producer = [];
             state.worker = [];
             state.front = [];
@@ -1035,7 +1166,7 @@ export function createPopulationNatives() {
             }
 
             if (['RespawnHours', 'RespawnUnseenHours', 'RespawnMultiplier'].includes(name) && value !== 0) {
-                unsupported('respawn/redistribution');
+                unsupported('respawn scheduling');
             }
 
             state.producer.push({ type: 'config', name, value: Math.fround(value) });
@@ -1071,6 +1202,16 @@ export function createPopulationNatives() {
             }
 
             state.outfits = next;
+
+            if (state.savedVirtualNames) {
+                for (const group of state.virtual) {
+                    for (const record of group.records) {
+                        record.outfit = remapOutfit(record.outfit, state.savedVirtualNames, next);
+                    }
+                }
+
+                state.savedVirtualNames = null;
+            }
         },
         /**
          * Accepts the qualified empty-origin input and rejects unsupported nonempty origins.
@@ -1194,14 +1335,6 @@ export function createPopulationNatives() {
 
             if (interval === undefined) {
                 unsupported('missing actual RedistributeHours');
-            }
-
-            if (nextTime && interval > 0) {
-                for (const cell of state.cells.values()) {
-                    if (Math.fround(Math.min(cell.lastRedistribution, nextTime.age) + interval) < Math.fround(nextTime.age)) {
-                        unsupported('redistribution due: virtual movement not yet ported');
-                    }
-                }
             }
 
             const areaTask = batch.filter((task) => task.type === 'areas').at(-1);
@@ -1346,10 +1479,35 @@ export function createPopulationNatives() {
                 state.realCount = realTask.records.length;
             }
 
-            if (interval > 0 && nextTime) {
-                for (const cell of state.cells.values()) {
+            await updateVirtual(lib);
+
+            if (interval > 0 && nextTime && !state.gameState.get('PAUSED')) {
+                await sequence([...state.cells], async ([name, cell]) => {
                     cell.lastRedistribution = Math.fround(Math.min(cell.lastRedistribution, nextTime.age));
-                }
+
+                    if (Math.fround(cell.lastRedistribution + interval) >= Math.fround(nextTime.age)) {
+                        return;
+                    }
+
+                    const [cellX, cellY] = name.split(',').map(Number);
+                    const flags = virtualFlags(await collisionNeighborhood(lib, cellX, cellY));
+                    const groups = redistributionGroups({ chunks: cell.chunks, cellX, cellY, rng, flags });
+                    const removed = new Set(groups.flatMap((group) => group.records));
+
+                    for (const group of groups) {
+                        Object.assign(group.records[0], { px: group.targetX, py: group.targetY });
+                        group.alternate = false;
+                        state.virtual.push(group);
+                    }
+
+                    if (groups.length) {
+                        cell.chunks = cell.chunks.map((records) => records.filter((record) => !removed.has(record)));
+                        state.virtualDirty = true;
+                    }
+
+                    cell.lastRedistribution = Math.fround(nextTime.age);
+                    state.populationDirty.add(name);
+                });
             }
 
             state.updates++;
@@ -1564,7 +1722,7 @@ export function createPopulationNatives() {
          * @returns {boolean} Whether no worker batch is pending.
          */
         shouldWait() {
-            return state.worker.length === 0;
+            return state.worker.length === 0 && state.virtual.length === 0;
         },
         /**
          * Releases owned queues and state at the original service stop boundary.
@@ -1575,6 +1733,8 @@ export function createPopulationNatives() {
             state.worker = [];
             state.front = [];
             state.pendingOutput = [];
+            state.virtual = [];
+            state.savedVirtualNames = null;
             state.registry.clear();
             state.consumed.clear();
             state.config = new Map(nativeDefaults);
@@ -1776,6 +1936,8 @@ export function createPopulationNatives() {
             cells: state.cells.size,
 
             registered: state.registry.size,
+            virtualGroups: state.virtual.length,
+            virtualRecords: state.virtual.reduce((sum, group) => sum + group.records.length, 0),
 
             successfulSaves: state.successfulSaves ?? 0,
             saveDeadline: state.autoSaveDeadline,

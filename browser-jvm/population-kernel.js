@@ -386,4 +386,443 @@ function generate({ rng, density, chunks, config, constants, directions, cellX, 
     return { entries, generated: nextID - idStart, sum, total };
 }
 
-export { NativeMT, collision, generate };
+/**
+ * Finds the original redistribution group's reachable squares inside its 8-by-8 chunk.
+ *
+ * @param {number} x - Original integer source square x.
+ * @param {number} y - Original integer source square y.
+ * @param {function(number, number): number} flags - Actual original collision bits.
+ * @returns {Uint8Array} Reachability in source-chunk square order.
+ */
+function redistributionReachable(x, y, flags) {
+    const left = Math.trunc(x / 8) * 8;
+    const top = Math.trunc(y / 8) * 8;
+    const reached = new Uint8Array(64);
+
+    for (const [sx, sy] of redistributionSquares(x, y, flags)) {
+        reached[sx - left + (sy - top) * 8] = 1;
+    }
+
+    return reached;
+}
+
+/**
+ * Plans original redistribution groups without removing records before movement is supported.
+ *
+ * @param {object} input - Actual cell population and collision inputs.
+ * @param {Array<Array<object>>} input.chunks - Original virtual records in 1024 chunk order.
+ * @param {number} input.cellX - Original cell x.
+ * @param {number} input.cellY - Original cell y.
+ * @param {NativeMT} input.rng - Original native random selection state.
+ * @param {function(number, number): number} input.flags - Actual original collision bits.
+ * @returns {Array<object>} Ordered groups and their actual target chunk centers.
+ */
+function redistributionGroups({ chunks, cellX, cellY, rng, flags }) {
+    const destinations = [];
+    const groups = [];
+
+    for (const [index, records] of chunks.entries()) {
+        if (records.length) {
+            continue;
+        }
+
+        const x = cellX * 256 + index % 32 * 8;
+        const y = cellY * 256 + Math.floor(index / 32) * 8;
+        let blocked = 0;
+
+        for (let square = 0; square < 64; square++) {
+            if (flags(x + square % 8, y + Math.floor(square / 8)) & 0x19) {
+                blocked++;
+            }
+        }
+
+        if (blocked !== 64) {
+            destinations.push([x + 4, y + 4]);
+        }
+    }
+
+    if (!destinations.length) {
+        return groups;
+    }
+
+    for (const records of chunks) {
+        if (records.length <= 5) {
+            continue;
+        }
+
+        const eligible = records.filter((record) => Math.floor(record.z) === 0 && !(record.state & 8)
+            && !(flags(Math.floor(record.x), Math.floor(record.y)) & 0x19));
+
+        if (eligible.length <= 5) {
+            continue;
+        }
+
+        while (eligible.length) {
+            const first = eligible.shift();
+            const [targetX, targetY] = destinations[rng.bounded(destinations.length)];
+            const x = Math.floor(first.x);
+            const y = Math.floor(first.y);
+            const reachable = redistributionReachable(x, y, flags);
+            const left = Math.trunc(x / 8) * 8;
+            const top = Math.trunc(y / 8) * 8;
+            const members = [first];
+
+            for (let i = 0; i < eligible.length && members.length < 5; i++) {
+                const dx = Math.floor(eligible[i].x) - left;
+                const dy = Math.floor(eligible[i].y) - top;
+
+                if (dx >= 0 && dx < 8 && dy >= 0 && dy < 8 && reachable[dx + dy * 8]) {
+                    members.push(...eligible.splice(i--, 1));
+                }
+            }
+
+            groups.push({ records: members, targetX, targetY });
+        }
+    }
+
+    return groups;
+}
+
+/**
+ * Applies the original virtual-population edge and diagonal collision rules.
+ *
+ * @param {function(number, number): number} flags - Actual collision bits.
+ * @param {number} x - Source square x.
+ * @param {number} y - Source square y.
+ * @param {number} tx - Destination square x.
+ * @param {number} ty - Destination square y.
+ * @returns {boolean} Whether the original collision edge is blocked.
+ */
+function populationBlocked(flags, x, y, tx, ty) {
+    const a = flags(x, y);
+    const b = flags(tx, ty);
+
+    return Boolean((b & 0x19) || (ty < y && (a & 2)) || (tx < x && (a & 4))
+        || (y < ty && (b & 2)) || (x < tx && (b & 4))
+        || (x !== tx && y !== ty && (populationBlocked(flags, x, y, x, ty)
+            || populationBlocked(flags, x, y, tx, y) || populationBlocked(flags, tx, ty, x, ty)
+            || populationBlocked(flags, tx, ty, tx, y))));
+}
+
+/**
+ * Performs the original bounded virtual-agent straight-line fallback probe.
+ *
+ * @param {number} x - Source integer x.
+ * @param {number} y - Source integer y.
+ * @param {number} tx - Destination integer x.
+ * @param {number} ty - Destination integer y.
+ * @param {function(number, number): number} flags - Actual collision bits.
+ * @param {number} limit - Original maximum probe steps.
+ * @returns {boolean} Whether the inspected prefix is clear.
+ */
+function virtualLineClear(x, y, tx, ty, flags, limit = 10) {
+    const dx = tx - x;
+    const dy = ty - y;
+    const horizontal = Math.abs(dy) < Math.abs(dx);
+    const step = (horizontal ? dx : dy) < 0 ? -1 : 1;
+    let position = f((horizontal ? y : x) + 0.5);
+
+    while ((horizontal ? x !== tx : y !== ty) && limit-- > 0) {
+        const before = Math.trunc(position);
+
+        position = f(position + f(f((horizontal ? dy : dx) / (horizontal ? dx : dy)) * step));
+        const after = Math.trunc(position);
+
+        if (populationBlocked(flags, horizontal ? x : before, horizontal ? before : y,
+            horizontal ? x + step : after, horizontal ? after : y + step)) {
+            return false;
+        }
+
+        if (horizontal) {
+            x += step;
+        } else {
+            y += step;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Advances one original virtual-agent displacement with its alternating collision slide.
+ *
+ * @param {object} record - Original record containing float x and y.
+ * @param {number} dx - Original accumulated x displacement.
+ * @param {number} dy - Original accumulated y displacement.
+ * @param {boolean} alternate - Original collision-axis alternation bit.
+ * @param {number[]} bounds - Original minimum x/y and exclusive maximum x/y in squares.
+ * @param {function(number, number): number} flags - Actual collision bits.
+ * @returns {object} Resulting position, alternation bit and original blocked marker.
+ */
+function moveVirtual(record, dx, dy, alternate, bounds, flags) {
+    const ox = f(record.x);
+    const oy = f(record.y);
+    let x = f(Math.max(f(ox + dx), bounds[0]));
+    let y = f(Math.max(f(oy + dy), bounds[1]));
+    const length = f(Math.sqrt(f(f(f(y - oy) * f(y - oy)) + f(f(x - ox) * f(x - ox)))));
+
+    if (length > 1) {
+        x = f(ox + f(f(x - ox) / length));
+        y = f(oy + f(f(y - oy) / length));
+    }
+
+    const desiredX = x;
+    const desiredY = y;
+    const hit = { x: false, y: false, blocked: false };
+    /**
+     * Tests original exclusive metadata bounds.
+     *
+     * @param {number} sx - Square x.
+     * @param {number} sy - Square y.
+     * @returns {boolean} Whether the square is outside metadata.
+     */
+    const outside = (sx, sy) => sx < bounds[0] || sy < bounds[1] || sx >= bounds[2] || sy >= bounds[3];
+
+    /**
+     * Applies native180015980's half-square lookahead and selected collision axis.
+     *
+     * @param {number} axis - Original first/second collision axis.
+     */
+    function collide(axis) {
+        const sx = Math.floor(ox);
+        const sy = Math.floor(oy);
+        const tx = Math.floor(x);
+        const ty = Math.floor(y);
+        const out = outside(tx, ty);
+
+        if ((tx === sx && ty === sy) || out) {
+            if (x === ox && y === oy) {
+                return;
+            }
+
+            if (out) {
+                hit.x ||= x !== ox;
+                hit.y ||= y !== oy;
+                x = ox;
+                y = oy;
+                hit.blocked = true;
+
+                return;
+            }
+
+            const cx = f(x - ox);
+            const cy = f(y - oy);
+            const distance = f(Math.sqrt(f(f(cy * cy) + f(cx * cx))));
+            const px = Math.floor(f(f((distance >= 0.001 ? f(cx / distance) : 0) * 0.5) + ox));
+            const py = Math.floor(f(f((distance >= 0.001 ? f(cy / distance) : 0) * 0.5) + oy));
+
+            if (outside(px, py) || (px === tx && py === ty) || !populationBlocked(flags, tx, ty, px, py)) {
+                return;
+            }
+
+            hit.x ||= tx !== px;
+            hit.y ||= ty !== py;
+        } else {
+            if (!populationBlocked(flags, sx, sy, tx, ty)) {
+                return;
+            }
+
+            hit.x ||= sx !== tx;
+            hit.y ||= sy !== ty;
+        }
+
+        if (axis === 2 && hit.x) {
+            hit.y = false;
+        } else if (axis === 1 && hit.y) {
+            hit.x = false;
+        }
+
+        hit.blocked = true;
+    }
+
+    collide(alternate ? 2 : 1);
+
+    if (hit.y) {
+        y = oy;
+    }
+
+    if (hit.x) {
+        x = ox;
+    }
+
+    collide(alternate ? 1 : 2);
+    alternate = !alternate;
+    let blocked = false;
+
+    if (hit.y) {
+        y = oy;
+        blocked = true;
+    }
+
+    if (hit.x) {
+        x = ox;
+        blocked = true;
+    }
+
+    const firstX = x;
+    const firstY = y;
+
+    x = desiredX;
+    y = desiredY;
+
+    if (blocked) {
+        collide(alternate ? 2 : 1);
+
+        if (hit.y) {
+            y = oy;
+        }
+
+        if (hit.x) {
+            x = ox;
+        }
+
+        collide(alternate ? 1 : 2);
+
+        if (hit.y) {
+            y = oy;
+        }
+
+        if (hit.x) {
+            x = ox;
+        }
+
+        if (f(Math.abs(f(y - oy)) + Math.abs(f(x - ox))) < f(Math.abs(f(firstY - oy)) + Math.abs(f(firstX - ox)))) {
+            x = firstX;
+            y = firstY;
+        }
+    }
+
+    return { x: f(f(x - ox) + ox), y: f(f(y - oy) + oy), alternate, blocked: hit.blocked };
+}
+
+/**
+ * Advances the original ordinary-game virtual leader; Last Stand uses a separate native path.
+ *
+ * @param {object} group - Original-derived records, targetX/targetY and alternation bit.
+ * @param {number} multiplier - Actual original worker time multiplier.
+ * @param {number[]} bounds - Original square bounds.
+ * @param {function(number, number): number} flags - Actual original collision bits.
+ * @returns {object} Next leader position and whether original fallback stopped movement.
+ */
+function advanceVirtual(group, multiplier, bounds, flags) {
+    const record = group.records[0];
+    const x = Math.floor(record.x);
+    const y = Math.floor(record.y);
+
+    if ((x === group.targetX && y === group.targetY)
+        || !virtualLineClear(x, y, group.targetX, group.targetY, flags)) {
+        return { x: record.x, y: record.y, alternate: Boolean(group.alternate), blocked: true };
+    }
+
+    const dx = f(f(group.targetX + 0.5) - record.x);
+    const dy = f(f(group.targetY + 0.5) - record.y);
+    const length = f(Math.sqrt(f(f(dx * dx) + f(dy * dy))));
+
+    return moveVirtual(record, f(f(f(dx / length) * f(0.06)) * multiplier), f(f(f(dy / length) * f(0.06)) * multiplier),
+        Boolean(group.alternate), bounds, flags);
+}
+
+/**
+ * Preserves original scanline output order for group scatter RNG indices.
+ *
+ * @param {number} x - Source square x.
+ * @param {number} y - Source square y.
+ * @param {function(number, number): number} flags - Actual collision bits.
+ * @returns {Array<number[]>} Reachable world squares in native output order.
+ */
+function redistributionSquares(x, y, flags) {
+    const left = Math.trunc(x / 8) * 8;
+    const top = Math.trunc(y / 8) * 8;
+    const reached = new Uint8Array(64);
+    const pending = [[x, y]];
+    const squares = [];
+    /**
+     * Tests the native bounded unvisited-edge callback.
+     *
+     * @param {number} sx - Source x.
+     * @param {number} sy - Source y.
+     * @param {number} tx - Destination x.
+     * @param {number} ty - Destination y.
+     * @returns {boolean} Whether the edge is open and unvisited.
+     */
+    const cross = (sx, sy, tx, ty) => tx >= left && tx < left + 8 && ty >= top && ty < top + 8
+        && !reached[tx - left + (ty - top) * 8] && !populationBlocked(flags, sx, sy, tx, ty);
+
+    while (pending.length) {
+        const next = pending.pop();
+        const sx = next[0];
+        let sy = next[1];
+
+        if (sx - left === -1) {
+            break;
+        }
+
+        while (cross(sx, sy, sx, sy - 1)) {
+            sy--;
+        }
+
+        let spanLeft = false;
+        let spanRight = false;
+        let down;
+
+        do {
+            if (squares.length === 64) {
+                return squares;
+            }
+
+            squares.push([sx, sy]);
+            reached[sx - left + (sy - top) * 8] = 1;
+
+            for (const side of [-1, 1]) {
+                const open = cross(sx, sy, sx + side, sy);
+                const span = side === -1 ? spanLeft : spanRight;
+
+                const enqueue = open && (!span || !cross(sx + side, sy, sx + side, sy - 1));
+
+                if (enqueue && pending.length === 64) {
+                    return squares;
+                }
+
+                if (enqueue) {
+                    pending.push([sx + side, sy]);
+                }
+
+                if (side === -1) {
+                    spanLeft = open;
+                } else {
+                    spanRight = open;
+                }
+            }
+
+            down = cross(sx, sy, sx, sy + 1);
+            sy++;
+        } while (down);
+    }
+
+    return squares;
+}
+
+/**
+ * Reconstructs original grouped members at reachable square centers on completion/publication.
+ *
+ * @param {object} group - Actual moving records with current leader position.
+ * @param {NativeMT} rng - Original random state.
+ * @param {function(number, number): number} flags - Actual collision bits.
+ * @returns {Array<object>} Ordered records with original scatter positions.
+ */
+function scatterVirtual(group, rng, flags) {
+    if (group.records.length === 1) {
+        return group.records.map((record) => ({ ...record }));
+    }
+
+    const leader = group.records[0];
+    const squares = redistributionSquares(Math.floor(leader.x), Math.floor(leader.y), flags);
+
+    return group.records.map((record) => {
+        const [x, y] = squares[rng.bounded(squares.length)];
+
+        return { ...record, x: f(x + 0.5), y: f(y + 0.5) };
+    });
+}
+
+export { NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual };
