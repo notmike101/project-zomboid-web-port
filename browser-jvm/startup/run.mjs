@@ -3,10 +3,11 @@ import { createHash } from 'node:crypto';
 import { createReadStream, writeFileSync } from 'node:fs';
 import { readFile, writeFile, stat, mkdtemp } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
+import { freemem, tmpdir } from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { certifyPublished } from './certify-published.mjs';
+import { startMemoryGuard } from './memory-guard.mjs';
 import { isPositiveMetadataEntry } from './negative-stat.js';
 import { createGateNetworkObserver } from './network-observer.mjs';
 import { createOriginalBootRoutes, hash } from './profile-routes.mjs';
@@ -58,7 +59,7 @@ assert.ok(generationFile && executablePath && process.argv.length <= 5
 const generation = JSON.parse(await readFile(generationFile, 'utf8'));
 
 assert.equal(generation.executionAdmitted, true, 'Root review must explicitly admit the exact frozen generation');
-assert.equal(generation.hostSources.length, 7);
+assert.equal(generation.hostSources.length, 9);
 
 for (const record of generation.hostSources) {
     // These small source identities precede all owner creation.
@@ -108,6 +109,7 @@ let page;
 let networkObserver;
 let checkpointTimer;
 let checkpointPending;
+let memoryGuard;
 const checkpointErrors = [];
 
 output = await mkdtemp(path.join(tmpdir(), 'pz-original-first-gate-'));
@@ -282,7 +284,42 @@ try {
     const origin = `http://127.0.0.1:${server.address().port}`;
 
     evidence.origin = origin;
+
+    if (freemem() < 5 * 1_024 ** 3) {
+        evidence.memoryAbort = { reason: 'system-available-before-browser', availableBytes: freemem() };
+        throw new Error('At least 5 GiB available system memory is required before browser startup');
+    }
+
     browserServer = await chromium.launchServer({ executablePath, headless: false });
+    memoryGuard = startMemoryGuard({
+        pid: browserServer.process().pid, output,
+        /**
+         * Requests original Stop before the helper's bounded hard-close grace.
+         *
+         * @param {object} sample - First actual memory budget violation.
+         */
+        onPressure(sample) {
+            evidence.memoryAbort ??= { reason: sample.reason, sample };
+            writeFileSync(path.join(output, 'memory-abort.json'), JSON.stringify(evidence.memoryAbort));
+
+            if (page && !page.isClosed()) {
+                void bounded(page.locator('#stop').click(), 1_000, 'memory-stop-request')
+                    .catch((error) => {
+                        evidence.memoryStopError = String(error);
+                    });
+            }
+        },
+        /**
+         * Preserves a guard failure as a failed run.
+         *
+         * @param {Error} error - Actual observer or budget failure.
+         */
+        onFailure(error) {
+            evidence.memoryAbort ??= { reason: 'memory-guard-failure', error: String(error) };
+            rejectHostFailure(error);
+        },
+    });
+    await bounded(memoryGuard.ready, 10_000, 'memory-guard-initialization');
     ownerPhase = 'original-browser';
     assert.ok(Date.now() < outerDeadlineAt, 'Original owner deadline already elapsed');
     browser = await chromium.connect(browserServer.wsEndpoint());
@@ -330,17 +367,18 @@ try {
             return;
         }
 
-        checkpointPending = bounded(page.evaluate(() => globalThis.originalBoot
+        checkpointPending = page.evaluate(async () => globalThis.originalBoot
             ? {
                     ...globalThis.originalBoot,
                     mediaNegativeStat: globalThis.originalBoot.mediaNegativeStatSnapshot?.() ?? null,
+                    resources: await globalThis.originalBoot.resourceTelemetrySnapshot?.() ?? null,
                 }
-            : null), 2_000, 'checkpoint-evaluate')
+            : null)
             .then((originalBoot) => {
                 const network = networkObserver.snapshot();
 
                 return writeFile(path.join(output, 'checkpoint.json'), JSON.stringify({
-                    observedAt: new Date().toISOString(), originalBoot, logs: logs.slice(-2_000), network: {
+                    observedAt: new Date().toISOString(), originalBoot, memory: memoryGuard?.snapshot(), logs: logs.slice(-2_000), network: {
                         ...network, requests: network.requests.slice(-16), cdpFailures: network.cdpFailures.slice(-16),
                         successfulSamples: Object.fromEntries(Object.entries(network.successfulSamples).map(([name, values]) => [name, values.slice(-16)])),
                         checkpointHistoryComplete: false, checkpointSampleLimit: 16,
@@ -772,7 +810,7 @@ try {
 } catch (error) {
     evidence.error = String(error.stack || error);
 
-    if (page && !page.isClosed()) {
+    if (!evidence.memoryAbort && page && !page.isClosed()) {
         try {
             evidence.failureState = await bounded(page.evaluate(() => ({ ...globalThis.originalBoot, mediaNegativeStat: globalThis.originalBoot?.mediaNegativeStatSnapshot?.() })), 5_000);
 
@@ -833,6 +871,9 @@ try {
             cleanupErrors.push('Owned browser still alive');
         }
     }
+
+    evidence.memory = memoryGuard?.snapshot();
+    memoryGuard?.dispose();
 
     if (fileWatchService) {
         try {
@@ -916,7 +957,7 @@ try {
         ...generation.hostSources.map((record) => ({ ...record, file: record.evidenceFile })),
         ...(evidence.positiveCertificateRoute ? [evidence.positiveCertificateRoute] : [])].map((record) => [record.file, record]));
 
-    for (const [file, record] of frozen) {
+    for (const [file, record] of evidence.memoryAbort ? [] : frozen) {
         try {
             // Bound immutable post-runtime verification to one stream at a time.
             // eslint-disable-next-line no-await-in-loop
@@ -929,7 +970,7 @@ try {
         }
     }
 
-    const publications = closedMedia?.publishedFiles() ?? [];
+    const publications = evidence.memoryAbort ? [] : closedMedia?.publishedFiles() ?? [];
     const verifiedMedia = new Set(publications.map((record) => record.source));
 
     evidence.ownedSnapshotAfterHashes = [];
@@ -957,7 +998,8 @@ try {
         }
     }
 
-    evidence.fullAuditCompleted = evidence.frozenAfterHashes.length === frozen.size
+    evidence.auditSkippedReason = evidence.memoryAbort ? 'memory-budget-abort' : null;
+    evidence.fullAuditCompleted = !evidence.memoryAbort && evidence.frozenAfterHashes.length === frozen.size
         && evidence.ownedSnapshotAfterHashes.length === publications.length && evidence.mediaAfterHashes.length === verifiedMedia.size;
     evidence.ownerTiming = { ...deadlineRecord, phase: 'terminal', elapsedMilliseconds: Date.now() - ownerStartedAt };
     evidence.cleanupErrors = cleanupErrors;

@@ -31,6 +31,7 @@ let helper;
 let owners;
 let metadataOwner;
 let metadataDescriptor;
+let javaLibrary;
 
 globalThis.originalBoot = { observations, failures, hostReports, completed: false, vmExitObserved: false };
 /**
@@ -83,6 +84,28 @@ try {
         hostReports.push(value);
         failures.push({ unexpectedGraphicsQualificationReport: value });
     });
+
+    /**
+     * Returns scalar host resource counts and Chromium's optional JS heap counters.
+     *
+     * @returns {Promise<object>} Actual resource counts, not a total-memory estimate.
+     */
+    globalThis.originalBoot.resourceTelemetrySnapshot = async () => {
+        const boot = javaLibrary ? await javaLibrary.zombie.BrowserOriginalBoot : null;
+        const directBuffers = boot ? JSON.parse(String(await boot.ownedDirectBuffers())) : null;
+
+        return {
+            graphics: graphics.resources(), directBuffers,
+            jsHeap: performance.memory
+                ? {
+                        usedBytes: performance.memory.usedJSHeapSize,
+                        totalBytes: performance.memory.totalJSHeapSize,
+                        limitBytes: performance.memory.jsHeapSizeLimit,
+                    }
+                : null,
+        };
+    };
+
     const presentation = { markers: [], presents: [], failures: [], actualPresents: 0 };
 
     globalThis.originalBoot.presentation = presentation;
@@ -149,6 +172,7 @@ try {
              * @param {string} json - Java observation serialized by its actual owner.
              */
             Java_zombie_BrowserOriginalBoot_report(_library, json) {
+                javaLibrary = _library;
                 const value = JSON.parse(String(json));
 
                 observations.push(value);
