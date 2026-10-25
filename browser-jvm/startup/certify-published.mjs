@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { lstat, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import { mapFour } from './map-four.mjs';
 
 /**
  * Certifies only previously published payload snapshots; never reads installed sources.
@@ -118,24 +119,8 @@ export async function certifyPublished({ owner, namespace, namespaceSHA, sourceR
         return Object.freeze({ path: `/media/${relative}`, bytes: record.bytes, sha256: record.sha256 });
     }
 
-    const files = [];
-
-    /**
-     * Serializes certification so only one payload handle is open at a time.
-     *
-     * @param {number} index - Next actual publication index.
-     * @returns {Promise<void>} Completion of the finite publication list.
-     */
-    async function certifyNext(index) {
-        if (index === records.length) {
-            return;
-        }
-
-        files.push(await certifyRecord(records[index]));
-        await certifyNext(index + 1);
-    }
-
-    await certifyNext(0);
+    // Each record owns its handle cleanup; all workers drain before failure escapes.
+    const files = await mapFour(records, certifyRecord);
 
     assert.equal(new Set(files.map((file) => file.path)).size, files.length);
     const finalState = owner.diagnostics();

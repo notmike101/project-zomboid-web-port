@@ -59,7 +59,7 @@ assert.ok(generationFile && executablePath && process.argv.length <= 5
 const generation = JSON.parse(await readFile(generationFile, 'utf8'));
 
 assert.equal(generation.executionAdmitted, true, 'Root review must explicitly admit the exact frozen generation');
-assert.equal(generation.hostSources.length, 9);
+assert.equal(generation.hostSources.length, 10);
 
 for (const record of generation.hostSources) {
     // These small source identities precede all owner creation.

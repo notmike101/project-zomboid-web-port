@@ -41,3 +41,5 @@ npx eslint browser-jvm/startup --max-warnings 0
 node browser-jvm/check-unsafe-float-volatile.mjs
 node browser-jvm/verify-media-files.mjs
 ```
+
+Positive snapshot certification uses four bounded workers while retaining publication order. Each record keeps the original hash and file-identity checks and closes its own handle; workers stop scheduling after a failure and drain before rejection. Recovery binds `map-four.mjs` alongside the certifier (10 ordinary host inputs, 12 with real Bullet). Directory enumeration and payload publication remain serial.
