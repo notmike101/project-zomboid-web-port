@@ -1,4 +1,47 @@
 /**
+ * Evaluates original 0x18000b470 with float32 arithmetic and signed native count input.
+ *
+ * @param {number} sum - Original signed cell target sum.
+ * @param {number} start - Actual start multiplier.
+ * @param {number} peak - Actual peak multiplier.
+ * @param {number} peakDay - Actual peak day.
+ * @param {number} age - Original world age hours.
+ * @returns {number} Native age-scaled target count.
+ */
+function populationTarget(sum, start, peak, peakDay, age) {
+    const days = Math.fround(Math.fround(age) / 24);
+    const f = Math.fround;
+
+    return days < peakDay ? Math.trunc(f(f(f(f(sum * peak) - f(sum * start)) * f(days / peakDay)) + f(sum * start))) : Math.trunc(f(sum * peak));
+}
+
+/**
+ * Runs the source-qualified pre-spawn branch of native 0x180020e70.
+ *
+ * @param {object} input - Actual cell counts and configuration.
+ * @param {number} input.target - Age-scaled original target.
+ * @param {number} input.count - Ordinary plus grouped original population.
+ * @param {number} input.excess - Eight-neighbor excess population.
+ * @param {number} input.last - Original saved cell respawn clock.
+ * @param {number} input.age - Actual original world age.
+ * @param {number} input.hours - Actual configured respawn interval.
+ * @returns {object} Exact updated clock and actual due-operation indication.
+ */
+function respawnClock({ target, count, excess, last, age, hours }) {
+    const f = Math.fround;
+
+    age = f(age);
+
+    if (Math.max(0, target - count) - excess < 10) {
+        return { last: age, due: false };
+    }
+
+    last = f(Math.min(age, last));
+
+    return { last, due: f(last + hours) < age };
+}
+
+/**
  * Combines the native MT recurrence words without signed overflow.
  *
  * @param {number} a - First native recurrence word.
@@ -936,4 +979,4 @@ function soundChunks(sound) {
     return chunks;
 }
 
-export { NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual, soundTarget, worldSoundGroups, soundChunks };
+export { populationTarget, respawnClock, NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual, soundTarget, worldSoundGroups, soundChunks };

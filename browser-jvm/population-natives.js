@@ -1,4 +1,4 @@
-import { NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual, soundChunks, worldSoundGroups, soundTarget } from './population-kernel.js';
+import { populationTarget, respawnClock, NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual, soundChunks, worldSoundGroups, soundTarget } from './population-kernel.js';
 
 import { decodeCell, encodeCell, decodeIDs, encodeIDs, decodeVirtual, encodeVirtual, encodeCollision, remapOutfit } from './population-save-codec.js';
 
@@ -188,6 +188,7 @@ export function createPopulationNatives() {
         mcd: false,
         pop: false,
         cells: new Map(),
+        populationCache: new Map(),
         metadata: new Map(),
         gameState: new Map(),
         producer: [],
@@ -411,20 +412,26 @@ export function createPopulationNatives() {
      * @param {object} lib - Actual CheerpJ Java class namespace.
      * @param {number} cx - Original chunk x coordinate.
      * @param {number} cy - Original chunk y coordinate.
+     * @param {boolean} [cacheOnly] - Preserve inactive neighbor ownership until saved/unloaded.
      * @returns {Promise<object>} Restored or naturally generated initial cell.
      */
-    async function ensureCell(lib, cx, cy) {
+    async function ensureCell(lib, cx, cy, cacheOnly = false) {
         const x = Math.floor(cx / 32);
         const y = Math.floor(cy / 32);
         const name = key(x, y);
 
         if (state.cells.has(name)) {
+            if (!cacheOnly) {
+                state.cells.get(name).passive = false;
+            }
+
             return state.cells.get(name);
         }
 
         // Native DAT131928 starts at zero; queued time is not applied by full-save.
         const age = state.workerTime?.[1] ?? 0;
 
+        state.populationCache.delete(name);
         const data = metadata(x, y);
         const saved = String(await (await helper(lib)).readOwned(`zpop/zpop_${x}_${y}.bin`));
 
@@ -447,6 +454,7 @@ export function createPopulationNatives() {
                 }
             }
 
+            cell.passive = cacheOnly;
             state.cells.set(name, cell);
 
             return cell;
@@ -516,6 +524,7 @@ export function createPopulationNatives() {
             cell.targets[entry.index] = entry.target;
         }
 
+        cell.passive = cacheOnly;
         state.cells.set(name, cell);
         state.populationDirty.add(name);
 
@@ -940,8 +949,122 @@ export function createPopulationNatives() {
             chunks[index].records.push({ ...record });
         }
 
-        state.populationDirty.delete(name);
         await transport.writeOwned(`zpop/zpop_${name.replace(',', '_')}.bin`, hex(encodeCell({ names: [...state.outfits], scalars: [cell.createdAge, cell.lastRedistribution], chunks })), false);
+        state.populationDirty.delete(name);
+    }
+
+    /**
+     * Reads native cached target/count totals without retaining inactive population owners.
+     *
+     * @param {object} lib - Actual Java owner.
+     * @param {number} x - Native cell x.
+     * @param {number} y - Native cell y.
+     * @returns {Promise<object>} Cached ordinary/target counts.
+     */
+    async function populationCounts(lib, x, y) {
+        const name = key(x, y);
+        let cell = state.cells.get(name);
+        const active = Boolean(cell && !cell.passive);
+
+        if (!cell && state.populationCache.has(name)) {
+            return state.populationCache.get(name);
+        }
+
+        cell ??= await ensureCell(lib, x * 32, y * 32, true);
+        const counts = {
+            target: (cell.targets.reduce((sum, value) => sum + value, 0) << 16) >> 16,
+            count: (cell.chunks.reduce((sum, records) => sum + records.length, 0) << 16) >> 16,
+        };
+
+        if (!active) {
+            /* Native 0x18001ba70 loads/generates, caches totals, then saves/unloads
+             * inactive neighbors. They never enter the active worker iteration. */
+            if (state.populationDirty.has(name)) {
+                await writePopulationCell(await helper(lib), name, cell, []);
+            }
+
+            state.populationCache.set(name, counts);
+            state.cells.delete(name);
+        }
+
+        return counts;
+    }
+
+    /**
+     * Counts current grouped ownership; inactive cached totals never retain moving groups.
+     *
+     * @param {number} x - Native cell x.
+     * @param {number} y - Native cell y.
+     * @returns {number} Native signed-short grouped population count.
+     */
+    function groupedPopulation(x, y) {
+        const count = state.virtual.filter((group) => Math.floor(group.records[0].x / 256) === x
+            && Math.floor(group.records[0].y / 256) === y).reduce((sum, group) => sum + group.records.length, 0);
+
+        return (count << 16) >> 16;
+    }
+
+    /**
+     * Preserves actual pre-due respawn clocks, stopping at the unimplemented spawn operation.
+     *
+     * @param {object} lib - Actual Java owner.
+     * @returns {Promise<void>} Completed clock/cache updates only.
+     */
+    async function updateRespawn(lib) {
+        const hours = state.config.get('RespawnHours');
+
+        if (!(hours > 0) || !state.workerTime || state.gameState.get('PAUSED')) {
+            return;
+        }
+
+        const age = state.workerTime[1];
+        /**
+         * Scales cached native target totals using actual current configuration.
+         *
+         * @param {number} base - Signed native target total.
+         * @returns {number} Actual age-scaled target.
+         */
+        const targetFor = (base) => populationTarget(base, state.config.get('PopulationStartMultiplier'),
+            state.config.get('PopulationPeakMultiplier'), state.config.get('PopulationPeakDay'), age);
+        const plans = [];
+
+        for (const [name, cell] of [...state.cells].filter(([, value]) => !value.passive)) {
+            const [x, y] = name.split(',').map(Number);
+            // eslint-disable-next-line no-await-in-loop -- Preserve native cell and neighbor preparation order.
+            const own = await populationCounts(lib, x, y);
+            let excess = 0;
+
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    if ((!dx && !dy) || !inGrid(x + dx, y + dy)) {
+                        continue;
+                    }
+
+                    // eslint-disable-next-line no-await-in-loop -- Native row-major neighbor order fixes RNG and save ownership.
+                    const neighbor = await populationCounts(lib, x + dx, y + dy);
+
+                    excess += Math.max(0, neighbor.count + groupedPopulation(x + dx, y + dy) - targetFor(neighbor.target));
+                }
+            }
+
+            const plan = respawnClock({
+                target: targetFor(own.target), count: own.count + groupedPopulation(x, y), excess,
+                last: cell.createdAge, age, hours,
+            });
+
+            if (plan.due) {
+                unsupported('due respawn placement');
+            }
+
+            plans.push({ name, cell, last: plan.last });
+        }
+
+        for (const { name, cell, last } of plans) {
+            if (cell.createdAge !== last) {
+                cell.createdAge = last;
+                state.populationDirty.add(name);
+            }
+        }
     }
 
     const collisionService = {
@@ -966,6 +1089,7 @@ export function createPopulationNatives() {
             state.grid = [x, y, w, h];
             state.metadata.clear();
             state.cells.clear();
+            state.populationCache.clear();
         },
         /**
          * Registers original collision source order; null sources allocate nothing.
@@ -1185,6 +1309,7 @@ export function createPopulationNatives() {
             if (!state.pop) {
                 state.metadata.clear();
                 state.cells.clear();
+                state.populationCache.clear();
             }
         },
 
@@ -1264,10 +1389,6 @@ export function createPopulationNatives() {
 
             if (!floatKeys.includes(name) || value < 0) {
                 unsupported('config float key/range');
-            }
-
-            if (['RespawnHours', 'RespawnUnseenHours', 'RespawnMultiplier'].includes(name) && value !== 0) {
-                unsupported('respawn scheduling');
             }
 
             state.producer.push({ type: 'config', name, value: Math.fround(value) });
@@ -1600,11 +1721,12 @@ export function createPopulationNatives() {
                 state.realCount = realTask.records.length;
             }
 
+            await updateRespawn(lib);
             await updateSounds(lib, batch, sampledTime);
             await updateVirtual(lib);
 
             if (interval > 0 && nextTime && !state.gameState.get('PAUSED')) {
-                await sequence([...state.cells], async ([name, cell]) => {
+                await sequence([...state.cells].filter(([, value]) => !value.passive), async ([name, cell]) => {
                     cell.lastRedistribution = Math.fround(Math.min(cell.lastRedistribution, nextTime.age));
 
                     if (Math.fround(cell.lastRedistribution + interval) >= Math.fround(nextTime.age)) {
@@ -1868,6 +1990,7 @@ export function createPopulationNatives() {
 
             if (!state.mcd) {
                 state.cells.clear();
+                state.populationCache.clear();
                 state.metadata.clear();
             }
         },

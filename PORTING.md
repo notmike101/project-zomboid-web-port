@@ -599,3 +599,5 @@ Ragdoll body-0 terrain publication now shares the qualified vehicle marker. Its 
 Compose the corrected FMOD loader and trusted AudioWorklet resume hook into the next generation. Their actual browser initialization/resume/disposal passed independently. Also bind failure-state-before-audit persistence and the exact normal respawn configuration lifecycle once implemented, before repeating full-world startup. The preceding audio attempt failed before Java in blob-relative WASM resolution.
 
 Select bullet-ragdoll-native-rolling for the original rolling-friction material calculation. Its callback/contact domain remains exact; the residual 0.264342 dynamics difference requires comparison of actual contact points, normals and material state. Do not report this as complete collision parity.
+
+Bind the updated population native service and kernel together with their unchanged colocated save codec. Normal respawn configuration and exact pre-due timer/count ownership are now supported; actual due placement still fails explicitly. Next implement that original placement branch while the full original startup runs. No Java helper rebuild is needed for this increment.
