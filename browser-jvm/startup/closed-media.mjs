@@ -312,6 +312,7 @@ async function createOwner({ root, entries, certificate, namespace, snapshotPare
     let terminal;
     let published = 0;
     let publishedBytes = 0;
+    let preparationDeadline = null;
     const publications = [];
     const cleanupFailures = [];
     const malformedRequests = [];
@@ -344,6 +345,12 @@ async function createOwner({ root, entries, certificate, namespace, snapshotPare
              * @param {function(Error|null, Buffer=):void} callback - Original stream completion.
              */
             transform(bytes, encoding, callback) {
+                if (preparationDeadline !== null && Date.now() >= preparationDeadline) {
+                    callback(new Error('Eager publication deadline'));
+
+                    return;
+                }
+
                 count += bytes.length;
                 digest.update(bytes);
                 callback(null, bytes);
@@ -391,6 +398,23 @@ async function createOwner({ root, entries, certificate, namespace, snapshotPare
         }
 
         return output;
+    }
+
+    /**
+     * Reuses the existing single-owner verified copy promise.
+     *
+     * @param {object} entry - Actual frozen file record.
+     * @returns {Promise<string>} Actual published snapshot path.
+     */
+    function ensurePublished(entry) {
+        if (!copies.has(entry.relative)) {
+            copies.set(entry.relative, copy(entry).catch((error) => {
+                terminal ??= error;
+                throw error;
+            }));
+        }
+
+        return copies.get(entry.relative);
     }
 
     /**
@@ -476,14 +500,7 @@ async function createOwner({ root, entries, certificate, namespace, snapshotPare
             }
 
             if (!body) {
-                if (!copies.has(entry.relative)) {
-                    copies.set(entry.relative, copy(entry).catch((error) => {
-                        terminal ??= error;
-                        throw error;
-                    }));
-                }
-
-                file = await copies.get(entry.relative);
+                file = await ensurePublished(entry);
 
                 if (!active) {
                     response.writeHead(500, { 'Content-Length': 0 }).end();
@@ -538,6 +555,42 @@ async function createOwner({ root, entries, certificate, namespace, snapshotPare
     }
 
     return {
+        /**
+         * Publishes one fresh, uncopied namespace before Java using the same verified copy path.
+         *
+         * @param {object} bounds - Explicit admitted preparation bounds.
+         * @param {number} bounds.deadlineAt - Actual host preparation deadline.
+         * @param {number} bounds.maxBytes - Maximum admitted source bytes.
+         * @returns {Promise<object>} Actual complete publication diagnostics.
+         */
+        async publishAll({ deadlineAt, maxBytes }) {
+            assert.ok(active && terminal === undefined && requests.size === 0 && preparationDeadline === null && published === 0 && copies.size === 0);
+            assert.ok(Number.isSafeInteger(deadlineAt) && deadlineAt > Date.now());
+            assert.ok(Number.isSafeInteger(maxBytes) && maxBytes >= 0);
+            const files = [...entries.values()].filter((entry) => entry.kind === 'file' && entry.bytes > 0);
+            const expectedBytes = files.reduce((total, entry) => total + entry.bytes, 0);
+
+            assert.ok(Number.isSafeInteger(expectedBytes) && expectedBytes <= maxBytes);
+            preparationDeadline = deadlineAt;
+
+            try {
+                for (const entry of files) {
+                    assert.ok(active && Date.now() < deadlineAt, 'Eager publication lifetime/deadline');
+                    // eslint-disable-next-line no-await-in-loop -- One source and snapshot stream at a time.
+                    await ensurePublished(entry);
+                }
+
+                assert.equal(published, files.length);
+                assert.equal(publishedBytes, expectedBytes);
+
+                return { published, publishedBytes, namespaceSHA };
+            } catch (error) {
+                terminal ??= error;
+                throw error;
+            } finally {
+                preparationDeadline = null;
+            }
+        },
         /**
          * Owns each actual HTTP task until its streams and response are complete.
          *

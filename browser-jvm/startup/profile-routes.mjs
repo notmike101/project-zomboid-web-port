@@ -182,10 +182,21 @@ async function createOriginalBootRoutes(generation) {
     }
 
     const closedMedia = await loadClosedMedia({ ...generation.closedMedia, mediaRoot, snapshotParent });
-    const mediaHandler = closedMedia.handle;
-    const watch = createFileWatchService({ mounts: [{ virtualPrefix: '/app/media', root: mediaRoot }] });
 
-    return { routes, mediaHandler, watch, headers, integrity, verifiedMedia, closedMedia };
+    try {
+        const mediaHandler = closedMedia.handle;
+        const watch = createFileWatchService({ mounts: [{ virtualPrefix: '/app/media', root: mediaRoot }] });
+
+        return { routes, mediaHandler, watch, headers, integrity, verifiedMedia, closedMedia };
+    } catch (error) {
+        try {
+            await closedMedia.dispose();
+        } catch (cleanupError) {
+            throw new AggregateError([error, cleanupError], 'Route owner creation and media cleanup failed');
+        }
+
+        throw error;
+    }
 }
 
 export { createOriginalBootRoutes, headers, sourceModules, generatedUrls, hash, shaderParserModules, requireShaderParserRoutes };

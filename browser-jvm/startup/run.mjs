@@ -1,13 +1,52 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, writeFileSync } from 'node:fs';
 import { readFile, writeFile, stat, mkdtemp } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
+import { certifyPublished } from './certify-published.mjs';
+import { isPositiveMetadataEntry } from './negative-stat.js';
 import { createGateNetworkObserver } from './network-observer.mjs';
 import { createOriginalBootRoutes, hash } from './profile-routes.mjs';
+
+const ownerStartedAt = Date.now();
+const outerDeadlineAt = ownerStartedAt + 2_640_000;
+let ownerPhase = 'admission-preflight';
+let browserServer;
+let rejectHostFailure;
+let evidence = null;
+let output = null;
+const deadlineRecord = { establishedAt: ownerStartedAt, deadlineAt: outerDeadlineAt, firedAt: null };
+const deadline = setTimeout(() => {
+    deadlineRecord.firedAt = Date.now();
+    deadlineRecord.phase = ownerPhase;
+
+    if (evidence) {
+        evidence.deadlineExceeded = true;
+    }
+
+    const record = JSON.stringify({ ...deadlineRecord, event: 'owner-deadline-fired' });
+
+    process.stderr.write(`${record}\n`);
+
+    if (output) {
+        try {
+            writeFileSync(path.join(output, 'deadline-fired.json'), record);
+        } catch (error) {
+            process.stderr.write(`${String(error.stack ?? error)}\n`);
+        }
+    }
+
+    rejectHostFailure?.(new Error('Original total owner deadline exceeded'));
+
+    if (browserServer) {
+        void browserServer.kill().catch((error) => process.stderr.write(`${String(error.stack ?? error)}\n`));
+    }
+}, Math.max(0, outerDeadlineAt - Date.now()));
+
+process.stderr.write(`${JSON.stringify({ ...deadlineRecord, event: 'owner-deadline-established' })}\n`);
 
 // Admission is checked before HTTP, browser, or filesystem-watch owners are created.
 const generationFile = process.argv[2];
@@ -17,7 +56,7 @@ assert.ok(generationFile && executablePath, 'Usage: node first-gate.mjs GENERATI
 const generation = JSON.parse(await readFile(generationFile, 'utf8'));
 
 assert.equal(generation.executionAdmitted, true, 'Root review must explicitly admit the exact frozen generation');
-assert.equal(generation.hostSources.length, 6);
+assert.equal(generation.hostSources.length, 7);
 
 for (const record of generation.hostSources) {
     // These small source identities precede all owner creation.
@@ -44,12 +83,14 @@ for (const prefix of ['namespace', 'certificate', 'ledger']) {
     assert.equal(record.sha256, generation.closedMedia[`${prefix}SHA256`]);
 }
 
-const owners = await createOriginalBootRoutes(generation);
-const { routes, mediaHandler, closedMedia, watch: fileWatchService } = owners;
+let owners;
+let routes;
+let mediaHandler;
+let closedMedia;
+let fileWatchService;
 const logs = [];
 const requests = [];
 const denied = [];
-let rejectHostFailure;
 const hostFailure = new Promise((resolve, reject) => {
     rejectHostFailure = reject;
 });
@@ -57,19 +98,18 @@ const hostFailure = new Promise((resolve, reject) => {
 // Retain early event failures even if they arrive before the first awaited browser condition.
 void hostFailure.catch(() => undefined);
 const activeMediaRequests = new Set();
-const evidence = { pass: false, fullGamePlayable: false, originalFullShutdownQualified: false, generationFile };
+
+evidence = { pass: false, fullGamePlayable: false, originalFullShutdownQualified: false, generationFile };
 let server;
-let browserServer;
 let browser;
 let page;
-let deadline;
-let outerDeadlineAt;
 let networkObserver;
 let checkpointTimer;
 let checkpointPending;
 const checkpointErrors = [];
-const output = await mkdtemp(path.join(tmpdir(), 'pz-original-first-gate-'));
 
+output = await mkdtemp(path.join(tmpdir(), 'pz-original-first-gate-'));
+writeFileSync(path.join(output, 'deadline-established.json'), JSON.stringify(deadlineRecord));
 process.stdout.write(`${JSON.stringify({ output, generationFile, phase: 'startup-preflight' })}\n`);
 
 /**
@@ -93,6 +133,56 @@ async function bounded(promise, milliseconds, label = 'owner-operation') {
 }
 
 try {
+    ownerPhase = 'route-owner-creation';
+    owners = await createOriginalBootRoutes(generation);
+    ({ routes, mediaHandler, closedMedia, watch: fileWatchService } = owners);
+    const specification = generation.eagerMedia;
+
+    assert.equal(specification?.schema, 'same-owner-eager-metadata-v1');
+    assert.equal(specification.namespaceSHA, closedMedia.certificate.namespaceSHA);
+    const files = closedMedia.namespace.filter((entry) => entry.kind === 'file');
+    const nonempty = files.filter((entry) => entry.bytes > 0);
+    const sourceBytes = files.reduce((total, entry) => total + entry.bytes, 0);
+
+    assert.equal(files.length, 47_417);
+    assert.equal(nonempty.length, 47_416);
+    assert.equal(sourceBytes, 10_044_025_029);
+    assert.equal(specification.files, files.length);
+    assert.equal(specification.nonempty, nonempty.length);
+    assert.equal(specification.sourceBytes, sourceBytes);
+    ownerPhase = 'eager-publication';
+    evidence.eagerStartedAt = Date.now();
+    evidence.eagerPublication = await closedMedia.publishAll({ deadlineAt: outerDeadlineAt, maxBytes: sourceBytes });
+    ownerPhase = 'positive-certificate';
+    evidence.certificateAudit = { handles: [] };
+    const rawCertificate = await certifyPublished({
+        owner: closedMedia, namespace: closedMedia.namespace, namespaceSHA: closedMedia.certificate.namespaceSHA,
+        sourceRoot: generation.mediaRoot, inodeHelperSource: specification.inodeHelperSource,
+        deadlineAt: outerDeadlineAt, audit: evidence.certificateAudit,
+    });
+    const eligible = rawCertificate.files.filter(isPositiveMetadataEntry);
+    const excluded = rawCertificate.files.filter((entry) => !isPositiveMetadataEntry(entry));
+    const subsetSHA = createHash('sha256').update(JSON.stringify(eligible)).digest('hex');
+
+    assert.equal(eligible.length, 47_414);
+    assert.equal(excluded.length, 2);
+    assert.equal(subsetSHA, specification.eligibleOrderedRecordsSHA256);
+    assert.deepEqual(excluded, specification.excluded);
+    const positiveCertificate = { ...rawCertificate, files: eligible };
+    const certificateBytes = Buffer.from(JSON.stringify(positiveCertificate));
+    const certificateFile = path.join(output, 'media-positive-certificate.json');
+
+    await writeFile(certificateFile, certificateBytes, { flag: 'wx' });
+    evidence.positiveCertificateRoute = {
+        file: certificateFile, bytes: certificateBytes.length,
+        sha256: createHash('sha256').update(certificateBytes).digest('hex'), type: 'application/json',
+    };
+    evidence.positiveEligibility = { eligible: eligible.length, excluded, subsetSHA };
+    evidence.eagerFinishedAt = Date.now();
+    assert.equal(routes.has('/media-positive-certificate.json'), false);
+    routes.set('/media-positive-certificate.json', evidence.positiveCertificateRoute);
+    assert.ok(Date.now() < outerDeadlineAt, 'Preparation exhausted original owner deadline');
+    ownerPhase = 'http-server';
     server = createServer(async (request, response) => {
         try {
             for (const [name, value] of Object.entries(owners.headers)) {
@@ -191,19 +281,15 @@ try {
 
     evidence.origin = origin;
     browserServer = await chromium.launchServer({ executablePath, headless: false });
-    // Original 2640s outer deadline also bounds loading; setup retains its separate 60s limit.
-    outerDeadlineAt = Date.now() + 2_640_000;
-    deadline = setTimeout(() => {
-        evidence.deadlineExceeded = true;
-        void browserServer.kill();
-    }, 2_640_000);
+    ownerPhase = 'original-browser';
+    assert.ok(Date.now() < outerDeadlineAt, 'Original owner deadline already elapsed');
     browser = await chromium.connect(browserServer.wsEndpoint());
     const context = await browser.newContext({ serviceWorkers: 'block' });
 
     await context.route('**/*', async (route) => {
         const request = route.request();
         const url = new URL(request.url());
-        const item = { url: request.url(), method: request.method(), postDataBytes: request.postDataBuffer()?.length || 0 };
+        const item = { url: request.url(), method: request.method(), range: request.headers().range ?? null, postDataBytes: request.postDataBuffer()?.length || 0 };
 
         requests.push(item);
         const local = url.origin === origin && !url.search && (routes.has(url.pathname) || url.pathname === '/media' || url.pathname.startsWith('/media/') || url.pathname === '/watch-events');
@@ -686,7 +772,19 @@ try {
 } finally {
     clearTimeout(deadline);
     clearInterval(checkpointTimer);
-    await checkpointPending;
+    ownerPhase = 'checkpoint-drain';
+
+    try {
+        writeFileSync(path.join(output, 'partial-cleanup-entry.json'), JSON.stringify({
+            timing: { ...deadlineRecord, phase: ownerPhase, elapsedMilliseconds: Date.now() - ownerStartedAt },
+            error: evidence.error ?? null, browserPid: browserServer?.process().pid ?? null, fullAuditCompleted: false,
+        }));
+        await bounded(checkpointPending, 5_000, 'checkpoint-drain');
+    } catch (error) {
+        checkpointErrors.push(String(error.stack ?? error));
+    }
+
+    ownerPhase = 'browser-cleanup';
     networkObserver?.markClosing();
     evidence.checkpointErrors = [...checkpointErrors];
 
@@ -720,15 +818,17 @@ try {
         }
     }
 
-    try {
-        await bounded(fileWatchService.close(), 5_000);
-        evidence.watchClosed = fileWatchService.diagnostics();
-        const closed = evidence.watchClosed;
+    if (fileWatchService) {
+        try {
+            await bounded(fileWatchService.close(), 5_000);
+            evidence.watchClosed = fileWatchService.diagnostics();
+            const closed = evidence.watchClosed;
 
-        assert.ok(closed.closed && !closed.watchers && !closed.clients && !closed.queued
-            && !closed.entries && !closed.watcherListeners && !closed.timerActive);
-    } catch (error) {
-        cleanupErrors.push(String(error));
+            assert.ok(closed.closed && !closed.watchers && !closed.clients && !closed.queued
+                && !closed.entries && !closed.watcherListeners && !closed.timerActive);
+        } catch (error) {
+            cleanupErrors.push(String(error));
+        }
     }
 
     if (server) {
@@ -749,20 +849,26 @@ try {
 
     await bounded(Promise.allSettled([...activeMediaRequests]), 5_000).catch((error) => cleanupErrors.push(String(error)));
 
-    try {
-        evidence.closedMediaBeforeDispose = closedMedia.diagnostics();
-        await bounded(closedMedia.dispose(), 5_000, 'closed-media-dispose');
-        evidence.closedMediaAfterDispose = closedMedia.diagnostics();
-        assert.equal(evidence.closedMediaAfterDispose.active, false);
-        assert.equal(evidence.closedMediaAfterDispose.requests, 0);
-        assert.equal(evidence.closedMediaAfterDispose.terminalFailure, null);
-        assert.deepEqual(evidence.closedMediaAfterDispose.cleanupFailures, []);
-    } catch (error) {
-        cleanupErrors.push(String(error.stack ?? error));
+    const browserDead = !browserServer || browserServer.process().exitCode !== null || browserServer.process().signalCode !== null;
+
+    if (closedMedia && browserDead) {
+        try {
+            evidence.closedMediaBeforeDispose = closedMedia.diagnostics();
+            await bounded(closedMedia.dispose(), 5_000, 'closed-media-dispose');
+            evidence.closedMediaAfterDispose = closedMedia.diagnostics();
+            assert.equal(evidence.closedMediaAfterDispose.active, false);
+            assert.equal(evidence.closedMediaAfterDispose.requests, 0);
+            assert.equal(evidence.closedMediaAfterDispose.terminalFailure, null);
+            assert.deepEqual(evidence.closedMediaAfterDispose.cleanupFailures, []);
+        } catch (error) {
+            cleanupErrors.push(String(error.stack ?? error));
+        }
+    } else if (closedMedia) {
+        cleanupErrors.push('Browser death unconfirmed; actual media owner retained');
     }
 
     try {
-        const certifiedPaths = new Set(closedMedia.certificate.absent);
+        const certifiedPaths = new Set(closedMedia?.certificate.absent ?? []);
 
         evidence.certifiedMediaHttpRequests = requests.filter((item) => certifiedPaths.has(decodeURIComponent(new URL(item.url).pathname)));
         assert.deepEqual(evidence.certifiedMediaHttpRequests, [], 'Certified missing paths must not reach HTTP');
@@ -770,10 +876,29 @@ try {
         cleanupErrors.push(String(error.stack ?? error));
     }
 
+    ownerPhase = 'immutable-posthash-audit';
+    evidence.ownerTiming = { ...deadlineRecord, phase: ownerPhase, elapsedMilliseconds: Date.now() - ownerStartedAt };
+
+    try {
+        writeFileSync(path.join(output, 'logs-before-audit.json'), JSON.stringify(logs));
+        writeFileSync(path.join(output, 'requests-before-audit.json'), JSON.stringify(requests));
+        writeFileSync(path.join(output, 'partial-terminal-before-audit.json'), JSON.stringify({
+            timing: evidence.ownerTiming, error: evidence.error ?? null, cleanupErrors,
+            browserProcess: evidence.browserProcess ?? null, browserDead,
+            media: closedMedia?.diagnostics() ?? null,
+            latestOriginal: evidence.failureState?.latest ?? evidence.beforeStop?.latest ?? null,
+            runtimeAssertionsPassed: evidence.runtimeAssertionsPassed ?? false,
+            fullAuditCompleted: false,
+        }, null, 2));
+    } catch (error) {
+        cleanupErrors.push(String(error.stack ?? error));
+    }
+
     evidence.mediaAfterHashes = [];
     evidence.frozenAfterHashes = [];
     const frozen = new Map([...generation.routes, ...generation.hostSources, ...generation.rootSourceInputs, ...generation.closedMediaInputs,
-        ...generation.hostSources.map((record) => ({ ...record, file: record.evidenceFile }))].map((record) => [record.file, record]));
+        ...generation.hostSources.map((record) => ({ ...record, file: record.evidenceFile })),
+        ...(evidence.positiveCertificateRoute ? [evidence.positiveCertificateRoute] : [])].map((record) => [record.file, record]));
 
     for (const [file, record] of frozen) {
         try {
@@ -788,7 +913,7 @@ try {
         }
     }
 
-    const publications = closedMedia.publishedFiles();
+    const publications = closedMedia?.publishedFiles() ?? [];
     const verifiedMedia = new Set(publications.map((record) => record.source));
 
     evidence.ownedSnapshotAfterHashes = [];
@@ -816,6 +941,9 @@ try {
         }
     }
 
+    evidence.fullAuditCompleted = evidence.frozenAfterHashes.length === frozen.size
+        && evidence.ownedSnapshotAfterHashes.length === publications.length && evidence.mediaAfterHashes.length === verifiedMedia.size;
+    evidence.ownerTiming = { ...deadlineRecord, phase: 'terminal', elapsedMilliseconds: Date.now() - ownerStartedAt };
     evidence.cleanupErrors = cleanupErrors;
     evidence.network = networkObserver?.snapshot();
 

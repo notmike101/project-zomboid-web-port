@@ -4,10 +4,16 @@ import { copyFile, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/pr
 import path from 'node:path';
 
 // Recover only exact recorded bytes; proprietary inputs remain in ignored target.
-const [sourceFile, outputArgument] = process.argv.slice(2);
+const [sourceFile, outputArgument, eagerSpecificationFile] = process.argv.slice(2);
 
-assert.ok(sourceFile && outputArgument, 'Usage: node recover.mjs GENERATION_JSON TARGET_DIRECTORY');
+assert.ok(sourceFile && outputArgument, 'Usage: node recover.mjs GENERATION_JSON TARGET_DIRECTORY [EAGER_SPECIFICATION_JSON]');
 const generation = JSON.parse(await readFile(sourceFile, 'utf8'));
+
+if (eagerSpecificationFile) {
+    generation.eagerMedia = JSON.parse(await readFile(eagerSpecificationFile, 'utf8'));
+}
+
+assert.equal(generation.eagerMedia?.schema, 'same-owner-eager-metadata-v1', 'Recorded eager metadata specification required');
 const originalRoot = await realpath(generation.root);
 const target = path.resolve(import.meta.dirname, '../../target');
 const output = path.resolve(outputArgument);
@@ -62,6 +68,16 @@ for (const record of generation.routes) {
 
     await exactCopy(source, destination, record);
     record.file = destination;
+
+    if (['/original-boot.js', '/negative-stat.js'].includes(record.url)) {
+        const selected = path.join(import.meta.dirname, record.url.slice(1));
+        const bytes = await readFile(selected);
+
+        record.recoveredSource = { sha256: record.sha256, bytes: record.bytes };
+        record.sha256 = digest(bytes);
+        record.bytes = bytes.length;
+        await writeFile(destination, bytes);
+    }
 }
 
 const inventory = { file: generation.importer.inventoryFile, bytes: (await stat(generation.importer.inventoryFile)).size, sha256: generation.importer.inventorySha256 };
@@ -72,7 +88,7 @@ generation.recoveredFrom = { file: path.resolve(sourceFile), sha256: digest(awai
 generation.root = output;
 generation.hostSources = [];
 
-for (const name of ['run.mjs', 'profile-routes.mjs', 'network-observer.mjs', 'closed-media.mjs', '../file-watch-service.mjs', '../media-files.mjs']) {
+for (const name of ['run.mjs', 'profile-routes.mjs', 'network-observer.mjs', 'closed-media.mjs', 'certify-published.mjs', '../file-watch-service.mjs', '../media-files.mjs']) {
     const file = path.resolve(import.meta.dirname, name);
     const bytes = await readFile(file);
     const evidenceFile = path.join(output, 'host-source-evidence', path.basename(name));

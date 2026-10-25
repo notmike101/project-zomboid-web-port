@@ -504,4 +504,3 @@ public final class BrowserOriginalBoot {
         return result.append('"').toString();
     }
 }
-
