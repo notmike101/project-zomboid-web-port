@@ -520,6 +520,20 @@ extern "C" int apply_torque(int id,float x,float y,float z){
     auto& body=*ownedVehicle->body;
     body.applyTorque(btVector3(double(x),double(y),double(z))*body.getLinearFactor());return 1;
 }
+extern "C" int teleport_vehicle(int id,float x,float y,float z,float qx,float qy,float qz,float qw){
+    auto* owner=findVehicle(id);
+    if(!ownedWorld||!owner||owner->id!=id)return 0;
+    for(float value:{x,y,z,qx,qy,qz,qw})if(!std::isfinite(value))return 0;
+    const btQuaternion rotation{double(qx),double(qy),double(qz),double(qw)};
+    if(rotation.length2()==0)return 0;
+    // Original JNI 0x18000f183..0x18000f326 detaches the body, updates COM, clears velocities and reattaches.
+    auto& body=*owner->body;ownedWorld->world.removeRigidBody(&body);
+    btTransform transform=body.getWorldTransform();
+    transform.setOrigin(btVector3(double(x-float(worldHeader[4])),double(z),double(y-float(worldHeader[5]))));
+    transform.setRotation(rotation);body.setCenterOfMassTransform(transform);
+    body.setAngularVelocity(btVector3(0,0,0));body.setLinearVelocity(btVector3(0,0,0));
+    ownedWorld->world.addRigidBody(&body,2,15);return 1;
+}
 static btQuaternion nativeEuler(const btVector3& degrees){
     double x=degrees.x()*3.141592653589793/180.0*0.5,y=degrees.y()*3.141592653589793/180.0*0.5,z=degrees.z()*3.141592653589793/180.0*0.5;
     double cx=std::cos(x),sx=std::sin(x),cy=std::cos(y),sy=std::sin(y),cz=std::cos(z),sz=std::sin(z);

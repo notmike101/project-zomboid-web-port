@@ -332,6 +332,22 @@ export function createVehicleWorldNatives(engine) {
             expect(engine._apply_torque(id, x, y, z) === 1, 'Unsupported actual vehicle torque');
         },
         /**
+         * Relocates the owned body through the original detach/COM/reattach sequence.
+         *
+         * @param {object} lib - Original Java namespace supplied by the runtime.
+         * @param {number} id - Original vehicle identity.
+         * @param {number} x - Original world X.
+         * @param {number} y - Original world Y.
+         * @param {number} z - Original physics height.
+         * @param {number} qx - Quaternion X.
+         * @param {number} qy - Quaternion Y.
+         * @param {number} qz - Quaternion Z.
+         * @param {number} qw - Quaternion W.
+         */
+        teleportVehicle(lib, id, x, y, z, qx, qy, qz, qw) {
+            expect(engine._teleport_vehicle(id, x, y, z, qx, qy, qz, qw) === 1, 'Unsupported actual vehicle relocation');
+        },
+        /**
          * Dispatches setChunkMinMaxLevel to the actual qualified engine operation.
          *
          * @param {object} lib - Original Java namespace supplied by the runtime.
