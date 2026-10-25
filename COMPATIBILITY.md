@@ -1144,3 +1144,9 @@ An isolated original-JNI comparison and rebuilt WASM adapter match five stages: 
 The population adapter no longer rejects all time updates after three hours or new-cell access after two hours. Inspection of the original native worker, lazy cell generation and spawn placement found no such cutoffs. Existing nonfinite/negative checks, unsupported respawn configuration and exact due-redistribution rejection remain intact.
 
 A direct isolated call to the original population target-scale function matches the current JavaScript float arithmetic in all 165 cases across eleven ages through 1,000 hours, five density sums and three start/peak/day configurations. Actual host time submissions now accept the previously rejected positive ages. This supports later-age target calculation and removes fixture-specific restrictions; it does not establish full late-game browser behavior. Default twelve-hour redistribution still requires the original virtual movement/pathfinding implementation and remains an explicit failure when due. Installed native input hashes are unchanged.
+
+## Prepared real Bullet startup composition
+
+`startup/prepare-real-bullet.mjs` now prepares a separate generation with the real vehicle engine, explicitly replaces the static Bullet callbacks, and binds the original library descriptor to the same real engine owner. Existing Clipper, collision and ragdoll-definition services remain composed. Preparation and source lint pass with the zero-vehicle-capable build; final shutdown assertions inspect actual real-world and mesh ownership.
+
+This composition is opt-in and has not yet executed in a whole-startup browser run. It does not remove the existing map-width, world-boundary, unsupported vehicle/ragdoll or missing scrolling boundaries. The current running startup generation remains frozen on its previous selection.
