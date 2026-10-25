@@ -510,6 +510,67 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             expect(engine._update_ballistics_controller(id, x, y, z) === 1, 'Actual ballistics controller update rejected');
         },
         /**
+         * Scales the original owned aperture box and sphere used by remaining aim queries.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} size - Original float shape scale.
+         */
+        setBallisticsSize(lib, id, size) {
+            expect(engine._set_ballistics_size(id, size) === 1, 'Actual ballistics shape scale rejected');
+        },
+        /**
+         * Stores the original separate world-relative aim reticle origin.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} x - World X.
+         * @param {number} y - Bullet Y.
+         * @param {number} z - World Z.
+         */
+        updateBallisticsAimReticlePosition(lib, id, x, y, z) {
+            expect(engine._update_ballistics_reticle_position(id, x, y, z) === 1, 'Actual reticle position rejected');
+        },
+        /**
+         * Sets the original reticle and shared basis from its quaternion.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} x - Quaternion X.
+         * @param {number} y - Quaternion Y.
+         * @param {number} z - Quaternion Z.
+         * @param {number} w - Quaternion W.
+         */
+        updateBallisticsAimReticleQuaternion(lib, id, x, y, z, w) {
+            expect(engine._update_ballistics_reticle_rotation(id, x, y, z, w, 0) === 1, 'Actual reticle quaternion rejected');
+        },
+        /**
+         * Postmultiplies the original current reticle quaternion without changing its origin.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} x - Quaternion X.
+         * @param {number} y - Quaternion Y.
+         * @param {number} z - Quaternion Z.
+         * @param {number} w - Quaternion W.
+         */
+        updateBallisticsAimReticleRotate(lib, id, x, y, z, w) {
+            expect(engine._update_ballistics_reticle_rotation(id, x, y, z, w, 1) === 1, 'Actual reticle quaternion rotation rejected');
+        },
+        /**
+         * Sets the original normalized-axis angle rotation without changing its origin.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} x - Axis X.
+         * @param {number} y - Axis Y.
+         * @param {number} z - Axis Z.
+         * @param {number} angle - Original radian angle.
+         */
+        updateBallisticsAimReticleRotation(lib, id, x, y, z, angle) {
+            expect(engine._update_ballistics_reticle_rotation(id, x, y, z, angle, 2) === 1, 'Actual reticle axis rotation rejected');
+        },
+        /**
          * Stores the original controller range without allocating a missing identity.
          *
          * @param {object} lib - Original Java namespace.

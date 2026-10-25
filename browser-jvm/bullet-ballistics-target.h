@@ -40,10 +40,13 @@ extern "C" int remove_ballistics_target(int id){
     pooledBallisticsTargets.push_back(std::move(found->second));ownedBallisticsTargets.erase(found);return result;
 }
 struct OwnedBallisticsController {
-    btTransform transform=btTransform::getIdentity();
+    btTransform transform=btTransform::getIdentity(),reticle=btTransform::getIdentity();
+    std::unique_ptr<btBoxShape> aperture=std::make_unique<btBoxShape>(btVector3(1,1,1));
+    std::unique_ptr<btSphereShape> sphere=std::make_unique<btSphereShape>(1);
     double range=0;
     btVector3 color=btVector3(0,1,1);
 };
+static btTransform globalBallisticsReticle(btMatrix3x3(0,0,0,0,0,0,0,0,0),btVector3(0,0,0));
 static std::map<int,std::unique_ptr<OwnedBallisticsController>> ownedBallisticsControllers;
 static std::vector<std::unique_ptr<OwnedBallisticsController>> pooledBallisticsControllers;
 extern "C" int clear_ballistics_targets(){
@@ -170,4 +173,33 @@ extern "C" int ballistics_query_state(int id,double* output){
 extern "C" int ballistics_target_hit_state(int id,double* output){
     auto found=ownedBallisticsTargets.find(id);if(found==ownedBallisticsTargets.end()||!output)return 0;const auto& target=*found->second;
     output[0]=target.aggregateHit?1:0;for(int axis=0;axis<3;axis++){output[1+axis]=target.hitPoint[axis];output[4+axis]=target.hitColor[axis];}return 1;
+}
+
+extern "C" int set_ballistics_size(int id,float size){
+    if(!ownedWorld||!std::isfinite(size))return 0;auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 1;
+    const btVector3 scale(size,size,size);found->second->aperture->setLocalScaling(scale);found->second->sphere->setLocalScaling(scale);return 1;
+}
+extern "C" int update_ballistics_reticle_position(int id,float x,float y,float z){
+    if(!ownedWorld)return 0;for(float value:{x,y,z})if(!std::isfinite(value))return 0;
+    auto found=ownedBallisticsControllers.find(id);if(found!=ownedBallisticsControllers.end())found->second->reticle.setOrigin(btVector3(double(x-float(worldHeader[4])),double(y),double(z-float(worldHeader[5]))));return 1;
+}
+// Original quaternion setter changes the shared reticle basis; rotate and axis-angle setters do not.
+extern "C" int update_ballistics_reticle_rotation(int id,float x,float y,float z,float w,int mode){
+    if(!ownedWorld||mode<0||mode>2)return 0;for(float value:{x,y,z,w})if(!std::isfinite(value))return 0;
+    auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 1;
+    btQuaternion rotation;
+    if(mode==2){btVector3 axis(x,y,z);if(axis.length2()==0)return 0;rotation=btQuaternion(axis,double(w));}
+    else{rotation=btQuaternion(x,y,z,w);if(rotation.length2()==0)return 0;}
+    auto& reticle=found->second->reticle;if(mode==1)rotation=reticle.getRotation()*rotation;reticle.setRotation(rotation);
+    if(mode==0)globalBallisticsReticle.setBasis(reticle.getBasis());return 1;
+}
+extern "C" int ballistics_reticle_state(int id,double* output){
+    auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end()||!output)return 0;const auto& controller=*found->second;int cursor=0;
+    for(int row=0;row<3;row++)for(int col=0;col<3;col++)output[cursor++]=controller.reticle.getBasis()[row][col];
+    for(int axis=0;axis<3;axis++)output[cursor++]=controller.reticle.getOrigin()[axis];
+    for(const auto& scale:{controller.aperture->getLocalScaling(),controller.sphere->getLocalScaling()})for(int axis=0;axis<3;axis++)output[cursor++]=scale[axis];
+    for(const btCollisionShape* shape:{static_cast<const btCollisionShape*>(controller.aperture.get()),static_cast<const btCollisionShape*>(controller.sphere.get())}){
+        btVector3 lo,hi;shape->getAabb(btTransform::getIdentity(),lo,hi);for(const auto& point:{lo,hi})for(int axis=0;axis<3;axis++)output[cursor++]=point[axis];
+    }
+    for(int row=0;row<3;row++)for(int col=0;col<3;col++)output[cursor++]=globalBallisticsReticle.getBasis()[row][col];return 1;
 }

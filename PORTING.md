@@ -625,3 +625,5 @@ The next audio generation must bind the corrected FMOD Java-return/callback mars
 Select bullet-ballistics-query-original-cast for actual primary closest-hit queries, with its matching ray-source hash and JNI adapter. Root review of exact-forward direction was resolved by an original-DLL witness, not an invented normalization branch. Complete the remaining size/reticle/spread/camera/body-part closures next, while preserving the current original-world run.
 
 The next audio provider also includes the bounded per-open-file read-ahead cache: 96.82% fewer backing requests for 1.26% additional fetched bytes in the real twelve-bank loop, with identical delivered bytes. Keep the 256 KiB per-file bound and late-read ownership checks; no whole-bank preload or global unbounded cache is introduced.
+
+The bullet-ballistics-reticle-qualified aggregate closes ordinary size/reticle setters. Continue source-qualified CRT random ownership for spread and temporary real-body attachment/query/cleanup for camera operations; do not substitute Math.random or empty results. Bind matching target header and JNI adapter in the next generation.
