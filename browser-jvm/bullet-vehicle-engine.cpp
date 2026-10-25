@@ -513,6 +513,13 @@ extern "C" int apply_central_force(int id,float x,float y,float z){
     // Original JNI0x180009760 accumulates force with actual per-axis linear factors.
     ownedVehicle->body->applyCentralForce(btVector3(double(x),double(y),double(z)));return 1;
 }
+extern "C" int apply_torque(int id,float x,float y,float z){
+    auto* ownedVehicle=findVehicle(id);
+    if(!ownedVehicle||ownedVehicle->id!=id||!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(z))return 0;
+    // Original JNI 0x180009b02..0x180009b5e accumulates both factors, without activation.
+    auto& body=*ownedVehicle->body;
+    body.applyTorque(btVector3(double(x),double(y),double(z))*body.getLinearFactor());return 1;
+}
 static btQuaternion nativeEuler(const btVector3& degrees){
     double x=degrees.x()*3.141592653589793/180.0*0.5,y=degrees.y()*3.141592653589793/180.0*0.5,z=degrees.z()*3.141592653589793/180.0*0.5;
     double cx=std::cos(x),sx=std::sin(x),cy=std::cos(y),sy=std::sin(y),cz=std::cos(z),sz=std::sin(z);

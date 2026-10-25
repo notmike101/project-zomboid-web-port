@@ -320,6 +320,18 @@ export function createVehicleWorldNatives(engine) {
             expect(engine._apply_central_force(id, x, y, z) === 1, 'Unsupported actual vehicle force');
         },
         /**
+         * Accumulates original world-axis torque without changing activation.
+         *
+         * @param {object} lib - Original Java namespace supplied by the runtime.
+         * @param {number} id - Original vehicle identity.
+         * @param {number} x - World-axis X torque.
+         * @param {number} y - World-axis Y torque.
+         * @param {number} z - World-axis Z torque.
+         */
+        applyTorqueToVehicle(lib, id, x, y, z) {
+            expect(engine._apply_torque(id, x, y, z) === 1, 'Unsupported actual vehicle torque');
+        },
+        /**
          * Dispatches setChunkMinMaxLevel to the actual qualified engine operation.
          *
          * @param {object} lib - Original Java namespace supplied by the runtime.
