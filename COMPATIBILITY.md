@@ -1150,3 +1150,9 @@ A direct isolated call to the original population target-scale function matches 
 `startup/prepare-real-bullet.mjs` now prepares a separate generation with the real vehicle engine, explicitly replaces the static Bullet callbacks, and binds the original library descriptor to the same real engine owner. Existing Clipper, collision and ragdoll-definition services remain composed. Preparation and source lint pass with the zero-vehicle-capable build; final shutdown assertions inspect actual real-world and mesh ownership.
 
 This composition is opt-in and has not yet executed in a whole-startup browser run. It does not remove the existing map-width, world-boundary, unsupported vehicle/ragdoll or missing scrolling boundaries. The current running startup generation remains frozen on its previous selection.
+
+## Real Bullet chunk-map scrolling
+
+The vehicle profile now implements original `Bullet.scrollChunkMap` in all four directions. It retains chunk identity across overlapping player maps and releases registered collision bodies only when the final map owner leaves. Real chunk allocation, shared mesh references and world teardown remain intact; the foundation export set is unchanged.
+
+Nine original-DLL/WASM stages match map coordinates, ownership masks and retained/shared chunk identities through all directions, overlapping maps, thirteen-step travel, deactivation and return. Six additional registered-mesh/vehicle stages match body and mesh-reference retention when one owner leaves and release when the final owner leaves; final objects and mesh ownership reach zero. Original workers terminate and installed inputs remain unchanged. A separate next-startup generation contains the rebuilt engine, but it has not yet executed the whole game. Existing width, publication-domain and remaining physics guards still apply.

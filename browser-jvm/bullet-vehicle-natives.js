@@ -332,6 +332,16 @@ export function createVehicleWorldNatives(engine) {
             expect([x, y, min, max].every(Number.isInteger) && engine._set_chunk_levels(x, y, min, max) === 1, 'Unsupported original chunk extent');
         },
         /**
+         * Scrolls the actual player's chunk map while retaining shared chunks and bodies.
+         *
+         * @param {object} lib - Original Java namespace supplied by the runtime.
+         * @param {number} id - Original player map index.
+         * @param {number} direction - Original left, right, up or down ordinal.
+         */
+        scrollChunkMap(lib, id, direction) {
+            expect(Number.isInteger(id) && Number.isInteger(direction) && engine._scroll_map(id, direction) === 1, 'Unsupported original chunk-map scroll');
+        },
+        /**
          * Dispatches ToBullet to the actual qualified engine operation.
          *
          * @param {object} lib - Original Java namespace supplied by the runtime.

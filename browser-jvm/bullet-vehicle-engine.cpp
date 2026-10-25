@@ -182,6 +182,30 @@ int deactivate_map(int id){
     }
     return 1;
 }
+int scroll_map(int id,int direction){
+    if(!ownedWorld||id<0||id>=4||!activeMaps[id]||direction<0||direction>3)return 0;
+    auto& map=*activeMaps[id];
+    int64_t x=int64_t(map.x)+(direction==0?-1:direction==1?1:0);
+    int64_t y=int64_t(map.y)+(direction==2?-1:direction==3?1:0);
+    if(x<INT32_MIN||y<INT32_MIN||x+map.width>INT32_MAX||y+map.width>INT32_MAX)return 0;
+    auto pending=std::make_unique<ChunkMap>(id,int(x),int(y),map.width);
+    for(int dx=0;dx<map.width;dx++)for(int dy=0;dy<map.width;dy++){
+        std::shared_ptr<Chunk> chunk;
+        for(const auto& other:activeMaps)if(other){
+            chunk=other->at(int(x)+dx,int(y)+dy);
+            if(chunk)break;
+        }
+        if(!chunk)chunk=std::make_shared<Chunk>(int(x)+dx,int(y)+dy);
+        pending->cells[dx*map.width+dy]=chunk;
+    }
+    for(const auto& chunk:map.cells)if(!pending->at(chunk->x,chunk->y)){
+        chunk->owners[id]=false;
+        if(std::none_of(chunk->owners.begin(),chunk->owners.end(),[](bool owner){return owner;}))clear_chunk_geometry(chunk->x,chunk->y);
+    }
+    for(const auto& chunk:pending->cells)chunk->owners[id]=true;
+    activeMaps[id]=std::move(pending);
+    return 1;
+}
 int map_info(int id,int* output){
     if(id<0||id>=4||!activeMaps[id]||!output)return 0;
     auto& map=*activeMaps[id];
