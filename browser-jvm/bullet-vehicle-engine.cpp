@@ -988,3 +988,4 @@ extern "C" int get_vehicle_physics_batch(int offset,float* output,int count){
 
 #include "bullet-ragdoll-body.h"
 #include "bullet-ragdoll-actions.h"
+#include "bullet-ragdoll-readback.h"

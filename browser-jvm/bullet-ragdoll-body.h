@@ -13,7 +13,9 @@ struct OwnedRagdoll {
     std::array<int,11> anchorBones{};
     std::array<btTransform,11> anchorOffsets;
     bool anchorsReady=false;
-    std::vector<btTransform> poseLocal,poseWorld;
+    std::vector<btTransform> poseLocal,poseWorld,boneOffsets;
+    std::vector<int> boneParts;
+    btTransform rawRootPose=btTransform::getIdentity();
 };
 static std::map<int,std::unique_ptr<OwnedRagdoll>> ownedRagdolls;
 static double ragdollMass=70;
@@ -93,6 +95,7 @@ extern "C" int configure_ragdoll_anchors(int id,const float* records,int count){
     auto* owner=findRagdoll(id);if(!owner||!records||count<0||count>4096)return 0;
     const std::array<int,11> bones={2,4,6,20,21,24,25,8,9,14,15};
     std::vector<btTransform> boneOffsets(owner->definition->world.size(),btTransform::getIdentity());
+    std::vector<int> boneParts(boneOffsets.size(),-1);
     std::vector<bool> present(boneOffsets.size());std::array<btTransform,11> offsets;
     for(int row=0;row<count;row++){
         const float* r=records+row*5;for(int j=0;j<5;j++)if(!std::isfinite(r[j]))return 0;
@@ -105,9 +108,10 @@ extern "C" int configure_ragdoll_anchors(int id,const float* records,int count){
         const auto& bind=owner->definition->world[bone];const auto& body=owner->initialBody[part];
         btVector3 direction=body.getOrigin()-bind.getOrigin();if(r[2])direction=-direction;
         btQuaternion rotation=direction.length2()==0?btQuaternion(0,0,0,1):shortestArcQuat(btVector3(0,1,0),direction.normalized());
-        btTransform frame(rotation,(bind.getOrigin()+body.getOrigin())*.5);boneOffsets[bone]=bind.inverse()*frame;present[bone]=true;
+        btTransform frame(rotation,(bind.getOrigin()+body.getOrigin())*.5);boneOffsets[bone]=bind.inverse()*frame;boneParts[bone]=part;present[bone]=true;
     }
     for(int part=0;part<11;part++)offsets[part]=boneOffsets[bones[part]];
+    owner->boneOffsets=std::move(boneOffsets);owner->boneParts=std::move(boneParts);
     owner->anchorBones=bones;owner->anchorOffsets=offsets;owner->anchorsReady=true;return 1;
 }
 extern "C" int update_ragdoll_root(int id,float x,float y,float z,float qx,float qy,float qz,float qw){
@@ -123,7 +127,7 @@ extern "C" int update_ragdoll_pose(int id,int count,const float* records){
     for(int i=0;i<count;i++){
         const float* r=records+i*7;for(int j=0;j<7;j++)if(!std::isfinite(r[j]))return 0;
         btQuaternion rotation(r[3],r[4],r[5],r[6]);if(rotation.length2()==0)return 0;
-        local[i]=btTransform(rotation,btVector3(r[0],r[1],r[2]));if(i==0)local[i]=local[i]*owner->localRotation;world[i]=i==0?local[i]:world[owner->definition->parents[i]]*local[i];
+        local[i]=btTransform(rotation,btVector3(r[0],r[1],r[2]));if(i==0){owner->rawRootPose=local[i];local[i]=local[i]*owner->localRotation;}world[i]=i==0?local[i]:world[owner->definition->parents[i]]*local[i];
     }
     for(int part=0;part<11;part++){
         auto& body=*owner->bodies[part];if(owner->active)ownedWorld->world.removeRigidBody(&body);

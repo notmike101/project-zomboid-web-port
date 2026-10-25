@@ -142,6 +142,43 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
         calls.push({ method: 'ToBullet', x, y, min, max, level, cells: seen.size });
     }
 
+    /**
+     * Copies original skeletal/rigid output prefixes from the owned real bodies.
+     *
+     * @param {number} id - Original ragdoll identity.
+     * @param {Float32Array} values - Original local bone output buffer.
+     * @param {Float32Array|null} bodies - Optional original body output buffer.
+     * @returns {number} Original bone count, or minus one for absent ownership.
+     */
+    function readRagdoll(id, values, bodies) {
+        const count = engine._ragdoll_bone_count(id);
+
+        if (count === -1) {
+            return -1;
+        }
+
+        expect(values instanceof Float32Array && values.length >= count * 7
+            && (bodies === null || (bodies instanceof Float32Array && bodies.length >= 77)), 'Original contained ragdoll output buffers required');
+
+        const bones = engine._malloc(count * 28);
+        const rigid = bodies === null ? 0 : engine._malloc(308);
+
+        try {
+            expect(bones !== 0 && (bodies === null || rigid !== 0), 'Actual ragdoll output allocation failed');
+            expect(engine._read_ragdoll(id, bones, count * 7, rigid) === count, 'Actual original ragdoll reconstruction rejected');
+            values.set(engine.HEAPF32.subarray(bones / 4, bones / 4 + count * 7));
+
+            if (bodies !== null) {
+                bodies.set(engine.HEAPF32.subarray(rigid / 4, rigid / 4 + 77));
+            }
+
+            return count;
+        } finally {
+            engine._free(rigid);
+            engine._free(bones);
+        }
+    }
+
     const raw = {
         /**
          * Registers an original typed definition.
@@ -501,6 +538,29 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             floats(values.subarray(0, count * 7), (records) => {
                 expect(engine._update_ragdoll_pose(id, count, records) === 1, 'Actual original body pose rejected');
             });
+        },
+        /**
+         * Reconstructs original local bones from actual simulated rigid bodies.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {Float32Array} values - Original bone output buffer.
+         * @returns {number} Original bone count or minus one for absent ownership.
+         */
+        simulateRagdoll(lib, id, values) {
+            return readRagdoll(id, values, null);
+        },
+        /**
+         * Reads bones and bodies, then applies the original linear-speed limit.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {Float32Array} values - Original bone output buffer.
+         * @param {Float32Array} bodies - Original rigid-body output buffer.
+         * @returns {number} Original bone count or minus one for absent ownership.
+         */
+        simulateRagdollWithRigidBodyOutput(lib, id, values, bodies) {
+            return readRagdoll(id, values, bodies);
         },
         /**
          * Derives original starting impulses from the previous animation pose.

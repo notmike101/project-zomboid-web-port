@@ -1246,3 +1246,8 @@ The real owner now applies the original force/relative-position torque and impul
 ### Previous animation pose initialization
 
 The real ragdoll owner now derives the original additive linear and angular impulses from the previous animation pose for positive time intervals. The bounded original-DLL comparison matched 251 of 253 float32 action fields exactly; two near-zero fields differed by less than 4e-13, with maximum internal double difference 2.772e-12. This is not a bit-exact pass. Nonpositive intervals remain guarded, and complete simulation readback/combat integration remains unverified.
+### Original ragdoll simulation readback
+
+The real owner now reconstructs original skeletal output and optional rigid-body output, including the original speed clamp on the rigid-output call only. Before and after a real constrained 0.01-second step, 720 of 1,050 gameplay floats matched exactly as float32; the remaining 330 near-zero values differed by at most 2.585e-16. Both 77-float rigid-body arrays matched exactly, and all 28 spare-capacity sentinels remained unchanged. This is numerical agreement, not bit-exact parity. Original speed limiting reduced the observed maximum from 60.0801 to 10.
+
+Ragdoll terrain publication remains the next required integration: the host currently requests collision geometry around vehicles only. Free-space readback does not establish terrain contact or combat playability. The active audio startup generation retains the earlier actions-only physics closure.

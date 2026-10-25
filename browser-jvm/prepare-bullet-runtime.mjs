@@ -11,7 +11,7 @@ const sdk = path.join(repository, '.tools/emsdk-3.1.74-source/emsdk-3d6d8ee91046
 const compiler = path.join(sdk, 'upstream/emscripten/emcc.py');
 const foundationExports = ['scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'create_world', 'world_state', 'destroy_world', 'create_mapped_world', 'activate_map', 'world_header', 'deactivate_map', 'map_info', 'map_chunk', 'destroy_mapped_world', 'malloc', 'free'];
 
-const vehicleExports = ['update_ragdoll_previous_pose', 'apply_ragdoll_force', 'detach_ragdoll_constraint', 'ragdoll_action_state', 'set_ragdoll_local_rotation', 'ragdoll_capsule_support', 'configure_ragdoll_anchors', 'update_ragdoll_root', 'update_ragdoll_pose', 'add_ragdoll', 'remove_ragdoll', 'set_ragdoll_active', 'ragdoll_simulation_state', 'ragdoll_body_state', 'initialize_ragdoll_template', 'ragdoll_template_bone', 'ragdoll_template_shape', 'vehicle_constraint_count', 'vehicle_constraint_feedback', 'add_vehicle_constraint', 'set_vehicle_constraint_erp', 'remove_vehicle_constraint', 'teleport_vehicle', 'apply_torque', 'scroll_map', 'vehicle_count_snapshot', 'get_vehicle_physics_batch', 'vehicle_basis', 'bind_static_mesh', 'has_static_mesh', 'registered_mesh_references', 'observe_vehicle_contacts', 'apply_central_force', 'vehicle_control_history', 'scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'world_state', 'create_mapped_world', 'destroy_mapped_world', 'build_geometry', 'clear_geometry', 'geometry_count', 'geometry_body', 'define_vehicle', 'define_vehicle_named', 'vehicle_definition_count', 'select_vehicle_definition', 'add_vehicle', 'vehicle_state', 'vehicle_child', 'vehicle_wheel', 'set_vehicle_active', 'set_vehicle_mass', 'set_vehicle_static', 'set_tire_inflation', 'set_tire_removed', 'set_vehicle_params', 'set_vehicle_velocity_multiplier', 'control_vehicle', 'step_vehicle_freefall', 'get_vehicle_physics', 'replace_chunk_level', 'begin_vehicle_publication', 'finish_vehicle_publication', 'step_mapped_vehicle', 'chunk_level_state', 'vehicle_material', 'set_chunk_levels', 'registered_vehicle_count', 'object_registry_count', 'remove_vehicle', 'world_header', 'activate_map', 'deactivate_map', 'map_info', 'map_chunk', 'malloc', 'free', 'create_world'];
+const vehicleExports = ['ragdoll_bone_count', 'read_ragdoll', 'update_ragdoll_previous_pose', 'apply_ragdoll_force', 'detach_ragdoll_constraint', 'ragdoll_action_state', 'set_ragdoll_local_rotation', 'ragdoll_capsule_support', 'configure_ragdoll_anchors', 'update_ragdoll_root', 'update_ragdoll_pose', 'add_ragdoll', 'remove_ragdoll', 'set_ragdoll_active', 'ragdoll_simulation_state', 'ragdoll_body_state', 'initialize_ragdoll_template', 'ragdoll_template_bone', 'ragdoll_template_shape', 'vehicle_constraint_count', 'vehicle_constraint_feedback', 'add_vehicle_constraint', 'set_vehicle_constraint_erp', 'remove_vehicle_constraint', 'teleport_vehicle', 'apply_torque', 'scroll_map', 'vehicle_count_snapshot', 'get_vehicle_physics_batch', 'vehicle_basis', 'bind_static_mesh', 'has_static_mesh', 'registered_mesh_references', 'observe_vehicle_contacts', 'apply_central_force', 'vehicle_control_history', 'scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'world_state', 'create_mapped_world', 'destroy_mapped_world', 'build_geometry', 'clear_geometry', 'geometry_count', 'geometry_body', 'define_vehicle', 'define_vehicle_named', 'vehicle_definition_count', 'select_vehicle_definition', 'add_vehicle', 'vehicle_state', 'vehicle_child', 'vehicle_wheel', 'set_vehicle_active', 'set_vehicle_mass', 'set_vehicle_static', 'set_tire_inflation', 'set_tire_removed', 'set_vehicle_params', 'set_vehicle_velocity_multiplier', 'control_vehicle', 'step_vehicle_freefall', 'get_vehicle_physics', 'replace_chunk_level', 'begin_vehicle_publication', 'finish_vehicle_publication', 'step_mapped_vehicle', 'chunk_level_state', 'vehicle_material', 'set_chunk_levels', 'registered_vehicle_count', 'object_registry_count', 'remove_vehicle', 'world_header', 'activate_map', 'deactivate_map', 'map_info', 'map_chunk', 'malloc', 'free', 'create_world'];
 
 /**
  * Computes a byte-exact source or generated artifact fingerprint.
@@ -126,6 +126,8 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
     const ragdollBodySha = ragdollBodyHeader ? digest(await readFile(ragdollBodyHeader)) : null;
     const ragdollActionsHeader = profile === 'vehicle' ? path.join(import.meta.dirname, 'bullet-ragdoll-actions.h') : null;
     const ragdollActionsSha = ragdollActionsHeader ? digest(await readFile(ragdollActionsHeader)) : null;
+    const ragdollReadbackHeader = profile === 'vehicle' ? path.join(import.meta.dirname, 'bullet-ragdoll-readback.h') : null;
+    const ragdollReadbackSha = ragdollReadbackHeader ? digest(await readFile(ragdollReadbackHeader)) : null;
     const cpp = inputs.filter(([name]) => name.endsWith('.cpp')).map(([name]) => path.join(sourceRoot, name));
     let solverOverlay = null;
     let capsuleOverlay = null;
@@ -265,14 +267,15 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
         profile, exports, solverOverlay, capsuleOverlay, compilerArguments, sourceInventorySha: digest(JSON.stringify(inputs)),
         compilerSha: digest(await readFile(compiler)), compilerConfigSha: digest(await readFile(path.join(sdk, '.emscripten'))),
         candidateCommit: '2c204c49e56ed15ec5fcfa71d199ab6d6570b3f5', candidateVersion: '3.25', installedCoreVersion: 'unknown', versionMatchVerified: false,
-        compilerVersion: '3.1.74', scalarBytes: 8, bridgeSha, ragdollTemplateSha, ragdollBodySha, ragdollActionsSha, sources: cpp.length,
+        compilerVersion: '3.1.74', scalarBytes: 8, bridgeSha, ragdollTemplateSha, ragdollBodySha, ragdollActionsSha, ragdollReadbackSha, sources: cpp.length,
         compilerVerification: 'emcc.py SHA-256; SDK release provenance is documented separately', upstreamLicense: 'BULLET-LICENSE.txt',
         moduleSha: digest(await readFile(path.join(output, 'bullet-engine.mjs'))), wasmSha: digest(await readFile(path.join(output, 'bullet-engine.wasm'))),
     };
 
     if (digest(await readFile(bridge)) !== bridgeSha || (ragdollHeader && digest(await readFile(ragdollHeader)) !== ragdollTemplateSha)
         || (ragdollBodyHeader && digest(await readFile(ragdollBodyHeader)) !== ragdollBodySha)
-        || (ragdollActionsHeader && digest(await readFile(ragdollActionsHeader)) !== ragdollActionsSha)) {
+        || (ragdollActionsHeader && digest(await readFile(ragdollActionsHeader)) !== ragdollActionsSha)
+        || (ragdollReadbackHeader && digest(await readFile(ragdollReadbackHeader)) !== ragdollReadbackSha)) {
         throw new Error('Bullet bridge changed during compilation');
     }
 
