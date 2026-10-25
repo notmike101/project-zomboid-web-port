@@ -51,8 +51,10 @@ process.stderr.write(`${JSON.stringify({ ...deadlineRecord, event: 'owner-deadli
 // Admission is checked before HTTP, browser, or filesystem-watch owners are created.
 const generationFile = process.argv[2];
 const executablePath = process.argv[3];
+const interactive = process.argv[4] === '--interactive';
 
-assert.ok(generationFile && executablePath, 'Usage: node first-gate.mjs GENERATION_JSON CHROMIUM_EXECUTABLE');
+assert.ok(generationFile && executablePath && process.argv.length <= 5
+    && (process.argv[4] === undefined || interactive), 'Usage: node run.mjs GENERATION_JSON CHROMIUM_EXECUTABLE [--interactive]');
 const generation = JSON.parse(await readFile(generationFile, 'utf8'));
 
 assert.equal(generation.executionAdmitted, true, 'Root review must explicitly admit the exact frozen generation');
@@ -99,7 +101,7 @@ const hostFailure = new Promise((resolve, reject) => {
 void hostFailure.catch(() => undefined);
 const activeMediaRequests = new Set();
 
-evidence = { pass: false, fullGamePlayable: false, originalFullShutdownQualified: false, generationFile };
+evidence = { pass: false, fullGamePlayable: false, originalFullShutdownQualified: false, generationFile, interactive };
 let server;
 let browser;
 let page;
@@ -328,7 +330,12 @@ try {
             return;
         }
 
-        checkpointPending = bounded(page.evaluate(() => globalThis.originalBoot || null), 2_000, 'checkpoint-evaluate')
+        checkpointPending = bounded(page.evaluate(() => globalThis.originalBoot
+            ? {
+                    ...globalThis.originalBoot,
+                    mediaNegativeStat: globalThis.originalBoot.mediaNegativeStatSnapshot?.() ?? null,
+                }
+            : null), 2_000, 'checkpoint-evaluate')
             .then((originalBoot) => {
                 const network = networkObserver.snapshot();
 
@@ -712,7 +719,16 @@ try {
     assert.ok(entered.currentOriginalState?.name === 'zombie.gameStates.IngameState');
     evidence.originalIngameObserved = true;
     await page.locator('#graphics-canvas').screenshot({ path: path.join(output, 'original-ingame.png') });
-    await page.locator('#stop').click();
+
+    if (interactive) {
+        evidence.interactiveStartedAt = new Date().toISOString();
+        process.stdout.write(`${JSON.stringify({ output, event: 'original-ingame-interactive' })}\n`);
+        await Promise.race([hostFailure, page.waitForFunction(() => globalThis.originalBoot?.completed
+            || globalThis.originalBoot?.failures?.length, undefined, { timeout: Math.max(1, outerDeadlineAt - Date.now()) })]);
+    } else {
+        await page.locator('#stop').click();
+    }
+
     await page.waitForFunction(() => globalThis.originalBoot?.completed, undefined, { timeout: 30_000 });
     evidence.result = await page.evaluate(() => ({ ...globalThis.originalBoot, mediaNegativeStat: globalThis.originalBoot?.mediaNegativeStatSnapshot?.() }));
     assert.equal(evidence.result.metadataDescriptorRestored, true);
