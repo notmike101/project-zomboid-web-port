@@ -2,6 +2,9 @@ let published;
 const names = ['n_1init', 'newInstance', 'clear', 'addPath', 'addAABB', 'addPolygon', 'clipAABB',
     'generatePolygons', 'getPolygon', 'triangulate2'].map((name) => `Java_zombie_vehicles_Clipper_${name}`);
 
+names.push(...['newInstance', 'clear', 'addPath', 'execute', 'getPolygonCount', 'getPolygon']
+    .map((name) => `Java_zombie_vehicles_ClipperOffset_${name}`));
+
 /**
  * Publishes the existing physics owner once for the real original native-library descriptor.
  *

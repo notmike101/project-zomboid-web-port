@@ -831,6 +831,32 @@ export function createBrowserPhysics() {
                 await helper.initializeOriginalBindings();
                 clipperInitializations++;
             },
+            /* eslint-disable jsdoc/require-param, jsdoc/require-returns -- These JNI callbacks forward original descriptors to the authored Java owner. */
+            /** Allocates the actual Java offset engine and returns its exact opaque owner ordinal. */
+            async Java_zombie_vehicles_ClipperOffset_newInstance(lib, receiver) {
+                return Number(await (await clipperSupport(lib)).allocateOffset(receiver));
+            },
+            /** Clears original offset input paths, retaining its last published results. */
+            async Java_zombie_vehicles_ClipperOffset_clear(lib, receiver) {
+                await (await clipperSupport(lib)).clearOffset(receiver);
+            },
+            /** Transfers the original direct-buffer path and original join/end ordinals. */
+            async Java_zombie_vehicles_ClipperOffset_addPath(lib, receiver, count, buffer, join, end) {
+                await (await clipperSupport(lib)).addOffsetPath(receiver, count, buffer, join, end);
+            },
+            /** Executes the real offset engine at the original world-unit distance. */
+            async Java_zombie_vehicles_ClipperOffset_execute(lib, receiver, delta) {
+                await (await clipperSupport(lib)).executeOffset(receiver, delta);
+            },
+            /** Reports the actual published outer-polygon count. */
+            async Java_zombie_vehicles_ClipperOffset_getPolygonCount(lib, receiver) {
+                return (await clipperSupport(lib)).offsetPolygonCount(receiver);
+            },
+            /** Writes the original outer/hole polygon wire into the caller's actual buffer. */
+            async Java_zombie_vehicles_ClipperOffset_getPolygon(lib, receiver, index, buffer) {
+                return (await clipperSupport(lib)).getOffsetPolygon(receiver, index, buffer);
+            },
+            /* eslint-enable jsdoc/require-param, jsdoc/require-returns */
             /**
              * Allocates an actual empty polygon container owned by the Java Clipper instance.
              *

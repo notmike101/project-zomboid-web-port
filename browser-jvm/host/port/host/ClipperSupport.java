@@ -44,6 +44,13 @@ public final class ClipperSupport {
 
     // Original static Clipper instances survive world replacement; ownership lasts for this browser JVM.
     private static final IdentityHashMap<Object, State> states = new IdentityHashMap<>();
+    private static final IdentityHashMap<Object, OffsetState> offsets = new IdentityHashMap<>();
+    private static long nextOffset = 1;
+
+    private static final class OffsetState {
+        final ClipperOffset engine = new ClipperOffset();
+        final ArrayList<Polygon> polygons = new ArrayList<>();
+    }
 
     private static final class State {
         final Clipper64 engine = new Clipper64();
@@ -57,6 +64,88 @@ public final class ClipperSupport {
     private static native int[] triangulateNative(double[] coordinates, int[] ends);
 
     private ClipperSupport() { }
+
+    /** Owns the original offset receiver; the returned ordinal is not a native address. */
+    public static synchronized long allocateOffset(Object owner) {
+        if (owner == null || offsets.containsKey(owner))
+            throw new IllegalArgumentException("Invalid or duplicate offset owner");
+        if (nextOffset > 9_007_199_254_740_991L)
+            throw new IllegalStateException("Offset owner ordinal exceeds exact browser Java long transport");
+        offsets.put(owner, new OffsetState());
+        return nextOffset++;
+    }
+
+    private static OffsetState offset(Object owner) {
+        OffsetState state = offsets.get(owner);
+        if (state == null) throw new IllegalArgumentException("Unknown offset owner");
+        return state;
+    }
+
+    public static synchronized void clearOffset(Object owner) {
+        // Original clear removes input groups, retaining published polygons until execute.
+        offset(owner).engine.clear();
+    }
+
+    public static synchronized void addOffsetPath(Object owner, int count, ByteBuffer buffer, int join, int end) {
+        OffsetState state = offset(owner);
+        if (join != 3 || end != 2)
+            throw new UnsupportedOperationException("Only original street Miter/Butt offsets are qualified");
+        if (buffer == null || !buffer.isDirect() || count < 0 || count > Short.MAX_VALUE || count > buffer.capacity() / 8)
+            throw new IllegalArgumentException("Invalid offset path buffer");
+        ByteBuffer read = buffer.duplicate().order(ByteOrder.BIG_ENDIAN);
+        read.clear();
+        Path64 path = new Path64();
+        for (int index = 0; index < count; index++)
+            path.add(new Point64(offsetCoordinate(read.getFloat()), offsetCoordinate(read.getFloat())));
+        state.engine.addPath(path, JoinType.Miter, EndType.Butt);
+    }
+
+    private static long offsetCoordinate(float value) {
+        // Native addPath does both multiply and add at float32 before floor/int32 conversion.
+        float shifted = value * 1000.0f + 0.5f;
+        double rounded = Math.floor(shifted);
+        if (!Float.isFinite(value) || rounded < Integer.MIN_VALUE || rounded > Integer.MAX_VALUE)
+            throw new IllegalArgumentException("Offset coordinate outside native int32 range");
+        return (long) rounded;
+    }
+
+    public static synchronized void executeOffset(Object owner, double delta) {
+        OffsetState state = offset(owner);
+        if (!Double.isFinite(delta) || delta < 0)
+            throw new UnsupportedOperationException("Negative or nonfinite open-path offset");
+        state.polygons.clear();
+        PolyTree64 tree = new PolyTree64();
+        state.engine.execute(delta * 1000.0, tree);
+        collect(tree, state.polygons);
+    }
+
+    public static synchronized int offsetPolygonCount(Object owner) {
+        return offset(owner).polygons.size();
+    }
+
+    public static synchronized int getOffsetPolygon(Object owner, int index, ByteBuffer buffer) {
+        Polygon polygon = offset(owner).polygons.get(index);
+        int bytes = Math.addExact(ringBytes(polygon.outer), 2);
+        if (polygon.holes.size() > Short.MAX_VALUE) throw new IllegalArgumentException("Too many offset holes");
+        for (Path64 hole : polygon.holes) bytes = Math.addExact(bytes, ringBytes(hole));
+        if (buffer == null || !buffer.isDirect() || buffer.isReadOnly())
+            throw new IllegalArgumentException("Invalid offset output buffer");
+        if (bytes > buffer.capacity()) throw new BufferOverflowException();
+        ByteBuffer output = buffer.duplicate().order(ByteOrder.BIG_ENDIAN);
+        output.clear();
+        writeOffsetRing(output, polygon.outer);
+        output.putShort((short) polygon.holes.size());
+        for (Path64 hole : polygon.holes) writeOffsetRing(output, hole);
+        return 0;
+    }
+
+    private static void writeOffsetRing(ByteBuffer output, Path64 ring) {
+        output.putShort((short) ring.size());
+        for (Point64 point : ring) {
+            output.putFloat((float) point.x / 1000.0f);
+            output.putFloat((float) point.y / 1000.0f);
+        }
+    }
 
     public static synchronized void allocate(Object owner) {
         if (owner == null || states.containsKey(owner)) {
