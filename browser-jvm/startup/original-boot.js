@@ -31,6 +31,7 @@ let helper;
 let owners;
 let metadataOwner;
 let metadataDescriptor;
+let audioOwner;
 
 globalThis.originalBoot = { observations, failures, hostReports, completed: false, vmExitObserved: false };
 /**
@@ -93,7 +94,7 @@ try {
         const directBuffers = globalThis.originalBoot.resourceTelemetry?.directBuffers ?? null;
 
         return {
-            graphics: graphics.resources(), directBuffers,
+            graphics: graphics.resources(), directBuffers, audio: audioOwner?.snapshot() ?? null,
             jsHeap: performance.memory
                 ? {
                         usedBytes: performance.memory.usedJSHeapSize,
@@ -164,10 +165,17 @@ try {
         root = globalThis.originalBootOwnedHome;
     }
 
+    if (admission.audioRuntime) {
+        const { loadFmodRuntime } = await import('./fmod-runtime.js');
+
+        audioOwner = await loadFmodRuntime(admission.audioRuntime.manifestSHA);
+        globalThis.originalBoot.audio = audioOwner.snapshot();
+    }
+
     await startSchedulerRuntime({
         version: 17,
         status: 'none',
-        javaProperties: ['user.dir=/app', `user.home=${root}`, 'java.library.path=/app/'],
+        javaProperties: ['user.dir=/app', `user.home=${root}`, 'java.library.path=/app/', `pz.browser.audio=${Boolean(audioOwner)}`],
         natives: {
             ...graphics.natives, ...keyboard.natives, ...mouse.natives, ...display.natives,
             ...controllers.natives, ...clock.natives, ...physics.natives, ...watch.natives, ...processes.natives,
@@ -324,6 +332,15 @@ try {
             cursor: owners.display.cursorSnapshot(), physics: owners.physics.snapshot(), processes: owners.processes.diagnostics(),
             graphics: owners.graphics.resources(), contextLost: gl.isContextLost(),
         };
+    }
+
+    if (audioOwner) {
+        try {
+            await audioOwner.dispose();
+            globalThis.originalBoot.audioAfterDispose = audioOwner.snapshot();
+        } catch (error) {
+            failures.push({ audioDisposeError: String(error.stack || error) });
+        }
     }
 
     if (metadataOwner) {

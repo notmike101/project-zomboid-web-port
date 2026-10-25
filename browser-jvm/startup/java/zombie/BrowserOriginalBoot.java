@@ -48,7 +48,7 @@ public final class BrowserOriginalBoot {
                     || !root.toString().equals(System.getProperty("user.home")))
                 throw new IllegalStateException("Fresh read-only media and owned writable home required");
             System.setProperty("zomboid.steam", "0");
-            Core.soundDisabled = true;
+            Core.soundDisabled = !Boolean.getBoolean("pz.browser.audio");
             ZomboidFileSystem.instance.setCacheDir(root.resolve("cache").toString());
             zombie.debug.DebugLog.getInstance().setStdOut(System.out);
             zombie.debug.DebugLog.getInstance().setStdErr(System.err);

@@ -27,8 +27,8 @@ public final class BrowserLifecycleBoot {
     public void start(Path ownedRoot) throws Exception {
         requireOwner();
         require(RenderThread.isRunning(), "Actual render owner must already be running");
-        require("0".equals(System.getProperty("zomboid.steam")) && Core.soundDisabled,
-                "Original -nosteam/-nosound branch must be configured before boot");
+        require("0".equals(System.getProperty("zomboid.steam")) && Core.soundDisabled != Boolean.getBoolean("pz.browser.audio"),
+                "Original offline/audio branch must be configured before boot");
         require(System.getProperty("nosave") == null && !Core.getInstance().isNoSave(), "Saving stays enabled");
         require(System.getProperty("server") == null && System.getProperty("nozombies") == null
                 && !zombie.network.GameServer.server && !zombie.network.GameClient.client,
@@ -43,7 +43,7 @@ public final class BrowserLifecycleBoot {
         Path cache = Path.of(ZomboidFileSystem.instance.getCacheDir()).toRealPath();
         require(cache.startsWith(root) && !cache.equals(root), "Existing cache must be inside owned root");
 
-        // Original mainThreadInit producers, selected original nosound branch.
+        // Original mainThreadInit producers, selected original audio branch.
         zombie.debug.DebugOptions.instance.init();
         zombie.debug.DebugOptions.instance.pathfindUseNativeCode.setValue(false);
         require(!zombie.debug.DebugOptions.instance.pathfindUseNativeCode.getValue(),

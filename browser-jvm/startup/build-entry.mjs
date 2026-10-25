@@ -49,7 +49,7 @@ function command(tool, args, cwd = work) {
     return result.stdout;
 }
 
-const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|port\/host\/(?:BrowserAvatarDiagnostics|PopulationBuffers|SpriteBuffers(?:\$[^/]+)?))\.class$/u;
+const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|port\/host\/(?:BrowserAvatarDiagnostics|PopulationBuffers|FmodArrays|SpriteBuffers(?:\$[^/]+)?))\.class$/u;
 const shadowedGraphics = /^port\/host\/SpriteGraphics(?:\$[^/]+)?\.class$/u;
 const earlierArchives = classpath.slice(0, classpath.indexOf(entry));
 
@@ -63,7 +63,7 @@ try {
         .map((name) => path.join(java, name));
 
     sources.push(path.resolve(import.meta.dirname, '../host/port/host/BrowserAvatarDiagnostics.java'));
-    sources.push(...['SpriteBuffers.java', 'PopulationBuffers.java'].map((name) => path.resolve(import.meta.dirname, '../host/port/host', name)));
+    sources.push(...['SpriteBuffers.java', 'PopulationBuffers.java', 'FmodArrays.java'].map((name) => path.resolve(import.meta.dirname, '../host/port/host', name)));
     await mkdir(classes);
     command('javac', ['--release', '17', '-classpath', classpath.map((record) => path.resolve(record.file)).join(path.delimiter),
         '-d', classes, ...sources]);

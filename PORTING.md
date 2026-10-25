@@ -577,3 +577,6 @@ The qualified ASCII case-alias metadata optimization is now public in `browser-j
 
 
 Four-way positive snapshot certification is now public with the same actual ordered certificate identity verified by the next preparation. Recovery pins its `map-four.mjs` dependency (10 base host inputs, 12 with real Bullet). Preserve those pins when assembling the next generation. The measured 14.479-second preparation result does not qualify gameplay; resolve the separately observed codec assembly dependency before the next genuine run. Unmeasured directory-metadata concurrency remains private.
+
+
+The optional original FMOD composition command now freezes the supplied HTML5 runtime, JNI provider and Java array helper as a new generation. Its real Node bank/event contract passes through bounded range I/O without whole-bank preloading for metadata. Continue with the remaining original Core loose-sound/channel/reverb and event-callback calls before enabling audio in the next full-world run. Preserve original eager sample-data requests, verify actual trusted-input AudioContext resume, and qualify audible browser output separately from the current `NOSOUND` data-only results.
