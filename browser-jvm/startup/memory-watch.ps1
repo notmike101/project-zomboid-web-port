@@ -24,7 +24,7 @@ while ($true) {
         }
     } while ($changed)
     $processes = @($all | Where-Object { $ids.Contains([int]$_.ProcessId) } | ForEach-Object {
-        @{ pid=[int]$_.ProcessId; parent=[int]$_.ParentProcessId; name=$_.Name; commandLine=$_.CommandLine; privateBytes=[long]$_.PrivatePageCount; workingSetBytes=[long]$_.WorkingSetSize }
+        [pscustomobject]@{ pid=[int]$_.ProcessId; parent=[int]$_.ParentProcessId; name=$_.Name; commandLine=$_.CommandLine; privateBytes=[long]$_.PrivatePageCount; workingSetBytes=[long]$_.WorkingSetSize }
     })
     $system = Get-CimInstance Win32_OperatingSystem
     $privateBytes = [long](($processes | Measure-Object privateBytes -Sum).Sum)
