@@ -143,9 +143,25 @@ public final class BrowserOriginalBoot {
     }
 
     /** Scanned only by the original observation producer at the bounded resource cadence. */
+    private static java.lang.reflect.Field ownedAllocations;
+    private static String directTelemetryFailure;
     private static String ownedDirectBuffers() {
-        long[] allocation = port.host.SpriteGraphics.allocationSnapshot();
-        return "{\"count\":" + allocation[0] + ",\"capacityBytes\":" + allocation[1] + "}";
+        if (directTelemetryFailure != null) return directTelemetryFailure;
+        try {
+            if (ownedAllocations == null) {
+                ownedAllocations = port.host.SpriteGraphics.class.getDeclaredField("allocations");
+                ownedAllocations.setAccessible(true);
+            }
+            java.util.Map<?, ?> allocations = (java.util.Map<?, ?>) ownedAllocations.get(null);
+            synchronized (allocations) {
+                long capacity = 0;
+                for (Object owner : allocations.values()) capacity += ((java.nio.ByteBuffer) owner).capacity();
+                return "{\"count\":" + allocations.size() + ",\"capacityBytes\":" + capacity + "}";
+            }
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError unavailable) {
+            directTelemetryFailure = "{\"unavailable\":true,\"error\":" + quote(unavailable.toString()) + "}";
+            return directTelemetryFailure;
+        }
     }
 
     /** Reads intended writable paths and existing ancestors; creates no directories. */

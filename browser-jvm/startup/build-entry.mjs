@@ -49,7 +49,12 @@ function command(tool, args, cwd = work) {
     return result.stdout;
 }
 
-const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|port\/host\/(?:BrowserAvatarDiagnostics|PopulationBuffers|Sprite(?:Graphics|Buffers)(?:\$[^/]+)?))\.class$/u;
+const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|port\/host\/(?:BrowserAvatarDiagnostics|PopulationBuffers|SpriteBuffers(?:\$[^/]+)?))\.class$/u;
+const shadowedGraphics = /^port\/host\/SpriteGraphics(?:\$[^/]+)?\.class$/u;
+const earlierArchives = classpath.slice(0, classpath.indexOf(entry));
+
+assert.ok(earlierArchives.some((record) => command('jar', ['--list', '--file', path.resolve(record.file)])
+    .split(/\r?\n/u).includes('port/host/SpriteGraphics.class')), 'The qualified graphics facade must precede the entry archive');
 
 try {
     const classes = path.join(work, 'classes');
@@ -58,13 +63,20 @@ try {
         .map((name) => path.join(java, name));
 
     sources.push(path.resolve(import.meta.dirname, '../host/port/host/BrowserAvatarDiagnostics.java'));
-    sources.push(...['SpriteGraphics.java', 'SpriteBuffers.java', 'PopulationBuffers.java'].map((name) => path.resolve(import.meta.dirname, '../host/port/host', name)));
+    sources.push(...['SpriteBuffers.java', 'PopulationBuffers.java'].map((name) => path.resolve(import.meta.dirname, '../host/port/host', name)));
     await mkdir(classes);
     command('javac', ['--release', '17', '-classpath', classpath.map((record) => path.resolve(record.file)).join(path.delimiter),
         '-d', classes, ...sources]);
     const candidate = path.join(work, 'entry.jar');
 
-    await copyFile(entry.file, candidate);
+    const base = path.join(work, 'base');
+    const baseNames = command('jar', ['--list', '--file', path.resolve(entry.file)]).trim().split(/\r?\n/u);
+
+    assert.ok(baseNames.every((name) => !name.startsWith('/') && !name.includes('\\') && !name.split('/').includes('..')));
+    await mkdir(base);
+    command('jar', ['--extract', '--file', path.resolve(entry.file)], base);
+    await Promise.all(baseNames.filter((name) => shadowedGraphics.test(name)).map((name) => rm(path.join(base, name))));
+    command('jar', ['--create', '--no-manifest', '--file', candidate, '-C', base, '.']);
     command('jar', ['--update', '--file', candidate, '-C', classes, '.']);
     const archives = [];
 
@@ -86,6 +98,11 @@ try {
     const [before, after] = archives;
 
     for (const name of before.names) {
+        if (shadowedGraphics.test(name)) {
+            assert.equal(after.names.includes(name), false, `Raw graphics facade still shadows qualified archive: ${name}`);
+            continue;
+        }
+
         assert.ok(after.names.includes(name), `Removed entry: ${name}`);
 
         if (!name.endsWith('/') && !authored.test(name)) {
