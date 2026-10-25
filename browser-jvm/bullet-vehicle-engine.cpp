@@ -12,6 +12,7 @@ static int nextConstraintId=0;
 #include <vector>
 #include <cmath>
 #include "btBulletDynamicsCommon.h"
+#include "BulletCollision/CollisionDispatch/btManifoldResult.h"
 extern "C" int ragdoll_body_contains(const btCollisionObject* body);
 
 // Candidate real Bullet collision core. PZ's embedded upstream revision is unknown.
@@ -35,10 +36,15 @@ struct World {
     btDiscreteDynamicsWorld world{&dispatcher,&broadphase,&solver,&configuration};
 };
 static World* ownedWorld=nullptr;
+// Original 0x18007bcd9..7bcf9 multiplies rolling coefficients; newer upstream mixes ordinary friction.
+static btScalar nativeCombinedRollingFriction(const btCollisionObject* first,const btCollisionObject* second){
+    btScalar value=first->getRollingFriction()*second->getRollingFriction();return btMin(btMax(value,btScalar(-10)),btScalar(10));
+}
 extern "C" {
 int create_world() {
     if(ownedWorld) return 0;
     ownedWorld=new World;nextConstraintId=0;
+    gCalculateCombinedRollingFrictionCallback=nativeCombinedRollingFriction;
     ownedWorld->world.setGravity(btVector3(0,-10,0));
     ownedWorld->world.getSolverInfo().m_erp2=btScalar(0.8); // Original Dynamics constructor 0x180059f90 stores double 0.8.
     ownedWorld->world.getSolverInfo().m_restitutionVelocityThreshold=0; // Original 0x18006447a..0x180064482 multiplies restitution then max(0), without a velocity cutoff.
