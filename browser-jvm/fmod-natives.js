@@ -3,6 +3,21 @@ const handleKey = (kind, id) => `${kind}:${BigInt(id)}`;
 const arrayLength = async (lib, destination) => destination instanceof BigInt64Array
     ? destination.length
     : (await lib.port.host.FmodArrays).arrayLength(destination);
+const javaValue = (value) => {
+    if (typeof value !== 'bigint') {
+        return value;
+    }
+
+    const number = Number(value);
+
+    if (!Number.isSafeInteger(number) || BigInt(number) !== value) {
+        throw new Error('FMOD identity exceeds exact browser Java long transport');
+    }
+
+    /* The pinned CheerpJ bridge accepts Number for Java long results/arguments;
+     * unsupported JS bigint converts to zero. Java-to-JS long arguments remain bigint. */
+    return number;
+};
 
 /**
  * Owns actual FMOD Studio objects behind the original javafmod JNI identities.
@@ -746,7 +761,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                 for (const entry of callbacks) {
                     try {
                         // eslint-disable-next-line no-await-in-loop -- Preserve actual native callback order.
-                        await entry.callback[entry.method](...entry.args);
+                        await entry.callback[entry.method](...(args[0] ? entry.args.map(javaValue) : entry.args));
                         deliveredCallbacks++;
                     } catch (failure) {
                         failures.push(failure);
@@ -761,7 +776,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                     throw new AggregateError(failures, 'FMOD operation/callback delivery failed');
                 }
 
-                return value;
+                return args[0] ? javaValue(value) : value;
             });
 
             deliveries.add(delivery);
