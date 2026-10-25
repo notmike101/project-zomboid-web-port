@@ -592,6 +592,42 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             expect(engine._set_ragdoll_local_rotation(id, ...rotation) === 1, 'Actual ragdoll local rotation rejected');
         },
         /**
+         * Applies the original vehicle-contact tuning to every owned ragdoll body.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {Float32Array} values - Original eight-float override record.
+         * @returns {boolean} Original JNI success result, including an absent identity.
+         */
+        setRagdollBodyDynamics(lib, id, values) {
+            expect(values instanceof Float32Array && values.length === 8, 'Original eight-float dynamics override required');
+            floats(values, (record) => {
+                expect(engine._set_ragdoll_body_dynamics(id, record) === 1, 'Actual ragdoll dynamics override rejected');
+            });
+
+            return true;
+        },
+        /**
+         * Restores the current original per-part definition without waking the bodies.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @returns {boolean} Whether the original identity exists.
+         */
+        resetRagdollBodyDynamics(lib, id) {
+            const definition = ragdollDefinitions().find((entry) => entry.kind === 'bodyDynamics');
+
+            expect(definition?.values.length === 88, 'Original per-part dynamics definition required');
+            let result;
+
+            floats(new Float32Array(definition.values), (records) => {
+                result = engine._reset_ragdoll_body_dynamics(id, records);
+                expect(result === 1 || result === 2, 'Actual ragdoll dynamics reset rejected');
+            });
+
+            return result === 1;
+        },
+        /**
          * Accumulates actual body force and its original relative-position torque.
          *
          * @param {object} lib - Original Java namespace.
