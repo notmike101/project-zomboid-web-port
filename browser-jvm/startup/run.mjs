@@ -855,6 +855,7 @@ try {
     if (!evidence.memoryAbort && page && !page.isClosed()) {
         try {
             evidence.failureState = await bounded(page.evaluate(() => ({ ...globalThis.originalBoot, mediaNegativeStat: globalThis.originalBoot?.mediaNegativeStatSnapshot?.() })), 5_000);
+            writeFileSync(path.join(output, 'failure-state-before-audit.json'), JSON.stringify(evidence.failureState, null, 2));
 
             if (!evidence.failureState?.completed) {
                 await bounded(page.locator('#stop').click(), 5_000);
