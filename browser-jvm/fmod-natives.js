@@ -44,6 +44,10 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
     let rangeReads = 0;
     let maxRangeBytes = 0;
     let openFiles = 0;
+    let deliveredBytes = 0;
+    let cacheBytes = 0;
+    let peakCacheBytes = 0;
+    const fileOwners = new Set();
     let ioFailure;
     let disposed = false;
     const ownedDSPs = [];
@@ -148,6 +152,14 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         return ids.length;
     };
 
+    const clearFileCache = (handle) => {
+        for (const bytes of handle.cache.values()) {
+            cacheBytes -= bytes.byteLength;
+        }
+
+        handle.cache.clear();
+    };
+
     const fileCallbacks = async (path) => {
         const length = await files.size(path);
 
@@ -163,17 +175,24 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                 }
 
                 openFiles++;
+                const handle = { position: 0, closed: false, cache: new Map() };
 
-                return { filesize: length, handle: { position: 0, closed: false }, result: FMOD.OK };
+                fileOwners.add(handle);
+
+                return { filesize: length, handle, result: FMOD.OK };
             },
             closecallback(handle) {
                 if (!handle.closed) {
                     handle.closed = true;
+                    clearFileCache(handle);
+                    fileOwners.delete(handle);
                     openFiles--;
                 }
             },
             seekcallback(handle, position) {
                 if (handle.closed || position < 0 || position > length) {
+                    clearFileCache(handle);
+
                     return FMOD.ERR_FILE_COULDNOTSEEK;
                 }
 
@@ -183,7 +202,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             },
             async readcallback(handle, pointer, count) {
                 try {
-                    if (handle.closed) {
+                    if (handle.closed || disposed) {
                         return { bytesread: 0, result: FMOD.ERR_INVALID_HANDLE };
                     }
 
@@ -191,25 +210,54 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                     let copied = 0;
 
                     while (copied < requested) {
-                        const chunk = Math.min(1_024 * 1_024, requested - copied);
-                        // eslint-disable-next-line no-await-in-loop -- Keep one bounded source range active for this native read.
-                        const bytes = await files.read(path, handle.position + copied, chunk);
+                        const position = handle.position + copied;
+                        const start = Math.floor(position / 65_536) * 65_536;
+                        let bytes = handle.cache.get(start);
 
-                        if (bytes.byteLength !== chunk) {
-                            throw new Error('FMOD range provider returned the wrong byte count');
+                        if (bytes) {
+                            handle.cache.delete(start);
+                        } else {
+                            if (handle.cache.size === 4) {
+                                const oldest = handle.cache.keys().next().value;
+
+                                cacheBytes -= handle.cache.get(oldest).byteLength;
+                                handle.cache.delete(oldest);
+                            }
+
+                            const size = Math.min(65_536, length - start);
+
+                            // eslint-disable-next-line no-await-in-loop -- One bounded source range per actual file owner.
+                            bytes = await files.read(path, start, size);
+
+                            if (handle.closed || disposed) {
+                                return { bytesread: 0, result: FMOD.ERR_INVALID_HANDLE };
+                            }
+
+                            if (bytes.byteLength !== size) {
+                                throw new Error('FMOD range provider returned the wrong byte count');
+                            }
+
+                            rangeBytes += bytes.byteLength;
+                            maxRangeBytes = Math.max(maxRangeBytes, bytes.byteLength);
+                            rangeReads++;
+                            cacheBytes += bytes.byteLength;
+                            peakCacheBytes = Math.max(peakCacheBytes, cacheBytes);
                         }
 
-                        FMOD.copyToPtr(pointer + copied, bytes, bytes.byteLength);
-                        copied += bytes.byteLength;
-                        rangeBytes += bytes.byteLength;
-                        maxRangeBytes = Math.max(maxRangeBytes, bytes.byteLength);
-                        rangeReads++;
+                        handle.cache.set(start, bytes);
+                        const offset = position - start;
+                        const chunk = Math.min(bytes.byteLength - offset, requested - copied);
+
+                        FMOD.copyToPtr(pointer + copied, bytes.subarray(offset, offset + chunk), chunk);
+                        copied += chunk;
                     }
 
                     handle.position += copied;
+                    deliveredBytes += copied;
 
                     return { bytesread: copied, result: copied === count ? FMOD.OK : FMOD.ERR_FILE_EOF };
                 } catch (error) {
+                    clearFileCache(handle);
                     ioFailure ??= error;
 
                     return { bytesread: 0, result: FMOD.ERR_FILE_BAD };
@@ -788,7 +836,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
 
     return {
         natives,
-        snapshot: () => ({ initialized, disposed, version, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, audibleVerified: false }),
+        snapshot: () => ({ initialized, disposed, version, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, audibleVerified: false }),
         async dispose() {
             /* The host calls teardown after the original VM has joined. Drain complete JNI
              * deliveries (including callbacks outside the SDK lock) before releasing the engine. */
@@ -796,15 +844,23 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             disposed = true;
             await lock;
 
-            for (const dsp of ownedDSPs) {
-                dsp.release();
-            }
+            try {
+                for (const dsp of ownedDSPs) {
+                    dsp.release();
+                }
 
-            ownedDSPs.length = 0;
-            masterChannelGroup = undefined;
+                ownedDSPs.length = 0;
+                masterChannelGroup = undefined;
 
-            if (system) {
-                await system.release();
+                if (system) {
+                    await system.release();
+                }
+            } finally {
+                for (const handle of fileOwners) {
+                    clearFileCache(handle);
+                }
+
+                fileOwners.clear();
             }
 
             system = undefined;
