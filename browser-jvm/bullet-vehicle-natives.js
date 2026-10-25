@@ -503,6 +503,55 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             });
         },
         /**
+         * Sets the original root local-pose postrotation.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {...number} rotation - Original quaternion XYZW.
+         */
+        setRagdollLocalTransformRotation(lib, id, ...rotation) {
+            expect(rotation.length === 4 && rotation.every(Number.isFinite), 'Original finite quaternion required');
+            expect(engine._set_ragdoll_local_rotation(id, ...rotation) === 1, 'Actual ragdoll local rotation rejected');
+        },
+        /**
+         * Accumulates actual body force and its original relative-position torque.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {number} part - Original body part.
+         * @param {Float32Array} values - Force XYZ and relative position XYZ.
+         */
+        applyForce(lib, id, part, values) {
+            expect(values instanceof Float32Array && values.length >= 6, 'Original six-float force record required');
+            floats(values.subarray(0, 6), (record) => {
+                expect(engine._apply_ragdoll_force(id, part, record, 0) === 1, 'Actual ragdoll force rejected');
+            });
+        },
+        /**
+         * Applies the original linear-factor and inertia-scaled body impulse.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {number} part - Original body part.
+         * @param {Float32Array} values - Impulse XYZ and relative position XYZ.
+         */
+        applyImpulse(lib, id, part, values) {
+            expect(values instanceof Float32Array && values.length >= 6, 'Original six-float impulse record required');
+            floats(values.subarray(0, 6), (record) => {
+                expect(engine._apply_ragdoll_force(id, part, record, 1) === 1, 'Actual ragdoll impulse rejected');
+            });
+        },
+        /**
+         * Disables the original joint while preserving its world attachment.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original ragdoll identity.
+         * @param {number} joint - Original constraint identity.
+         */
+        detachConstraint(lib, id, joint) {
+            expect(engine._detach_ragdoll_constraint(id, joint) === 1, 'Actual ragdoll joint disable rejected');
+        },
+        /**
          * Attaches or detaches the actual bodies and linked constraints.
          *
          * @param {object} lib - Original Java namespace.

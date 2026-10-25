@@ -8,7 +8,7 @@ struct OwnedRagdoll {
     std::vector<std::unique_ptr<btRigidBody>> bodies;
     std::vector<std::unique_ptr<btTypedConstraint>> joints;
     bool active=false;
-    btTransform root=btTransform::getIdentity();
+    btTransform root=btTransform::getIdentity(),localRotation=btTransform::getIdentity();
     std::array<btTransform,11> initialBody;
     std::array<int,11> anchorBones{};
     std::array<btTransform,11> anchorOffsets;
@@ -123,7 +123,7 @@ extern "C" int update_ragdoll_pose(int id,int count,const float* records){
     for(int i=0;i<count;i++){
         const float* r=records+i*7;for(int j=0;j<7;j++)if(!std::isfinite(r[j]))return 0;
         btQuaternion rotation(r[3],r[4],r[5],r[6]);if(rotation.length2()==0)return 0;
-        local[i]=btTransform(rotation,btVector3(r[0],r[1],r[2]));world[i]=i==0?local[i]:world[owner->definition->parents[i]]*local[i];
+        local[i]=btTransform(rotation,btVector3(r[0],r[1],r[2]));if(i==0)local[i]=local[i]*owner->localRotation;world[i]=i==0?local[i]:world[owner->definition->parents[i]]*local[i];
     }
     for(int part=0;part<11;part++){
         auto& body=*owner->bodies[part];if(owner->active)ownedWorld->world.removeRigidBody(&body);

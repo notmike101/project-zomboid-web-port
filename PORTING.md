@@ -589,3 +589,5 @@ Ordinary FMOD Core loose-sound/channel/reverb and SoundManager callback dispatch
 
 
 The next aggregate `target/browser-jvm/bullet-ragdoll-pose-marked/bullet-manifest.json` adds qualified nonzero root/current-pose placement and the pinned capsule nonvirtual fastpath derivative. Its focused original DLL replay passes 132 float32 body-transform fields and five actual capsule support vectors. Both capsule source hashes and the body-header hash are manifest-bound. Continue with previous-pose velocity derivation, local rotation, skeleton/rigid-body output reconstruction, impulses and detach before claiming a connected original combat path; preserve the still-unqualified ragdoll terrain/publication boundary.
+
+The qualified `target/browser-jvm/bullet-ragdoll-actions` aggregate adds local rotation, forces, impulses and joint disabling to the original body owner. Continue with previous-pose initialization and simulation readback before claiming complete ragdoll gameplay. Bind the matching frozen adapter and manifest when selecting this aggregate; do not replace the active game generation in place.
