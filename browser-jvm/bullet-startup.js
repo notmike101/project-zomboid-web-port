@@ -3,7 +3,7 @@ import { createVehicleWorldNatives } from './bullet-vehicle-natives.js';
 
 let owner;
 const bulletPrefix = 'Java_zombie_core_physics_Bullet_';
-const retainedDefinitions = new Set(['defineRagdollBodyDynamics', 'defineRagdollConstraints', 'defineRagdollAnchors', 'defineRagdollBodyPartInfo']);
+const retainedDefinitions = new Set(['defineRagdollBodyDynamics', 'defineRagdollConstraints', 'defineRagdollAnchors', 'defineRagdollBodyPartInfo', 'initializeRagdollSkeleton', 'setBallisticsTargetAdjustingShapeScale']);
 
 /**
  * Composes one real Bullet world with the existing Clipper, collision and ragdoll-definition owner.

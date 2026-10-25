@@ -57,6 +57,39 @@ export function createRagdollDefinitions() {
     return {
         natives: {
             /**
+             * Copies the original template's parent prefix; spare Java array entries are ignored.
+             *
+             * @param {object} lib - Browser JVM native context.
+             * @param {number} count - Actual bone count.
+             * @param {Int32Array} parents - Original parent identifiers, including spare capacity.
+             */
+            Java_zombie_core_physics_Bullet_initializeRagdollSkeleton(lib, count, parents) {
+                if (!(parents instanceof Int32Array) || !Number.isInteger(count) || count < 0
+                    || count > parents.length || count > 1_048_576) {
+                    throw new RangeError('Original ragdoll skeleton requires a contained integer parent prefix');
+                }
+
+                definitions.set('skeleton', { stride: 1, values: new Int32Array(parents.subarray(0, count)) });
+            },
+            /**
+             * Stores original global shape-adjustment coordinates; no target is allocated here.
+             *
+             * @param {object} lib - Browser JVM native context.
+             * @param {number} x - Original float X scale.
+             * @param {number} y - Original float Y scale.
+             * @param {number} z - Original float Z scale.
+             */
+            Java_zombie_core_physics_Bullet_setBallisticsTargetAdjustingShapeScale(lib, x, y, z) {
+                const values = new Float64Array([Math.fround(x), Math.fround(y), Math.fround(z), 0]);
+
+                if (!values.every(Number.isFinite)) {
+                    throw new RangeError('Original shape adjustment requires finite Java floats');
+                }
+
+                definitions.set('ballisticsAdjustingShapeScale', { stride: 4, values });
+            },
+
+            /**
              * Stores original body damping, sleeping and friction definitions.
              *
              * @param {object} lib - Browser JVM native context.
