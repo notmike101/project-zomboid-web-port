@@ -1,4 +1,4 @@
-import { NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual } from './population-kernel.js';
+import { NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual, soundChunks, worldSoundGroups, soundTarget } from './population-kernel.js';
 
 import { decodeCell, encodeCell, decodeIDs, encodeIDs, decodeVirtual, encodeVirtual, encodeCollision, remapOutfit } from './population-save-codec.js';
 
@@ -212,6 +212,7 @@ export function createPopulationNatives() {
         virtualDirty: true,
         virtual: [],
         savedVirtualNames: null,
+        sounds: [],
         terminalFailure: null,
     };
 
@@ -623,6 +624,95 @@ export function createPopulationNatives() {
     }
 
     /**
+     * Merges original sound events, generates affected groups and retargets existing leaders.
+     *
+     * @param {object} lib - Actual Java transport.
+     * @param {Array<object>} batch - Original worker commands.
+     * @param {number} now - Original worker wall-clock sample in milliseconds.
+     * @returns {Promise<void>} Completion of original ordered sound influence.
+     */
+    async function updateSounds(lib, batch, now) {
+        for (const task of batch.filter((entry) => entry.type === 'sound')) {
+            const existing = state.sounds.find((sound) => ['x', 'y', 'radius', 'volume'].every((key) => sound[key] === task.sound[key]));
+
+            if (existing) {
+                existing.updatedAt = now;
+            } else {
+                state.sounds.push({ ...task.sound, updatedAt: now, processedAt: 0 });
+            }
+        }
+
+        state.sounds = state.sounds.filter((sound) => sound.updatedAt + 1_000 >= now);
+        await sequence(state.sounds, async (sound) => {
+            if (sound.processedAt + 5_000 >= now) {
+                return;
+            }
+
+            await sequence(soundChunks(sound), async ([cx, cy]) => {
+                const cellX = Math.floor(cx / 32);
+                const cellY = Math.floor(cy / 32);
+
+                if (!inGrid(cellX, cellY)) {
+                    return;
+                }
+
+                const cell = await ensureCell(lib, cx, cy);
+                const index = ((cx % 32 + 32) % 32) + ((cy % 32 + 32) % 32) * 32;
+
+                if (!cell.chunks[index].some((record) => Math.floor(record.z) === 0 && !(record.state & 8))) {
+                    return;
+                }
+
+                const flags = virtualFlags(await collisionNeighborhood(lib, cellX, cellY));
+                const groups = worldSoundGroups([{ cx, cy, records: cell.chunks[index] }], sound, rng, flags);
+
+                if (!groups.length) {
+                    return;
+                }
+
+                const removed = new Set(groups.flatMap((group) => group.records));
+
+                for (const group of groups) {
+                    Object.assign(group.records[0], { px: group.targetX, py: group.targetY });
+                }
+
+                state.virtual.push(...groups);
+                cell.chunks[index] = cell.chunks[index].filter((record) => !removed.has(record));
+                state.populationDirty.add(key(cellX, cellY));
+                state.virtualDirty = true;
+            });
+            sound.processedAt = now;
+        });
+
+        for (const group of state.virtual) {
+            const x = Math.floor(group.records[0].x);
+            const y = Math.floor(group.records[0].y);
+            let nearest = null;
+            let best = 2_147_483_647;
+
+            for (const sound of state.sounds) {
+                const dx = Math.fround(Math.fround(sound.x + 0.5) - Math.fround(x + 0.5));
+                const dy = Math.fround(Math.fround(sound.y + 0.5) - Math.fround(y + 0.5));
+                const distance = Math.fround(Math.fround(dy * dy) + Math.fround(dx * dx));
+                const squared = distance >= 2_147_483_648 ? -2_147_483_648 : Math.trunc(distance);
+
+                if (squared < best && squared < Math.imul(sound.radius, sound.radius)) {
+                    nearest = sound;
+                    best = squared;
+                }
+            }
+
+            if (nearest && nearest !== group.sound) {
+                [group.targetX, group.targetY] = soundTarget(nearest, x + 0.5, y + 0.5, rng);
+                group.sound = nearest;
+                group.followSteps = 0;
+                Object.assign(group.records[0], { px: group.targetX, py: group.targetY });
+                state.virtualDirty = true;
+            }
+        }
+    }
+
+    /**
      * Advances original ordinary-game moving groups and transfers ownership exactly once.
      *
      * @param {object} lib - Actual Java file transport.
@@ -640,9 +730,12 @@ export function createPopulationNatives() {
             const chunkIndex = ((Math.floor(leader.x / 8) % 32 + 32) % 32) + ((Math.floor(leader.y / 8) % 32 + 32) % 32) * 32;
             let publish = cell.loaded.has(chunkIndex) && !loadedAreaBorder(Math.floor(leader.x), Math.floor(leader.y));
             let blocked = false;
+            let stoppedFollowing = false;
 
             if (!publish) {
                 const [gx, gy, w, h] = state.grid;
+                const oldX = Math.floor(leader.x);
+                const oldY = Math.floor(leader.y);
                 const next = advanceVirtual(group, state.workerTime[0], [gx * 256, gy * 256, (gx + w) * 256, (gy + h) * 256], flags);
 
                 if (leader.x !== next.x || leader.y !== next.y || group.alternate !== next.alternate) {
@@ -653,6 +746,13 @@ export function createPopulationNatives() {
                 Object.assign(leader, { x: next.x, y: next.y });
                 group.alternate = next.alternate;
                 blocked = next.blocked;
+
+                if (!blocked && group.sound && (oldX !== Math.floor(next.x) || oldY !== Math.floor(next.y))) {
+                    group.followSteps = ((group.followSteps + 1) << 16) >> 16;
+                    blocked = group.followSteps >= state.config.get('FollowSoundDistance');
+                    stoppedFollowing = blocked;
+                }
+
                 dirtyRecord(leader);
             }
 
@@ -664,7 +764,7 @@ export function createPopulationNatives() {
             const targetIndex = ((Math.floor(leader.x / 8) % 32 + 32) % 32) + ((Math.floor(leader.y / 8) % 32 + 32) % 32) * 32;
             const interior = publish;
 
-            publish ||= targetCell.loaded.has(targetIndex) && loadedAreaBorder(Math.floor(leader.x), Math.floor(leader.y));
+            publish ||= !stoppedFollowing && targetCell.loaded.has(targetIndex) && loadedAreaBorder(Math.floor(leader.x), Math.floor(leader.y));
             const records = scatterVirtual(group, rng, flags);
 
             if (publish) {
@@ -1129,6 +1229,7 @@ export function createPopulationNatives() {
                 })),
             }));
             state.savedVirtualNames = restored.names;
+            state.sounds = [];
 
             state.reopenID = ids ? decodeIDs(decoder(ids)) : 1;
             state.pop = true;
@@ -1187,6 +1288,26 @@ export function createPopulationNatives() {
             }
 
             state.producer.push({ type: 'config', name, value });
+        },
+        /**
+         * Queues the real original sound after Java's hearing/source eligibility checks.
+         *
+         * @param {object} lib - Actual Java namespace.
+         * @param {number} x - Original sound x.
+         * @param {number} y - Original sound y.
+         * @param {number} radius - Original hearing-adjusted radius.
+         * @param {number} volume - Original sound volume.
+         */
+        worldSound(lib, x, y, radius, volume) {
+            for (const value of [x, y, radius, volume]) {
+                integer(value, 'world sound');
+            }
+
+            if (!state.pop || radius < 0) {
+                unsupported('world sound lifecycle/radius');
+            }
+
+            state.producer.push({ type: 'sound', sound: { x, y, radius, volume } });
         },
         /**
          * Copies the actual original persistent-outfit dictionary.
@@ -1479,6 +1600,7 @@ export function createPopulationNatives() {
                 state.realCount = realTask.records.length;
             }
 
+            await updateSounds(lib, batch, sampledTime);
             await updateVirtual(lib);
 
             if (interval > 0 && nextTime && !state.gameState.get('PAUSED')) {
@@ -1735,6 +1857,7 @@ export function createPopulationNatives() {
             state.pendingOutput = [];
             state.virtual = [];
             state.savedVirtualNames = null;
+            state.sounds = [];
             state.registry.clear();
             state.consumed.clear();
             state.config = new Map(nativeDefaults);
@@ -1938,6 +2061,7 @@ export function createPopulationNatives() {
             registered: state.registry.size,
             virtualGroups: state.virtual.length,
             virtualRecords: state.virtual.reduce((sum, group) => sum + group.records.length, 0),
+            activeSounds: state.sounds.length,
 
             successfulSaves: state.successfulSaves ?? 0,
             saveDeadline: state.autoSaveDeadline,

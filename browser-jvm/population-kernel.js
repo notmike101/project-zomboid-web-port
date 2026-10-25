@@ -133,6 +133,23 @@ class NativeMT {
 
         return Number(product >> 32n);
     }
+
+    /**
+     * Reproduces the native 24-bit float draw over the selected range.
+     *
+     * @param {number} min - Original lower bound.
+     * @param {number} max - Original upper bound.
+     * @returns {number} Original float32 random value.
+     */
+    real(min, max) {
+        if (min === max) {
+            return min;
+        }
+
+        const fraction = f((this.next() >>> 8) * 2 ** -24);
+
+        return f(f(fraction * f(max - min)) + min);
+    }
 }
 
 /**
@@ -825,4 +842,98 @@ function scatterVirtual(group, rng, flags) {
     });
 }
 
-export { NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual };
+/**
+ * Selects the original distance-scaled jitter around a heard sound.
+ *
+ * @param {object} sound - Original integer x/y/radius/volume event.
+ * @param {number} x - Original source center x.
+ * @param {number} y - Original source center y.
+ * @param {NativeMT} rng - Actual native random state.
+ * @returns {number[]} Original integer target x/y.
+ */
+function soundTarget(sound, x, y, rng) {
+    const distance = f(Math.abs(f(f(sound.y + 0.5) - y)) + Math.abs(f(f(sound.x + 0.5) - x)));
+
+    return [Math.floor(f(sound.x + f(rng.real(-distance, distance) * 0.25))),
+        Math.floor(f(sound.y + f(rng.real(-distance, distance) * 0.25)))];
+}
+
+/**
+ * Forms original sound-following groups from ordered affected global chunks.
+ *
+ * @param {Array<object>} chunks - Actual cx/cy and records in native y/x order.
+ * @param {object} sound - Actual original sound event.
+ * @param {NativeMT} rng - Actual native random state.
+ * @param {function(number, number): number} flags - Actual collision bits.
+ * @returns {Array<object>} Original groups of up to26 connected ground records.
+ */
+function worldSoundGroups(chunks, sound, rng, flags) {
+    const groups = [];
+
+    for (const chunk of chunks) {
+        const centerX = chunk.cx * 8 + 4;
+        const centerY = chunk.cy * 8 + 4;
+        const dx = f(f(sound.x + 0.5) - centerX);
+        const dy = f(f(sound.y + 0.5) - centerY);
+        const distance = f(f(dy * dy) + f(dx * dx));
+
+        if (distance > Math.imul(sound.radius, sound.radius) || distance < 100) {
+            continue;
+        }
+
+        const eligible = chunk.records.filter((record) => Math.floor(record.z) === 0 && !(record.state & 8)
+            && !(flags(Math.floor(record.x), Math.floor(record.y)) & 0x19));
+
+        while (eligible.length) {
+            const [targetX, targetY] = soundTarget(sound, centerX, centerY, rng);
+            const first = eligible.shift();
+            const x = Math.floor(first.x);
+            const y = Math.floor(first.y);
+            const left = Math.trunc(x / 8) * 8;
+            const top = Math.trunc(y / 8) * 8;
+            const reachable = redistributionReachable(x, y, flags);
+            const records = [first];
+
+            for (let i = 0; i < eligible.length && records.length < 26; i++) {
+                const dx = Math.floor(eligible[i].x) - left;
+                const dy = Math.floor(eligible[i].y) - top;
+
+                if (dx >= 0 && dx < 8 && dy >= 0 && dy < 8 && reachable[dx + dy * 8]) {
+                    records.push(...eligible.splice(i--, 1));
+                }
+            }
+
+            groups.push({ records, targetX, targetY, sound, followSteps: 0, alternate: false });
+        }
+    }
+
+    return groups;
+}
+
+/**
+ * Enumerates original affected chunks in worker y/x order, excluding the inner10-square region.
+ *
+ * @param {object} sound - Original integer sound fields.
+ * @returns {Array<number[]>} Original affected global chunk coordinates.
+ */
+function soundChunks(sound) {
+    const chunks = [];
+
+    /* eslint-disable unicorn/prefer-math-trunc -- Native int32 addition wraps before chunk division. */
+    for (let cy = Math.trunc(((sound.y - sound.radius) | 0) / 8); cy <= Math.trunc(((sound.y + sound.radius) | 0) / 8); cy++) {
+        for (let cx = Math.trunc(((sound.x - sound.radius) | 0) / 8); cx <= Math.trunc(((sound.x + sound.radius) | 0) / 8); cx++) {
+            const dx = f(f(sound.x + 0.5) - f(cx * 8 + 4));
+            const dy = f(f(sound.y + 0.5) - f(cy * 8 + 4));
+            const squared = f(f(dy * dy) + f(dx * dx));
+
+            if (squared >= 100 && squared <= Math.imul(sound.radius, sound.radius)) {
+                chunks.push([cx, cy]);
+            }
+        }
+    }
+    /* eslint-enable unicorn/prefer-math-trunc */
+
+    return chunks;
+}
+
+export { NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual, soundTarget, worldSoundGroups, soundChunks };
