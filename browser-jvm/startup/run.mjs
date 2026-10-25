@@ -720,7 +720,9 @@ try {
         await Promise.race([hostFailure, page.waitForFunction(() => {
             const boot = globalThis.originalBoot;
 
-            return boot?.completed || boot?.failures?.length || boot?.presentation?.presents?.length === 3;
+            return boot?.completed || boot?.failures?.length || boot?.presentation?.presents?.length === 3
+                || (boot?.presentation?.observationErrors?.length >= 3
+                    && boot.presentation.actualPresents > boot.currentOriginalState.actualPresentsAtObservation);
         }, undefined, { timeout: frontendRemaining() })]);
         const appearance = await page.evaluate(() => globalThis.originalBoot);
 
@@ -730,6 +732,7 @@ try {
         evidence.frontendAppearance = setup;
         evidence.frontendAppearanceConsumed = appearance.lastConsumedUi;
         evidence.actualPresentation = appearance.presentation;
+        evidence.presentationDiagnosticUnavailable = appearance.presentation.observationErrors?.length > 0;
 
         for (const [index, sample] of appearance.presentation.presents.entries()) {
             assert.match(sample.png, /^data:image\/png;base64,/u);

@@ -2,6 +2,21 @@ import { normalizeDesktopShader, preprocessShaderUnit, instrumentAlphaTest, hasA
 import { SpriteAttributeState } from './sprite-attrib.js';
 
 /**
+ * Retains an actual WebGL object identity without inventing unknown handles.
+ *
+ * @param {Map<number, unknown>} map - Owned object handle registry.
+ * @param {unknown} value - Actual WebGL state object.
+ * @returns {number|string} Owned handle, zero for null, or explicit unknown.
+ */
+function observedHandle(map, value) {
+    if (value === null) {
+        return 0;
+    }
+
+    return [...map].find(([, object]) => object === value)?.[0] ?? 'unknown';
+}
+
+/**
  * Resolves an owned graphics handle and rejects foreign handles.
  *
  * @param {Map} map - Registry of owned browser objects indexed by handle.
@@ -1918,6 +1933,19 @@ export function createSpriteNatives(canvas, report) {
 
     return {
         natives, diagnostics,
+        /**
+         * Reads the actual rendering target and raster state without changing it.
+         *
+         * @returns {object} Current WebGL state for a synchronous owner observation.
+         */
+        inspectState: () => ({
+            drawFramebuffer: observedHandle(framebuffers, gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)),
+            readFramebuffer: observedHandle(framebuffers, gl.getParameter(gl.READ_FRAMEBUFFER_BINDING)),
+            program: observedHandle(programs, gl.getParameter(gl.CURRENT_PROGRAM)),
+            viewport: [...gl.getParameter(gl.VIEWPORT)], scissor: [...gl.getParameter(gl.SCISSOR_BOX)],
+            scissorEnabled: gl.isEnabled(gl.SCISSOR_TEST), blend: gl.isEnabled(gl.BLEND),
+            depthTest: gl.isEnabled(gl.DEPTH_TEST), colorMask: [...gl.getParameter(gl.COLOR_WRITEMASK)],
+        }),
         /**
          * Performs the resources operation for the owned browser runtime.
          *

@@ -105,7 +105,29 @@ try {
         };
     };
 
-    const presentation = { markers: [], presents: [], failures: [], actualPresents: 0 };
+    const presentation = { markers: [], presents: [], failures: [], observationErrors: [], actualPresents: 0 };
+    /**
+     * Reads optional raster diagnostics without changing the original game result.
+     *
+     * @returns {object} Actual state or an explicit unavailable diagnostic.
+     */
+    const inspectPresentationState = () => {
+        try {
+            if (typeof graphics.inspectState !== 'function') {
+                throw new TypeError('Optional graphics.inspectState is unavailable');
+            }
+
+            return graphics.inspectState();
+        } catch (error) {
+            const unavailable = { diagnosticUnavailable: true, error: String(error.stack || error) };
+
+            if (presentation.observationErrors.length < 3) {
+                presentation.observationErrors.push(unavailable);
+            }
+
+            return unavailable;
+        }
+    };
 
     globalThis.originalBoot.presentation = presentation;
     let latestAppearanceMarker;
@@ -122,19 +144,20 @@ try {
 
         presentation.actualPresents++;
 
-        if (latestAppearanceMarker && presentation.presents.length < 3
+        if (latestAppearanceMarker && presentation.observationErrors.length < 3 && presentation.presents.length < 3
             && !presentation.presents.some((sample) => sample.sequence === latestAppearanceMarker.originalUiConsumed)) {
             try {
                 presentation.presents.push({
                     sequence: latestAppearanceMarker.originalUiConsumed,
-                    observedUtc: new Date().toISOString(), state: graphics.inspectState(),
+                    observedUtc: new Date().toISOString(), state: inspectPresentationState(),
                     png: canvas.toDataURL('image/png'),
                 });
             } catch (error) {
                 const failure = { presentationObservationFailed: String(error.stack || error) };
 
-                presentation.failures.push(failure);
-                failures.push(failure);
+                if (presentation.observationErrors.length < 3) {
+                    presentation.observationErrors.push(failure);
+                }
             }
         }
 
@@ -236,17 +259,18 @@ try {
                     if (value.appearanceVisible) {
                         latestAppearanceMarker = value;
 
-                        if (presentation.markers.length < 3) {
+                        if (presentation.observationErrors.length < 3 && presentation.markers.length < 3) {
                             try {
                                 presentation.markers.push({
                                     sequence: value.originalUiConsumed,
-                                    observedUtc: new Date().toISOString(), state: graphics.inspectState(),
+                                    observedUtc: new Date().toISOString(), state: inspectPresentationState(),
                                 });
                             } catch (error) {
                                 const failure = { presentationObservationFailed: String(error.stack || error) };
 
-                                presentation.failures.push(failure);
-                                failures.push(failure);
+                                if (presentation.observationErrors.length < 3) {
+                                    presentation.observationErrors.push(failure);
+                                }
                             }
                         }
                     }
