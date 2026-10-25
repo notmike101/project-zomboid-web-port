@@ -1,4 +1,4 @@
-import { populationTarget, respawnClock, NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual, soundChunks, worldSoundGroups, soundTarget } from './population-kernel.js';
+import { populationSpawnable, respawnRequest, respawnPlacement, mapCollisionPath, populationTarget, respawnClock, NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual, soundChunks, worldSoundGroups, soundTarget } from './population-kernel.js';
 
 import { decodeCell, encodeCell, decodeIDs, encodeIDs, decodeVirtual, encodeVirtual, encodeCollision, remapOutfit } from './population-save-codec.js';
 
@@ -189,6 +189,7 @@ export function createPopulationNatives() {
         pop: false,
         cells: new Map(),
         populationCache: new Map(),
+        respawnJobs: [],
         metadata: new Map(),
         gameState: new Map(),
         producer: [],
@@ -568,7 +569,9 @@ export function createPopulationNatives() {
         unsupported('uniform distribution target branch not qualified');
     }
 
-    /** Rejects use after a failed persistence operation; native EH recovery is unqualified. */
+    /**
+     * Rejects use after a failed persistence operation; native EH recovery is unqualified.
+     */
     function requireActive() {
         if (state.terminalFailure) {
             unsupported(`terminal persistence owner: ${state.terminalFailure}`);
@@ -1005,10 +1008,168 @@ export function createPopulationNatives() {
     }
 
     /**
-     * Preserves actual pre-due respawn clocks, stopping at the unimplemented spawn operation.
+     * Tests the native loaded-area rectangle mask in world-square units.
+     *
+     * @param {number} x - World square x.
+     * @param {number} y - World square y.
+     * @returns {boolean} Whether an original loaded area covers this square.
+     */
+    function respawnLoaded(x, y) {
+        return state.areas.some(([ax, ay, w, h]) => x >= ax * 8 && y >= ay * 8 && x < (ax + w) * 8 && y < (ay + h) * 8);
+    }
+
+    /**
+     * Executes a native kernel with the actual global collision lookup.
+     *
+     * @callback RespawnCollisionOperation
+     * @param {function(number, number): number} flags - Actual global square flags.
+     * @returns {object} Private kernel result before ownership publication.
+     */
+    /**
+     * Resolves genuine lazy collision reads before committing a native kernel operation.
      *
      * @param {object} lib - Actual Java owner.
-     * @returns {Promise<void>} Completed clock/cache updates only.
+     * @param {RespawnCollisionOperation} operation - Source-qualified synchronous operation.
+     * @returns {Promise<object>} Result after all encountered real cells have loaded.
+     */
+    async function respawnCollision(lib, operation) {
+        const before = rng.state.slice();
+        const draws = rng.draws;
+
+        for (;;) {
+            let missing;
+            /**
+             * Reads real global collision flags or requests their lazy owner.
+             *
+             * @param {number} x - Original native x coordinate or status.
+             * @param {number} y - Original native y coordinate or status.
+             * @returns {number} Actual native operation result.
+             */
+            const flags = (x, y) => {
+                const cx = Math.floor(x / 256);
+                const cy = Math.floor(y / 256);
+
+                if (!inGrid(cx, cy)) {
+                    return 1;
+                }
+
+                const chunks = metadata(cx, cy).collision;
+
+                if (!chunks) {
+                    missing = [cx, cy];
+                    throw new Error('Population lazy collision read');
+                }
+
+                return chunks[((y - cy * 256) >> 3) * 32 + ((x - cx * 256) >> 3)][(y & 7) * 8 + (x & 7)];
+            };
+
+            try {
+                return operation(flags);
+            } catch (error) {
+                if (!missing) {
+                    throw error;
+                }
+
+                rng.state.set(before);
+                rng.draws = draws;
+                // eslint-disable-next-line no-await-in-loop -- Replay only private kernel state after genuine lazy I/O.
+                await cellCollision(lib, ...missing);
+            }
+        }
+    }
+
+    /**
+     * Commits a genuine due path request to the original collision worker owner.
+     *
+     * @param {object} lib - Actual Java owner.
+     * @param {string} name - Active cell key.
+     * @param {object} cell - Actual active cell owner.
+     * @param {number} deficit - Original neighbor-adjusted missing population.
+     * @returns {Promise<void>} Queued path request or original exhausted-candidate clock update.
+     */
+    async function scheduleRespawn(lib, name, cell, deficit) {
+        const [cellX, cellY] = name.split(',').map(Number);
+        const [gx, gy, w, h] = state.grid;
+        const age = Math.fround(state.workerTime[1]);
+        const plan = await respawnCollision(lib, (flags) => respawnRequest({
+            chunks: cell.chunks, targets: cell.targets, seen: cell.lastSeen, lastSpawn: cell.lastRespawn,
+            age, last: Math.fround(Math.min(age, cell.createdAge)), hours: state.config.get('RespawnHours'),
+            unseen: state.config.get('RespawnUnseenHours'), multiplier: state.config.get('RespawnMultiplier'),
+            start: state.config.get('PopulationStartMultiplier'), peak: state.config.get('PopulationPeakMultiplier'),
+            peakDay: state.config.get('PopulationPeakDay'), bounds: [gx * 256, gy * 256, w * 256, h * 256],
+            cellX, cellY, deficit, rng, loaded: respawnLoaded,
+            valid: populationSpawnable.bind(null, flags),
+            ...(cell.respawnState ?? {}),
+        }));
+
+        cell.createdAge = plan.last;
+        cell.lastRespawn.set(plan.clocks);
+        cell.respawnState = { quota: plan.quota, budget: plan.budget, spawned: plan.spawned };
+        state.populationDirty.add(name);
+
+        if (plan.request) {
+            state.respawnJobs.push({ name, cell, request: plan.request });
+            cell.respawnPending = (cell.respawnPending ?? 0) + 1;
+        }
+    }
+
+    /**
+     * Delivers actual path results and creates records only on original success status three.
+     *
+     * @param {object} lib - Actual Java owner.
+     * @returns {Promise<void>} Collision-worker callbacks with single owned ID allocation.
+     */
+    async function completeRespawn(lib) {
+        for (const job of state.respawnJobs.slice()) {
+            const { name, cell, request } = job;
+            // eslint-disable-next-line no-await-in-loop -- Native queued path callbacks execute in source order.
+            const outcome = await respawnCollision(lib, (flags) => {
+                const path = mapCollisionPath(request.startX, request.startY, request.targetX, request.targetY, flags);
+                const active = state.cells.get(name) === cell && !cell.passive;
+
+                return path.status === 3 && active
+                    ? respawnPlacement({
+                            ...path, cellX: Number(name.split(',')[0]), cellY: Number(name.split(',')[1]),
+                            count: request.count, idStart: state.nextID, rng, flags, loaded: respawnLoaded,
+                        })
+                    : null;
+            });
+
+            if (outcome) {
+                for (const record of outcome.records) {
+                    const index = ((Math.floor(record.x / 8) % 32 + 32) % 32) + ((Math.floor(record.y / 8) % 32 + 32) % 32) * 32;
+
+                    cell.chunks[index].push(record);
+                }
+
+                state.nextID = outcome.nextID;
+                const age = Math.fround(state.workerTime[1]);
+
+                for (const index of outcome.chunks) {
+                    cell.lastRespawn[index] = age;
+                }
+
+                cell.respawnState.spawned += outcome.records.length;
+
+                if (outcome.records.length && cell.respawnState.spawned >= cell.respawnState.budget) {
+                    cell.createdAge = age;
+                }
+
+                if (outcome.chunks.length) {
+                    state.populationDirty.add(name);
+                }
+            }
+
+            cell.respawnPending--;
+            state.respawnJobs.splice(state.respawnJobs.indexOf(job), 1);
+        }
+    }
+
+    /**
+     * Preserves original respawn clocks and queues due work for actual collision-worker delivery.
+     *
+     * @param {object} lib - Actual Java owner.
+     * @returns {Promise<void>} Completed native clock/cache updates and due path requests.
      */
     async function updateRespawn(lib) {
         const hours = state.config.get('RespawnHours');
@@ -1028,7 +1189,7 @@ export function createPopulationNatives() {
             state.config.get('PopulationPeakMultiplier'), state.config.get('PopulationPeakDay'), age);
         const plans = [];
 
-        for (const [name, cell] of [...state.cells].filter(([, value]) => !value.passive)) {
+        for (const [name, cell] of [...state.cells].filter(([, value]) => !value.passive && !value.respawnPending)) {
             const [x, y] = name.split(',').map(Number);
             // eslint-disable-next-line no-await-in-loop -- Preserve native cell and neighbor preparation order.
             const own = await populationCounts(lib, x, y);
@@ -1053,7 +1214,9 @@ export function createPopulationNatives() {
             });
 
             if (plan.due) {
-                unsupported('due respawn placement');
+                // eslint-disable-next-line no-await-in-loop -- Preserve native respawn scheduling order.
+                await scheduleRespawn(lib, name, cell, Math.max(0, targetFor(own.target) - own.count - groupedPopulation(x, y)) - excess);
+                continue;
             }
 
             plans.push({ name, cell, last: plan.last });
@@ -1090,6 +1253,7 @@ export function createPopulationNatives() {
             state.metadata.clear();
             state.cells.clear();
             state.populationCache.clear();
+            state.respawnJobs = [];
         },
         /**
          * Registers original collision source order; null sources allocate nothing.
@@ -1217,7 +1381,7 @@ export function createPopulationNatives() {
          * @returns {boolean} Whether original worker data is now available.
          */
         hasDataForThread() {
-            if (!state.collisionProducer.length) {
+            if (!state.collisionProducer.length && !state.respawnJobs.length) {
                 return false;
             }
 
@@ -1272,6 +1436,8 @@ export function createPopulationNatives() {
                     }
                 }
             }
+
+            await completeRespawn(lib);
         },
         /**
          * Writes the qualified original collision or population persistence through its Java owner.
@@ -1296,7 +1462,7 @@ export function createPopulationNatives() {
          * @returns {boolean} Whether no worker batch is pending.
          */
         shouldWait() {
-            return state.collisionWorker.length === 0;
+            return state.collisionWorker.length === 0 && !state.respawnJobs.length;
         },
         /**
          * Releases owned queues and state at the original service stop boundary.
@@ -1310,6 +1476,7 @@ export function createPopulationNatives() {
                 state.metadata.clear();
                 state.cells.clear();
                 state.populationCache.clear();
+                state.respawnJobs = [];
             }
         },
 
@@ -1991,6 +2158,7 @@ export function createPopulationNatives() {
             if (!state.mcd) {
                 state.cells.clear();
                 state.populationCache.clear();
+                state.respawnJobs = [];
                 state.metadata.clear();
             }
         },

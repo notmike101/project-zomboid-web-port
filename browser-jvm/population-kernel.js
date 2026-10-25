@@ -42,6 +42,160 @@ function respawnClock({ target, count, excess, last, age, hours }) {
 }
 
 /**
+ * Applies the original respawn/initial-generation square exclusions (0x18001cdd0).
+ *
+ * @param {function(number, number): number} flags - Actual collision flags.
+ * @param {number} x - World square x.
+ * @param {number} y - World square y.
+ * @returns {boolean} Whether the original square is eligible for population placement.
+ */
+function populationSpawnable(flags, x, y) {
+    /**
+     * Tests the original directional collision edge.
+     *
+     * @param {number} sx - Original native sx coordinate or status.
+     * @param {number} sy - Original native sy coordinate or status.
+     * @param {number} tx - Original native tx coordinate or status.
+     * @param {number} ty - Original native ty coordinate or status.
+     * @returns {boolean} Actual native operation result.
+     */
+    const blocked = (sx, sy, tx, ty) => {
+        const a = flags(sx, sy);
+        const b = flags(tx, ty);
+
+        return Boolean((b & 0x19) || (ty < sy && (a & 2)) || (tx < sx && (a & 4))
+            || (sy < ty && (b & 2)) || (sx < tx && (b & 4)));
+    };
+
+    /**
+     * Classifies the original square opening.
+     *
+     * @param {number} sx - Original native sx coordinate or status.
+     * @param {number} sy - Original native sy coordinate or status.
+     * @returns {number} Actual native operation result.
+     */
+    const shape = (sx, sy) => {
+        if (flags(sx, sy) & 0x19) {
+            return -1;
+        }
+
+        const edges = [blocked(sx, sy, sx, sy - 1), blocked(sx, sy, sx, sy + 1),
+            blocked(sx - 1, sy, sx, sy), blocked(sx + 1, sy, sx, sy)];
+
+        if (edges.every(Boolean)) {
+            return 4;
+        }
+
+        return edges.filter(Boolean).length === 3 ? edges.findIndex((value) => !value) : -1;
+    };
+
+    return !(flags(x, y) & 0x19) && shape(x, y) !== 4 && !(shape(x, y) === 3 && shape(x + 1, y) === 2)
+        && !(shape(x - 1, y) === 3 && shape(x, y) === 2) && !(shape(x, y) === 1 && shape(x, y + 1) === 0)
+        && !(shape(x, y - 1) === 1 && shape(x, y) === 0);
+}
+
+/**
+ * Plans the original due-respawn path request; placement still requires its actual result.
+ *
+ * @param {object} input - Native cell/chunk state, world bounds, configuration and RNG.
+ * @returns {object} Updated native clocks/budget and the genuine requested path, if any.
+ */
+function respawnRequest(input) {
+    const {
+        chunks, targets, seen, lastSpawn, age, hours, unseen, multiplier, rng, bounds, cellX, cellY,
+        start, peak, peakDay, deficit, valid, loaded, last,
+    } = input;
+    const clocks = Float32Array.from(lastSpawn, (last) => Math.min(age, last));
+    const eligible = [];
+
+    for (let i = 0; i < 1_024; i++) {
+        const x = cellX * 256 + i % 32 * 8;
+        const y = cellY * 256 + (i >> 5) * 8;
+
+        if (!loaded(x, y) && f(f(seen[i]) + unseen) < f(age)
+            && chunks[i].length < populationTarget((targets[i] << 16) >> 16, start, peak, peakDay, age)
+            && f(clocks[i] + hours) < f(age)) {
+            eligible.push(i);
+        }
+    }
+
+    let { quota = 0, budget = -1, spawned = 0 } = input;
+
+    if (budget === -1) {
+        const target = populationTarget((targets.reduce((sum, value) => sum + value, 0) << 16) >> 16, start, peak, peakDay, age);
+
+        quota = Math.trunc(f(f(target * multiplier) / 100));
+        budget = Math.imul(Math.trunc(f(f(age - last) / hours)), quota);
+        spawned = 0;
+    }
+
+    const count = Math.min(deficit, Math.max(10, Math.trunc(quota / 36)));
+    const [left, top, width, height] = bounds;
+
+    while (eligible.length) {
+        const selected = rng.bounded(eligible.length);
+        const index = eligible[selected];
+
+        clocks[index] = f(age);
+        let origin;
+
+        for (let attempt = 0; attempt < 100; attempt++) {
+            let x;
+            let y;
+
+            switch (rng.bounded(4)) {
+                case 0: {
+                    x = 0;
+                    y = rng.bounded(height);
+                    break;
+                }
+                case 1: {
+                    x = rng.bounded(width);
+                    y = 0;
+                    break;
+                }
+                case 2: {
+                    x = width - 1;
+                    y = rng.bounded(height);
+                    break;
+                }
+
+                default: {
+                    x = rng.bounded(width);
+                    y = height - 1;
+                }
+            }
+
+            x += left;
+            y += top;
+
+            if (valid(x, y)) {
+                origin = [x, y];
+                break;
+            }
+        }
+
+        if (origin) {
+            for (let attempt = 0; attempt < 20; attempt++) {
+                const x = cellX * 256 + index % 32 * 8 + rng.bounded(8);
+                const y = cellY * 256 + (index >> 5) * 8 + rng.bounded(8);
+
+                if (valid(x, y)) {
+                    return {
+                        last, clocks, quota, budget, spawned,
+                        request: { startX: origin[0], startY: origin[1], targetX: x, targetY: y, count },
+                    };
+                }
+            }
+        }
+
+        eligible.splice(selected, 1);
+    }
+
+    return { last: f(age), clocks, quota, budget: -1, spawned, request: null };
+}
+
+/**
  * Combines the native MT recurrence words without signed overflow.
  *
  * @param {number} a - First native recurrence word.
@@ -52,7 +206,9 @@ function respawnClock({ target, count, excess, last, age, hours }) {
 const twist = (a, b, c) => ((c ^ ((((a ^ b) & 0x7F_FF_FF_FF) ^ a) >>> 1) ^ ((b & 1) ? 0x99_08_B0_DF : 0)) >>> 0);
 const f = Math.fround;
 
-/** Reproduces the source-qualified native MT layout and unsigned arithmetic. */
+/**
+ * Reproduces the source-qualified native MT layout and unsigned arithmetic.
+ */
 class NativeMT {
     /**
      * Restores the original native MT state layout from little-endian words.
@@ -565,6 +721,206 @@ function populationBlocked(flags, x, y, tx, ty) {
 }
 
 /**
+ * Executes the original MCD wall-follower query (native 0x180017870/17a80).
+ *
+ * @param {number} startX - Original source x.
+ * @param {number} startY - Original source y.
+ * @param {number} targetX - Original target x.
+ * @param {number} targetY - Original target y.
+ * @param {function(number, number): number} flags - Actual global collision flags.
+ * @returns {object} Native status, endpoint, movement count and worker ticks.
+ */
+function mapCollisionPath(startX, startY, targetX, targetY, flags) {
+    let x = startX;
+    let y = startY;
+    let anchor = null;
+    let wall;
+    let wallSteps = 0;
+    let loops = 0;
+    let steps = 0;
+    let ticks = 0;
+    /**
+     * Tests the original directional collision edge.
+     *
+     * @param {number} sx - Original native sx coordinate or status.
+     * @param {number} sy - Original native sy coordinate or status.
+     * @param {number} tx - Original native tx coordinate or status.
+     * @param {number} ty - Original native ty coordinate or status.
+     * @returns {boolean} Actual native operation result.
+     */
+    const blocked = (sx, sy, tx, ty) => populationBlocked(flags, sx, sy, tx, ty);
+    /**
+     * Publishes the original path query result.
+     *
+     * @param {number} status - Original native status coordinate or status.
+     * @returns {object} Actual native operation result.
+     */
+    const result = (status) => ({ status, x, y, steps, ticks });
+    /**
+     * Advances actual path movement and its native counter.
+     *
+     * @param {number} tx - Original native tx coordinate or status.
+     * @param {number} ty - Original native ty coordinate or status.
+     * @returns {void} Actual native operation result.
+     */
+    const move = (tx, ty) => {
+        x = tx;
+        y = ty;
+        steps++;
+    };
+
+    /**
+     * Tests the exact float32 anchor-to-target grid line.
+     *
+     * @returns {boolean} Actual native operation result.
+     */
+    const lineContains = () => {
+        const [ax, ay] = anchor;
+        const dx = targetX - ax;
+        const dy = targetY - ay;
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+            const sign = dx < 0 ? -1 : 1;
+            const slope = f(f(dy / dx) * sign);
+            let minor = f(ay + 0.5);
+
+            for (let major = ax; major !== targetX;) {
+                major += sign;
+                minor = f(minor + slope);
+
+                if (major === x && Math.floor(minor) === y) {
+                    return true;
+                }
+            }
+        } else {
+            const sign = dy < 0 ? -1 : 1;
+            const slope = f(f(dx / dy) * sign);
+            let minor = f(ax + 0.5);
+
+            for (let major = ay; major !== targetY;) {
+                major += sign;
+                minor = f(minor + slope);
+
+                if (Math.floor(minor) === x && major === y) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    };
+
+    for (;;) {
+        ticks++;
+
+        if (flags(x, y) & 0x19) {
+            return result(1);
+        }
+
+        if (x === targetX && y === targetY) {
+            return result(3);
+        }
+
+        if (steps >= 90_000) {
+            return result(1);
+        }
+
+        if (!anchor) {
+            const dx = targetX - x;
+            const dy = targetY - y;
+            const tx = Math.abs(dx) > Math.abs(dy)
+                ? x + (dx < 0 ? -1 : 1)
+                : Math.floor(f(f(x + 0.5) + f(f(dx / dy) * (dy < 0 ? -1 : 1))));
+            const ty = Math.abs(dx) > Math.abs(dy)
+                ? Math.floor(f(f(y + 0.5) + f(f(dy / dx) * (dx < 0 ? -1 : 1))))
+                : y + (dy < 0 ? -1 : 1);
+
+            if (blocked(x, y, tx, ty)) {
+                anchor = [x, y];
+                wall = [tx, ty];
+                wallSteps = 0;
+                loops = 0;
+
+                if (tx > x && ty < y && !blocked(x + 1, y, tx, ty)) {
+                    wall[0]--;
+                } else if (tx > x && ty > y && !blocked(x, y + 1, tx, ty)) {
+                    wall[1]--;
+                } else if (tx < x && ty < y && !blocked(x, y - 1, tx, ty)) {
+                    wall[1]++;
+                } else if (tx < x && ty > y && !blocked(x - 1, y, tx, ty)) {
+                    wall[0]++;
+                }
+            } else {
+                move(tx, ty);
+            }
+
+            if (steps && x === startX && y === startY) {
+                return result(2);
+            }
+        } else {
+            const oldSteps = steps;
+            const dx = wall[0] - x;
+            const dy = wall[1] - y;
+            let tx = x;
+            let ty = y;
+            let corner = false;
+            let wallBit = false;
+
+            if ((dx === 1 && dy === -1) || (dx === 0 && dy === -1)) {
+                tx++;
+                corner = dx === 0;
+                wallBit = Boolean(flags(x, y) & 2);
+            } else if ((dx === 1 && dy === 0) || (dx === 1 && dy === 1)) {
+                ty++;
+                corner = dy === 0;
+                wallBit = Boolean(flags(x + 1, y) & 4);
+            } else if ((dx === 0 && dy === 1) || (dx === -1 && dy === 1)) {
+                tx--;
+                corner = dx === 0;
+                wallBit = Boolean(flags(x, y + 1) & 2);
+            } else if ((dx === -1 && dy === 0) || (dx === -1 && dy === -1)) {
+                ty--;
+                corner = dy === 0;
+                wallBit = Boolean(flags(x, y) & 4);
+            }
+
+            if (tx !== x || ty !== y) {
+                if (blocked(x, y, tx, ty)) {
+                    wall = [tx, ty];
+                } else {
+                    if (corner && wallBit && !blocked(x, y, tx + dx, ty + dy)) {
+                        wall = [x, y];
+                    }
+
+                    move(tx, ty);
+                }
+            }
+
+            if (steps > oldSteps) {
+                wallSteps++;
+            }
+
+            if ((x !== anchor[0] || y !== anchor[1]) && lineContains()) {
+                anchor = null;
+            }
+
+            if (anchor && wallSteps && x === anchor[0] && y === anchor[1] && ++loops >= 2) {
+                return result(2);
+            }
+        }
+
+        if ((flags(x, y) & 0x19) || [[x - 1, y], [x, y - 1], [x + 1, y], [x, y + 1]]
+            .every(([tx, ty]) => blocked(x, y, tx, ty))) {
+            return result(1);
+        }
+
+        if (x === targetX && y === targetY) {
+            return result(3);
+        }
+    }
+}
+
+/**
  * Performs the original bounded virtual-agent straight-line fallback probe.
  *
  * @param {number} x - Source integer x.
@@ -788,12 +1144,14 @@ function advanceVirtual(group, multiplier, bounds, flags) {
  * @param {number} x - Source square x.
  * @param {number} y - Source square y.
  * @param {function(number, number): number} flags - Actual collision bits.
+ * @param {object|null} [region] - Actual native flood bounds, or the original 8-by-8 chunk.
  * @returns {Array<number[]>} Reachable world squares in native output order.
  */
-function redistributionSquares(x, y, flags) {
-    const left = Math.trunc(x / 8) * 8;
-    const top = Math.trunc(y / 8) * 8;
-    const reached = new Uint8Array(64);
+function redistributionSquares(x, y, flags, region = null) {
+    const left = region?.left ?? Math.trunc(x / 8) * 8;
+    const top = region?.top ?? Math.trunc(y / 8) * 8;
+    const width = region?.width ?? 8;
+    const reached = new Uint8Array(width * width);
     const pending = [[x, y]];
     const squares = [];
     /**
@@ -805,8 +1163,8 @@ function redistributionSquares(x, y, flags) {
      * @param {number} ty - Destination y.
      * @returns {boolean} Whether the edge is open and unvisited.
      */
-    const cross = (sx, sy, tx, ty) => tx >= left && tx < left + 8 && ty >= top && ty < top + 8
-        && !reached[tx - left + (ty - top) * 8] && !populationBlocked(flags, sx, sy, tx, ty);
+    const cross = (sx, sy, tx, ty) => tx >= left && tx < left + width && ty >= top && ty < top + width
+        && !reached[tx - left + (ty - top) * width] && !populationBlocked(flags, sx, sy, tx, ty);
 
     while (pending.length) {
         const next = pending.pop();
@@ -826,12 +1184,12 @@ function redistributionSquares(x, y, flags) {
         let down;
 
         do {
-            if (squares.length === 64) {
+            if (squares.length === width * width) {
                 return squares;
             }
 
             squares.push([sx, sy]);
-            reached[sx - left + (sy - top) * 8] = 1;
+            reached[sx - left + (sy - top) * width] = 1;
 
             for (const side of [-1, 1]) {
                 const open = cross(sx, sy, sx + side, sy);
@@ -839,7 +1197,7 @@ function redistributionSquares(x, y, flags) {
 
                 const enqueue = open && (!span || !cross(sx + side, sy, sx + side, sy - 1));
 
-                if (enqueue && pending.length === 64) {
+                if (enqueue && pending.length === width * width) {
                     return squares;
                 }
 
@@ -860,6 +1218,50 @@ function redistributionSquares(x, y, flags) {
     }
 
     return squares;
+}
+
+/**
+ * Applies the original successful respawn callback's bounded flood and record allocation.
+ *
+ * @param {object} input - Actual path endpoint, cell state, RNG and allocation identity.
+ * @param {number} input.x - Actual path endpoint x.
+ * @param {number} input.y - Actual path endpoint y.
+ * @param {number} input.cellX - Original owning cell x.
+ * @param {number} input.cellY - Original owning cell y.
+ * @param {number} input.count - Actual requested allocation count.
+ * @param {number} input.idStart - Original next record identity.
+ * @param {NativeMT} input.rng - Original native random owner.
+ * @param {function(number, number): number} input.flags - Actual global collision flags.
+ * @param {function(number, number): boolean} input.loaded - Actual loaded-area mask.
+ * @returns {object} Actual allocated records, covered chunk clocks and next identity.
+ */
+function respawnPlacement({ x, y, cellX, cellY, count, idStart, rng, flags, loaded }) {
+    const left = Math.max(cellX * 256, Math.min((cellX + 1) * 256 - 40, Math.trunc(x / 8) * 8 - 16));
+    const top = Math.max(cellY * 256, Math.min((cellY + 1) * 256 - 40, Math.trunc(y / 8) * 8 - 16));
+    const squares = redistributionSquares(x, y, (sx, sy) => flags(sx, sy) | (loaded(sx, sy) ? 1 : 0), { left, top, width: 40 });
+    const records = [];
+    const chunks = [];
+    let nextID = idStart;
+
+    if (squares.length) {
+        for (let cy = 0; cy < 5; cy++) {
+            for (let cx = 0; cx < 5; cx++) {
+                chunks.push(Math.trunc(left / 8) + cx - cellX * 32 + (Math.trunc(top / 8) + cy - cellY * 32) * 32);
+            }
+        }
+
+        for (let i = 0; i < Math.min(count, squares.length); i++) {
+            const square = squares[rng.bounded(squares.length)];
+            const direction = rng.bounded(8);
+
+            records.push({
+                x: square[0] + 0.5, y: square[1] + 0.5, z: 0, direction, outfit: 0, state: 4,
+                px: -2_147_483_648, py: -2_147_483_648, id: nextID++,
+            });
+        }
+    }
+
+    return { records, chunks, nextID };
 }
 
 /**
@@ -979,4 +1381,4 @@ function soundChunks(sound) {
     return chunks;
 }
 
-export { populationTarget, respawnClock, NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual, soundTarget, worldSoundGroups, soundChunks };
+export { populationSpawnable, populationTarget, respawnClock, respawnRequest, respawnPlacement, mapCollisionPath, NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual, soundTarget, worldSoundGroups, soundChunks };

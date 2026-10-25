@@ -1283,3 +1283,9 @@ The authored PNG/STB decoder reuses its existing decoded bytes for exact RGBA ou
 ### Original ragdoll vehicle-contact dynamics
 
 The original ragdoll controller can now override damping, deactivation timing, sleeping thresholds, friction and rolling friction on all eleven owned bodies, then restore the current per-part definitions. The operation preserves activation state. The bounded original-DLL comparison matches all 264 double-valued tuning/activation observations before override, after override and after reset, including the original differing results for unknown identities. This closes that vehicle-contact call boundary; connected browser hit reactions remain unverified.
+
+### Original due respawn placement
+
+Actual due respawn now schedules the original edge-to-target collision request and allocates records only after its successful collision-worker result. The source-derived wall-following path routine matches nine original DLL cases for status, endpoint, movements and worker ticks. A complete original ten-zombie operation matches its request, all resulting IDs/positions/directions/state, all 1,024 chunk clocks and all 1,250 RNG-state words.
+
+The connected host comparison confirms no IDs before the next collision-worker turn, then exactly ten original records on success. Save/reopen retains IDs 1 through 10 and next ID 11. Quota, budget retention and the unchanged 0.1 configuration value follow the original Java/JNI/native instructions, including the native percentage calculation and minimum batch size. Focused ownership review found no introduced defect. The previous due-placement guard is removed for this implemented internal path; the separate public MCD path-task API remains unsupported, and full-world browser respawn is not yet observed.
