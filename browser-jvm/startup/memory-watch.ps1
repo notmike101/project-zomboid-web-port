@@ -29,7 +29,7 @@ while ($true) {
     $system = Get-CimInstance Win32_OperatingSystem
     $privateBytes = [long](($processes | Measure-Object privateBytes -Sum).Sum)
     $availableBytes = [long]$system.FreePhysicalMemory * 1024
-    $reason = if ($privateBytes -ge $MaxPrivateBytes) { 'owned-private-limit' } elseif ($availableBytes -le $MinAvailableBytes) { 'system-available-floor' } elseif ($privateBytes -ge ($MaxPrivateBytes * 0.9)) { 'owned-private-soft-limit' } elseif ($availableBytes -le ($MinAvailableBytes + 1073741824)) { 'system-available-soft-floor' } else { $null }
+    $reason = if ($privateBytes -ge $MaxPrivateBytes) { 'owned-private-limit' } elseif ($availableBytes -le $MinAvailableBytes) { 'system-available-floor' } elseif ($privateBytes -ge ($MaxPrivateBytes * 0.9)) { 'owned-private-soft-limit' } elseif ($availableBytes -le ($MinAvailableBytes + 2147483648)) { 'system-available-soft-floor' } else { $null }
     if ($reason -and $null -eq $pressureAt) { $pressureAt = [DateTime]::UtcNow }
     $sample = @{ event='sample'; observedAt=[DateTime]::UtcNow.ToString('o'); rootPid=$RootProcessId; rootCreation=$originalCreation.ToString('o'); profile=$ownedProfile; privateBytes=$privateBytes; workingSetBytes=[long](($processes | Measure-Object workingSetBytes -Sum).Sum); systemAvailableBytes=$availableBytes; systemTotalBytes=[long]$system.TotalVisibleMemorySize * 1024; reason=$reason; processCount=$processes.Count; processes=@($processes | Select-Object -First 128) }
     [Console]::Out.WriteLine(($sample | ConvertTo-Json -Depth 5 -Compress))

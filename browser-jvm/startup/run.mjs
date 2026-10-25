@@ -288,9 +288,9 @@ try {
 
     evidence.origin = origin;
 
-    if (freemem() < 5 * 1_024 ** 3) {
+    if (freemem() < 10 * 1_024 ** 3) {
         evidence.memoryAbort = { reason: 'system-available-before-browser', availableBytes: freemem() };
-        throw new Error('At least 5 GiB available system memory is required before browser startup');
+        throw new Error('At least 10 GiB available system memory is required before browser startup');
     }
 
     if (persistentPlay) {

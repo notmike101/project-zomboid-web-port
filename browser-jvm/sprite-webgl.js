@@ -61,6 +61,9 @@ export function createSpriteNatives(canvas, report) {
     const programs = new Map();
     const textures = new Map();
     const buffers = new Map();
+    // Scalar upload extents only; never retain Java arrays or pixel payloads.
+    const textureExtents = new WeakMap();
+    const bufferExtents = new WeakMap();
     const framebuffers = new Map();
     const renderbuffers = new Map();
     const locations = new Map();
@@ -616,7 +619,16 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} usage - Numeric usage argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        bufferDataSize: (target, size, usage) => gl.bufferData(target, size, usage),
+        bufferDataSize: (target, size, usage) => {
+            gl.bufferData(target, size, usage);
+            const binding = gl.getParameter(target === gl.ARRAY_BUFFER ? gl.ARRAY_BUFFER_BINDING : gl.ELEMENT_ARRAY_BUFFER_BINDING);
+
+            if (binding) {
+                bufferExtents.set(binding, size);
+            }
+
+            return undefined;
+        },
         /**
          * Performs the buffer data bytes operation for the owned browser runtime.
          *
@@ -625,7 +637,16 @@ export function createSpriteNatives(canvas, report) {
          * @param {number} usage - Numeric usage argument for the declared operation.
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        bufferDataBytes: (target, data, usage) => gl.bufferData(target, bytes(data), usage),
+        bufferDataBytes: (target, data, usage) => {
+            gl.bufferData(target, bytes(data), usage);
+            const binding = gl.getParameter(target === gl.ARRAY_BUFFER ? gl.ARRAY_BUFFER_BINDING : gl.ELEMENT_ARRAY_BUFFER_BINDING);
+
+            if (binding) {
+                bufferExtents.set(binding, data.byteLength);
+            }
+
+            return undefined;
+        },
         /**
          * Performs the buffer upload operation for the owned browser runtime.
          *
@@ -1701,6 +1722,14 @@ export function createSpriteNatives(canvas, report) {
             }
 
             gl.texImage2D(target, level, red ? gl.R8 : internal, w, h, border, format, type, bytes(data));
+            const binding = gl.getParameter(gl.TEXTURE_BINDING_2D);
+
+            if (binding) {
+                const levels = textureExtents.get(binding) ?? new Map();
+
+                levels.set(level, w * h * (red ? 1 : 4) / (depth ? 2 : 1));
+                textureExtents.set(binding, levels);
+            }
         },
         /**
          * Performs the read pixels operation for the owned browser runtime.
@@ -1894,6 +1923,12 @@ export function createSpriteNatives(canvas, report) {
          *
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        resources: () => ({ shaders: shaders.size, programs: programs.size, textures: textures.size + attributeState.pendingCount('texture'), buffers: buffers.size + attributeState.pendingCount('buffer'), framebuffers: framebuffers.size }),
+        resources: () => ({
+            shaders: shaders.size, programs: programs.size, textures: textures.size + attributeState.pendingCount('texture'), buffers: buffers.size + attributeState.pendingCount('buffer'), framebuffers: framebuffers.size,
+            /* Live registry extents exclude pending deletions, mipmap generation,
+               internal transient uploads, driver overhead and framebuffer storage. */
+            textureUploadedLevelBytes: [...textures.values()].reduce((sum, texture) => sum + [...(textureExtents.get(texture)?.values() ?? [])].reduce((total, size) => total + size, 0), 0),
+            bufferAllocatedBytes: [...buffers.values()].reduce((sum, buffer) => sum + (bufferExtents.get(buffer) ?? 0), 0),
+        }),
     };
 }
