@@ -47,7 +47,7 @@ const helper = async (lib) => await lib.port.host.PopulationBuffers;
 const key = (x, y) => `${x},${y}`;
 
 /**
- * Rejects simulation times outside the qualified initial-age interval.
+ * Validates simulation time; actual respawn and redistribution gates remain worker-owned.
  *
  * @param {number} multiplier - Actual original time multiplier.
  * @param {number} age - Actual original world age in hours.
@@ -56,8 +56,8 @@ function validateTime(multiplier, age) {
     finite(multiplier, 'multiplier');
     finite(age, 'age');
 
-    if (multiplier < 0 || age < 0 || age > 3) {
-        unsupported(`time outside qualified initial-age kernel: multiplier=${multiplier},age=${age}`);
+    if (multiplier < 0 || age < 0) {
+        unsupported(`negative simulation time: multiplier=${multiplier},age=${age}`);
     }
 }
 
@@ -403,19 +403,6 @@ export function createPopulationNatives() {
     }
 
     /**
-     * Rejects later-age access outside the explicitly loaded-cell replay boundary.
-     *
-     * @param {number} cx - Original global chunk x.
-     * @param {number} cy - Original global chunk y.
-     * @param {number} age - Collected or applied original worker age.
-     */
-    function requireLoadedAtLateAge(cx, cy, age) {
-        if (age > 2 && !state.cells.has(key(Math.floor(cx / 32), Math.floor(cy / 32)))) {
-            unsupported('later-age replay requires an already-loaded cell');
-        }
-    }
-
-    /**
      * Restores or generates initial cell state only inside the qualified algorithm boundary.
      *
      * @param {object} lib - Actual CheerpJ Java class namespace.
@@ -434,8 +421,6 @@ export function createPopulationNatives() {
 
         // Native DAT131928 starts at zero; queued time is not applied by full-save.
         const age = state.workerTime?.[1] ?? 0;
-
-        requireLoadedAtLateAge(cx, cy, age);
 
         const data = metadata(x, y);
         const saved = String(await (await helper(lib)).readOwned(`zpop/zpop_${x}_${y}.bin`));
@@ -636,25 +621,6 @@ export function createPopulationNatives() {
 
         const tasks = [...state.worker, ...state.producer];
         const released = new Set(tasks.filter((task) => task.type === 'release').map((task) => task.id));
-
-        const appliedAge = state.workerTime?.[1] ?? 0;
-
-        // Preflight all existing and temporary destinations before feedback/release mutation.
-        for (const record of [...state.registry.values(), ...state.pendingOutput]) {
-            requireLoadedAtLateAge(Math.floor(record.x / 8), Math.floor(record.y / 8), appliedAge);
-        }
-
-        for (const task of tasks) {
-            if (task.type === 'real') {
-                for (const value of task.records) {
-                    if (state.registry.has(value.id)) {
-                        requireLoadedAtLateAge(Math.floor(value.x / 8), Math.floor(value.y / 8), appliedAge);
-                    }
-                }
-            } else if (task.type === 'add' || (task.type === 'register' && !released.has(task.record.id))) {
-                requireLoadedAtLateAge(Math.floor(task.record.x / 8), Math.floor(task.record.y / 8), appliedAge);
-            }
-        }
 
         // Native01d370 applies feedback but does not run config/load/generation commands.
         for (const task of tasks) {
@@ -1257,25 +1223,6 @@ export function createPopulationNatives() {
 
             if (generation.length && !nextTime) {
                 unsupported('worker time absent before generation');
-            }
-
-            for (const [cx, cy] of generation) {
-                requireLoadedAtLateAge(cx, cy, nextTime.age);
-            }
-
-            const preflightAge = nextTime?.age ?? state.workerTime?.[1] ?? 0;
-
-            for (const task of batch) {
-                if (task.type === 'register') {
-                    requireLoadedAtLateAge(Math.floor(task.record.x / 8), Math.floor(task.record.y / 8), preflightAge);
-                } else if (task.type === 'real') {
-                    for (const value of task.records) {
-                        if (!batch.some((queued) => queued.type === 'release' && queued.id === value.id)
-                            && (state.registry.has(value.id) || batch.some((queued) => queued.type === 'register' && queued.record.id === value.id))) {
-                            requireLoadedAtLateAge(Math.floor(value.x / 8), Math.floor(value.y / 8), preflightAge);
-                        }
-                    }
-                }
             }
 
             const sampledTime = Date.now();
