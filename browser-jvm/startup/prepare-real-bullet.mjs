@@ -41,6 +41,12 @@ assert.equal(manifest.sourceInventorySha, '63048c5718d2c086889682f6f40d79f6b599b
 assert.equal(manifest.solverOverlay.overlaySha, '2a79dede1585b30244f86201202a53af14255999add3cbc16e0914456ed4012d');
 assert.equal(manifest.capsuleOverlay.originalSha, 'a5ca083fd8eaa1a5c7343cbd79d7bdeec52b85c680e492ecec1d9cb3917c02e5');
 assert.equal(manifest.capsuleOverlay.overlaySha, '9cf066a92ff92625041e871e0b049dc4a19e245734cc41f70cf0205651ba35f3');
+assert.equal(manifest.gjkOverlay.originalSha, 'd0f17f0d545646f79b052a1e3691ff2f8ecc775dde5bbcceb1dbbef5c5bc3635');
+assert.equal(manifest.gjkOverlay.overlaySha, '8a074be6640aa3991bb9dbc7a8568c2b3c952efafa2d6c15991de710d503f417');
+assert.equal(manifest.pairOverlay.originalSha, 'b32b8411f2b3b5e3cfedfa198198c6b7842ac4e9b092873c71155b0ab45b84e8');
+assert.equal(manifest.pairOverlay.overlaySha, '6ddda5861e742d50556951e9d73c135263d78321f64953ab0eee08350557a803');
+assert.equal(manifest.convexOverlay.originalSha, '7b02cbe1ce4d7024b37129905fffeffc68110923de3de6308e1d93b61d88760c');
+assert.equal(manifest.convexOverlay.overlaySha, 'bb5272915473174b8b1d9dc5ed817f27de8cdf418912f50dd04ab8657376ce37');
 
 for (const [url, source, expected] of [
     ['/bullet-startup.js', path.join(import.meta.dirname, '../bullet-startup.js')],

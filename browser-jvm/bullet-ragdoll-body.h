@@ -157,3 +157,19 @@ extern "C" int ragdoll_contact_count(){
         if(ragdoll_body_contains(manifold->getBody0())||ragdoll_body_contains(manifold->getBody1()))count+=manifold->getNumContacts();
     }return count;
 }
+
+// Bounded, read-only observation used for original contact-point/material qualification.
+extern "C" int ragdoll_contact_points(double* output,int capacity){
+    if(!ownedWorld||!output||capacity<5632||ownedRagdolls.size()!=1||ownedWorld->dispatcher.getNumManifolds()>64)return -1;
+    const auto& owner=*ownedRagdolls.begin()->second;int cursor=0;
+    for(int i=0;i<ownedWorld->dispatcher.getNumManifolds();i++){
+        const auto* manifold=ownedWorld->dispatcher.getManifoldByIndexInternal(i);int part=-1,side=-1;
+        for(int p=0;p<11;p++){if(owner.bodies[p].get()==manifold->getBody0()){part=p;side=0;}else if(owner.bodies[p].get()==manifold->getBody1()){part=p;side=1;}}
+        if(part<0)continue;
+        for(int j=0;j<manifold->getNumContacts();j++){
+            const auto& point=manifold->getContactPoint(j);output[cursor++]=part;output[cursor++]=side;
+            for(const auto& v:{point.m_localPointA,point.m_localPointB,point.getPositionWorldOnB(),point.getPositionWorldOnA(),point.m_normalWorldOnB})for(int axis=0;axis<3;axis++)output[cursor++]=v[axis];
+            for(double value:{double(point.getDistance()),double(point.m_combinedFriction),double(point.m_combinedRollingFriction),double(point.m_combinedRestitution),double(point.getAppliedImpulse())})output[cursor++]=value;
+        }
+    }return cursor;
+}

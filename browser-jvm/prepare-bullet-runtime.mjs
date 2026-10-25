@@ -11,7 +11,7 @@ const sdk = path.join(repository, '.tools/emsdk-3.1.74-source/emsdk-3d6d8ee91046
 const compiler = path.join(sdk, 'upstream/emscripten/emcc.py');
 const foundationExports = ['scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'create_world', 'world_state', 'destroy_world', 'create_mapped_world', 'activate_map', 'world_header', 'deactivate_map', 'map_info', 'map_chunk', 'destroy_mapped_world', 'malloc', 'free'];
 
-const vehicleExports = ['ragdoll_contact_count', 'ragdoll_bone_count', 'read_ragdoll', 'update_ragdoll_previous_pose', 'apply_ragdoll_force', 'detach_ragdoll_constraint', 'ragdoll_action_state', 'set_ragdoll_local_rotation', 'ragdoll_capsule_support', 'configure_ragdoll_anchors', 'update_ragdoll_root', 'update_ragdoll_pose', 'add_ragdoll', 'remove_ragdoll', 'set_ragdoll_active', 'ragdoll_simulation_state', 'ragdoll_body_state', 'initialize_ragdoll_template', 'ragdoll_template_bone', 'ragdoll_template_shape', 'vehicle_constraint_count', 'vehicle_constraint_feedback', 'add_vehicle_constraint', 'set_vehicle_constraint_erp', 'remove_vehicle_constraint', 'teleport_vehicle', 'apply_torque', 'scroll_map', 'vehicle_count_snapshot', 'get_vehicle_physics_batch', 'vehicle_basis', 'bind_static_mesh', 'has_static_mesh', 'registered_mesh_references', 'observe_vehicle_contacts', 'apply_central_force', 'vehicle_control_history', 'scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'world_state', 'create_mapped_world', 'destroy_mapped_world', 'build_geometry', 'clear_geometry', 'geometry_count', 'geometry_body', 'define_vehicle', 'define_vehicle_named', 'vehicle_definition_count', 'select_vehicle_definition', 'add_vehicle', 'vehicle_state', 'vehicle_child', 'vehicle_wheel', 'set_vehicle_active', 'set_vehicle_mass', 'set_vehicle_static', 'set_tire_inflation', 'set_tire_removed', 'set_vehicle_params', 'set_vehicle_velocity_multiplier', 'control_vehicle', 'step_vehicle_freefall', 'get_vehicle_physics', 'replace_chunk_level', 'begin_vehicle_publication', 'finish_vehicle_publication', 'step_mapped_vehicle', 'chunk_level_state', 'vehicle_material', 'set_chunk_levels', 'registered_vehicle_count', 'object_registry_count', 'remove_vehicle', 'world_header', 'activate_map', 'deactivate_map', 'map_info', 'map_chunk', 'malloc', 'free', 'create_world'];
+const vehicleExports = ['ragdoll_contact_points', 'ragdoll_contact_count', 'ragdoll_bone_count', 'read_ragdoll', 'update_ragdoll_previous_pose', 'apply_ragdoll_force', 'detach_ragdoll_constraint', 'ragdoll_action_state', 'set_ragdoll_local_rotation', 'ragdoll_capsule_support', 'configure_ragdoll_anchors', 'update_ragdoll_root', 'update_ragdoll_pose', 'add_ragdoll', 'remove_ragdoll', 'set_ragdoll_active', 'ragdoll_simulation_state', 'ragdoll_body_state', 'initialize_ragdoll_template', 'ragdoll_template_bone', 'ragdoll_template_shape', 'vehicle_constraint_count', 'vehicle_constraint_feedback', 'add_vehicle_constraint', 'set_vehicle_constraint_erp', 'remove_vehicle_constraint', 'teleport_vehicle', 'apply_torque', 'scroll_map', 'vehicle_count_snapshot', 'get_vehicle_physics_batch', 'vehicle_basis', 'bind_static_mesh', 'has_static_mesh', 'registered_mesh_references', 'observe_vehicle_contacts', 'apply_central_force', 'vehicle_control_history', 'scalar_bytes', 'create_mesh', 'add_hull', 'get_aabb', 'child_count', 'point_count', 'get_point', 'clear_mesh', 'live_meshes', 'world_state', 'create_mapped_world', 'destroy_mapped_world', 'build_geometry', 'clear_geometry', 'geometry_count', 'geometry_body', 'define_vehicle', 'define_vehicle_named', 'vehicle_definition_count', 'select_vehicle_definition', 'add_vehicle', 'vehicle_state', 'vehicle_child', 'vehicle_wheel', 'set_vehicle_active', 'set_vehicle_mass', 'set_vehicle_static', 'set_tire_inflation', 'set_tire_removed', 'set_vehicle_params', 'set_vehicle_velocity_multiplier', 'control_vehicle', 'step_vehicle_freefall', 'get_vehicle_physics', 'replace_chunk_level', 'begin_vehicle_publication', 'finish_vehicle_publication', 'step_mapped_vehicle', 'chunk_level_state', 'vehicle_material', 'set_chunk_levels', 'registered_vehicle_count', 'object_registry_count', 'remove_vehicle', 'world_header', 'activate_map', 'deactivate_map', 'map_info', 'map_chunk', 'malloc', 'free', 'create_world'];
 
 /**
  * Computes a byte-exact source or generated artifact fingerprint.
@@ -131,6 +131,9 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
     const cpp = inputs.filter(([name]) => name.endsWith('.cpp')).map(([name]) => path.join(sourceRoot, name));
     let solverOverlay = null;
     let capsuleOverlay = null;
+    let gjkOverlay = null;
+    let pairOverlay = null;
+    let convexOverlay = null;
 
     if (profile === 'vehicle') {
         const original = path.join(sourceRoot, 'src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp');
@@ -253,10 +256,142 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
             originalSha: digest(capsuleBytes), overlaySha: digest(capsuleDerived), overlay: capsuleOutput,
             originalNativeSupport: '0x18007c660', originalNativeAabb: '0x180037800',
         };
+        const gjkOriginal = path.join(sourceRoot, 'src/BulletCollision/NarrowPhaseCollision/btGjkEpa2.cpp');
+        const gjkBytes = await readFile(gjkOriginal);
+
+        if (digest(gjkBytes) !== 'd0f17f0d545646f79b052a1e3691ff2f8ecc775dde5bbcceb1dbbef5c5bc3635') {
+            throw new Error('Unqualified original GJK/EPA source');
+        }
+
+        let gjkText = gjkBytes.toString('utf8');
+        const gjkChanges = [
+            ['#define GJK_ACCURACY ((btScalar)1e-12)', '#define GJK_ACCURACY ((btScalar)0.0001)', '0x1800981fe..9821e'],
+            ['#define GJK_MIN_DISTANCE ((btScalar)1e-12)', '#define GJK_MIN_DISTANCE ((btScalar)0.0001)', '0x1800980d8..980e1'],
+            ['#define GJK_DUPLICATED_EPS ((btScalar)1e-12)', '#define GJK_DUPLICATED_EPS ((btScalar)0.0001)', '0x180098170..981af'],
+            ['#define EPA_ACCURACY ((btScalar)1e-12)', '#define EPA_ACCURACY ((btScalar)0.0001)', '0x18009774f..97852'],
+            ['#define EPA_PLANE_EPS ((btScalar)1e-14)', '#define EPA_PLANE_EPS ((btScalar)0.00001)', '0x180099fd6;0x18009a6f4'],
+            ['#define EPA_MAX_VERTICES 128', '#define EPA_MAX_VERTICES 64', '0x1800977e0..977e9'],
+        ];
+
+        for (const [before, after] of gjkChanges) {
+            if (gjkText.split(before).length !== 2) {
+                throw new Error('Original GJK/EPA compatibility context is absent or ambiguous');
+            }
+
+            gjkText = gjkText.replace(before, after);
+        }
+
+        gjkText = gjkText.replace('// Config', '// Altered compatibility overlay: source-recovered original native convergence limits.\n// Config');
+
+        const gjkDerived = Buffer.from(gjkText);
+
+        if (digest(gjkDerived) !== '8a074be6640aa3991bb9dbc7a8568c2b3c952efafa2d6c15991de710d503f417') {
+            throw new Error('GJK/EPA derivative differs from reviewed bytes');
+        }
+
+        const gjkOutput = path.join(output, 'btGjkEpa2.cpp');
+        const gjkIndex = cpp.indexOf(gjkOriginal);
+
+        if (gjkIndex === -1 || cpp.lastIndexOf(gjkOriginal) !== gjkIndex) {
+            throw new Error('Expected exactly one GJK/EPA translation unit');
+        }
+
+        await writeFile(gjkOutput, gjkDerived, { flag: 'wx' });
+        cpp[gjkIndex] = gjkOutput;
+        gjkOverlay = { originalSha: digest(gjkBytes), overlaySha: digest(gjkDerived), overlay: gjkOutput, changes: gjkChanges };
+        const pairOriginal = path.join(sourceRoot, 'src/BulletCollision/NarrowPhaseCollision/btGjkPairDetector.cpp');
+        const pairBytes = await readFile(pairOriginal);
+
+        if (digest(pairBytes) !== 'b32b8411f2b3b5e3cfedfa198198c6b7842ac4e9b092873c71155b0ab45b84e8') {
+            throw new Error('Unqualified original distance-GJK source');
+        }
+
+        let pairText = pairBytes.toString('utf8');
+        const pairChanges = [
+            ['#define REL_ERROR2 btScalar(1.0e-12)', '#define REL_ERROR2 btScalar(1.0e-6)', '0x1800a59c5..a59ca;0x1800a5a2a'],
+            ['btScalar gGjkEpaPenetrationTolerance = 1.0e-12;', 'btScalar gGjkEpaPenetrationTolerance = 0.01;', '0x1800a5c6b..a5c7c'],
+            ['if (lenSqr < REL_ERROR2)', 'if (lenSqr < btScalar(0.0001))', '0x1800a5b36..a5b4f'],
+        ];
+
+        for (const [before, after] of pairChanges) {
+            if (pairText.split(before).length !== 2) {
+                throw new Error('Original distance-GJK compatibility context is absent or ambiguous');
+            }
+
+            pairText = pairText.replace(before, after);
+        }
+
+        const precheckStart = '\t//we add a separate implementation to check if the convex shapes intersect\n';
+        const precheckEnd = '\t\t//printf("dir=%f,%f,%f\\n",dir[0],dir[1],dir[2]);\n';
+
+        if (pairText.split(precheckStart).length !== 2 || pairText.split(precheckEnd).length !== 2
+            || pairText.split('\tint status = -2;\n').length !== 2
+            || pairText.split('if ((checkPenetration && (!isValid || catchDegeneratePenetrationCase)) || (status == 0))').length !== 2) {
+            throw new Error('Original distance-GJK call-flow context is absent or ambiguous');
+        }
+
+        const precheckOffset = pairText.indexOf(precheckStart);
+        const precheckLimit = pairText.indexOf(precheckEnd, precheckOffset) + precheckEnd.length;
+
+        const precheckReplacement = '\t// Original native enters classic distance GJK directly, without the later libCCD precheck.\n\t{\n\t\tbtScalar squaredDistance = BT_LARGE_FLOAT;\n\t\tbtScalar delta = btScalar(0.);\n\t\tm_simplexSolver->reset();\n';
+
+        pairText = `${pairText.slice(0, precheckOffset)}${precheckReplacement}${pairText.slice(precheckLimit)}`;
+        pairText = pairText.replace('\tint status = -2;\n', '')
+            .replace('if ((checkPenetration && (!isValid || catchDegeneratePenetrationCase)) || (status == 0))', 'if (checkPenetration && (!isValid || catchDegeneratePenetrationCase))');
+
+        pairText = pairText.replace('//must be above the machine epsilon', '// Altered compatibility overlay: original native relative/normal/fallback thresholds.\n//must be above the machine epsilon');
+
+        const pairDerived = Buffer.from(pairText);
+
+        if (digest(pairDerived) !== '6ddda5861e742d50556951e9d73c135263d78321f64953ab0eee08350557a803') {
+            throw new Error('Distance-GJK derivative differs from reviewed bytes');
+        }
+
+        const pairOutput = path.join(output, 'btGjkPairDetector.cpp');
+        const pairIndex = cpp.indexOf(pairOriginal);
+
+        if (pairIndex === -1 || cpp.lastIndexOf(pairOriginal) !== pairIndex) {
+            throw new Error('Expected exactly one distance-GJK translation unit');
+        }
+
+        await writeFile(pairOutput, pairDerived, { flag: 'wx' });
+        cpp[pairIndex] = pairOutput;
+        pairOverlay = { originalSha: digest(pairBytes), overlaySha: digest(pairDerived), overlay: pairOutput, changes: pairChanges, callFlowNative: '0x1800a5380..a5633;0x1800a5c84..a5c91' };
+        const convexOriginal = path.join(sourceRoot, 'src/BulletCollision/CollisionDispatch/btConvexConvexAlgorithm.cpp');
+        const convexBytes = await readFile(convexOriginal);
+        const simplexBefore = '\t\tbtVoronoiSimplexSolver simplexSolver;\n\t\tbtGjkPairDetector gjkPairDetector';
+        const simplexAfter = '\t\tbtVoronoiSimplexSolver simplexSolver;\n\t\t// Altered compatibility: original constructor 0x18007854a stores double(float(.0001)).\n\t\tsimplexSolver.setEqualVertexThreshold(btScalar(0.0001f));\n\t\tbtGjkPairDetector gjkPairDetector';
+        const convexText = convexBytes.toString('utf8');
+
+        if (digest(convexBytes) !== '7b02cbe1ce4d7024b37129905fffeffc68110923de3de6308e1d93b61d88760c' || convexText.split(simplexBefore).length !== 2) {
+            throw new Error('Unqualified original contact simplex constructor context');
+        }
+
+        const convexDerived = Buffer.from(convexText.replace(simplexBefore, simplexAfter));
+
+        if (digest(convexDerived) !== 'bb5272915473174b8b1d9dc5ed817f27de8cdf418912f50dd04ab8657376ce37') {
+            throw new Error('Contact simplex derivative differs from reviewed bytes');
+        }
+
+        const convexOutput = path.join(output, 'btConvexConvexAlgorithm.cpp');
+        const convexIndex = cpp.indexOf(convexOriginal);
+
+        if (convexIndex === -1 || cpp.lastIndexOf(convexOriginal) !== convexIndex) {
+            throw new Error('Expected exactly one convex contact translation unit');
+        }
+
+        await writeFile(convexOutput, convexDerived, { flag: 'wx' });
+        cpp[convexIndex] = convexOutput;
+        convexOverlay = {
+            originalSha: digest(convexBytes), overlaySha: digest(convexDerived), overlay: convexOutput,
+            simplexNative: '0x18007854a..78560;0x1800a42d1..a4334',
+        };
     }
 
     const compilerArguments = ['-3', compiler, '-std=c++17', '-O1', '-DBT_USE_DOUBLE_PRECISION', `-I${path.join(sourceRoot, 'src')}`,
-        ...(capsuleOverlay ? [`-I${path.join(sourceRoot, 'src/BulletCollision/CollisionShapes')}`] : []), bridge, ...cpp,
+        ...(capsuleOverlay ? [`-I${path.join(sourceRoot, 'src/BulletCollision/CollisionShapes')}`] : []),
+        ...(gjkOverlay ? [`-I${path.join(sourceRoot, 'src/BulletCollision/NarrowPhaseCollision')}`] : []),
+        ...(convexOverlay ? [`-I${path.join(sourceRoot, 'src/BulletCollision/CollisionDispatch')}`] : []), bridge, ...cpp,
         '-sMODULARIZE=1', '-sEXPORT_ES6=1', '-sENVIRONMENT=web,node', '-sALLOW_MEMORY_GROWTH=1',
         `-sEXPORTED_FUNCTIONS=${JSON.stringify(exports.map((name) => `_${name}`))}`, '-o', path.join(output, 'bullet-engine.mjs')];
 
@@ -264,7 +399,7 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
         { env: { ...process.env, EM_CONFIG: path.join(sdk, '.emscripten') }, timeout: 180_000, maxBuffer: 4_194_304 });
 
     const manifest = {
-        profile, exports, solverOverlay, capsuleOverlay, compilerArguments, sourceInventorySha: digest(JSON.stringify(inputs)),
+        profile, exports, solverOverlay, capsuleOverlay, gjkOverlay, pairOverlay, convexOverlay, compilerArguments, sourceInventorySha: digest(JSON.stringify(inputs)),
         compilerSha: digest(await readFile(compiler)), compilerConfigSha: digest(await readFile(path.join(sdk, '.emscripten'))),
         candidateCommit: '2c204c49e56ed15ec5fcfa71d199ab6d6570b3f5', candidateVersion: '3.25', installedCoreVersion: 'unknown', versionMatchVerified: false,
         compilerVersion: '3.1.74', scalarBytes: 8, bridgeSha, ragdollTemplateSha, ragdollBodySha, ragdollActionsSha, ragdollReadbackSha, sources: cpp.length,
@@ -288,6 +423,18 @@ export async function prepareBulletRuntime(outputDirectory, { profile = 'foundat
 
     if (capsuleOverlay && digest(await readFile(capsuleOverlay.overlay)) !== capsuleOverlay.overlaySha) {
         throw new Error('Capsule fastpath derivative changed during compilation');
+    }
+
+    if (gjkOverlay && digest(await readFile(gjkOverlay.overlay)) !== gjkOverlay.overlaySha) {
+        throw new Error('GJK/EPA derivative changed during compilation');
+    }
+
+    if (pairOverlay && digest(await readFile(pairOverlay.overlay)) !== pairOverlay.overlaySha) {
+        throw new Error('Distance-GJK derivative changed during compilation');
+    }
+
+    if (convexOverlay && digest(await readFile(convexOverlay.overlay)) !== convexOverlay.overlaySha) {
+        throw new Error('Contact simplex derivative changed during compilation');
     }
 
     await verifySources(inputs);
