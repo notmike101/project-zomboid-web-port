@@ -108,6 +108,9 @@ async function createOriginalBootRoutes(generation) {
 
     assert.equal(servedAdmission.executionAdmitted, true);
     assert.deepEqual(servedAdmission.classpath, generation.classpath);
+    assert.ok(generation.texture2x === undefined || typeof generation.texture2x === 'boolean',
+        'Original texture2x selection must be an explicit boolean');
+    assert.equal(servedAdmission.texture2x, generation.texture2x, 'Served original texture2x selection differs');
     const inventoryFile = await realpath(generation.importer.inventoryFile);
     const importerFile = routes.get('/prepared/index.properties').file;
 

@@ -53,7 +53,13 @@ try {
         throw new Error('Original -novoip selection must be an explicit boolean');
     }
 
-    globalThis.originalBoot.startupOptions = { audio: Boolean(admission.audioRuntime), noVoip: admission.noVoip === true };
+    if (admission.texture2x !== undefined && typeof admission.texture2x !== 'boolean') {
+        throw new Error('Original texture2x selection must be an explicit boolean');
+    }
+
+    globalThis.originalBoot.startupOptions = {
+        audio: Boolean(admission.audioRuntime), noVoip: admission.noVoip === true, texture2x: admission.texture2x ?? null,
+    };
 
     if (!response.ok || admission.executionAdmitted !== true || admission.scope !== 'original-frontend-setup'
         || !Array.isArray(admission.classpath) || !admission.classpath.every((name) => /^\/app\/[a-z0-9-]+\.jar$/u.test(name))) {
@@ -207,7 +213,8 @@ try {
         version: 17,
         status: 'none',
         javaProperties: ['user.dir=/app', `user.home=${root}`, 'java.library.path=/app/',
-            `pz.browser.audio=${Boolean(audioOwner)}`, `pz.browser.novoip=${admission.noVoip === true}`],
+            `pz.browser.audio=${Boolean(audioOwner)}`, `pz.browser.novoip=${admission.noVoip === true}`,
+            ...(admission.texture2x === undefined ? [] : [`pz.browser.texture2x=${admission.texture2x}`])],
         natives: {
             ...graphics.natives, ...keyboard.natives, ...mouse.natives, ...display.natives,
             ...controllers.natives, ...clock.natives, ...physics.natives, ...watch.natives, ...processes.natives,
