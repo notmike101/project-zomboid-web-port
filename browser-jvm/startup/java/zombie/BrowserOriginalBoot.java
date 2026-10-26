@@ -49,6 +49,11 @@ public final class BrowserOriginalBoot {
                 throw new IllegalStateException("Fresh read-only media and owned writable home required");
             System.setProperty("zomboid.steam", "0");
             Core.soundDisabled = !Boolean.getBoolean("pz.browser.audio");
+            // Same independent selection as original MainScreenState.main's -novoip flag.
+            boolean noVoip = Boolean.getBoolean("pz.browser.novoip");
+            if (noVoip) zombie.core.raknet.VoiceManager.voipDisabled = true;
+            report("{\"startupOptions\":{\"audio\":" + !Core.soundDisabled
+                    + ",\"noVoip\":" + noVoip + "}}");
             ZomboidFileSystem.instance.setCacheDir(root.resolve("cache").toString());
             zombie.debug.DebugLog.getInstance().setStdOut(System.out);
             zombie.debug.DebugLog.getInstance().setStdErr(System.err);

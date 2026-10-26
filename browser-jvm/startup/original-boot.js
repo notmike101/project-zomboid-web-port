@@ -49,6 +49,12 @@ try {
     const response = await fetch('/original-boot-admission.json', { cache: 'no-store' });
     const admission = await response.json();
 
+    if (admission.noVoip !== undefined && typeof admission.noVoip !== 'boolean') {
+        throw new Error('Original -novoip selection must be an explicit boolean');
+    }
+
+    globalThis.originalBoot.startupOptions = { audio: Boolean(admission.audioRuntime), noVoip: admission.noVoip === true };
+
     if (!response.ok || admission.executionAdmitted !== true || admission.scope !== 'original-frontend-setup'
         || !Array.isArray(admission.classpath) || !admission.classpath.every((name) => /^\/app\/[a-z0-9-]+\.jar$/u.test(name))) {
         throw new Error('Original startup has no reviewed complete importer/resource generation');
@@ -200,7 +206,8 @@ try {
     await startSchedulerRuntime({
         version: 17,
         status: 'none',
-        javaProperties: ['user.dir=/app', `user.home=${root}`, 'java.library.path=/app/', `pz.browser.audio=${Boolean(audioOwner)}`],
+        javaProperties: ['user.dir=/app', `user.home=${root}`, 'java.library.path=/app/',
+            `pz.browser.audio=${Boolean(audioOwner)}`, `pz.browser.novoip=${admission.noVoip === true}`],
         natives: {
             ...graphics.natives, ...keyboard.natives, ...mouse.natives, ...display.natives,
             ...controllers.natives, ...clock.natives, ...physics.natives, ...watch.natives, ...processes.natives,
