@@ -57,6 +57,8 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
     let initialized = false;
     let version;
     let recordDriverQuery;
+    let recordSoundQuery;
+    let recordVolume = 3;
     let rangeBytes = 0;
     let rangeReads = 0;
     let maxRangeBytes = 0;
@@ -384,6 +386,35 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             }
 
             return drivers.numdrivers;
+        },
+        FMOD_System_CreateRecordSound(_lib, driver) {
+            requireSystem();
+            const device = Number(BigInt.asIntN(32, BigInt(driver)));
+
+            core.getRecordDriverInfo(device);
+            const result = FMOD.getLastError();
+
+            recordSoundQuery = { driver: device, result };
+
+            // Original 0x18000cbe3..cbea returns a null sound before allocating any capture resources.
+            if (result !== FMOD.OK) {
+                FMOD.setLastError(FMOD.OK);
+
+                return 0n;
+            }
+
+            throw new Error('Original recording sound/resampler/DSP ownership requires an admitted recording device');
+        },
+        FMOD_System_SetRecordVolume(_lib, value) {
+            const input = Number(BigInt.asIntN(32, BigInt(value)));
+            // eslint-disable-next-line unicorn/prefer-math-trunc -- Preserve native signed-int32 abs(INT_MIN) overflow.
+            const absolute = (input < 0 ? -input : input) | 0;
+
+            // Native signed abs preserves INT_MIN; the upper clamp has no lower bound.
+            recordVolume = Math.min(absolute, 31);
+
+            // Successful record-sound creation is guarded above, so its capture DSP remains null.
+            return 0n;
         },
         async FMOD_ChannelGroup_Release(_lib, id) {
             await use(id, 'channelGroup').release();
@@ -929,7 +960,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
 
     return {
         natives,
-        snapshot: () => ({ initialized, disposed, version, recordDriverQuery, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, callbackFailures, sdkMarkerFallthroughs, callbackEvents: [...callbackEvents], lastCallbackFailures: [...lastCallbackFailures], audibleVerified: false }),
+        snapshot: () => ({ initialized, disposed, version, recordDriverQuery, recordSoundQuery, recordVolume, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, callbackFailures, sdkMarkerFallthroughs, callbackEvents: [...callbackEvents], lastCallbackFailures: [...lastCallbackFailures], audibleVerified: false }),
         async dispose() {
             /* The host calls teardown after the original VM has joined. Drain complete JNI
              * deliveries (including callbacks outside the SDK lock) before releasing the engine. */
