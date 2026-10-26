@@ -76,3 +76,9 @@ The next maintained stage assembles those archives with supplied scene and media
 INPUTS_JSON supplies jarManifest, gameRoot, sceneRoot, raknetManifest, earcutManifest, closedMedia and eagerMedia. The archive and component manifests come from their maintained builders. sceneRoot contains the6034 snapshots, plan.tsv, snapshot-routes.json, index.properties and whole-boot-directory-index.list. closedMedia supplies the namespace/certificate/ledger file paths and SHA-256 identities plus an external snapshotParent; eagerMedia retains its existing same-owner-eager-metadata-v1 schema.
 
 This freezes current host modules and small runtime artifacts, verifies scene snapshots in place, and records original media metadata without copying its payloads. The generation remains unadmitted. Required real Bullet composition, explicit audio/voice selection and actual browser startup qualification follow separately. Source inventory generation and native scene preparation must still be supplied; this stage does not turn a retained private plan into a fresh-install guarantee.
+
+For a supplied original importer plan, validate and compile the maintained batch recipe without running native imports:
+
+    node browser-jvm/startup/prepare-scene-batches.mjs INSTALLATION PLAN_TSV JDK25 NEW_TARGET_DIRECTORY --plan-only
+
+Selecting --prepare instead runs the existing bounded per-record native importer sequentially, then transfers only its owned generated snapshots into a combined inventory. It never starts the game/server or moves installed files. The6,034-entry plan is split into4,096 and1,938 entries, respecting the original preparer's limit. The resulting combined directory can supply sceneRoot to assemble-base.mjs. The plan itself must still come from a qualified installed-source inventory; this command does not invent missing model/animation coverage.
