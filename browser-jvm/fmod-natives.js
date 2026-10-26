@@ -40,6 +40,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
     let lock = Promise.resolve();
     let initialized = false;
     let version;
+    let recordDriverQuery;
     let rangeBytes = 0;
     let rangeReads = 0;
     let maxRangeBytes = 0;
@@ -342,6 +343,35 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         },
         FMOD_Studio_GetEvent(_lib, path) {
             return retain('event', requireSystem().getEvent(String(path)));
+        },
+        FMOD_System_GetRecordNumDrivers() {
+            requireSystem();
+            const drivers = core.getRecordNumDrivers();
+            const result = FMOD.getLastError();
+
+            recordDriverQuery = { result, numDrivers: drivers?.numdrivers, numConnected: drivers?.numconnected };
+
+            // Original JNI 0x18000d9ba..d9e1 returns zero on SDK error, otherwise the actual driver count.
+            if (result !== FMOD.OK) {
+                FMOD.setLastError(FMOD.OK);
+
+                return 0;
+            }
+
+            if (!Number.isInteger(drivers.numdrivers) || drivers.numdrivers < 0) {
+                throw new Error('Invalid actual FMOD recording-driver count');
+            }
+
+            return drivers.numdrivers;
+        },
+        async FMOD_ChannelGroup_Release(_lib, id) {
+            await use(id, 'channelGroup').release();
+
+            if (FMOD.getLastError() === FMOD.OK) {
+                drop('channelGroup', id);
+            }
+
+            return FMOD.OK;
         },
         async FMOD_Studio_CreateEventInstance(_lib, id) {
             const instance = await use(id, 'event').createInstance();
@@ -836,7 +866,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
 
     return {
         natives,
-        snapshot: () => ({ initialized, disposed, version, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, audibleVerified: false }),
+        snapshot: () => ({ initialized, disposed, version, recordDriverQuery, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, audibleVerified: false }),
         async dispose() {
             /* The host calls teardown after the original VM has joined. Drain complete JNI
              * deliveries (including callbacks outside the SDK lock) before releasing the engine. */
