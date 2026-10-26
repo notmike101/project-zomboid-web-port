@@ -10,6 +10,8 @@ struct OwnedBallisticsTarget {
     btTransform axis=btTransform::getIdentity();
     btVector3 position=btVector3(0,0,0);
     bool aggregateHit=false;
+    bool bodyHit[11]={};
+    btVector3 bodyHitColor[11];
     btVector3 hitPoint=btVector3(0,0,0),hitColor=btVector3(0,0,0);
     std::unique_ptr<btCollisionObject> object;
 };
@@ -223,4 +225,39 @@ extern "C" int ballistics_reticle_state(int id,double* output){
         btVector3 lo,hi;shape->getAabb(btTransform::getIdentity(),lo,hi);for(const auto& point:{lo,hi})for(int axis=0;axis<3;axis++)output[cursor++]=point[axis];
     }
     for(int row=0;row<3;row++)for(int col=0;col<3;col++)output[cursor++]=globalBallisticsReticle.getBasis()[row][col];return 1;
+}
+
+static int ballistics_part_priority(int part){return part==2?0:part==1?1:part==0?2:3;}
+extern "C" int get_targeted_body_part(int id){
+    auto found=ownedBallisticsTargets.find(id);if(found==ownedBallisticsTargets.end())return 11;
+    for(int part=0;part<11;part++)if(found->second->bodyHit[part])return part;return 11;
+}
+extern "C" int get_ballistics_camera_targets(int id,float range,int capacity,int detailed,float* output){
+    if(!ownedWorld||!output||!std::isfinite(range)||capacity<1)return -1;
+    auto found=ownedBallisticsControllers.find(id);if(found==ownedBallisticsControllers.end())return 0;
+    const auto& controller=*found->second;btVector3 backward=-controller.reticle.getBasis().getColumn(2);
+    if(backward.length2()==0)return 0;backward.normalize();
+    const btVector3 from=controller.reticle.getOrigin()-backward*150.,to=controller.reticle.getOrigin()+backward*150.;
+    btCollisionWorld::AllHitsRayResultCallback hit(from,to);ownedWorld->world.rayTest(from,to,hit);
+    int count=0;std::vector<OwnedBallisticsTarget*> candidates;
+    for(int index=0;index<hit.m_collisionObjects.size()&&count<capacity;index++){
+        OwnedBallisticsTarget* target=nullptr;int targetId=-1;
+        for(const auto& entry:ownedBallisticsTargets)if(entry.second->object.get()==hit.m_collisionObjects[index]){target=entry.second.get();targetId=entry.first;break;}
+        if(!target||(controller.transform.getOrigin()-target->object->getWorldTransform().getOrigin()).length()>double(range))continue;
+        target->aggregateHit=true;target->hitColor=controller.color;float* row=output+count*5;row[0]=float(targetId);
+        // Original0x1800202cc reads the first AllHits point for every accepted aggregate.
+        for(int axis=0;axis<3;axis++)row[1+axis]=float(hit.m_hitPointWorld[0][axis]+(axis==0?worldHeader[4]:axis==2?worldHeader[5]:0));
+        row[4]=11;candidates.push_back(target);count++;
+    }
+    if(!detailed||count==0)return count;
+    for(auto* target:candidates)for(const auto& body:target->skeleton->bodies)if(body->getBroadphaseHandle())return -1;
+    for(auto* target:candidates)for(const auto& body:target->skeleton->bodies){body->setCollisionFlags(4);ownedWorld->world.addCollisionObject(body.get(),16,-1);}
+    ownedWorld->world.rayTest(from,to,hit);int selected=-1;
+    for(int index=0;index<hit.m_collisionObjects.size();index++)for(int candidate=0;candidate<count;candidate++){
+        auto* target=candidates[candidate];for(int part=0;part<11;part++)if(target->skeleton->bodies[part].get()==hit.m_collisionObjects[index]){
+            if(selected<0||ballistics_part_priority(part)<ballistics_part_priority(selected)){output[candidate*5+4]=float(part);selected=part;}
+            target->bodyHit[part]=true;target->bodyHitColor[part]=controller.color;
+        }
+    }
+    for(auto* target:candidates)for(const auto& body:target->skeleton->bodies)ownedWorld->world.removeCollisionObject(body.get());return count;
 }

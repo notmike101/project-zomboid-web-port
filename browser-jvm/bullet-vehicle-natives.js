@@ -648,6 +648,45 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             }
         },
         /**
+         * Queries actual camera aggregate hits and temporarily attached precise body shapes.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original shooter identity.
+         * @param {number} range - Original center distance bound.
+         * @param {number} capacity - Original maximum record count.
+         * @param {boolean} detailed - Original precise body query selector.
+         * @param {Float32Array} output - Original five-float records and spare capacity.
+         * @returns {number} Actual camera target count.
+         */
+        getBallisticsCameraTargets(lib, id, range, capacity, detailed, output) {
+            expect(output instanceof Float32Array && Number.isInteger(capacity) && capacity > 0 && capacity * 5 <= output.length,
+                'Original bounded camera output required');
+            const pointer = engine._malloc(capacity * 20);
+
+            expect(pointer !== 0, 'Actual camera allocation failed');
+
+            try {
+                const count = engine._get_ballistics_camera_targets(id, range, capacity, detailed ? 1 : 0, pointer);
+
+                expect(count >= 0 && count <= capacity, 'Actual camera query rejected');
+                output.set(engine.HEAPF32.subarray(pointer / 4, pointer / 4 + count * 5));
+
+                return count;
+            } finally {
+                engine._free(pointer);
+            }
+        },
+        /**
+         * Reads the first persistently hit precise body, as the original getter does.
+         *
+         * @param {object} lib - Original Java namespace.
+         * @param {number} id - Original target identity.
+         * @returns {number} Actual first hit part or original sentinel11.
+         */
+        getTargetedBodyPart(lib, id) {
+            return engine._get_targeted_body_part(id);
+        },
+        /**
          * Traces the actual closest world collision and registers a genuine target or vehicle hit.
          *
          * @param {object} lib - Original Java namespace.
