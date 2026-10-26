@@ -157,7 +157,7 @@ public final class PrepareSpriteGraphics {
                             bytes=cf.transformClass(cf.parse(bytes),(builder,element)->builder.with(element));
                             bytes=cf.transformClass(cf.parse(bytes),new ClassTransform(){
                                 public void accept(ClassBuilder builder,ClassElement element){builder.with(element);}
-                                public void atEnd(ClassBuilder builder){builder.withMethodBody("<init>",MethodTypeDesc.of(ConstantDescs.CD_void,ConstantDescs.CD_boolean),0x1,code->code.aload(0).invokespecial(ConstantDescs.CD_Object,"<init>",MethodTypeDesc.of(ConstantDescs.CD_void)).aload(0).iload(1).putfield(CAPS,"GL_ARB_vertex_buffer_object",ConstantDescs.CD_boolean).aload(0).invokestatic(HOST,"framebufferSupported",MethodTypeDesc.of(ConstantDescs.CD_boolean)).putfield(CAPS,"GL_ARB_framebuffer_object",ConstantDescs.CD_boolean).return_());}
+                                public void atEnd(ClassBuilder builder){builder.withMethodBody("<init>",MethodTypeDesc.of(ConstantDescs.CD_void,ConstantDescs.CD_boolean),0x1,code->code.aload(0).invokespecial(ConstantDescs.CD_Object,"<init>",MethodTypeDesc.of(ConstantDescs.CD_void)).aload(0).iload(1).putfield(CAPS,"GL_ARB_vertex_buffer_object",ConstantDescs.CD_boolean).aload(0).invokestatic(HOST,"framebufferSupported",MethodTypeDesc.of(ConstantDescs.CD_boolean)).putfield(CAPS,"GL_ARB_framebuffer_object",ConstantDescs.CD_boolean).aload(0).invokestatic(HOST,"textureCompressionSupported",MethodTypeDesc.of(ConstantDescs.CD_boolean)).putfield(CAPS,"GL_ARB_texture_compression",ConstantDescs.CD_boolean).return_());}
                             });changes.add("<init>(Z):bounded-ARB-buffer-descriptor");
                         }
                     }

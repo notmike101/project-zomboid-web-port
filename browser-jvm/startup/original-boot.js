@@ -32,6 +32,7 @@ let owners;
 let metadataOwner;
 let metadataDescriptor;
 let audioOwner;
+let compression;
 
 globalThis.originalBoot = { observations, failures, hostReports, completed: false, vmExitObserved: false };
 /**
@@ -51,6 +52,14 @@ try {
 
     if (admission.noVoip !== undefined && typeof admission.noVoip !== 'boolean') {
         throw new Error('Original -novoip selection must be an explicit boolean');
+    }
+
+    if (admission.textureCompressionEnabled !== undefined && typeof admission.textureCompressionEnabled !== 'boolean') {
+        throw new Error('Texture compression selection must be an optional boolean');
+    }
+
+    if (admission.textureCompressionEnabled === true && !admission.textureCompression) {
+        throw new Error('Texture compression requires an admitted real encoder');
     }
 
     globalThis.originalBoot.startupOptions = { audio: Boolean(admission.audioRuntime), noVoip: admission.noVoip === true };
@@ -84,12 +93,18 @@ try {
     }
 
     helper = installCredentiallessRuntimeHelper();
+    if (admission.textureCompression) {
+        const { loadTextureCompression } = await import('./texture-compression-runtime.js');
+
+        compression = await loadTextureCompression(admission.textureCompression.manifestSHA);
+    }
+
     const graphics = createSpriteNatives(canvas, (json) => {
         const value = JSON.parse(String(json));
 
         hostReports.push(value);
         failures.push({ unexpectedGraphicsQualificationReport: value });
-    });
+    }, compression ?? null);
 
     /**
      * Returns scalar host resource counts and Chromium's optional JS heap counters.
@@ -207,7 +222,8 @@ try {
         version: 17,
         status: 'none',
         javaProperties: ['user.dir=/app', `user.home=${root}`, 'java.library.path=/app/',
-            `pz.browser.audio=${Boolean(audioOwner)}`, `pz.browser.novoip=${admission.noVoip === true}`],
+            `pz.browser.audio=${Boolean(audioOwner)}`, `pz.browser.novoip=${admission.noVoip === true}`,
+            ...(admission.textureCompressionEnabled === undefined ? [] : [`pz.browser.textureCompression=${admission.textureCompressionEnabled}`])],
         natives: {
             ...graphics.natives, ...keyboard.natives, ...mouse.natives, ...display.natives,
             ...controllers.natives, ...clock.natives, ...physics.natives, ...watch.natives, ...processes.natives,
@@ -365,6 +381,14 @@ try {
             cursor: owners.display.cursorSnapshot(), physics: owners.physics.snapshot(), processes: owners.processes.diagnostics(),
             graphics: owners.graphics.resources(), contextLost: gl.isContextLost(),
         };
+    }
+
+    if (compression) {
+        try {
+            compression.dispose();
+        } catch (error) {
+            failures.push({ compressionDisposeError: String(error.stack || error) });
+        }
     }
 
     if (audioOwner) {

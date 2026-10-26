@@ -58,14 +58,28 @@ const floats = (value) => new Float32Array(value.buffer, value.byteOffset, value
  *
  * @param {HTMLCanvasElement} canvas - Connected canvas owned by this browser qualification.
  * @param {function(string):void} report - Receives serialized original-code qualification results.
+ * @param {object|null} [compression] - Admitted real BC3 encoder, or no compression capability.
  * @returns {object} Owned native callbacks and lifecycle inspection functions.
  */
-export function createSpriteNatives(canvas, report) {
+export function createSpriteNatives(canvas, report, compression = null) {
     const gl = canvas.getContext('webgl2', { alpha: true, antialias: true, stencil: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
 
     if (!gl) {
         throw new Error('WebGL2 unavailable');
     }
+
+    const s3tc = compression ? gl.getExtension('WEBGL_compressed_texture_s3tc') : null;
+
+    if (compression && !s3tc) {
+        throw new Error('Admitted texture compression requires actual S3TC support');
+    }
+
+    // Original GL_COMPRESSED_RGBA is a driver choice; S3TC cannot represent arbitrary NPOT extents.
+    /**
+     *
+     * @param size
+     */
+    const blockExtent = (size) => size === 1 || size === 2 || size % 4 === 0;
 
     // Observe this context once; masked strings alone cannot identify software rendering.
     const debugRenderer = gl.getExtension('WEBGL_debug_renderer_info');
@@ -88,6 +102,7 @@ export function createSpriteNatives(canvas, report) {
     const buffers = new Map();
     // Scalar upload extents only; never retain Java arrays or pixel payloads.
     const textureExtents = new WeakMap();
+    const textureLevels = new WeakMap();
     const bufferExtents = new WeakMap();
     const framebuffers = new Map();
     const renderbuffers = new Map();
@@ -444,6 +459,176 @@ export function createSpriteNatives(canvas, report) {
         } finally {
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, original);
             gl.deleteBuffer(temporary);
+        }
+    }
+
+    /**
+     * Resolves an actual uploaded RGBA level and its original PACK byte layout.
+     *
+     * @param {number} target - Original texture target.
+     * @param {number} level - Original mip level.
+     * @param {number} format - Original output format.
+     * @param {number} type - Original output type.
+     * @returns {object} Bound texture, level metadata and destination layout.
+     */
+    function textureReadLayout(target, level, format, type) {
+        const texture = gl.getParameter(gl.TEXTURE_BINDING_2D);
+        const info = textureLevels.get(texture)?.get(level);
+
+        if (target !== gl.TEXTURE_2D || format !== gl.RGBA || type !== gl.UNSIGNED_BYTE || !info) {
+            throw new Error('Texture readback requires an owned uploaded RGBA level');
+        }
+
+        const alignment = gl.getParameter(gl.PACK_ALIGNMENT);
+        const stride = Math.ceil((gl.getParameter(gl.PACK_ROW_LENGTH) || info.width) * 4 / alignment) * alignment;
+        const offset = gl.getParameter(gl.PACK_SKIP_ROWS) * stride + gl.getParameter(gl.PACK_SKIP_PIXELS) * 4;
+
+        const count = offset + (info.height - 1) * stride + info.width * 4;
+
+        if (info.width <= 0 || info.height <= 0 || !Number.isSafeInteger(count) || count < 0 || count > 2_147_483_647) {
+            throw new RangeError('Texture readback byte extent exceeds Java array capacity');
+        }
+
+        return { texture, info, stride, offset, count };
+    }
+
+    /**
+     * Samples real GPU texels, including BC3, into temporary renderable RGBA storage.
+     * The original texture is never attached as a render target or retained on CPU.
+     *
+     * @param {number} target - Original 2D target.
+     * @param {number} level - Original mip level.
+     * @param {number} format - RGBA.
+     * @param {number} type - UNSIGNED_BYTE.
+     * @param {Uint8Array} destination - Original PACK destination, including preserved padding.
+     */
+    function readTexture(target, level, format, type, destination) {
+        const layout = textureReadLayout(target, level, format, type);
+
+        if (destination.byteLength < layout.count) {
+            throw new RangeError('Texture readback destination too short');
+        }
+
+        const { width, height } = layout.info;
+        const unit = gl.getParameter(gl.ACTIVE_TEXTURE) - gl.TEXTURE0;
+        const saved = {
+            read: gl.getParameter(gl.READ_FRAMEBUFFER_BINDING), draw: gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING),
+            program: gl.getParameter(gl.CURRENT_PROGRAM), vao: gl.getParameter(gl.VERTEX_ARRAY_BINDING),
+            viewport: gl.getParameter(gl.VIEWPORT), mask: gl.getParameter(gl.COLOR_WRITEMASK),
+            sampler: gl.getParameter(gl.SAMPLER_BINDING), pack: gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING),
+            unpack: gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING), base: gl.getTexParameter(target, gl.TEXTURE_BASE_LEVEL),
+            max: gl.getTexParameter(target, gl.TEXTURE_MAX_LEVEL),
+        };
+        const packNames = [gl.PACK_ALIGNMENT, gl.PACK_ROW_LENGTH, gl.PACK_SKIP_ROWS, gl.PACK_SKIP_PIXELS];
+        const packValues = packNames.map((name) => gl.getParameter(name));
+        const caps = [gl.BLEND, gl.DEPTH_TEST, gl.STENCIL_TEST, gl.SCISSOR_TEST, gl.CULL_FACE, gl.DITHER, gl.RASTERIZER_DISCARD];
+        const enabled = caps.map((cap) => gl.isEnabled(cap));
+        const color = gl.createTexture();
+        const framebuffer = gl.createFramebuffer();
+        const vertex = gl.createShader(gl.VERTEX_SHADER);
+        const fragment = gl.createShader(gl.FRAGMENT_SHADER);
+        const program = gl.createProgram();
+        const vao = gl.createVertexArray();
+        const sampler = gl.createSampler();
+
+        try {
+            gl.shaderSource(vertex, '#version 300 es\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.0-1.0,0.0,1.0);}');
+            gl.shaderSource(fragment, '#version 300 es\nprecision highp float;uniform sampler2D sourceTexture;uniform int sourceLevel;out vec4 color;void main(){color=texelFetch(sourceTexture,ivec2(gl_FragCoord.xy),sourceLevel);}');
+            gl.compileShader(vertex);
+            gl.compileShader(fragment);
+
+            if (!gl.getShaderParameter(vertex, gl.COMPILE_STATUS) || !gl.getShaderParameter(fragment, gl.COMPILE_STATUS)) {
+                throw new Error('Texture readback shader compilation failed');
+            }
+
+            gl.attachShader(program, vertex);
+            gl.attachShader(program, fragment);
+            gl.linkProgram(program);
+
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                throw new Error('Texture readback program link failed');
+            }
+
+            gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
+            gl.bindTexture(target, color);
+            gl.texImage2D(target, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, target, color, 0);
+
+            if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+                throw new Error('Texture readback framebuffer incomplete');
+            }
+
+            gl.bindTexture(target, layout.texture);
+            gl.texParameteri(target, gl.TEXTURE_BASE_LEVEL, level);
+            gl.texParameteri(target, gl.TEXTURE_MAX_LEVEL, level);
+            gl.samplerParameteri(sampler, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.samplerParameteri(sampler, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.bindSampler(unit, sampler);
+            gl.useProgram(program);
+            gl.bindVertexArray(vao);
+            gl.uniform1i(gl.getUniformLocation(program, 'sourceTexture'), unit);
+            gl.uniform1i(gl.getUniformLocation(program, 'sourceLevel'), 0);
+
+            for (const cap of caps) {
+                gl.disable(cap);
+            }
+
+            gl.colorMask(true, true, true, true);
+            gl.viewport(0, 0, width, height);
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+
+            for (const name of packNames) {
+                gl.pixelStorei(name, name === gl.PACK_ALIGNMENT ? 1 : 0);
+            }
+
+            const pixels = new Uint8Array(width * height * 4);
+
+            gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            const error = gl.getError();
+
+            if (error !== gl.NO_ERROR) {
+                compatibility.error ||= error;
+                throw new Error(`Actual texture readback GL error ${error}`);
+            }
+
+            for (let row = 0; row < height; row++) {
+                destination.set(pixels.subarray(row * width * 4, (row + 1) * width * 4), layout.offset + row * layout.stride);
+            }
+        } finally {
+            gl.bindTexture(target, layout.texture);
+            gl.texParameteri(target, gl.TEXTURE_BASE_LEVEL, saved.base);
+            gl.texParameteri(target, gl.TEXTURE_MAX_LEVEL, saved.max);
+            gl.bindSampler(unit, saved.sampler);
+            gl.useProgram(saved.program);
+            gl.bindVertexArray(saved.vao);
+            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, saved.pack);
+            gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, saved.unpack);
+
+            for (const [index, name] of packNames.entries()) {
+                gl.pixelStorei(name, packValues[index]);
+            }
+
+            for (const [index, cap] of caps.entries()) {
+                if (enabled[index]) {
+                    gl.enable(cap);
+                } else {
+                    gl.disable(cap);
+                }
+            }
+
+            gl.colorMask(...saved.mask);
+            gl.viewport(...saved.viewport);
+            gl.bindFramebuffer(gl.READ_FRAMEBUFFER, saved.read);
+            gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, saved.draw);
+            gl.deleteFramebuffer(framebuffer);
+            gl.deleteTexture(color);
+            gl.deleteVertexArray(vao);
+            gl.deleteProgram(program);
+            gl.deleteShader(vertex);
+            gl.deleteShader(fragment);
+            gl.deleteSampler(sampler);
         }
     }
 
@@ -1196,7 +1381,13 @@ export function createSpriteNatives(canvas, report) {
          driver validates target and format.
          * @returns {undefined} Completion of actual mip generation.
          */
-        glGenerateMipmap: (target) => gl.generateMipmap(target),
+        glGenerateMipmap: (target) => {
+            if (textureLevels.get(gl.getParameter(gl.TEXTURE_BINDING_2D))?.get(0)?.compressed) {
+                throw new Error('Automatic compressed mip generation is outside the original per-level upload contract');
+            }
+
+            gl.generateMipmap(target);
+        },
         /**
          * Sets the actual scissor box;
          * WebGL retains invalid negative-size errors.
@@ -1688,6 +1879,12 @@ export function createSpriteNatives(canvas, report) {
          */
         glTexParameteri: (target, name, value) => gl.texParameteri(target, name, value),
         /**
+         * Reports only a ready real encoder plus this context's actual S3TC extension.
+         *
+         * @returns {boolean} Whether original generic RGBA compression is implemented.
+         */
+        textureCompressionSupported: () => Boolean(compression && s3tc),
+        /**
          * Computes the Java buffer extent using the current actual 2D unpack state.
          * The final row needs its pixels but no trailing alignment padding.
          *
@@ -1737,6 +1934,59 @@ export function createSpriteNatives(canvas, report) {
          * @param {Uint8Array|Float32Array|Int32Array|DataView} data - Java array storage exposed by the browser runtime.
          */
         textureBytes: (target, level, internal, w, h, border, format, type, data) => {
+            const compress = internal === 34_030 && format === gl.RGBA && type === gl.UNSIGNED_BYTE;
+
+            if (compress) {
+                if (!compression || !s3tc) {
+                    throw new Error('Original compressed upload has no admitted codec');
+                }
+
+                if (target !== gl.TEXTURE_2D || border !== 0 || !Number.isInteger(level) || level < 0
+                    || ![w, h].every((size) => Number.isInteger(size) && size > 0 && size <= gl.getParameter(gl.MAX_TEXTURE_SIZE))) {
+                    throw new RangeError('Unsupported compressed texture dimensions/target');
+                }
+
+                if (blockExtent(w) && blockExtent(h)) {
+                    const binding = gl.getParameter(gl.TEXTURE_BINDING_2D);
+
+                    if (!binding) {
+                        throw new Error('Compressed upload requires a bound texture');
+                    }
+
+                    const rowPixels = gl.getParameter(gl.UNPACK_ROW_LENGTH) || w;
+                    const alignment = gl.getParameter(gl.UNPACK_ALIGNMENT);
+                    const layout = {
+                        stride: Math.ceil(rowPixels * 4 / alignment) * alignment,
+                        skipRows: gl.getParameter(gl.UNPACK_SKIP_ROWS), skipPixels: gl.getParameter(gl.UNPACK_SKIP_PIXELS),
+                    };
+                    const encoded = data === null
+                        ? new Uint8Array(Math.ceil(w / 4) * Math.ceil(h / 4) * 16)
+                        : compression.encodeBC3(w, h, bytes(data), layout);
+
+                    gl.compressedTexImage2D(target, level, s3tc.COMPRESSED_RGBA_S3TC_DXT5_EXT, w, h, border, encoded);
+                    const levels = textureExtents.get(binding) ?? new Map();
+
+                    const error = gl.getError();
+
+                    if (error !== gl.NO_ERROR) {
+                        compatibility.error ||= error;
+                        throw new Error(`Actual BC3 upload GL error ${error}`);
+                    }
+
+                    const metadata = textureLevels.get(binding) ?? new Map();
+
+                    metadata.set(level, { width: w, height: h, compressed: true });
+                    textureLevels.set(binding, metadata);
+                    levels.set(level, encoded.byteLength);
+                    textureExtents.set(binding, levels);
+
+                    return;
+                }
+
+                // Desktop generic compression may retain RGBA when no block format accepts the extent.
+                internal = gl.RGBA;
+            }
+
             const color = format === gl.RGBA && type === gl.UNSIGNED_BYTE && [gl.RGBA, gl.RGBA8].includes(internal);
             const depth = data === null && format === gl.DEPTH_COMPONENT && type === gl.UNSIGNED_SHORT && internal === gl.DEPTH_COMPONENT16;
 
@@ -1752,6 +2002,10 @@ export function createSpriteNatives(canvas, report) {
             if (binding) {
                 const levels = textureExtents.get(binding) ?? new Map();
 
+                const metadata = textureLevels.get(binding) ?? new Map();
+
+                metadata.set(level, { width: w, height: h, compressed: false });
+                textureLevels.set(binding, metadata);
                 levels.set(level, w * h * (red ? 1 : 4) / (depth ? 2 : 1));
                 textureExtents.set(binding, levels);
             }
@@ -1769,6 +2023,49 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         readPixels: (x, y, w, h, format, type, data) => gl.readPixels(x, y, w, h, format, type, bytes(data)),
+        /**
+         *
+         * @param target
+         * @param level
+         * @param format
+         * @param type
+         */
+        textureReadByteCount: (target, level, format, type) => textureReadLayout(target, level, format, type).count,
+        /**
+         *
+         * @param target
+         * @param level
+         * @param format
+         * @param type
+         * @param data
+         */
+        textureReadBytes: (target, level, format, type, data) => readTexture(target, level, format, type, bytes(data)),
+        /**
+         *
+         * @param target
+         * @param level
+         * @param x
+         * @param y
+         * @param w
+         * @param h
+         * @param format
+         * @param type
+         * @param data
+         */
+        textureSubBytes: (target, level, x, y, w, h, format, type, data) => {
+            const texture = gl.getParameter(gl.TEXTURE_BINDING_2D);
+            const info = textureLevels.get(texture)?.get(level);
+
+            if (info?.compressed) {
+                if (x !== 0 || y !== 0 || w !== info.width || h !== info.height) {
+                    throw new Error('Partial compressed updates require a separate block-preserving implementation');
+                }
+
+                api.textureBytes(target, level, 34_030, w, h, 0, format, type, data);
+            } else {
+                gl.texSubImage2D(target, level, x, y, w, h, format, type, bytes(data));
+            }
+        },
         /**
          * Executes the selected glGenRenderbuffers operation against the actual WebGL context.
          *

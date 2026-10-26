@@ -59,6 +59,14 @@ public final class BrowserLifecycleBoot {
         zombie.audio.BaseSoundBank.instance = Core.soundDisabled
                 ? new zombie.audio.DummySoundBank() : new fmod.fmod.FMODSoundBank();
         zombie.core.raknet.VoiceManager.instance.loadConfig();
+        String compressionSelection = System.getProperty("pz.browser.textureCompression");
+        if (compressionSelection != null) {
+            require("true".equals(compressionSelection) || "false".equals(compressionSelection), "Texture compression selection must be true or false");
+            boolean requested = "true".equals(compressionSelection);
+            require(!requested || port.host.SpriteGraphics.textureCompressionSupported(), "Actual texture encoder and S3TC required");
+            Core.getInstance().setOptionTextureCompression(requested);
+            require(Core.getInstance().getOptionTextureCompression() == requested, "Original texture compression option must match selection");
+        }
         zombie.core.textures.TextureID.useCompressionOption = Core.safeModeForced
                 || Core.getInstance().getOptionTextureCompression();
         zombie.core.textures.TextureID.useCompression = zombie.core.textures.TextureID.useCompressionOption;

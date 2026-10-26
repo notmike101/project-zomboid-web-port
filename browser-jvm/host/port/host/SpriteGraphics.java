@@ -26,6 +26,7 @@ public final class SpriteGraphics {
     public static native void initialize();
     public static native boolean contextCreated();
     public static native boolean framebufferSupported();
+    public static native boolean textureCompressionSupported();
     public static native void processMessages();
     public static native boolean isActive();
     public static native boolean isVisible();
@@ -384,6 +385,11 @@ public final class SpriteGraphics {
     public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,IntBuffer data){if(data!=null)throw new UnsupportedOperationException("IntBuffer texture uploads are outside the bounded browser backend");textureBytes(target,level,internal,width,height,border,format,type,null);}
     private static native int textureByteCount(int width,int height,int format,int type);
     private static native void textureBytes(int target,int level,int internal,int width,int height,int border,int format,int type,byte[] data);
+    public static void glTexSubImage2D(int target,int level,int x,int y,int width,int height,int format,int type,ByteBuffer data){Objects.requireNonNull(data,"pixels");int count=textureByteCount(width,height,format,type);if(data.remaining()<count)throw new IllegalArgumentException("Texture update buffer too short");byte[] bytes=new byte[count];data.duplicate().get(bytes);textureSubBytes(target,level,x,y,width,height,format,type,bytes);}
+    private static native void textureSubBytes(int target,int level,int x,int y,int width,int height,int format,int type,byte[] data);
+    public static void glGetTexImage(int target,int level,int format,int type,ByteBuffer data){Objects.requireNonNull(data,"pixels");if(data.isReadOnly())throw new ReadOnlyBufferException();int count=textureReadByteCount(target,level,format,type);if(data.remaining()<count)throw new IllegalArgumentException("Texture readback buffer too short");byte[] bytes=new byte[count];data.duplicate().get(bytes);textureReadBytes(target,level,format,type,bytes);data.duplicate().put(bytes);}
+    private static native int textureReadByteCount(int target,int level,int format,int type);
+    private static native void textureReadBytes(int target,int level,int format,int type,byte[] data);
     public static void glReadPixels(int x,int y,int width,int height,int format,int type,ByteBuffer data){int count=pixelCount(width,height,format,type);if(data.isReadOnly())throw new ReadOnlyBufferException();if(data.remaining()<count)throw new IllegalArgumentException("Readback buffer too short");byte[] bytes=new byte[count];for(int i=0;i<count;i++)bytes[i]=data.get(data.position()+i);readPixels(x,y,width,height,format,type,bytes);for(int i=0;i<count;i++)data.put(data.position()+i,bytes[i]);}
     private static native void readPixels(int x,int y,int width,int height,int format,int type,byte[] data);
     private static int pixelCount(int width,int height,int format,int type){if(format!=6408||type!=5121)throw new UnsupportedOperationException("Only RGBA UNSIGNED_BYTE qualified");if(width<0||height<0)throw new IllegalArgumentException("Negative image dimensions");return Math.multiplyExact(Math.multiplyExact(width,height),4);}

@@ -14,6 +14,8 @@ assert.ok(sourceFile && sdk && outputArgument && jdk,
 const source = JSON.parse(await readFile(sourceFile, 'utf8'));
 
 assert.ok(source.audioEnabled === undefined || typeof source.audioEnabled === 'boolean', 'audioEnabled must be an optional boolean');
+assert.ok(source.textureCompressionEnabled === undefined || typeof source.textureCompressionEnabled === 'boolean', 'textureCompressionEnabled must be an optional boolean');
+assert.ok(source.textureCompressionEnabled !== true || source.textureCompression, 'Texture compression requires an admitted encoder');
 assert.ok(!source.audioRuntime && !source.bullet, 'Select the base generation before optional Bullet/audio composition');
 const output = path.resolve(outputArgument);
 const execute = promisify(execFile);
@@ -50,6 +52,12 @@ await writeFile(rootListing.file, listingBytes);
 Object.assign(rootListing, { bytes: listingBytes.length, sha256: digest(listingBytes) });
 generation.audioRuntime = audio.audioRuntime;
 generation.audioEnabled = source.audioEnabled ?? true;
+if (source.textureCompressionEnabled !== undefined) {
+    generation.textureCompressionEnabled = source.textureCompressionEnabled;
+}
+if (source.textureCompression !== undefined) {
+    generation.textureCompression = source.textureCompression;
+}
 const admissionRecord = generation.routes.find((record) => record.url === '/original-boot-admission.json');
 const admission = JSON.parse(await readFile(admissionRecord.file, 'utf8'));
 
@@ -57,6 +65,12 @@ generation.noVoip ??= false;
 admission.noVoip = generation.noVoip;
 
 admission.audioRuntime = generation.audioEnabled ? generation.audioRuntime : null;
+if (generation.textureCompressionEnabled !== undefined) {
+    admission.textureCompressionEnabled = generation.textureCompressionEnabled;
+}
+if (generation.textureCompression !== undefined) {
+    admission.textureCompression = generation.textureCompression;
+}
 const admissionBytes = Buffer.from(JSON.stringify(admission));
 
 await writeFile(admissionRecord.file, admissionBytes);
