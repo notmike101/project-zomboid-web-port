@@ -3,6 +3,22 @@ const handleKey = (kind, id) => `${kind}:${BigInt(id)}`;
 const arrayLength = async (lib, destination) => destination instanceof BigInt64Array
     ? destination.length
     : (await lib.port.host.FmodArrays).arrayLength(destination);
+const recordCallback = (records, value) => {
+    if (records.length === 8) {
+        records.shift();
+    }
+
+    records.push(value);
+};
+
+const callbackArgument = (argument) => {
+    if (typeof argument === 'bigint') {
+        return String(argument);
+    }
+
+    return typeof argument === 'string' ? argument.slice(0, 256) : argument;
+};
+
 const javaValue = (value) => {
     if (typeof value !== 'bigint') {
         return value;
@@ -55,6 +71,11 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
     let masterChannelGroup;
     const pendingCallbacks = [];
     let deliveredCallbacks = 0;
+    let callbackFailures = 0;
+    let sdkMarkerFallthroughs = 0;
+    const callbackEvents = [];
+    const lastCallbackFailures = [];
+
     // Original integration 0x18000b7b0..b85e keeps the last listener attributes globally.
     let listenerAttributes = {
         position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 },
@@ -521,6 +542,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         },
         FMOD_Studio_EventInstance_SetCallback(_lib, id, callback, mask) {
             const supported = FMOD.STUDIO_EVENT_CALLBACK_STARTED | FMOD.STUDIO_EVENT_CALLBACK_STOPPED | FMOD.STUDIO_EVENT_CALLBACK_TIMELINE_MARKER;
+            let markerPosition;
 
             if ((mask & ~supported) !== 0) {
                 throw new Error('Original FMOD Java callback type not supported');
@@ -533,6 +555,16 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                             return FMOD.OK;
                         }
 
+                        recordCallback(callbackEvents, {
+                            type, instance: String(id), keys: Object.keys(parameters ?? {}).slice(0, 8),
+                            name: typeof parameters?.name === 'string' ? parameters.name.slice(0, 256) : null,
+                            position: Number.isFinite(parameters?.position) ? parameters.position : String(parameters?.position),
+                        });
+
+                        if (type !== FMOD.STUDIO_EVENT_CALLBACK_TIMELINE_MARKER) {
+                            markerPosition = undefined;
+                        }
+
                         switch (type) {
                             case FMOD.STUDIO_EVENT_CALLBACK_STARTED: {
                                 pendingCallbacks.push({ callback, method: 'started', args: [BigInt(id)] });
@@ -543,7 +575,25 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                                 break;
                             }
                             case FMOD.STUDIO_EVENT_CALLBACK_TIMELINE_MARKER: {
-                                pendingCallbacks.push({ callback, method: 'timelineMarker', args: [BigInt(id), String(parameters.name), parameters.position] });
+                                // The pinned 2.04 wrapper falls through from marker to beat conversion, retaining type 0x800.
+                                const beatFields = ['bar', 'beat', 'position', 'tempo', 'timesignatureupper', 'timesignaturelower'];
+
+                                if (markerPosition !== undefined && !Object.hasOwn(parameters ?? {}, 'name')
+                                    && beatFields.every((field) => Object.hasOwn(parameters ?? {}, field))
+                                    && parameters.beat === markerPosition) {
+                                    markerPosition = undefined;
+                                    sdkMarkerFallthroughs++;
+
+                                    return FMOD.OK;
+                                }
+
+                                if (typeof parameters?.name !== 'string' || !Number.isInteger(parameters.position)
+                                    || parameters.position < -2_147_483_648 || parameters.position > 2_147_483_647) {
+                                    throw new Error('Invalid actual FMOD timeline marker payload');
+                                }
+
+                                markerPosition = parameters.position;
+                                pendingCallbacks.push({ callback, method: 'timelineMarker', args: [BigInt(id), parameters.name, parameters.position] });
                                 // No default
                             }
 
@@ -833,8 +883,6 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             lock = result.catch(() => undefined);
 
             const delivery = result.then(async ({ value, callbacks, error }) => {
-                const failures = error ? [error] : [];
-
                 // Java callbacks run after the SDK lock is released, permitting genuine reentrant calls.
                 for (const entry of callbacks) {
                     try {
@@ -842,16 +890,31 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                         await entry.callback[entry.method](...(args[0] ? entry.args.map(javaValue) : entry.args));
                         deliveredCallbacks++;
                     } catch (failure) {
-                        failures.push(failure);
+                        /* Original JNI at 0x1800054aa..54be checks the callback exception but returns FMOD_OK.
+                         * A callback rejection must not become an FMOD_Update failure on the game owner. */
+                        callbackFailures++;
+                        let description;
+
+                        try {
+                            description = String(failure);
+                        } catch {
+                            description = 'Unprintable callback rejection';
+                        }
+
+                        const report = {
+                            method: entry.method, args: entry.args.map(callbackArgument),
+                            error: description.slice(0, 2_048), errorName: typeof failure?.name === 'string' ? failure.name.slice(0, 128) : null,
+                            errorMessage: typeof failure?.message === 'string' ? failure.message.slice(0, 1_024) : null,
+                            errorStack: typeof failure?.stack === 'string' ? failure.stack.slice(0, 4_096) : null,
+                        };
+
+                        recordCallback(lastCallbackFailures, report);
+                        console.error('Original FMOD callback exception (engine result preserved)', report);
                     }
                 }
 
-                if (failures.length === 1) {
-                    throw failures[0];
-                }
-
-                if (failures.length) {
-                    throw new AggregateError(failures, 'FMOD operation/callback delivery failed');
+                if (error) {
+                    throw error;
                 }
 
                 return args[0] ? javaValue(value) : value;
@@ -866,7 +929,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
 
     return {
         natives,
-        snapshot: () => ({ initialized, disposed, version, recordDriverQuery, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, audibleVerified: false }),
+        snapshot: () => ({ initialized, disposed, version, recordDriverQuery, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, callbackFailures, sdkMarkerFallthroughs, callbackEvents: [...callbackEvents], lastCallbackFailures: [...lastCallbackFailures], audibleVerified: false }),
         async dispose() {
             /* The host calls teardown after the original VM has joined. Drain complete JNI
              * deliveries (including callbacks outside the SDK lock) before releasing the engine. */
