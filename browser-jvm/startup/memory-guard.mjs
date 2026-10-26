@@ -30,6 +30,7 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
     let lastStage = null;
     let terminal = false;
     let closed = false;
+    let freshnessCheckPending = false;
     let ready;
     let failed;
     const initialized = new Promise((resolve, reject) => {
@@ -74,10 +75,19 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
 
                 switch (value.event) {
                     case 'sample': {
-                        lastSeen = Date.now();
+                        const sampledAt = Date.parse(value.observedAt);
+
+                        if (!Number.isFinite(sampledAt) || sampledAt > Date.now()) {
+                            throw new Error('Memory observer reported an invalid or future sample timestamp');
+                        }
+
+                        lastSeen = sampledAt;
                         latest = value;
                         peakPrivateBytes = Math.max(peakPrivateBytes, value.privateBytes);
-                        ready();
+
+                        if (Date.now() - sampledAt <= 15_000) {
+                            ready();
+                        }
 
                         if (value.reason && !pressure) {
                             pressure = value;
@@ -119,8 +129,16 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
         }
     });
     const heartbeat = setInterval(() => {
-        if (Date.now() - lastSeen > 15_000) {
-            fail(new Error(`Memory observer stopped reporting fresh samples; last stage: ${JSON.stringify(lastStage)}`));
+        if (!disposed && !terminal && !freshnessCheckPending && Date.now() - lastSeen > 15_000) {
+            freshnessCheckPending = true;
+            // A delayed parent timer can run before already-buffered observer stdout is polled.
+            setImmediate(() => {
+                freshnessCheckPending = false;
+
+                if (!disposed && !terminal && Date.now() - lastSeen > 15_000) {
+                    fail(new Error(`Memory observer stopped reporting fresh samples; last stage: ${JSON.stringify(lastStage)}`));
+                }
+            });
         }
     }, 5_000);
 
