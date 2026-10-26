@@ -1,6 +1,189 @@
 import { installNativeLongReturnRepair } from './native-long-return.js';
 
 /**
+ * Adds SQLite's rollback-journal lock protocol to the pinned unix-none memory VFS.
+ * File bytes, journals, sync and close still use the supplied engine's native I/O.
+ * The outer browser namespace lease excludes other VMs; this registry covers its connections.
+ *
+ * @param {object} sqlite - Pinned initialized SQLite WASM API.
+ * @returns {string} Named VFS selected only for this host's owned connections.
+ */
+function installOwnedSqliteVfs(sqlite) {
+    const { capi: c, wasm: w, __pzOwnedVfs: existing } = sqlite;
+
+    if (existing) {
+        if (existing.vfs.pointer !== c.sqlite3_vfs_find('pz-owned-locks')) {
+            throw new Error('Owned SQLite VFS registration was replaced');
+        }
+
+        return 'pz-owned-locks';
+    }
+
+    const base = new c.sqlite3_vfs(c.sqlite3_vfs_find(null));
+
+    if (w.cstrToJs(base.$zName) !== 'unix-none') {
+        throw new Error('Owned SQLite locking requires the pinned unix-none VFS');
+    }
+
+    const vfs = new c.sqlite3_vfs();
+
+    w.heap8u().set(w.heap8u().subarray(base.pointer, base.pointer + c.sqlite3_vfs.structInfo.sizeof), vfs.pointer);
+    vfs.$zName = w.allocCString('pz-owned-locks');
+    const originalOpen = w.functionEntry(base.$xOpen);
+    const files = new Map();
+    const tables = new Map();
+    /**
+     * Finds other actual open handles for this canonical POSIX filename.
+     *
+     * @param {object} file - Lock owner.
+     * @param {number} pointer - Current sqlite3_file pointer.
+     * @returns {Array} Other file owners.
+     */
+    const peers = (file, pointer) => [...files.entries()].filter(([key, value]) => key !== pointer && value.name === file.name);
+
+    vfs.installMethods({
+        /**
+         * Delegates native open and installs only this file's lock methods.
+         *
+         * @param {number} _vfs - Registered VFS pointer.
+         * @param {number} name - Native canonical filename.
+         * @param {number} pointer - Native sqlite3_file.
+         * @param {number} flags - Original open flags.
+         * @param {number} outputFlags - Original output flags pointer.
+         * @returns {number} SQLite result.
+         */
+        xOpen(_vfs, name, pointer, flags, outputFlags) {
+            const rc = originalOpen(base.pointer, name, pointer, flags, outputFlags);
+
+            if (rc !== c.SQLITE_OK) {
+                return rc;
+            }
+
+            const file = new c.sqlite3_file(pointer);
+            const originalPointer = file.$pMethods;
+            let table = tables.get(originalPointer);
+
+            if (!table) {
+                const original = new c.sqlite3_io_methods(originalPointer);
+                const close = w.functionEntry(original.$xClose);
+
+                table = new c.sqlite3_io_methods();
+                w.heap8u().set(w.heap8u().subarray(originalPointer, originalPointer + c.sqlite3_io_methods.structInfo.sizeof), table.pointer);
+                table.installMethods({
+                    /**
+                     * Upgrades this owner's lock, retaining PENDING on a busy exclusive upgrade.
+                     *
+                     * @param {number} pFile - Native file.
+                     * @param {number} requested - SQLite lock level.
+                     * @returns {number} SQLite result.
+                     */
+                    xLock(pFile, requested) {
+                        const owned = files.get(pFile);
+
+                        if (!owned || requested < c.SQLITE_LOCK_SHARED || requested > c.SQLITE_LOCK_EXCLUSIVE) {
+                            return c.SQLITE_IOERR_LOCK;
+                        }
+
+                        if (requested <= owned.lock) {
+                            return c.SQLITE_OK;
+                        }
+
+                        const others = peers(owned, pFile);
+
+                        if (requested === c.SQLITE_LOCK_SHARED) {
+                            if (others.some(([, other]) => other.lock >= c.SQLITE_LOCK_PENDING)) {
+                                return c.SQLITE_BUSY;
+                            }
+                        } else {
+                            if (others.some(([, other]) => other.lock >= c.SQLITE_LOCK_RESERVED)) {
+                                return c.SQLITE_BUSY;
+                            }
+
+                            if (requested === c.SQLITE_LOCK_EXCLUSIVE) {
+                                owned.lock = c.SQLITE_LOCK_PENDING;
+
+                                if (others.some(([, other]) => other.lock >= c.SQLITE_LOCK_SHARED)) {
+                                    return c.SQLITE_BUSY;
+                                }
+                            }
+                        }
+
+                        owned.lock = requested;
+
+                        return c.SQLITE_OK;
+                    },
+                    /**
+                     * Downgrades only this file owner.
+                     *
+                     * @param {number} pFile - Native file.
+                     * @param {number} requested - NONE or SHARED.
+                     * @returns {number} SQLite result.
+                     */
+                    xUnlock(pFile, requested) {
+                        const owned = files.get(pFile);
+
+                        if (!owned || ![c.SQLITE_LOCK_NONE, c.SQLITE_LOCK_SHARED].includes(requested)) {
+                            return c.SQLITE_IOERR_UNLOCK;
+                        }
+
+                        if (requested >= owned.lock) {
+                            return c.SQLITE_OK;
+                        }
+
+                        owned.lock = requested;
+
+                        return c.SQLITE_OK;
+                    },
+                    /**
+                     * Reports an actual reserved or stronger lock from any owner.
+                     *
+                     * @param {number} pFile - Native file.
+                     * @param {number} output - Native boolean output.
+                     * @returns {number} SQLite result.
+                     */
+                    xCheckReservedLock(pFile, output) {
+                        const owned = files.get(pFile);
+
+                        if (!owned) {
+                            return c.SQLITE_IOERR_CHECKRESERVEDLOCK;
+                        }
+
+                        w.poke32(output, [...files.values()].some((other) => other.name === owned.name && other.lock >= c.SQLITE_LOCK_RESERVED) ? 1 : 0);
+
+                        return c.SQLITE_OK;
+                    },
+                    /**
+                     * Delegates native close and releases only its lock owner.
+                     *
+                     * @param {number} pFile - Native file.
+                     * @returns {number} SQLite result.
+                     */
+                    xClose(pFile) {
+                        try {
+                            return close(pFile);
+                        } finally {
+                            files.delete(pFile);
+                        }
+                    },
+                });
+                tables.set(originalPointer, table);
+            }
+
+            // Null-named temporary files cannot alias another SQLite file.
+            files.set(pointer, { name: name ? w.cstrToJs(name) : `temporary:${pointer}`, lock: c.SQLITE_LOCK_NONE });
+            file.$pMethods = table.pointer;
+
+            return c.SQLITE_OK;
+        },
+    });
+    vfs.registerVfs(false);
+    // Keep registered native structs and installed function-table entries alive for this VM.
+    sqlite.__pzOwnedVfs = { vfs, base, tables, files };
+
+    return 'pz-owned-locks';
+}
+
+/**
  * Preserves a Java throwable while JavaScript performs engine cleanup.
  */
 class JavaFailure {
@@ -104,7 +287,9 @@ export function createNativeDb(sqlite3) {
     }
 
     const { capi: c, wasm: w } = sqlite3;
+    const ownedVfs = installOwnedSqliteVfs(sqlite3);
     const databases = new Map();
+    const images = new Map();
     const statements = new Map();
     const workingFiles = new Set();
 
@@ -124,6 +309,12 @@ export function createNativeDb(sqlite3) {
      * @param {object} state - Closed connection state.
      */
     function discardWorkingFile(state) {
+        state.image.connections.delete(state);
+
+        if (state.image.connections.size) {
+            return;
+        }
+
         for (const suffix of ['', '-journal']) {
             const result = unlink(state.vfs, state.posix + suffix);
 
@@ -133,6 +324,7 @@ export function createNativeDb(sqlite3) {
         }
 
         workingFiles.delete(state.posix);
+        images.delete(String(state.lease));
     }
 
     const calls = {};
@@ -154,7 +346,7 @@ export function createNativeDb(sqlite3) {
             throw new Error('The database has been closed');
         }
 
-        if (value.poison && !allowPoison) {
+        if ((value.poison || value.image.poison) && !allowPoison) {
             throw new Error('SQLite connection poisoned by publication failure');
         }
 
@@ -203,10 +395,10 @@ export function createNativeDb(sqlite3) {
      */
     async function publish(lib, state) {
         if (
-            state.poison
-            || !c.sqlite3_get_autocommit(state.ptr)
+            state.poison || state.image.poison
+            || [...state.image.connections].some((connection) => !c.sqlite3_get_autocommit(connection.ptr))
             || [...statements.values()].some(
-                (s) => s.db === state && s.write && s.active,
+                (s) => s.db.image === state.image && s.write && s.active,
             )
         ) {
             return;
@@ -219,6 +411,7 @@ export function createNativeDb(sqlite3) {
             state.publishes++;
         } catch (error) {
             state.poison = true;
+            state.image.poison = true;
             throw error;
         }
     }
@@ -341,9 +534,20 @@ export function createNativeDb(sqlite3) {
                 ));
             }
 
-            const posix = `/owned-${++serial}.db`;
+            let shared = images.get(String(lease));
+            const posix = shared?.posix ?? `/owned-${++serial}.db`;
 
-            if (image) {
+            const created = !shared;
+
+            if (!shared) {
+                shared = { posix, connections: new Set(), poison: false };
+                images.set(String(lease), shared);
+            }
+
+            working = { ptr: 0, lease, key, posix, image: shared, vfs: c.sqlite3_vfs_find(ownedVfs), poison: false, publishes: 0 };
+            workingFiles.add(posix);
+
+            if (created && image) {
                 c.sqlite3_js_posix_create_file(posix, image);
             }
 
@@ -351,21 +555,13 @@ export function createNativeDb(sqlite3) {
 
             try {
                 const out = w.scopedAllocPtr();
-                const rc = c.sqlite3_open_v2(posix, out, flags, 0);
+                const rc = c.sqlite3_open_v2(posix, out, flags, ownedVfs);
 
                 ptr = w.peekPtr(out);
-                const state = {
-                    ptr,
-                    lease,
-                    key,
-                    posix,
-                    vfs: dbVfs(ptr, 0),
-                    poison: false,
-                    publishes: 0,
-                };
+                const state = working;
 
-                working = state;
-                workingFiles.add(posix);
+                state.ptr = ptr;
+                state.vfs = ptr ? dbVfs(ptr, 0) : state.vfs;
 
                 if (rc) {
                     await engineError(lib, state, c.sqlite3_extended_errcode(ptr));
@@ -415,19 +611,20 @@ export function createNativeDb(sqlite3) {
                 }
 
                 databases.set(key, state);
+                shared.connections.add(state);
             } finally {
                 w.scopedAllocPop();
             }
         } catch (error) {
             if (ptr) {
                 c.sqlite3_close_v2(ptr);
+            }
 
-                if (working) {
-                    try {
-                        discardWorkingFile(working);
-                    } catch (cleanup) {
-                        console.error('SQLITE_WORKING_FILE_FAILURE', String(cleanup));
-                    }
+            if (working) {
+                try {
+                    discardWorkingFile(working);
+                } catch (cleanup) {
+                    console.error('SQLITE_WORKING_FILE_FAILURE', String(cleanup));
                 }
             }
 
@@ -459,6 +656,16 @@ export function createNativeDb(sqlite3) {
         let failure;
 
         try {
+            /* Closing a JDBC connection rolls back its uncommitted transaction. Do it
+               before the final export so other connections' committed data is not lost. */
+            if (!c.sqlite3_get_autocommit(state.ptr)) {
+                const rollback = c.sqlite3_exec(state.ptr, 'ROLLBACK', 0, 0, 0);
+
+                if (rollback) {
+                    await engineError(lib, state, rollback);
+                }
+            }
+
             if (!state.poison) {
                 await publish(lib, state);
             }
@@ -811,6 +1018,7 @@ export function createNativeDb(sqlite3) {
             calls: { ...calls },
             nativeEntries: Object.keys(functions).length,
             workingFiles: workingFiles.size,
+            sharedImages: images.size,
             states: [...databases.values()].map((s) => ({
                 poison: s.poison,
                 publishes: s.publishes,
@@ -820,3 +1028,5 @@ export function createNativeDb(sqlite3) {
 
     return activeBackend;
 }
+
+export { installOwnedSqliteVfs };

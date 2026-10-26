@@ -15,7 +15,7 @@ import java.util.UUID;
 /** Owned same-image bridge; graceful browser restart qualified, fsync/crash durability unqualified. */
 public final class SqliteFiles {
 
-    private record Lease(Path path, byte[] image) {}
+    private record Lease(Path path, byte[] image, int references) {}
 
     private static final Map<Long, Lease> leases = new HashMap<>();
     private static Path root;
@@ -51,14 +51,16 @@ public final class SqliteFiles {
         if (Files.isSymbolicLink(path)) throw new IOException(
             "Database symlink unsupported"
         );
-        for (Lease lease : leases.values()) {
-            if (lease.path.equals(path)) throw new IOException(
-                "Database already leased"
-            );
+        for (Map.Entry<Long, Lease> entry : leases.entrySet()) {
+            Lease lease = entry.getValue();
+            if (lease.path.equals(path)) {
+                leases.put(entry.getKey(), new Lease(path, lease.image, Math.addExact(lease.references, 1)));
+                return entry.getKey();
+            }
         }
         byte[] image = Files.exists(path) ? Files.readAllBytes(path) : null;
         long key = ++next;
-        leases.put(key, new Lease(path, image));
+        leases.put(key, new Lease(path, image, 1));
         return key;
     }
 
@@ -102,14 +104,15 @@ public final class SqliteFiles {
                 StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING
             );
-            leases.put(key, new Lease(lease.path, image.clone()));
+            leases.put(key, new Lease(lease.path, image.clone(), lease.references));
         } finally {
             Files.deleteIfExists(pending);
         }
     }
 
     public static synchronized void release(long key) throws IOException {
-        lease(key);
-        leases.remove(key);
+        Lease lease = lease(key);
+        if (lease.references == 1) leases.remove(key);
+        else leases.put(key, new Lease(lease.path, lease.image, lease.references - 1));
     }
 }
