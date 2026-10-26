@@ -14,6 +14,7 @@ const additions = ['/fmod-runtime.js', '/fmod-natives.js', '/fmod.js', '/fmodstu
  * @returns {Promise<object>} Existing owners plus verified original FMOD host routes.
  */
 export async function createOriginalBootRoutes(generation) {
+    assert.ok(generation.audioEnabled === undefined || typeof generation.audioEnabled === 'boolean', 'audioEnabled must be an optional boolean');
     assert.match(generation.audioRuntime?.manifestSHA, /^[a-f0-9]{64}$/u);
     const selected = generation.routes.filter((record) => additions.includes(record.url));
 
@@ -32,7 +33,8 @@ export async function createOriginalBootRoutes(generation) {
     const admissionRecord = generation.routes.find((record) => record.url === '/original-boot-admission.json');
     const admission = JSON.parse(await readFile(admissionRecord.file, 'utf8'));
 
-    assert.deepEqual(admission.audioRuntime, generation.audioRuntime, 'Served audio admission must match the selected generation');
+    assert.deepEqual(admission.audioRuntime, generation.audioEnabled === false ? null : generation.audioRuntime,
+        'Served audio admission must match the selected generation');
     const manifestRecord = selected.find((record) => record.url === '/fmod-runtime/manifest.json');
 
     assert.equal(manifestRecord.sha256, generation.audioRuntime.manifestSHA);

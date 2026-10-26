@@ -13,6 +13,7 @@ assert.ok(sourceFile && sdk && outputArgument && jdk,
     'Usage: node prepare-original-audio.mjs BASE_GENERATION_JSON HTML5_SDK NEW_TARGET_DIRECTORY JDK_DIRECTORY [QUALIFIED_BULLET_ENGINE_DIRECTORY]');
 const source = JSON.parse(await readFile(sourceFile, 'utf8'));
 
+assert.ok(source.audioEnabled === undefined || typeof source.audioEnabled === 'boolean', 'audioEnabled must be an optional boolean');
 assert.ok(!source.audioRuntime && !source.bullet, 'Select the base generation before optional Bullet/audio composition');
 const output = path.resolve(outputArgument);
 const execute = promisify(execFile);
@@ -48,12 +49,13 @@ const listingBytes = Buffer.from(`${children.join('\n\n')}\n`);
 await writeFile(rootListing.file, listingBytes);
 Object.assign(rootListing, { bytes: listingBytes.length, sha256: digest(listingBytes) });
 generation.audioRuntime = audio.audioRuntime;
+generation.audioEnabled = source.audioEnabled ?? true;
 const admissionRecord = generation.routes.find((record) => record.url === '/original-boot-admission.json');
 const admission = JSON.parse(await readFile(admissionRecord.file, 'utf8'));
 
 generation.noVoip ??= false;
 admission.noVoip = generation.noVoip;
-admission.audioRuntime = generation.audioRuntime;
+admission.audioRuntime = generation.audioEnabled ? generation.audioRuntime : null;
 const admissionBytes = Buffer.from(JSON.stringify(admission));
 
 await writeFile(admissionRecord.file, admissionBytes);
