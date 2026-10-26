@@ -67,6 +67,16 @@ export function createSpriteNatives(canvas, report) {
         throw new Error('WebGL2 unavailable');
     }
 
+    // Observe this context once; masked strings alone cannot identify software rendering.
+    const debugRenderer = gl.getExtension('WEBGL_debug_renderer_info');
+    const contextInfo = {
+        vendor: gl.getParameter(gl.VENDOR), renderer: gl.getParameter(gl.RENDERER),
+        version: gl.getParameter(gl.VERSION),
+        unmaskedVendor: debugRenderer ? gl.getParameter(debugRenderer.UNMASKED_VENDOR_WEBGL) : null,
+        unmaskedRenderer: debugRenderer ? gl.getParameter(debugRenderer.UNMASKED_RENDERER_WEBGL) : null,
+        attributes: gl.getContextAttributes(),
+    };
+
     let next = 1;
     let eventWidth = canvas.width;
     let eventHeight = canvas.height;
@@ -1952,6 +1962,7 @@ export function createSpriteNatives(canvas, report) {
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
         resources: () => ({
+            contextInfo,
             shaders: shaders.size, programs: programs.size, textures: textures.size + attributeState.pendingCount('texture'), buffers: buffers.size + attributeState.pendingCount('buffer'), framebuffers: framebuffers.size,
             /* Live registry extents exclude pending deletions, mipmap generation,
                internal transient uploads, driver overhead and framebuffer storage. */
