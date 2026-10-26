@@ -62,3 +62,9 @@ The optional last argument composes an already qualified real Bullet engine with
 Current evidence covers genuine 2.04.00 Node engine loading of the original strings bank and 3,215-event main sound bank through range callbacks, plus event creation/start/update/volume/stop/release under `OUTPUTTYPE_NOSOUND`. It does not establish audible browser playback. The original initialization preloads most nonambient events; those requests remain intact. The ordinary Core loose-sound/channel/reverb and SoundManager callback entry points are now implemented; static caller inventory covers FMODManager, FMODSoundEmitter and SoundManager. Actual browser resume/state, original Java array/callback transport, eager preload memory and audible output still require a connected runtime pass. Other FMOD capabilities such as recording and raw PCM remain outside this qualified closure.
 
 The reverb matrix is generated from the supplied SDK header into an ignored, hash-pinned runtime JSON file. All 24 float32 presets match the installed integration library, including its out-of-range preset fallback to HALLWAY. No SDK constants file is committed.
+
+The maintained archive stage can now build the seventeen ordered JARs directly from source:
+
+    node browser-jvm/startup/prepare-base-jars.mjs INSTALLED_GAME_JAR JDK25_DIRECTORY CLIPPER2_JAR NEW_OUTPUT_DIRECTORY
+
+Use the pinned Clipper2 2.0.1b archive. The output must be a new directory beneath the existing workspace target directory. This command runs classfile preparers and compilers only; it does not initialize the game, import native scenes, copy media or launch a browser. Its base-jars.json records source/input/output identities and explicitly leaves executionAdmitted false. The complete scene/media/runtime generation assembly is still a separate prerequisite.

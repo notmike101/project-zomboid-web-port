@@ -67,7 +67,13 @@ public final class PrepareControllers {
     }
 
     private static Adapted adapt(String name, byte[] input) throws Exception {
-        if (!sha(input).equals(PINS.get(name))) throw new IllegalArgumentException("Unqualified vendor source: " + name);
+        String identity = sha(input);
+        // Current PrepareSpriteGraphics forwards only ByteBuffer memCopy to the qualified facade;
+        // memUTF8, its descriptor and every other method body remain the same as the earlier SDK.
+        boolean currentMemoryFacade = name.equals("org/lwjgl/system/MemoryUtil")
+                && identity.equals("e6bd9bd1b16f6dd80081b59d4716649ebf82861f68267adcd941ede7ae506e7d");
+        if (!identity.equals(PINS.get(name)) && !currentMemoryFacade)
+            throw new IllegalArgumentException("Unqualified vendor source: " + name);
         var cf = ClassFile.of();
         var original = cf.parse(input);
         var selected = new ArrayList<String>();
