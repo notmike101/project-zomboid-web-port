@@ -328,8 +328,8 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         },
         async FMOD_Studio_LoadBankFile(_lib, name) {
             const path = String(name);
-            const info = await fileCallbacks(path);
-            const bank = await requireSystem().loadBankCustom(info, FMOD.STUDIO_LOAD_BANK_NORMAL);
+            // Deferred sample opens use the system-owned callback table, including after a failed bank load.
+            const bank = await requireSystem().loadBankFile(path, FMOD.STUDIO_LOAD_BANK_NORMAL);
             const result = FMOD.getLastError();
 
             // Original JNI 0x18000b922..b92b returns negated FMOD_RESULT, not a Java exception.
