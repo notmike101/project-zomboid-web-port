@@ -18,7 +18,7 @@ extern "C" int rn_voice_init(unsigned bytes) {
     if(!voiceOwner)voiceOwner.reset(new BrowserRakVoice());
     voiceOwner->mutex.reset(new RakNet::SimpleMutex());
     voiceOwner->bufferBytes=bytes;
-    if(!voicePeer)voicePeer=RakNet::RakPeerInterface::GetInstance();
+    voicePeer=rn_shared_peer_get();
     if(!voicePeer)return -2;
     voicePeer->AttachPlugin(voiceOwner.get());
     voiceOwner->initialized=true;return 0;
@@ -40,6 +40,8 @@ extern "C" int rn_voice_deinit() {
 extern "C" int rn_voice_destroy() {
     if(voiceOwner&&voiceOwner->initialized)rn_voice_deinit();
     voiceOwner.reset();
-    if(voicePeer)RakNet::RakPeerInterface::DestroyInstance(voicePeer);
     voicePeer=nullptr;return 0;
+}
+extern "C" int rn_voice_attached() {
+    return voiceOwner&&voiceOwner->initialized&&voiceOwner->GetRakPeerInterface()==sharedPeer;
 }

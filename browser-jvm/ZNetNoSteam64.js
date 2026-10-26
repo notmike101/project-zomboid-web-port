@@ -1,9 +1,11 @@
 const { ensureRakNetOwner } = await import(`${globalThis.location.origin}/raknet-runtime.js`);
 const { createZNetNatives } = await import(`${globalThis.location.origin}/znet-natives.js`);
+const { createRakVoiceNatives } = await import(`${globalThis.location.origin}/rakvoice-natives.js`);
 
-await ensureRakNetOwner();
+const engine = await ensureRakNetOwner();
 
 const logger = createZNetNatives();
+const voice = createRakVoiceNatives(engine);
 
-export { logger };
-export default logger.natives;
+export { logger, voice };
+export default { ...logger.natives, ...voice.natives };

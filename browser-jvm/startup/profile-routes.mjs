@@ -12,7 +12,7 @@ const sourceModules = [
     'custom-cursor.js', 'controller-natives.js', 'browser-clock.js', 'browser-physics.js', 'ragdoll-definitions.js',
     'file-watch-natives.js', 'process-natives.js', 'native-library-loader.js', 'unsafe-short-repair.js', 'unsafe-float-volatile.js',
     'credentialless-runtime-helper.js', 'sqlite-namespace.js', 'scheduler-runtime.js', 'RakNet64.js', 'ZNetNoSteam64.js',
-    'raknet-runtime.js', 'znet-natives.js', 'Lighting64.js', 'lighting-natives.js', 'lighting-kernel.js',
+    'raknet-runtime.js', 'znet-natives.js', 'rakvoice-natives.js', 'Lighting64.js', 'lighting-natives.js', 'lighting-kernel.js',
     'PZPopMan64.js', 'population-natives.js', 'population-kernel.js', 'population-save-codec.js',
     'sqlitejdbc.js', 'sqlite-natives.js', 'native-long-return.js',
     'PZClipper64.js', 'clipper-native-owner.js',

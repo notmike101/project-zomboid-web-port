@@ -73,6 +73,11 @@ function disposeRakNetOwner() {
     }
 
     engine?._rn_voice_destroy?.();
+
+    if (engine?._rn_shared_peer_destroy && engine._rn_shared_peer_destroy() !== 0) {
+        throw new Error('Cannot dispose RakNet with an attached voice owner');
+    }
+
     engine?.PThread.terminateAllThreads();
     disposed = true;
 

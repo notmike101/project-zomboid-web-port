@@ -7,6 +7,8 @@
 // Authored ownership/validation boundary. All codec and peer factory operations are upstream.
 static std::unordered_map<uint32_t, RakNet::BitStream*> owners;
 static uint32_t nextId = 1;
+static RakNet::RakPeerInterface* sharedPeer = nullptr;
+extern "C" int rn_voice_attached();
 
 static RakNet::BitStream* find(uint32_t id) {
     auto entry = owners.find(id);
@@ -25,6 +27,23 @@ RakNet::RakPeerInterface* rn_peer_create() {
 
 void rn_peer_destroy(RakNet::RakPeerInterface* peer) {
     RakNet::RakPeerInterface::DestroyInstance(peer);
+}
+
+// The original ZNet module and RakVoice share one actual peer, even before Startup.
+RakNet::RakPeerInterface* rn_shared_peer_get() {
+    if(!sharedPeer)sharedPeer=RakNet::RakPeerInterface::GetInstance();
+    return sharedPeer;
+}
+
+int rn_shared_peer_state(int* output) {
+    if(!sharedPeer||!output)return -1;
+    output[0]=sharedPeer->IsActive();output[1]=sharedPeer->NumberOfConnections();return 0;
+}
+
+int rn_shared_peer_destroy() {
+    if(rn_voice_attached())return -1;
+    if(sharedPeer)RakNet::RakPeerInterface::DestroyInstance(sharedPeer);
+    sharedPeer=nullptr;return 0;
 }
 
 uint32_t bs_create() {
