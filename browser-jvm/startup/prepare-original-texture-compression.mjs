@@ -57,6 +57,27 @@ assert.ok(source.hostSources.some((record) => path.basename(record.evidenceFile)
 assert.ok(source.routes.some((record) => record.url === '/original-boot.js'), 'Connected boot consumer required');
 assert.ok(source.routes.some((record) => record.url === '/sprite-webgl.js'), 'Connected graphics consumer required');
 const admission = JSON.parse(await readFile(admissionRecord.file, 'utf8'));
+const consumerBytes = new Map();
+
+for (const name of ['original-boot.js', 'sprite-webgl.js', 'audio-profile-routes.mjs']) {
+    let bytes = await readFile(path.join(import.meta.dirname, name === 'sprite-webgl.js' ? '../sprite-webgl.js' : name));
+
+    if (name === 'original-boot.js' && source.bullet) {
+        // Same exact composition as prepare-real-bullet.mjs; retain its real asynchronous owner.
+        const importBefore = "import { createBrowserPhysics } from './browser-physics.js';";
+        const ownerBefore = 'const physics = createBrowserPhysics();';
+        let boot = bytes.toString('utf8');
+
+        assert.equal(boot.split(importBefore).length, 2, 'Expected one public physics import');
+        assert.equal(boot.split(ownerBefore).length, 2, 'Expected one public physics owner');
+        assert.ok(source.routes.some((record) => record.url === '/bullet-startup.js'), 'Real Bullet startup route required');
+        boot = boot.replace(importBefore, "import { createBrowserPhysics } from './bullet-startup.js';")
+            .replace(ownerBefore, 'const physics = await createBrowserPhysics();');
+        assert.ok(!boot.includes(importBefore) && !boot.includes(ownerBefore), 'Static physics must not replace the selected real Bullet owner');
+        bytes = Buffer.from(boot);
+    }
+    consumerBytes.set(name, bytes);
+}
 
 assert.deepEqual(admission.audioRuntime, source.audioEnabled === false ? null : source.audioRuntime);
 for (const record of source.routes.filter((entry) => !entry.url.startsWith('/prepared/'))) {
@@ -91,7 +112,7 @@ const relocate = (value) => {
 const generation = relocate(source);
 
 for (const name of ['original-boot.js', 'sprite-webgl.js', 'audio-profile-routes.mjs']) {
-    const bytes = await readFile(path.join(import.meta.dirname, name === 'sprite-webgl.js' ? '../sprite-webgl.js' : name));
+    const bytes = consumerBytes.get(name);
     const record = name.endsWith('.js')
         ? generation.routes.find((entry) => entry.url === `/${name}`)
         : generation.hostSources.find((entry) => path.basename(entry.evidenceFile) === name);
