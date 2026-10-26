@@ -1,0 +1,17 @@
+{
+  "upstream": "nothings/stb",
+  "commit": "003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5",
+  "sourceRoot": ".tools/stb-003501f6",
+  "files": [
+    {
+      "file": "stb_dxt.h",
+      "bytes": 28319,
+      "sha256": "807667ef98e0fd749cdb65cca0c2d980bc148109d2fed6f1873c81ae0f449933"
+    },
+    {
+      "file": "LICENSE",
+      "bytes": 2510,
+      "sha256": "bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63"
+    }
+  ]
+}
