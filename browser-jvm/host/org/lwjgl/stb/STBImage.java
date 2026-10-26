@@ -82,44 +82,51 @@ public final class STBImage {
         int count = desired == 0 ? natural : desired;
         PNGDecoder.Format format = decoder.decideTextureFormat(PNGDecoder.Format.RGBA);
         int sourceChannels = format.getNumComponents();
-        ByteBuffer source = ByteBuffer.allocate(Math.multiplyExact(Math.multiplyExact(width, height), sourceChannels));
-        decoder.decode(source, width * sourceChannels, height, format, PNGDecoder.IDAT);
-        byte[] sourcePixels = source.array();
         Boolean localFlip = threadFlip.get();
         boolean flipped = localFlip == null ? flip : localFlip;
         boolean copyRGBA = format == PNGDecoder.Format.RGBA && count == 4 && !flipped;
-        // Exact decoder output already has the requested byte order and orientation.
-        byte[] pixels = copyRGBA ? sourcePixels : new byte[Math.multiplyExact(Math.multiplyExact(width, height), count)];
-        ByteBuffer result = SpriteGraphics.memAlloc(pixels.length);
+        boolean directRGBA = copyRGBA && decoder.isRGB() && decoder.hasAlphaChannel();
+        int resultBytes = Math.multiplyExact(Math.multiplyExact(width, height), count);
+        ByteBuffer result = SpriteGraphics.memAlloc(resultBytes);
         try {
-            if (!copyRGBA) {
-                int destination = 0;
-                for (int row = 0; row < height; row++) {
-                    int sourceRow = flipped ? height - row - 1 : row;
-                    for (int column = 0; column < width; column++) {
-                        int at = (sourceRow * width + column) * sourceChannels;
-                        int r, g, b, a = 255;
-                        if (format == PNGDecoder.Format.LUMINANCE || format == PNGDecoder.Format.LUMINANCE_ALPHA) {
-                            r = g = b = sourcePixels[at] & 255;
-                            if (sourceChannels == 2) a = sourcePixels[at + 1] & 255;
-                        } else if (format == PNGDecoder.Format.RGB || format == PNGDecoder.Format.RGBA) {
-                            r = sourcePixels[at] & 255; g = sourcePixels[at + 1] & 255; b = sourcePixels[at + 2] & 255;
-                            if (sourceChannels == 4) a = sourcePixels[at + 3] & 255;
-                        } else throw new IOException("Unsupported original PNG decoder output: " + format);
-                        if (count <= 2) {
-                            pixels[destination++] = (byte) ((77 * r + 150 * g + 29 * b) >> 8);
-                            if (count == 2) pixels[destination++] = (byte) a;
-                        } else {
-                            pixels[destination++] = (byte) r;
-                            pixels[destination++] = (byte) g;
-                            pixels[destination++] = (byte) b;
-                            if (count == 4) pixels[destination++] = (byte) a;
+            if (directRGBA) {
+                // Original PNGDecoder accepts direct output; avoid a second full RGBA image.
+                decoder.decode(result, Math.multiplyExact(width, sourceChannels), height, format, PNGDecoder.IDAT);
+            } else {
+                ByteBuffer source = ByteBuffer.allocate(Math.multiplyExact(Math.multiplyExact(width, height), sourceChannels));
+                decoder.decode(source, Math.multiplyExact(width, sourceChannels), height, format, PNGDecoder.IDAT);
+                byte[] sourcePixels = source.array();
+                byte[] pixels = copyRGBA ? sourcePixels : new byte[resultBytes];
+                if (!copyRGBA) {
+                    int destination = 0;
+                    for (int row = 0; row < height; row++) {
+                        int sourceRow = flipped ? height - row - 1 : row;
+                        for (int column = 0; column < width; column++) {
+                            int at = (sourceRow * width + column) * sourceChannels;
+                            int r, g, b, a = 255;
+                            if (format == PNGDecoder.Format.LUMINANCE || format == PNGDecoder.Format.LUMINANCE_ALPHA) {
+                                r = g = b = sourcePixels[at] & 255;
+                                if (sourceChannels == 2) a = sourcePixels[at + 1] & 255;
+                            } else if (format == PNGDecoder.Format.RGB || format == PNGDecoder.Format.RGBA) {
+                                r = sourcePixels[at] & 255; g = sourcePixels[at + 1] & 255; b = sourcePixels[at + 2] & 255;
+                                if (sourceChannels == 4) a = sourcePixels[at + 3] & 255;
+                            } else throw new IOException("Unsupported original PNG decoder output: " + format);
+                            if (count <= 2) {
+                                pixels[destination++] = (byte) ((77 * r + 150 * g + 29 * b) >> 8);
+                                if (count == 2) pixels[destination++] = (byte) a;
+                            } else {
+                                pixels[destination++] = (byte) r;
+                                pixels[destination++] = (byte) g;
+                                pixels[destination++] = (byte) b;
+                                if (count == 4) pixels[destination++] = (byte) a;
+                            }
                         }
                     }
                 }
+                // One bulk Java NIO transfer avoids a native boundary call for every color component.
+                result.put(pixels);
             }
-            // One bulk Java NIO transfer avoids a native boundary call for every color component.
-            result.put(pixels).flip();
+            result.flip();
             synchronized (images) { images.put(result, Boolean.TRUE); }
             if (x != null) x[0] = width;
             if (y != null) y[0] = height;
