@@ -99,7 +99,7 @@ export async function prepareOpusRuntime(directory) {
         throw new Error('Unpinned Opus translation unit');
     }
 
-    const exports = ['voice_codec_create', 'voice_codec_destroy', 'voice_codec_encode', 'voice_codec_decode', 'malloc', 'free'];
+    const exports = ['voice_decoder_create', 'voice_codec_create', 'voice_codec_destroy', 'voice_codec_encode', 'voice_codec_decode', 'malloc', 'free'];
     const arguments_ = ['-3', compiler, '-O2', '-DOPUS_BUILD', '-DUSE_ALLOCA', '-DHAVE_LRINTF', '-DHAVE_LRINT',
         ...['include', 'celt', 'silk', 'silk/float'].map((name) => `-I${path.join(source, name)}`), bridge,
         ...ledger.sources.map((name) => path.join(source, name)), '-sMODULARIZE=1', '-sEXPORT_ES6=1',

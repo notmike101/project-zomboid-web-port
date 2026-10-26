@@ -61,10 +61,13 @@ export function createRakVoiceChannels(codecs, bufferBytes) {
         const previous = channels.get(guid);
 
         if (previous) {
-            codecs.destroy(previous.codec);
+            close(guid);
         }
 
-        channels.set(guid, { codec, ring, read: 0, write: 0, playerId: 0, sequence: 0, lastUpdate: 0 });
+        channels.set(guid, {
+            codec, ring, rate: pending.sampleRate, receivers: new Map(),
+            read: 0, write: 0, playerId: 0, sequence: 0, lastUpdate: 0,
+        });
         configuration = pending;
     }
 
@@ -86,7 +89,7 @@ export function createRakVoiceChannels(codecs, bufferBytes) {
         }
 
         if (!Number.isInteger(playerId) || playerId < -2_147_483_648 || playerId > 2_147_483_647
-            || !(bytes instanceof Uint8Array) || bytes.length !== bufferBytes) {
+            || !(bytes instanceof Uint8Array) || bytes.length > capacity) {
             throw new TypeError('Original bounded capture block and player identity required');
         }
 
@@ -98,7 +101,7 @@ export function createRakVoiceChannels(codecs, bufferBytes) {
         }
 
         if (channel.write + bytes.length > capacity) {
-            throw new Error('Unqualified non-aligned original capture write');
+            throw new Error('Original capture write crosses the native ring end');
         }
 
         channel.ring.set(bytes, channel.write);
@@ -184,6 +187,10 @@ export function createRakVoiceChannels(codecs, bufferBytes) {
         const channel = channels.get(guid);
 
         if (channel) {
+            for (const receiver of channel.receivers.values()) {
+                codecs.destroy(receiver.codec);
+            }
+
             codecs.destroy(channel.codec);
             channels.delete(guid);
         }
@@ -196,6 +203,133 @@ export function createRakVoiceChannels(codecs, bufferBytes) {
         for (const guid of channels.keys()) {
             close(guid);
         }
+    }
+
+    /**
+     * Decodes a real incoming packet into its separate GUID/player PCM owner.
+     *
+     * @param {bigint} guid - Original packet source identity.
+     * @param {Uint8Array} packet - Original0x2F header and actual Opus payload.
+     * @returns {boolean} Whether an existing channel accepted a nonnegative player.
+     */
+    function receivePacket(guid, packet) {
+        checkGuid(guid);
+
+        const channel = channels.get(guid);
+
+        if (!channel) {
+            return false;
+        }
+
+        if (!(packet instanceof Uint8Array) || packet.length < 8 || packet[0] !== 0x2F) {
+            throw new TypeError('Original RakVoice frame header and payload required');
+        }
+
+        const header = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+        const playerId = header.getInt32(3, true);
+
+        if (playerId < 0) {
+            return false;
+        }
+
+        let receiver = channel.receivers.get(playerId);
+        const pending = !receiver;
+
+        if (pending) {
+            const ring = new Uint8Array(capacity);
+
+            receiver = { ring, codec: codecs.createDecoder(channel.rate), read: 0, write: 0, nextSequence: 0 };
+        }
+
+        let samples;
+
+        try {
+            samples = codecs.decode(receiver.codec, packet.subarray(7), 2_048);
+        } catch (error) {
+            if (pending) {
+                codecs.destroy(receiver.codec);
+            }
+
+            throw error;
+        }
+
+        if (samples.byteLength > capacity) {
+            if (pending) {
+                codecs.destroy(receiver.codec);
+            }
+
+            throw new Error('Unqualified original PCM write exceeding the complete ring');
+        }
+
+        const available = (receiver.write - receiver.read + capacity) % capacity;
+        const free = capacity - available;
+        const output = new DataView(receiver.ring.buffer);
+        let at = receiver.write;
+
+        for (const sample of samples) {
+            output.setInt16(at, sample, true);
+            at = (at + 2) % capacity;
+        }
+
+        receiver.write = (receiver.write + samples.byteLength) % capacity;
+
+        // Original0x1800ac0c5 compares one capture block with free space, not the decoded byte count.
+        if (bufferBytes >= free) {
+            receiver.read = (receiver.read + bufferBytes) % capacity;
+        }
+
+        receiver.nextSequence = (header.getUint16(1, true) + 1) & 0xFF_FF;
+        channel.receivers.set(playerId, receiver);
+
+        return true;
+    }
+
+    /**
+     * Copies one real capture-sized PCM block, preserving the original two false-result behaviors.
+     *
+     * @param {number} playerId - Original incoming player identity.
+     * @param {Uint8Array} output - Original caller output with spare capacity.
+     * @returns {boolean} Actual full PCM block availability.
+     */
+    function receiveFrame(playerId, output) {
+        if (!Number.isInteger(playerId) || playerId < 0 || playerId > 2_147_483_647
+            || !(output instanceof Uint8Array) || output.length < bufferBytes) {
+            throw new TypeError('Original incoming player and PCM output required');
+        }
+
+        for (const guid of [...channels.keys()].sort((a, b) => Number(a > b) - Number(a < b))) {
+            const receiver = channels.get(guid).receivers.get(playerId);
+
+            if (!receiver) {
+                continue;
+            }
+
+            if ((receiver.write - receiver.read + capacity) % capacity < bufferBytes) {
+                return false;
+            }
+
+            output.set(receiver.ring.subarray(receiver.read, receiver.read + bufferBytes));
+            receiver.read = (receiver.read + bufferBytes) % capacity;
+
+            return true;
+        }
+
+        output.fill(0, 0, bufferBytes);
+
+        return false;
+    }
+
+    /**
+     * Copies one actual incoming ring's positions and sequence state for bounded observation.
+     *
+     * @param {bigint} guid - Original source identity.
+     * @param {number} playerId - Original incoming player identity.
+     * @returns {object|null} Actual owner state or absence.
+     */
+    function incomingSnapshot(guid, playerId) {
+        const receiver = channels.get(guid)?.receivers.get(playerId);
+
+        return receiver ? { read: receiver.read, write: receiver.write, next: receiver.nextSequence } : null;
     }
 
     /**
@@ -222,5 +356,5 @@ export function createRakVoiceChannels(codecs, bufferBytes) {
         };
     }
 
-    return { openReply, queue, prepareOutgoing, close, closeAll, snapshot };
+    return { openReply, queue, prepareOutgoing, close, closeAll, snapshot, receivePacket, receiveFrame, incomingSnapshot };
 }

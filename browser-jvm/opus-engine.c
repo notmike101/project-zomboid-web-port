@@ -32,16 +32,26 @@ failed:
     if(codec->decoder)opus_decoder_destroy(codec->decoder);
     free(codec);return 0;
 }
+int voice_decoder_create(int rate) {
+    int error=0;
+    if(nextCodecId>INT_MAX)return 0;
+    VoiceCodec* codec=calloc(1,sizeof(*codec));
+    if(!codec)return 0;
+    codec->decoder=opus_decoder_create(rate,1,&error);
+    if(!codec->decoder||error){if(codec->decoder)opus_decoder_destroy(codec->decoder);free(codec);return 0;}
+    codec->id=(int)nextCodecId++;codec->next=codecs;codecs=codec;return codec->id;
+}
 int voice_codec_destroy(int id) {
     VoiceCodec** link=&codecs;
     while(*link&&(*link)->id!=id)link=&(*link)->next;
     if(!*link)return -1;
     VoiceCodec* codec=*link;*link=codec->next;
-    opus_encoder_destroy(codec->encoder);opus_decoder_destroy(codec->decoder);free(codec);return 0;
+    if(codec->encoder)opus_encoder_destroy(codec->encoder);
+    opus_decoder_destroy(codec->decoder);free(codec);return 0;
 }
 int voice_codec_encode(int id,const opus_int16* samples,int count,unsigned char* output,int capacity) {
     VoiceCodec* codec=find_codec(id);
-    if(!codec||!samples||!output||count<1||capacity<1)return OPUS_BAD_ARG;
+    if(!codec||!codec->encoder||!samples||!output||count<1||capacity<1)return OPUS_BAD_ARG;
     return opus_encode(codec->encoder,samples,count,output,capacity);
 }
 int voice_codec_decode(int id,const unsigned char* packet,int length,opus_int16* output,int capacity) {

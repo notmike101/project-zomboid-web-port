@@ -33,6 +33,28 @@ export function createOpusVoiceCodecs(engine) {
     }
 
     /**
+     * Allocates a genuine incoming decoder without an unused encoder for each remote player.
+     *
+     * @param {number} sampleRate - Original negotiated mono sample rate.
+     * @returns {number} Actual owned decoder identity.
+     */
+    function createDecoder(sampleRate) {
+        if (!Number.isInteger(sampleRate) || sampleRate <= 0 || sampleRate > 48_000) {
+            throw new TypeError('Integer Opus sample rate required');
+        }
+
+        const id = engine._voice_decoder_create(sampleRate);
+
+        if (!id) {
+            throw new Error('Actual Opus decoder creation rejected');
+        }
+
+        owners.set(id, sampleRate);
+
+        return id;
+    }
+
+    /**
      * Encodes one actual signed16 mono frame; no encoded bytes or readiness are synthesized.
      *
      * @param {number} id - Owned codec identity.
@@ -72,14 +94,20 @@ export function createOpusVoiceCodecs(engine) {
      *
      * @param {number} id - Owned codec identity.
      * @param {Uint8Array} packet - Actual received Opus packet.
+     * @param {number} [maximumSamples] - Original bounded output capacity when explicitly supplied.
      * @returns {Int16Array} Actual decoded mono PCM.
      */
-    function decode(id, packet) {
+    function decode(id, packet, maximumSamples) {
         if (!owners.has(id) || !(packet instanceof Uint8Array) || !packet.length || packet.length > 1_275) {
             throw new TypeError('Owned Opus codec and bounded packet required');
         }
 
-        const capacity = owners.get(id) * 120 / 1_000;
+        const capacity = maximumSamples ?? owners.get(id) * 120 / 1_000;
+
+        if (!Number.isInteger(capacity) || capacity < 1 || capacity > 5_760) {
+            throw new TypeError('Bounded actual Opus decode capacity required');
+        }
+
         const offset = (packet.length + 1) & ~1;
         const input = engine._malloc(offset + capacity * 2);
 
@@ -117,5 +145,5 @@ export function createOpusVoiceCodecs(engine) {
         owners.delete(id);
     }
 
-    return { create, encode, decode, destroy };
+    return { create, createDecoder, encode, decode, destroy };
 }
