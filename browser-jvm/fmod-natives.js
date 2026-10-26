@@ -331,7 +331,10 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         async FMOD_System_Init(_lib, channels, studioFlags, coreFlags) {
             // Original integration 0x18000db6f..dbb5 selects 32 kHz / 5.1 before Studio initialize.
             core.setSoftwareFormat(32_000, FMOD.SPEAKERMODE_5POINT1, 0);
-            await requireSystem().initialize(channels, Number(studioFlags), Number(coreFlags), null);
+            // HTML5 worklet mixing runs outside this owner; asynchronous stream I/O must stay on serialized update.
+            const hostCoreFlags = Number(coreFlags) | FMOD.INIT_STREAM_FROM_UPDATE;
+
+            await requireSystem().initialize(channels, Number(studioFlags), hostCoreFlags, null);
             initialized = true;
 
             return FMOD.OK;
