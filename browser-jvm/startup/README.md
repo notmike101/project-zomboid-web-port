@@ -82,3 +82,9 @@ For a supplied original importer plan, validate and compile the maintained batch
     node browser-jvm/startup/prepare-scene-batches.mjs INSTALLATION PLAN_TSV JDK25 NEW_TARGET_DIRECTORY --plan-only
 
 Selecting --prepare instead runs the existing bounded per-record native importer sequentially, then transfers only its owned generated snapshots into a combined inventory. It never starts the game/server or moves installed files. The6,034-entry plan is split into4,096 and1,938 entries, respecting the original preparer's limit. The resulting combined directory can supply sceneRoot to assemble-base.mjs. The plan itself must still come from a qualified installed-source inventory; this command does not invent missing model/animation coverage.
+
+Generate that plan from the installed definitions and certified media namespace:
+
+    node browser-jvm/startup/inventory-scenes.mjs INSTALLATION CERTIFIED_NAMESPACE_JSON NEW_TARGET_DIRECTORY
+
+The inventory reads the two actual animationMesh definition files, verifies their source identities and selects their declared animation directories/prefixes plus the finite default-model set. It emits plan.tsv and inventory.json for the qualified 6,034 identities and rejects a different installed definition revision. Source payload validation remains the native preparer's responsibility. Feed the emitted plan to prepare-scene-batches.mjs; neither inventory generation nor --plan-only runs native imports or starts the game.
