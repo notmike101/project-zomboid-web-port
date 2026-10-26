@@ -112,3 +112,5 @@ int bs_align_read(uint32_t id) {
     return 0;
 }
 }
+
+#include "rakvoice-engine.h"

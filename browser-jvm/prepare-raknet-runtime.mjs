@@ -9,7 +9,7 @@ const repository = path.resolve(import.meta.dirname, '..');
 const sourceRoot = path.join(repository, '.tools/raknet-1a169895');
 const sdk = path.join(repository, '.tools/emsdk-3.1.74-source/emsdk-3d6d8ee910466516a53e665b86458faa81dae9ba');
 const compiler = path.join(sdk, 'upstream/emscripten/emcc.py');
-const exports = ['pthread_self', 'rn_candidate_version', 'rn_peer_create', 'rn_peer_destroy', 'bs_create', 'bs_destroy', 'bs_live', 'bs_write', 'bs_read', 'bs_bits', 'bs_bytes', 'bs_read_offset', 'bs_data', 'bs_reset', 'bs_reset_read', 'bs_align_write', 'bs_align_read', 'malloc', 'free'];
+const exports = ['rn_voice_init', 'rn_voice_set_complexity', 'rn_voice_state', 'rn_voice_deinit', 'rn_voice_destroy', 'pthread_self', 'rn_candidate_version', 'rn_peer_create', 'rn_peer_destroy', 'bs_create', 'bs_destroy', 'bs_live', 'bs_write', 'bs_read', 'bs_bits', 'bs_bytes', 'bs_read_offset', 'bs_data', 'bs_reset', 'bs_reset_read', 'bs_align_write', 'bs_align_read', 'malloc', 'free'];
 const patches = new Map([
     ['FileList.cpp', { before: 'aac65637774aa8e9217f33f9eef2a53bf1a7230f6d940e6f37cab6b2d15502a5', after: '9d0c278675f7eb411a43b79cbd793725d8babbf75dfdcda1464749164295510a', from: '#include <sys/io.h>', to: '#if !defined(__EMSCRIPTEN__)\n#include <sys/io.h>\n#endif' }],
     ['ReplicaManager3.cpp', { before: 'f2337fdb245b0c1d8233c70dee59442d05239d04a088dd75c58449fb487a909a', after: '301759fe53c4b3c0b51900b8c924e1174034b0617cd8ce0bdb72e0cd554705a3', from: 'GetConnectionByGUID(participantListIn[index], worldId)==false', to: 'GetConnectionByGUID(participantListIn[index], worldId)==nullptr' }],
@@ -137,6 +137,8 @@ export async function prepareRakNetRuntime(outputDirectory) {
     const sources = await readSources(ledger);
     const bridge = path.join(import.meta.dirname, 'raknet-engine.cpp');
     const bridgeSha = digest(await readFile(bridge));
+    const voiceHeader = path.join(import.meta.dirname, 'rakvoice-engine.h');
+    const voiceHeaderSha = digest(await readFile(voiceHeader));
     const notices = new Map();
 
     await Promise.all([['RAKNET-LICENSE.txt', 'da7efae279531d6969da900e53da7b57be40ac983de32d24eeecec0f33cc25f3'], ['RAKNET-PATENTS.txt', 'bd76e337528d2e7bd9f5adb8e2be798c7b8ee7313316fcd9533e5d51cfdfa2f1']].map(async ([name, sha]) => {
@@ -198,7 +200,7 @@ export async function prepareRakNetRuntime(outputDirectory) {
     await writeFile(path.join(output, 'raknet-build.log'), `${result.stdout}\n${result.stderr}`);
     await readSources(ledger);
 
-    if (digest(await readFile(ledgerFile)) !== digest(ledgerBytes) || digest(await readFile(bridge)) !== bridgeSha) {
+    if (digest(await readFile(ledgerFile)) !== digest(ledgerBytes) || digest(await readFile(bridge)) !== bridgeSha || digest(await readFile(voiceHeader)) !== voiceHeaderSha) {
         throw new Error('RakNet build input changed during compilation');
     }
 
@@ -209,7 +211,7 @@ export async function prepareRakNetRuntime(outputDirectory) {
     }));
     const manifest = {
         candidateVersion: ledger.candidateVersion, candidateCommit: ledger.commit, installedVersion: 'unknown', versionMatchVerified: false,
-        sourceFiles: ledger.files.length, translationUnits: 110, compilerVersion: '3.1.74', bridgeSha,
+        sourceFiles: ledger.files.length, translationUnits: 110, compilerVersion: '3.1.74', bridgeSha, voiceHeaderSha,
         sourceLedgerSha: digest(ledgerBytes), patches: [...patches].map(([file, { before, after }]) => ({ file, before, after })),
         arguments: arguments_, moduleSha: digest(await readFile(path.join(output, 'raknet-engine.mjs'))),
         wasmSha: digest(await readFile(path.join(output, 'raknet-engine.wasm'))),

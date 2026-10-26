@@ -72,6 +72,7 @@ function disposeRakNetOwner() {
         throw new Error('Cannot dispose RakNet with live BitStream owners');
     }
 
+    engine?._rn_voice_destroy?.();
     engine?.PThread.terminateAllThreads();
     disposed = true;
 
