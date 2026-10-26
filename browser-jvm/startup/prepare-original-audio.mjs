@@ -36,6 +36,17 @@ for (const record of audio.routes) {
 }
 
 generation.routes.push(...audio.routes);
+// Keep the served root directory metadata consistent after optional Bullet/audio routes are added.
+const rootListing = generation.routes.find((record) => record.url === '/index.list');
+
+assert.ok(rootListing, 'Base generation is missing root directory metadata');
+const previousChildren = (await readFile(rootListing.file, 'utf8')).split(/\r?\n/u).filter(Boolean);
+const children = [...new Set([...previousChildren, ...generation.routes
+    .filter((record) => record.url !== '/').map((record) => record.url.split('/')[1])])].sort();
+const listingBytes = Buffer.from(`${children.join('\n\n')}\n`);
+
+await writeFile(rootListing.file, listingBytes);
+Object.assign(rootListing, { bytes: listingBytes.length, sha256: digest(listingBytes) });
 generation.audioRuntime = audio.audioRuntime;
 const admissionRecord = generation.routes.find((record) => record.url === '/original-boot-admission.json');
 const admission = JSON.parse(await readFile(admissionRecord.file, 'utf8'));
