@@ -43,6 +43,12 @@ public final class AiSceneSnapshot {
  }
  static final class Reader {
   final DataInputStream in;final Map<Integer,Object> seen=new HashMap<>();Reader(DataInputStream in){this.in=in;}
+  byte[] scratch;
+  void readBuffer(ByteBuffer target,int capacity)throws IOException{
+   int size=Math.min(capacity,65536);
+   if(size>0&&(scratch==null||scratch.length<size))scratch=new byte[size];
+   for(int remaining=capacity;remaining>0;){int count=Math.min(remaining,scratch.length);in.readFully(scratch,0,count);target.put(scratch,0,count);remaining-=count;}
+  }
   Class<?> type(String name)throws Exception{return switch(name){case "int"->int.class;case "byte"->byte.class;case "short"->short.class;case "long"->long.class;case "float"->float.class;case "double"->double.class;case "boolean"->boolean.class;case "char"->char.class;default->{if(!name.startsWith("jassimp.")&&!name.equals("java.lang.String")&&!name.equals("java.nio.ByteBuffer")&&!name.equals("java.lang.Object"))throw new IOException("Unexpected snapshot type "+name);yield Class.forName(name);}};}
   Object construct(Class<?> type)throws Exception{
    // These original wrappers only store their buffer; decoded real fields replace it before return.
@@ -55,7 +61,7 @@ public final class AiSceneSnapshot {
   @SuppressWarnings({"unchecked","rawtypes"}) Object value()throws Exception{
    int tag=in.readUnsignedByte();switch(tag){
     case 0:return null;case 1:{int id=in.readInt();if(!seen.containsKey(id))throw new IOException("Missing reference "+id);return seen.get(id);}case 2:return in.readUTF();case 3:return in.readInt();case 4:return in.readLong();case 5:return Float.intBitsToFloat(in.readInt());case 6:return Double.longBitsToDouble(in.readLong());case 7:return in.readBoolean();case 8:return Enum.valueOf((Class)type(in.readUTF()),in.readUTF());case 16:return in.readByte();case 17:return in.readShort();case 18:return in.readChar();
-    case 9:{int id=in.readInt();boolean direct=in.readBoolean(),readOnly=in.readBoolean(),little=in.readBoolean();int position=in.readInt(),limit=in.readInt(),capacity=in.readInt();ByteBuffer b=direct?ByteBuffer.allocateDirect(capacity):ByteBuffer.allocate(capacity);for(int i=0;i<capacity;i++)b.put(i,in.readByte());b.limit(limit).position(position);if(readOnly)b=b.asReadOnlyBuffer();b.order(little?ByteOrder.LITTLE_ENDIAN:ByteOrder.BIG_ENDIAN);seen.put(id,b);return b;}
+    case 9:{int id=in.readInt();boolean direct=in.readBoolean(),readOnly=in.readBoolean(),little=in.readBoolean();int position=in.readInt(),limit=in.readInt(),capacity=in.readInt();ByteBuffer b=direct?ByteBuffer.allocateDirect(capacity):ByteBuffer.allocate(capacity);readBuffer(b,capacity);b.limit(limit).position(position);if(readOnly)b=b.asReadOnlyBuffer();b.order(little?ByteOrder.LITTLE_ENDIAN:ByteOrder.BIG_ENDIAN);seen.put(id,b);return b;}
     case 10:{int id=in.readInt();Class<?> component=type(in.readUTF());int n=in.readInt();Object result=Array.newInstance(component,n);seen.put(id,result);for(int i=0;i<n;i++)Array.set(result,i,value());return result;}
     case 11:{int id=in.readInt(),n=in.readInt();var list=new ArrayList<>();seen.put(id,list);for(int i=0;i<n;i++)list.add(value());return list;}
     case 12:{int id=in.readInt(),n=in.readInt();var map=new LinkedHashMap<>();seen.put(id,map);for(int i=0;i<n;i++)map.put(value(),value());return map;}
