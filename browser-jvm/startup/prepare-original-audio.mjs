@@ -51,6 +51,8 @@ generation.audioRuntime = audio.audioRuntime;
 const admissionRecord = generation.routes.find((record) => record.url === '/original-boot-admission.json');
 const admission = JSON.parse(await readFile(admissionRecord.file, 'utf8'));
 
+generation.noVoip ??= false;
+admission.noVoip = generation.noVoip;
 admission.audioRuntime = generation.audioRuntime;
 const admissionBytes = Buffer.from(JSON.stringify(admission));
 
