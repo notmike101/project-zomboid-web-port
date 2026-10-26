@@ -917,10 +917,34 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                 // Java callbacks run after the SDK lock is released, permitting genuine reentrant calls.
                 for (const entry of callbacks) {
                     try {
-                        // eslint-disable-next-line no-await-in-loop -- Preserve actual native callback order.
-                        await entry.callback[entry.method](...(args[0] ? entry.args.map(javaValue) : entry.args));
+                        if (args[0]) {
+                            // A retained Java proxy belongs to its registration thread. Rebind through the current JNI owner.
+                            // eslint-disable-next-line no-await-in-loop -- Preserve actual native callback order.
+                            const helper = await args[0].port.host.FmodArrays;
+                            // eslint-disable-next-line no-await-in-loop -- Preserve actual native callback order.
+                            const failure = await helper.dispatchCallback(entry.callback, entry.method,
+                                javaValue(entry.args[0]), entry.args[1] ?? null, entry.args[2] ?? 0);
+
+                            if (failure !== null) {
+                                const details = JSON.parse(String(failure));
+                                const report = { method: entry.method, args: entry.args.map(callbackArgument), ...details };
+
+                                callbackFailures++;
+                                recordCallback(lastCallbackFailures, report);
+                                console.error('Original FMOD callback exception (engine result preserved)', report);
+                                continue;
+                            }
+                        } else {
+                            // eslint-disable-next-line no-await-in-loop -- Preserve actual native callback order.
+                            await entry.callback[entry.method](...entry.args);
+                        }
+
                         deliveredCallbacks++;
                     } catch (failure) {
+                        if (args[0]) {
+                            throw failure;
+                        }
+
                         /* Original JNI at 0x1800054aa..54be checks the callback exception but returns FMOD_OK.
                          * A callback rejection must not become an FMOD_Update failure on the game owner. */
                         callbackFailures++;
