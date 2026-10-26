@@ -68,3 +68,11 @@ The maintained archive stage can now build the seventeen ordered JARs directly f
     node browser-jvm/startup/prepare-base-jars.mjs INSTALLED_GAME_JAR JDK25_DIRECTORY CLIPPER2_JAR NEW_OUTPUT_DIRECTORY
 
 Use the pinned Clipper2 2.0.1b archive. The output must be a new directory beneath the existing workspace target directory. This command runs classfile preparers and compilers only; it does not initialize the game, import native scenes, copy media or launch a browser. Its base-jars.json records source/input/output identities and explicitly leaves executionAdmitted false. The complete scene/media/runtime generation assembly is still a separate prerequisite.
+
+The next maintained stage assembles those archives with supplied scene and media evidence:
+
+    node browser-jvm/startup/assemble-base.mjs INPUTS_JSON NEW_TARGET_DIRECTORY
+
+INPUTS_JSON supplies jarManifest, gameRoot, sceneRoot, raknetManifest, earcutManifest, closedMedia and eagerMedia. The archive and component manifests come from their maintained builders. sceneRoot contains the6034 snapshots, plan.tsv, snapshot-routes.json, index.properties and whole-boot-directory-index.list. closedMedia supplies the namespace/certificate/ledger file paths and SHA-256 identities plus an external snapshotParent; eagerMedia retains its existing same-owner-eager-metadata-v1 schema.
+
+This freezes current host modules and small runtime artifacts, verifies scene snapshots in place, and records original media metadata without copying its payloads. The generation remains unadmitted. Required real Bullet composition, explicit audio/voice selection and actual browser startup qualification follow separately. Source inventory generation and native scene preparation must still be supplied; this stage does not turn a retained private plan into a fresh-install guarantee.
