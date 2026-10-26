@@ -52,13 +52,8 @@ public final class BrowserOriginalBoot {
             // Same independent selection as original MainScreenState.main's -novoip flag.
             boolean noVoip = Boolean.getBoolean("pz.browser.novoip");
             if (noVoip) zombie.core.raknet.VoiceManager.voipDisabled = true;
-            String texture2x = System.getProperty("pz.browser.texture2x");
-            if (texture2x != null) {
-                if (!texture2x.equals("true") && !texture2x.equals("false"))
-                    throw new IllegalArgumentException("Explicit texture2x boolean required");
-            }
             report("{\"startupOptions\":{\"audio\":" + !Core.soundDisabled
-                    + ",\"noVoip\":" + noVoip + ",\"texture2x\":" + texture2x + "}}");
+                    + ",\"noVoip\":" + noVoip + "}}");
             ZomboidFileSystem.instance.setCacheDir(root.resolve("cache").toString());
             zombie.debug.DebugLog.getInstance().setStdOut(System.out);
             zombie.debug.DebugLog.getInstance().setStdErr(System.err);
@@ -69,8 +64,6 @@ public final class BrowserOriginalBoot {
                 throw new IllegalStateException("Original remote logging branch is outside this offline admission");
             zombie.debug.DebugLog.getInstance().init();
             zombie.core.logger.LoggerManager.init();
-            // Select the original pack branch after display/options initialization, before save and GameWindow.enter.
-            if (texture2x != null) Core.getInstance().setOptionTexture2x(Boolean.parseBoolean(texture2x));
             Core.getInstance().saveOptions();
             new BrowserLifecycleController(root, 30000,
                     text -> report("{\"ownerEvent\":" + quote(text) + "}")).run();

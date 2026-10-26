@@ -14,7 +14,6 @@ assert.ok(sourceFile && sdk && outputArgument && jdk,
 const source = JSON.parse(await readFile(sourceFile, 'utf8'));
 
 assert.ok(source.audioEnabled === undefined || typeof source.audioEnabled === 'boolean', 'audioEnabled must be an optional boolean');
-assert.ok(source.texture2x === undefined || typeof source.texture2x === 'boolean', 'texture2x must be an optional boolean');
 assert.ok(!source.audioRuntime && !source.bullet, 'Select the base generation before optional Bullet/audio composition');
 const output = path.resolve(outputArgument);
 const execute = promisify(execFile);
@@ -56,11 +55,6 @@ const admission = JSON.parse(await readFile(admissionRecord.file, 'utf8'));
 
 generation.noVoip ??= false;
 admission.noVoip = generation.noVoip;
-
-if (generation.texture2x !== undefined) {
-    assert.equal(typeof generation.texture2x, 'boolean');
-    admission.texture2x = generation.texture2x;
-}
 
 admission.audioRuntime = generation.audioEnabled ? generation.audioRuntime : null;
 const admissionBytes = Buffer.from(JSON.stringify(admission));
