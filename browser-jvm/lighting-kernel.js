@@ -156,11 +156,11 @@ function validate(scene) {
     }
 
     if (!Array.from(player).every(Number.isFinite) || player[0] < 0 || player[1] < 0
-        || player[0] >= width || player[1] >= height || player[2] < minimum || player[2] > maximum) {
+        || player[0] >= width || player[1] >= height || Math.floor(player[2]) < minimum || Math.floor(player[2]) > maximum) {
         unsupported('player position');
     }
 
-    integer(player[2], minimum, maximum, 'player native level');
+    integer(Math.floor(player[2]), minimum, maximum, 'player native level');
 
     if (scene.origin !== undefined) {
         if (!Array.isArray(scene.origin) || scene.origin.length !== 3 || scene.origin[2] !== 0) {
@@ -835,8 +835,8 @@ function visibleStep(scene, current, previous) {
 function visible(scene, cache, target) {
     const destination = coordinates(scene, target);
 
-    if (destination[2] === scene.player[2] - 1 && scene.cells[target].stairs) {
-        destination[2] = scene.player[2];
+    if (destination[2] === Math.floor(scene.player[2]) - 1 && scene.cells[target].stairs) {
+        destination[2] = Math.floor(scene.player[2]);
     }
 
     const cacheIndex = (destination[2] - scene.minimum) * scene.width * scene.height
@@ -941,7 +941,7 @@ function withinCone(scene, index) {
     const distance = Math.fround(Math.sqrt(Math.fround(Math.fround(dx * dx) + Math.fround(dy * dy))));
 
     if (distance < Math.fround(Math.fround(1 - fatigue) * range)
-        || (x === Math.floor(scene.player[0]) && y === Math.floor(scene.player[1]) && z === scene.player[2])) {
+        || (x === Math.floor(scene.player[0]) && y === Math.floor(scene.player[1]) && z === Math.floor(scene.player[2]))) {
         return true;
     }
 

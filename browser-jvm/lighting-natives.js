@@ -637,7 +637,8 @@ export function createLightingNatives() {
 
             finite([x, y, z, directionX, directionY, fatigue, range, cone], 'player input');
 
-            integer(z, 0, 63, 'player native level');
+            z = Math.fround(z);
+            integer(Math.floor(z), 0, 63, 'player native level');
 
             if (x < state.x * 8 || y < state.y * 8
                 || x >= (state.x + state.width) * 8 || y >= (state.y + state.height) * 8) {
@@ -647,10 +648,6 @@ export function createLightingNatives() {
             if (flagA !== false || flagB !== false || flagC !== false || flagD !== false
                 || fatigue !== 0 || range < 0 || range > 20 || cone < -1 || cone > 1) {
                 unsupported('player flags or perception');
-            }
-
-            if (state.previousPlayer && state.previousPlayer[2] !== z) {
-                unsupported('moving-player level transition');
             }
 
             update.playerPosition = [x - state.x * 8, y - state.y * 8, z];
@@ -1224,7 +1221,7 @@ export function createLightingNatives() {
                 moved: Boolean(state.moved),
             };
             const [playerX, playerY, playerZ] = playerPosition;
-            const playerIndex = playerZ * pending.width * pending.height + Math.floor(playerY) * pending.width + Math.floor(playerX);
+            const playerIndex = Math.floor(playerZ) * pending.width * pending.height + Math.floor(playerY) * pending.width + Math.floor(playerX);
 
             if (cells[playerIndex] === null && cells.some((cell) => cell !== null)) {
                 unsupported('player on absent square');
