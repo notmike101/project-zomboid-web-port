@@ -18,6 +18,7 @@ public static class StartupMemoryNative {
  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool TerminateProcess(IntPtr handle,uint code);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GlobalMemoryStatusEx(ref Memory memory);
+ [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process,int kind,IntPtr buffer,int length,out int needed);
  public static Row[] Processes() {
   IntPtr snapshot=CreateToolhelp32Snapshot(2,0); if(snapshot==new IntPtr(-1)) throw new System.ComponentModel.Win32Exception();
@@ -28,6 +29,7 @@ public static class StartupMemoryNative {
   } finally {CloseHandle(snapshot);}
  }
  public static Memory SystemMemory() {Memory m=new Memory();m.size=(uint)Marshal.SizeOf(typeof(Memory));if(!GlobalMemoryStatusEx(ref m)) throw new System.ComponentModel.Win32Exception();return m;}
+ public static long UptimeMilliseconds() {return checked((long)GetTickCount64());}
  public static void TerminateOwned(IntPtr handle) {if(!TerminateProcess(handle,1)) throw new System.ComponentModel.Win32Exception();}
  public static string CommandLine(IntPtr process) {
   int needed;NtQueryInformationProcess(process,60,IntPtr.Zero,0,out needed);if(needed<=0||needed>1048576) throw new InvalidOperationException("Invalid command-line extent");
@@ -44,7 +46,7 @@ if ($SelfCheck) {
         $rows = [StartupMemoryNative]::Processes()
         $memory = [StartupMemoryNative]::SystemMemory()
         $command = [StartupMemoryNative]::CommandLine($self.Handle)
-        [pscustomobject]@{ event='native-self-check'; pid=$self.Id; found=@($rows | Where-Object ProcessId -EQ $self.Id).Count; privateBytes=$self.PrivateMemorySize64; workingSetBytes=$self.WorkingSet64; availableBytes=$memory.available; totalBytes=$memory.total; commandLinePresent=($command.Length -gt 0); milliseconds=$timer.ElapsedMilliseconds } | ConvertTo-Json -Compress
+        [pscustomobject]@{ event='native-self-check'; pid=$self.Id; found=@($rows | Where-Object ProcessId -EQ $self.Id).Count; privateBytes=$self.PrivateMemorySize64; workingSetBytes=$self.WorkingSet64; availableBytes=$memory.available; totalBytes=$memory.total; commandLinePresent=($command.Length -gt 0); milliseconds=$timer.ElapsedMilliseconds; observedUptimeMilliseconds=[StartupMemoryNative]::UptimeMilliseconds() } | ConvertTo-Json -Compress
     } finally { $self.Dispose() }
     exit 0
 }
@@ -122,10 +124,10 @@ while ($true) {
     $privateBytes = [long](($processes | Measure-Object privateBytes -Sum).Sum)
     $availableBytes = [long]$system.available
     $reason = if ($rootExited) { 'owned-root-exited-with-descendants' } elseif ($privateBytes -ge $MaxPrivateBytes) { 'owned-private-limit' } elseif ($availableBytes -le $MinAvailableBytes) { 'system-available-floor' } elseif ($privateBytes -ge ($MaxPrivateBytes * 0.9)) { 'owned-private-soft-limit' } elseif ($availableBytes -le ($MinAvailableBytes + 1073741824)) { 'system-available-soft-floor' } else { $null }
-    if ($reason -and $null -eq $pressureAt) { $pressureAt = [DateTime]::UtcNow }
-    $sample = @{ event='sample'; observedAt=[DateTime]::UtcNow.ToString('o'); stage='native-sample-complete'; sampleMilliseconds=$cycle.ElapsedMilliseconds; snapshotMilliseconds=$snapshotMilliseconds; rootPid=$RootProcessId; rootCreation=$originalCreation.ToString('o'); profile=$ownedProfile; privateBytes=$privateBytes; workingSetBytes=[long](($processes | Measure-Object workingSetBytes -Sum).Sum); systemAvailableBytes=$availableBytes; systemTotalBytes=[long]$system.total; reason=$reason; processCount=$processes.Count; processes=@($processes | Select-Object -First 128) }
+    if ($reason -and $null -eq $pressureAt) { $pressureAt = [StartupMemoryNative]::UptimeMilliseconds() }
+    $sample = @{ event='sample'; observedAt=[DateTime]::UtcNow.ToString('o'); observedUptimeMilliseconds=[StartupMemoryNative]::UptimeMilliseconds(); stage='native-sample-complete'; sampleMilliseconds=$cycle.ElapsedMilliseconds; snapshotMilliseconds=$snapshotMilliseconds; rootPid=$RootProcessId; rootCreation=$originalCreation.ToString('o'); profile=$ownedProfile; privateBytes=$privateBytes; workingSetBytes=[long](($processes | Measure-Object workingSetBytes -Sum).Sum); systemAvailableBytes=$availableBytes; systemTotalBytes=[long]$system.total; reason=$reason; processCount=$processes.Count; processes=@($processes | Select-Object -First 128) }
     [Console]::Out.WriteLine(($sample | ConvertTo-Json -Depth 5 -Compress))
-    if ($rootExited -or $privateBytes -ge $MaxPrivateBytes -or $availableBytes -le $MinAvailableBytes -or ($null -ne $pressureAt -and ([DateTime]::UtcNow - $pressureAt).TotalSeconds -ge 5)) {
+    if ($rootExited -or $privateBytes -ge $MaxPrivateBytes -or $availableBytes -le $MinAvailableBytes -or ($null -ne $pressureAt -and ([StartupMemoryNative]::UptimeMilliseconds() - $pressureAt) -ge 5000)) {
         $rootHandle.Refresh()
         if (-not $rootHandle.HasExited -and ($rootHandle.StartTime.ToUniversalTime() -ne $originalCreation -or [StartupMemoryNative]::CommandLine($rootHandle.Handle) -ne $originalCommandLine -or $rootHandle.ProcessName -ne 'chrome')) { throw 'Refusing changed identity at termination' }
         # Pin every sampled identity, including tracked orphans, before any termination.

@@ -1,6 +1,14 @@
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
+import { uptime } from 'node:os';
 import path from 'node:path';
+
+/**
+ * Windows Node/libuv and the observer share the GetTickCount64 boot epoch.
+ *
+ * @returns {number} Monotonic milliseconds since system boot.
+ */
+const uptimeMilliseconds = () => Math.round(uptime() * 1_000);
 
 /**
  * Samples one verified browser tree with one persistent Windows observer.
@@ -26,7 +34,9 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
     let disposed = false;
     let pending = '';
     let stderr = '';
-    let lastSeen = Date.now();
+    let lastSeen = uptimeMilliseconds();
+    let lastSampled = null;
+    let lastClockEvidence = null;
     let lastStage = null;
     let terminal = false;
     let closed = false;
@@ -75,15 +85,22 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
 
                 switch (value.event) {
                     case 'sample': {
-                        const sampledAt = Date.parse(value.observedAt);
-                        const receivedAt = Date.now();
+                        const sampledAt = value.observedUptimeMilliseconds;
+                        const receivedAt = uptimeMilliseconds();
 
-                        // Allow small cross-runtime clock skew without extending sample freshness.
-                        if (!Number.isFinite(sampledAt) || sampledAt > receivedAt + 16) {
-                            throw new Error(`Memory observer reported an invalid or future sample timestamp: observed=${value.observedAt}, received=${receivedAt}, skew=${sampledAt - receivedAt}ms`);
+                        lastClockEvidence = {
+                            observedAt: value.observedAt, receivedAt: new Date().toISOString(),
+                            observedUptimeMilliseconds: sampledAt, receivedUptimeMilliseconds: receivedAt,
+                            sampleAgeMilliseconds: receivedAt - sampledAt,
+                        };
+
+                        if (!Number.isSafeInteger(sampledAt) || sampledAt < 0 || sampledAt > receivedAt
+                            || (lastSampled !== null && sampledAt <= lastSampled)) {
+                            throw new Error(`Memory observer reported an invalid, future or replayed uptime sample: ${JSON.stringify(lastClockEvidence)}`);
                         }
 
-                        lastSeen = Math.min(sampledAt, receivedAt);
+                        lastSeen = sampledAt;
+                        lastSampled = sampledAt;
                         latest = value;
                         peakPrivateBytes = Math.max(peakPrivateBytes, value.privateBytes);
 
@@ -131,13 +148,13 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
         }
     });
     const heartbeat = setInterval(() => {
-        if (!disposed && !terminal && !freshnessCheckPending && Date.now() - lastSeen > 15_000) {
+        if (!disposed && !terminal && !freshnessCheckPending && uptimeMilliseconds() - lastSeen > 15_000) {
             freshnessCheckPending = true;
             // A delayed parent timer can run before already-buffered observer stdout is polled.
             setImmediate(() => {
                 freshnessCheckPending = false;
 
-                if (!disposed && !terminal && Date.now() - lastSeen > 15_000) {
+                if (!disposed && !terminal && uptimeMilliseconds() - lastSeen > 15_000) {
                     fail(new Error(`Memory observer stopped reporting fresh samples; last stage: ${JSON.stringify(lastStage)}`));
                 }
             });
@@ -152,7 +169,7 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
          * @returns {object} Bounded observer state.
          */
         snapshot() {
-            return { latest, peakPrivateBytes, pressure, lastStage, disposed };
+            return { latest, peakPrivateBytes, pressure, lastStage, lastClockEvidence, disposed };
         },
         /** Closes this observer after the owned browser has been stopped. */
         dispose() {
