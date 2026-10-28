@@ -110,6 +110,11 @@ let server;
 let browser;
 let page;
 let networkObserver;
+let heapUsageSession;
+let heapUsageObservedAt = 0;
+let heapUsageDiagnostic = null;
+let heapUsageAttemptError = null;
+let heapUsageInFlight = false;
 let checkpointTimer;
 let checkpointPending;
 let memoryGuard;
@@ -376,6 +381,13 @@ try {
     });
     page = await context.newPage();
     networkObserver = await createGateNetworkObserver(context, page);
+
+    try {
+        heapUsageSession = await context.newCDPSession(page);
+    } catch (error) {
+        heapUsageAttemptError = { unavailable: String(error), observedAt: new Date().toISOString() };
+    }
+
     page.on('console', (message) => logs.push(`${message.type()}: ${message.text()}`));
     page.on('pageerror', (error) => {
         logs.push(`PAGEERROR: ${error.stack}`);
@@ -404,11 +416,30 @@ try {
                     resources: await globalThis.originalBoot.resourceTelemetrySnapshot?.() ?? null,
                 }
             : null)
-            .then((originalBoot) => {
+            .then(async (originalBoot) => {
+                // Isolate aggregates distinguish backing storage; they are not total renderer memory.
+                if (heapUsageSession && !heapUsageInFlight && Date.now() - heapUsageObservedAt >= 60_000) {
+                    heapUsageObservedAt = Date.now();
+                    heapUsageInFlight = true;
+                    const sample = Promise.resolve().then(() => heapUsageSession.send('Runtime.getHeapUsage')).finally(() => {
+                        heapUsageInFlight = false;
+                    });
+
+                    try {
+                        heapUsageDiagnostic = {
+                            ...await bounded(sample, 2_000, 'aggregate-heap-usage'),
+                            observedAt: new Date().toISOString(),
+                        };
+                        heapUsageAttemptError = null;
+                    } catch (error) {
+                        heapUsageAttemptError = { unavailable: String(error), observedAt: new Date().toISOString() };
+                    }
+                }
+
                 const network = networkObserver.snapshot();
 
                 return writeFile(path.join(output, 'checkpoint.json'), JSON.stringify({
-                    observedAt: new Date().toISOString(), originalBoot, memory: memoryGuard?.snapshot(), logs: logs.slice(-2_000), network: {
+                    observedAt: new Date().toISOString(), originalBoot, heapUsageDiagnostic, heapUsageAttemptError, memory: memoryGuard?.snapshot(), logs: logs.slice(-2_000), network: {
                         ...network, requests: network.requests.slice(-16), cdpFailures: network.cdpFailures.slice(-16),
                         successfulSamples: Object.fromEntries(Object.entries(network.successfulSamples).map(([name, values]) => [name, values.slice(-16)])),
                         checkpointHistoryComplete: false, checkpointSampleLimit: 16,
@@ -883,6 +914,15 @@ try {
 
     ownerPhase = 'browser-cleanup';
     networkObserver?.markClosing();
+    evidence.heapUsageDiagnostic = heapUsageDiagnostic;
+    evidence.heapUsageAttemptError = heapUsageAttemptError;
+
+    try {
+        await bounded(heapUsageSession?.detach(), 2_000, 'aggregate-heap-detach');
+    } catch (error) {
+        evidence.heapUsageDetachUnavailable = String(error);
+    }
+
     evidence.checkpointErrors = [...checkpointErrors];
 
     if (checkpointErrors.length) {
