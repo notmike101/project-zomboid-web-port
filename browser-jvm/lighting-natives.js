@@ -359,6 +359,7 @@ export function createLightingNatives() {
     const states = new Map();
     const lights = new Map();
     const roomLights = new Map();
+    const torches = new Map();
     let lastUpdate = null;
 
     /**
@@ -1063,6 +1064,60 @@ export function createLightingNatives() {
             light.on = on;
         },
         /**
+         * Updates the actual shared handheld beam read by the native worker.
+         *
+         * @param {number} id - Original torch identifier.
+         * @param {number} x - World float32 X.
+         * @param {number} y - World float32 Y.
+         * @param {number} z - World level with original32 offset.
+         * @param {number} r - Original red strength.
+         * @param {number} g - Original green strength.
+         * @param {number} b - Original blue strength.
+         * @param {number} angleX - Original look-vector X.
+         * @param {number} angleY - Original look-vector Y.
+         * @param {number} dist - Original beam range.
+         * @param {number} strength - Original intensity.
+         * @param {boolean} cone - Original cone flag.
+         * @param {number} dot - Original cone threshold.
+         * @param {number} focusing - Original vehicle focusing mode; only handheld0 is qualified.
+         */
+        updateTorch(id, x, y, z, r, g, b, angleX, angleY, dist, strength, cone, dot, focusing) {
+            integer(id, -2_147_483_648, 2_147_483_647, 'torch identifier');
+
+            if ([x, y, z, r, g, b, angleX, angleY, dist, strength, dot]
+                .some((value) => !Number.isFinite(value) || !Number.isFinite(Math.fround(value)))
+                || typeof cone !== 'boolean' || dist < 0 || focusing !== 0) {
+                unsupported('unfocused handheld torch fields');
+            }
+
+            const floats = [x, y, z, r, g, b, angleX, angleY, dist, strength, dot].map(Math.fround);
+            const value = {
+                id, x: floats[0], y: floats[1], z: floats[2], color: floats.slice(3, 6),
+                angleX: floats[6], angleY: floats[7], dist: floats[8], strength: floats[9],
+                cone, dot: floats[10], focusing,
+            };
+
+            if (torches.has(id)) {
+                Object.assign(torches.get(id), value);
+            } else {
+                torches.set(id, value);
+            }
+        },
+        /**
+         * Retires the shared ID immediately; queued references remain alive but dark.
+         *
+         * @param {number} id - Original torch identifier; an unknown identifier is ignored.
+         */
+        removeTorch(id) {
+            integer(id, -2_147_483_648, 2_147_483_647, 'torch identifier');
+            const torch = torches.get(id);
+
+            if (torch) {
+                torch.id = 0;
+                torches.delete(id);
+            }
+        },
+        /**
          * Publishes the previous worker buffer and queues the validated retained scene.
          */
         stateEndUpdate() {
@@ -1119,6 +1174,7 @@ export function createLightingNatives() {
             const sceneLights = lightReferences.filter((reference) => reference.on).map(({ light }) => ({
                 ...light, x: light.x - state.x * 8, y: light.y - state.y * 8, color: [...light.color],
             }));
+            const torchReferences = state.playerInitialized ? [...torches.values()] : [];
 
             const pending = {
                 width: state.width * 8, height: state.height * 8, minimum: 0, maximum: 63, cells,
@@ -1130,6 +1186,7 @@ export function createLightingNatives() {
                         }))
                     : [],
                 lightReferences, lightRegistrations: new Set(lights.values()),
+                torchReferences, torches: torchReferences.map((torch) => ({ ...torch, color: [...torch.color] })),
                 origin: [state.x * 8, state.y * 8, 0],
                 perception: perception ?? state.pending?.perception,
                 sky: sky ?? state.pending?.sky,
@@ -1221,12 +1278,13 @@ export function createLightingNatives() {
                     const colorChanged = state.pending.lightReferences.some(({ light, on, color }) => on
                         && color.some((value, channel) => value !== light.color[channel]));
 
-                    if (colorChanged) {
+                    if (colorChanged || state.pending.torchReferences.length > 0) {
                         state.computed = calculateRetainedLighting({
                             ...state.pending,
                             lights: state.pending.lightReferences.filter((reference) => reference.on).map(({ light }) => ({
                                 ...light, x: light.x - state.x * 8, y: light.y - state.y * 8, color: [...light.color],
                             })),
+                            torches: state.pending.torchReferences.filter((torch) => torch.id !== 0),
                         });
                         restoreCoordinates(state, state.computed);
                     } else {
@@ -1409,6 +1467,7 @@ export function createLightingNatives() {
             states.clear();
             lights.clear();
             roomLights.clear();
+            torches.clear();
             active = null;
             chunk = null;
             square = null;
@@ -1418,7 +1477,7 @@ export function createLightingNatives() {
     };
 
     for (const name of [
-        'addTempLight', 'updateTorch', 'removeTorch',
+        'addTempLight',
         'getVertLight', 'getLightInfo', 'getDarkMulti', 'getTargetDarkMulti', 'getSeen', 'getCanSee', 'getCouldSee',
     ]) {
         /**

@@ -264,6 +264,36 @@ function validate(scene) {
 
         roomIdentifiers.add(room.id);
     }
+
+    const { torches } = scene;
+
+    if (torches !== undefined && !Array.isArray(torches)) {
+        unsupported('torch list');
+    }
+
+    const torchIdentifiers = new Set();
+
+    for (const torch of torches ?? []) {
+        if (!torch || typeof torch !== 'object' || typeof torch.cone !== 'boolean'
+            || !Array.isArray(torch.color) || torch.color.length !== 3) {
+            unsupported('handheld torch shape');
+        }
+
+        const floats = [...torch.color, ...['x', 'y', 'z', 'angleX', 'angleY', 'dist', 'strength', 'dot'].map((key) => torch[key])];
+
+        if (floats.some((value) => !Number.isFinite(value) || !Number.isFinite(Math.fround(value)))
+            || torch.dist < 0 || torch.focusing !== 0) {
+            unsupported('unfocused handheld torch fields');
+        }
+
+        integer(torch.id, -2_147_483_648, 2_147_483_647, 'torch identifier');
+
+        if (torchIdentifiers.has(torch.id)) {
+            unsupported('duplicate torch identifier');
+        }
+
+        torchIdentifiers.add(torch.id);
+    }
 }
 
 /**
@@ -533,15 +563,16 @@ function transmit(bytes, tuples) {
  * @param {object[]} target - Mutable target records.
  * @param {number} cost - Native float32 edge cost.
  * @param {number[][]|null} transforms - Optional cardinal endpoint filtering.
+ * @param {boolean} [limitRange] - Whether static propagation enforces the byte-radius bound.
  * @returns {boolean} Whether any record improved.
  */
-function relax(source, target, cost, transforms) {
+function relax(source, target, cost, transforms, limitRange = true) {
     let improved = false;
 
     for (const record of source) {
         const distance = Math.fround(record.distance + cost);
 
-        if (distance > Math.fround(record.light.radius + 0.01)) {
+        if (limitRange && distance > Math.fround(record.light.radius + 0.01)) {
             continue;
         }
 
@@ -1028,14 +1059,151 @@ function darknessMultipliers(scene, seen) {
 }
 
 /**
+ * Evaluates native0x9600's unfocused handheld beam at one queued path distance.
+ *
+ * @param {object} torch - Original shared float32 torch fields.
+ * @param {number} x - World square X.
+ * @param {number} y - World square Y.
+ * @param {number} distance - Native shortest queued path distance.
+ * @returns {number[]|null} Unclamped integer RGB, or an excluded beam square.
+ */
+function torchColor(torch, x, y, distance) {
+    const f = Math.fround;
+    let dx = f(torch.x - f(x + 0.5));
+    let dy = f(torch.y - f(y + 0.5));
+    const length = f(Math.sqrt(f(f(dx * dx) + f(dy * dy))));
+    const directionLength = f(Math.sqrt(f(f(torch.angleX * torch.angleX) + f(torch.angleY * torch.angleY))));
+
+    dx = length === 0 ? 0 : f(dx / length);
+    dy = length === 0 ? 0 : f(dy / length);
+
+    const angleX = directionLength === 0 ? 0 : f(torch.angleX / directionLength);
+    const angleY = directionLength === 0 ? 0 : f(torch.angleY / directionLength);
+    const dot = f(f(dx * angleX) + f(dy * angleY));
+    const integerDx = f(x - torch.x);
+    const integerDy = f(y - torch.y);
+    const squared = f(f(integerDx * integerDx) + f(integerDy * integerDy));
+
+    if (distance >= torch.dist || squared >= f(torch.dist * torch.dist)
+        || (dot !== -1 && (torch.cone ? dot >= -torch.dot : dot >= f(0.8)))) {
+        return null;
+    }
+
+    const fraction = Math.max(0, Math.min(1, f(distance / torch.dist)));
+    const attenuation = f(f(1 - f(fraction * fraction)) * f(1.15));
+    const cone = torch.cone ? Math.min(1, f(f(-dot - torch.dot) * 2)) : 1;
+
+    return torch.color.map((channel) => {
+        const integer = Math.trunc(f(f(f(f(attenuation * torch.strength) * channel) * 255) * cone));
+
+        // Native CVTTSS2SI produces INT_MIN for overflow or unordered conversion.
+        return Number.isFinite(integer) && integer >= -2_147_483_648 && integer < 2_147_483_648 ? integer : -2_147_483_648;
+    });
+}
+
+/**
+ * Builds the separate native torch records and cumulative beam RGB buffer.
+ *
+ * @param {object} scene - Retained geometry and original handheld torch references.
+ * @returns {object} Per-square torch records and RGB maxima.
+ */
+function torchLighting(scene) {
+    if (!scene.torches?.length) {
+        return { records: null, colors: null };
+    }
+
+    const records = scene.cells.map(() => []);
+    const colors = scene.cells.map(() => [0, 0, 0]);
+    const origin = scene.origin ?? [0, 0, 0];
+    const f = Math.fround;
+
+    for (const original of scene.torches) {
+        const torch = { ...original, color: original.color.map(Math.fround) };
+
+        for (const field of ['x', 'y', 'z', 'angleX', 'angleY', 'dist', 'strength', 'dot']) {
+            torch[field] = f(torch[field]);
+        }
+
+        const z = Math.floor(torch.z);
+
+        if (torch.id === 0 || z !== Math.floor(scene.player[2])) {
+            continue;
+        }
+
+        const x = Math.trunc(torch.x) - origin[0];
+        const y = Math.trunc(torch.y) - origin[1];
+        const source = squareIndex(scene, x, y, z);
+
+        if (source < 0) {
+            continue;
+        }
+
+        const light = { id: torch.id, x, y, z: Math.trunc(torch.z), radius: Math.trunc(torch.dist) & 255, torch: true };
+        const distances = new Map([[source, 0]]);
+        const queue = [source];
+
+        /**
+         * Seeds accepted beam color into its independent five-slot source buffer.
+         *
+         * @param {number} index - Present target square.
+         * @param {number} distance - Improved queued path distance.
+         * @returns {boolean} Whether the beam continues from this square.
+         */
+        function seed(index, distance) {
+            const [targetX, targetY] = coordinates(scene, index);
+            const color = torchColor(torch, targetX + origin[0], targetY + origin[1], distance);
+
+            if (!color) {
+                return false;
+            }
+
+            colors[index] = maximumColor(colors[index], color.map((value) => Math.min(255, value) & 255));
+            relax([{ light, distance, color: [...colors[index]] }], records[index], 0, null, false);
+
+            return true;
+        }
+
+        seed(source, 0);
+
+        for (let cursor = 0; cursor < queue.length; cursor++) {
+            const index = queue[cursor];
+
+            for (const direction of propagationOrder.slice(0, 8)) {
+                if (!propagationAllowed(scene, index, direction)) {
+                    continue;
+                }
+
+                const adjacent = neighbor(scene, index, direction);
+                const [targetX, targetY] = coordinates(scene, adjacent);
+                const dx = f(f(targetX + origin[0] + 0.5) - torch.x);
+                const dy = f(f(targetY + origin[1] + 0.5) - torch.y);
+                const distance = f(distances.get(index) + (direction % 2 === 0 ? 1 : f(Math.sqrt(2))));
+
+                if (f(f(dx * dx) + f(dy * dy)) >= f(torch.dist * torch.dist)
+                    || (distances.has(adjacent) && distances.get(adjacent) <= distance) || !seed(adjacent, distance)) {
+                    continue;
+                }
+
+                distances.set(adjacent, distance);
+                queue.push(adjacent);
+            }
+        }
+    }
+
+    return { records, colors };
+}
+
+/**
  * Applies native integer attenuation, channel maxima, and float32 darkness.
  *
  * @param {object[][]} records - Per-square native light records.
  * @param {number[]} darkness - Per-square darkness multipliers.
  * @param {number[][]} ambient - Per-square ambient RGB.
+ * @param {number[][]|null} torchColors - Separate native beam RGB maxima, when torches exist.
+ * @param {boolean[]} canSee - Current native player visibility.
  * @returns {number[][]} Per-square integer center RGB.
  */
-function centerColors(records, darkness, ambient) {
+function centerColors(records, darkness, ambient, torchColors, canSee) {
     return records.map((squareRecords, index) => {
         let color = ambient[index];
 
@@ -1044,6 +1212,10 @@ function centerColors(records, darkness, ambient) {
             const attenuated = record.color.map((value) => Math.trunc(Math.fround(value * attenuation)));
 
             color = maximumColor(color, attenuated);
+        }
+
+        if (canSee[index] && torchColors) {
+            color = color.map((value, channel) => Math.min(255, value + torchColors[index][channel]));
         }
 
         return color.map((value) => Math.trunc(Math.fround(Math.fround(Math.fround(value / 255) * darkness[index]) * 255)));
@@ -1088,12 +1260,13 @@ export function calculateLighting(scene) {
 
     const order = traversalOrder(scene);
     const records = propagate(scene, traversalOrder(scene, true));
+    const torches = torchLighting(scene);
     const couldSee = visibility(scene);
     const canSee = couldSee.map((value, index) => value && withinCone(scene, index));
     const seen = canSee.map((value, index) => value || Boolean(scene.seen?.[index]));
     const darkness = darknessMultipliers(scene, seen);
     const ambient = ambientColors(scene);
-    const colors = centerColors(records, darkness, ambient);
+    const colors = centerColors(records, darkness, ambient, torches.colors, canSee);
     const work = scene.cells.map(() => []);
     const lower = colors.map((color, index) => allowed(scene, index, 9)
         ? maximumColor(color, colors[neighbor(scene, index, 9)])
@@ -1140,12 +1313,21 @@ export function calculateLighting(scene) {
             payload[5 + corner] = pack(color) | 0xFF_00_00_00;
         }
 
-        payload[13] = records[index].length;
+        const torchRecords = torches.records?.[index];
+        const combined = torchRecords?.length ? records[index].map((record) => ({ ...record })) : records[index];
 
-        for (const [recordIndex, record] of records[index].entries()) {
+        if (torchRecords?.length) {
+            relax(torchRecords, combined, 0, null, false);
+        }
+
+        payload[13] = combined.length;
+
+        for (const [recordIndex, record] of combined.entries()) {
             const { light, color } = record;
 
-            payload.set([light.id, light.x, light.y, light.z, light.radius, pack(color) | (light.room ? 0x01_00_00_00 : 0)], 14 + recordIndex * 6);
+            const flags = (Number(Boolean(light.torch)) * 2 | Number(Boolean(light.room))) << 24;
+
+            payload.set([light.id, light.x, light.y, light.z, light.radius, pack(color) | flags], 14 + recordIndex * 6);
         }
     }
 
