@@ -1,4 +1,4 @@
-import { applyAggroTarget, nearestAggroTarget, populationSpawnable, respawnRequest, respawnPlacement, mapCollisionPath, populationTarget, respawnClock, NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual, soundChunks, worldSoundGroups, soundTarget } from './population-kernel.js';
+import { pointHorde, applyAggroTarget, nearestAggroTarget, populationSpawnable, respawnRequest, respawnPlacement, mapCollisionPath, populationTarget, respawnClock, NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual, soundChunks, worldSoundGroups, soundTarget } from './population-kernel.js';
 
 import { decodeCell, encodeCell, decodeIDs, encodeIDs, decodeVirtual, encodeVirtual, encodeCollision, remapOutfit } from './population-save-codec.js';
 
@@ -508,20 +508,22 @@ export function createPopulationNatives() {
         };
 
         const config = configBytes();
-        const result = generate({
-            globalFlags,
-            cellX: x,
-            cellY: y,
-            rng,
-            density: data.density,
-            chunks,
-            config,
-            constants,
-            directions: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
-            idStart: state.nextID,
-            age,
-            uniform: state.gameState.get('SandboxOptions.Distribution') === 2,
-        });
+        const result = state.gameState.get('Core.bLastStand')
+            ? { generated: 0, entries: [] }
+            : generate({
+                    globalFlags,
+                    cellX: x,
+                    cellY: y,
+                    rng,
+                    density: data.density,
+                    chunks,
+                    config,
+                    constants,
+                    directions: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
+                    idStart: state.nextID,
+                    age,
+                    uniform: state.gameState.get('SandboxOptions.Distribution') === 2,
+                });
 
         state.nextID += result.generated;
         const cell = {
@@ -744,7 +746,8 @@ export function createPopulationNatives() {
                 const [gx, gy, w, h] = state.grid;
                 const oldX = Math.floor(leader.x);
                 const oldY = Math.floor(leader.y);
-                const next = advanceVirtual(group, state.workerTime[0], [gx * 256, gy * 256, (gx + w) * 256, (gy + h) * 256], flags);
+                const next = advanceVirtual(group, state.workerTime[0], [gx * 256, gy * 256, (gx + w) * 256, (gy + h) * 256], flags,
+                    state.gameState.get('Core.bLastStand') === true);
 
                 if (leader.x !== next.x || leader.y !== next.y || group.alternate !== next.alternate) {
                     state.virtualDirty = true;
@@ -1485,6 +1488,43 @@ export function createPopulationNatives() {
 
     const populationService = {
         /**
+         * Queues the original Challenge1 point-horde request; rectangle placement remains unqualified.
+         *
+         * @param {object} lib - Actual Java namespace.
+         * @param {number} x - Original origin square x.
+         * @param {number} y - Original origin square y.
+         * @param {number} width - Original rectangle width; zero for point hordes.
+         * @param {number} height - Original rectangle height; zero for point hordes.
+         * @param {number} targetX - Original target float x.
+         * @param {number} targetY - Original target float y.
+         * @param {number} count - Actual positive requested record count.
+         */
+        spawnHorde(lib, x, y, width, height, targetX, targetY, count) {
+            for (const value of [x, y, width, height, count]) {
+                integer(value, 'horde int32');
+
+                if (value < -2_147_483_648 || value > 2_147_483_647) {
+                    unsupported('horde int32');
+                }
+            }
+
+            for (const value of [targetX, targetY]) {
+                finite(value, 'horde target');
+
+                if (Math.fround(value) < -2_147_483_648 || Math.fround(value) >= 2_147_483_648) {
+                    unsupported('horde target int32 conversion');
+                }
+            }
+
+            if (!state.pop || !state.gameState.get('Core.bLastStand') || width !== 0 || height !== 0
+                || count <= 0 || !inGrid(Math.floor(x / 256), Math.floor(y / 256))) {
+                unsupported('point horde lifecycle/rectangle/count/bounds');
+            }
+
+            requireActive();
+            state.producer.push({ type: 'horde', request: { x, y, targetX: Math.fround(targetX), targetY: Math.fround(targetY), count } });
+        },
+        /**
          * Transfers an original unloaded zombie into the producer queue without changing its identity.
          *
          * @param {object} lib - Actual Java namespace, unused by scalar record transport.
@@ -1870,6 +1910,8 @@ export function createPopulationNatives() {
                 && Math.trunc(task.record.z) === 0
                 && nearestAggroTarget(nextAggroTargets, Math.floor(task.record.x), Math.floor(task.record.y))),
             (task) => collisionNeighborhood(lib, Math.floor(task.record.x / 256), Math.floor(task.record.y / 256)));
+            await sequence(batch.filter((task) => task.type === 'horde'),
+                (task) => collisionNeighborhood(lib, Math.floor(task.request.x / 256), Math.floor(task.request.y / 256)));
 
             state.worker.splice(0);
             state.aggroTargets = nextAggroTargets;
@@ -1929,6 +1971,26 @@ export function createPopulationNatives() {
                 } else {
                     cell.loaded.delete(index);
                 }
+            });
+
+            await sequence(batch.filter((task) => task.type === 'horde'), async (task) => {
+                const [gx, gy, w, h] = state.grid;
+                const flags = virtualFlags(await collisionNeighborhood(lib, Math.floor(task.request.x / 256), Math.floor(task.request.y / 256)));
+
+                if (state.nextID + Math.min(task.request.count, 6_400) > 2_147_483_648) {
+                    unsupported('persistent ID overflow');
+                }
+
+                const placed = pointHorde(task.request, [gx * 256, gy * 256, (gx + w) * 256, (gy + h) * 256], flags, rng, state.nextID);
+
+                state.nextID = placed.nextID;
+
+                for (const record of placed.records) {
+                    state.virtual.push({ records: [record], targetX: record.px, targetY: record.py, alternate: false });
+                    dirtyRecord(record);
+                }
+
+                state.virtualDirty ||= placed.records.length > 0;
             });
 
             await sequence(batch.filter((task) => task.type === 'add'), async (task) => {
@@ -2450,7 +2512,7 @@ export function createPopulationNatives() {
                 unsupported(`game state ${name}/${suffix}`);
             }
 
-            if (suffix.endsWith('_2Z') && ['World.ZombiesDisabled', 'Core.bLastStand'].includes(name) && value) {
+            if (suffix.endsWith('_2Z') && name === 'World.ZombiesDisabled' && value) {
                 unsupported('disabled population');
             }
 
@@ -2474,8 +2536,8 @@ export function createPopulationNatives() {
         }
 
         if (boolState.includes(name) && typeof value === 'boolean') {
-            if (['World.ZombiesDisabled', 'Core.bLastStand'].includes(name) && value) {
-                unsupported('disabled/laststand population');
+            if (name === 'World.ZombiesDisabled' && value) {
+                unsupported('disabled population');
             }
 
             state.gameState.set(name, value);

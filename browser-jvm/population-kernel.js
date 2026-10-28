@@ -747,9 +747,10 @@ function populationBlocked(flags, x, y, tx, ty) {
  * @param {number} targetX - Original target x.
  * @param {number} targetY - Original target y.
  * @param {function(number, number): number} flags - Actual global collision flags.
+ * @param {number[][]|null} [waypoints] - Optional owner receiving the native pre-move path coordinates.
  * @returns {object} Native status, endpoint, movement count and worker ticks.
  */
-function mapCollisionPath(startX, startY, targetX, targetY, flags) {
+function mapCollisionPath(startX, startY, targetX, targetY, flags, waypoints = null) {
     let x = startX;
     let y = startY;
     let anchor = null;
@@ -783,6 +784,7 @@ function mapCollisionPath(startX, startY, targetX, targetY, flags) {
      * @returns {void} Actual native operation result.
      */
     const move = (tx, ty) => {
+        waypoints?.push([x, y]);
         x = tx;
         y = ty;
         steps++;
@@ -1135,26 +1137,46 @@ function moveVirtual(record, dx, dy, alternate, bounds, flags) {
 }
 
 /**
- * Advances the original ordinary-game virtual leader; Last Stand uses a separate native path.
+ * Advances the original virtual leader using the selected original direction algorithm.
  *
  * @param {object} group - Original-derived records, targetX/targetY and alternation bit.
  * @param {number} multiplier - Actual original worker time multiplier.
  * @param {number[]} bounds - Original square bounds.
  * @param {function(number, number): number} flags - Actual original collision bits.
+ * @param {boolean} [lastStand] - Actual original Core.bLastStand state.
  * @returns {object} Next leader position and whether original fallback stopped movement.
  */
-function advanceVirtual(group, multiplier, bounds, flags) {
+function advanceVirtual(group, multiplier, bounds, flags, lastStand = false) {
     const record = group.records[0];
     const x = Math.floor(record.x);
     const y = Math.floor(record.y);
 
-    if ((x === group.targetX && y === group.targetY)
-        || !virtualLineClear(x, y, group.targetX, group.targetY, flags)) {
+    if (x === group.targetX && y === group.targetY) {
         return { x: record.x, y: record.y, alternate: Boolean(group.alternate), blocked: true };
     }
 
-    const dx = f(f(group.targetX + 0.5) - record.x);
-    const dy = f(f(group.targetY + 0.5) - record.y);
+    let destination = null;
+
+    if (lastStand && !(flags(x, y) & 0x19)) {
+        const waypoints = [];
+        const path = mapCollisionPath(x, y, group.targetX, group.targetY, flags, waypoints);
+
+        if (path.status === 3) {
+            const later = waypoints.findIndex((point, index) => index > 0 && point[0] === x && point[1] === y);
+            const current = later === -1 ? 0 : later;
+
+            if (waypoints.length - current > 1) {
+                destination = waypoints[current + 1];
+            }
+        }
+    }
+
+    if (!destination && !virtualLineClear(x, y, group.targetX, group.targetY, flags)) {
+        return { x: record.x, y: record.y, alternate: Boolean(group.alternate), blocked: true };
+    }
+
+    const dx = f(f((destination?.[0] ?? group.targetX) + 0.5) - record.x);
+    const dy = f(f((destination?.[1] ?? group.targetY) + 0.5) - record.y);
     const length = f(Math.sqrt(f(f(dx * dx) + f(dy * dy))));
 
     return moveVirtual(record, f(f(f(dx / length) * f(0.06)) * multiplier), f(f(f(dy / length) * f(0.06)) * multiplier),
@@ -1424,6 +1446,75 @@ function applyAggroTarget(targets, request) {
 }
 
 /**
+ * Places original00dca0 point-horde records in bounded flood/perimeter and quarter-square order.
+ *
+ * @param {object} request - Original x/y, targetX/targetY and positive count.
+ * @param {number[]} bounds - Actual square minX/minY/maxX/maxY.
+ * @param {function(number, number): number} flags - Original global collision owner.
+ * @param {NativeMT} rng - Actual original random owner.
+ * @param {number} idStart - Actual next persistent identity.
+ * @returns {object} Actual allocated records and next persistent identity.
+ */
+function pointHorde(request, bounds, flags, rng, idStart) {
+    const { x, y, targetX, targetY, count } = request;
+    const records = [];
+    let nextID = idStart;
+
+    if (!populationSpawnable(flags, x, y)) {
+        return { records, nextID };
+    }
+
+    const width = 40;
+    const left = Math.min(Math.max(Math.trunc(x / 8) * 8 - 16, bounds[0]), bounds[2] - width);
+    const top = Math.min(Math.max(Math.trunc(y / 8) * 8 - 16, bounds[1]), bounds[3] - width);
+    const reached = new Set(redistributionSquares(x, y, flags, { left, top, width }).map((point) => `${point[0]},${point[1]}`));
+    /**
+     * Allocates at most four actual records at one reached native square.
+     *
+     * @param {number} sx - Original candidate square x.
+     * @param {number} sy - Original candidate square y.
+     */
+    const place = (sx, sy) => {
+        if (!reached.has(`${sx},${sy}`)) {
+            return;
+        }
+
+        for (const [ox, oy] of [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]]) {
+            if (records.length === count) {
+                return;
+            }
+
+            records.push({
+                x: sx + ox, y: sy + oy, z: 0, direction: rng.bounded(8), outfit: 0, state: 4,
+                px: Math.floor(targetX), py: Math.floor(targetY), id: nextID++,
+            });
+        }
+    };
+
+    place(x, y);
+
+    for (let radius = 1; radius < width && records.length < count; radius++) {
+        for (const sy of [y - radius, y + radius]) {
+            if (sy >= top && sy < top + width) {
+                for (let sx = Math.max(x - radius, left); sx < Math.min(x + radius + 1, left + width); sx++) {
+                    place(sx, sy);
+                }
+            }
+        }
+
+        for (const sx of [x - radius, x + radius]) {
+            if (sx >= left && sx < left + width) {
+                for (let sy = Math.max(y - radius + 1, top); sy < Math.min(y + radius, top + width); sy++) {
+                    place(sx, sy);
+                }
+            }
+        }
+    }
+
+    return { records, nextID };
+}
+
+/**
  * Selects original01d240's first nearest target below 300 using signed-int arithmetic.
  *
  * @param {number[][]} targets - Ordered actual worker target triples.
@@ -1452,4 +1543,4 @@ function nearestAggroTarget(targets, x, y) {
     return selected;
 }
 
-export { applyAggroTarget, nearestAggroTarget, populationSpawnable, populationTarget, respawnClock, respawnRequest, respawnPlacement, mapCollisionPath, NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual, soundTarget, worldSoundGroups, soundChunks };
+export { pointHorde, applyAggroTarget, nearestAggroTarget, populationSpawnable, populationTarget, respawnClock, respawnRequest, respawnPlacement, mapCollisionPath, NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual, soundTarget, worldSoundGroups, soundChunks };
