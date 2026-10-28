@@ -1,3 +1,6 @@
+import { createFmod20309Compat } from './fmod20309-api.js';
+import { createFmod20309Files } from './fmod20309-files.js';
+
 /* eslint-disable jsdoc/require-jsdoc -- JNI table names retain the installed Java signatures; the owner contract is documented below. */
 const handleKey = (kind, id) => `${kind}:${BigInt(id)}`;
 const arrayLength = async (lib, destination) => destination instanceof BigInt64Array
@@ -45,12 +48,18 @@ const javaValue = (value) => {
  * @param {function(string, number, number): Promise<Uint8Array>} files.read - Actual requested bytes.
  * @param {number|null} [output] - Explicit data-only oracle output; browser default is unchanged.
  * @param {Array<object>|null} [reverbPresets] - Verified original-compatible SDK preset definitions.
+ * @param {number} [expectedVersion] - Public version pinned by the runtime manifest.
  * @returns {object} Original JNI callbacks and owned engine teardown.
  */
-export function createFmodNatives(FMOD, files, output = null, reverbPresets = null) {
+export function createFmodNatives(FMOD, files, output = null, reverbPresets = null, expectedVersion = 0x00_02_04_00) {
+    if (![0x00_02_03_09, 0x00_02_04_00].includes(expectedVersion)) {
+        throw new Error('Unadmitted FMOD engine version');
+    }
+
+    const is203 = expectedVersion === 0x00_02_03_09;
     const handles = new Map();
     const deliveries = new Set();
-    let next = 1n << 32n;
+    let next = is203 ? 1n << 48n : 1n << 32n;
     let system;
     let core;
     let lock = Promise.resolve();
@@ -77,6 +86,15 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
     let sdkMarkerFallthroughs = 0;
     const callbackEvents = [];
     const lastCallbackFailures = [];
+    const publicFiles = is203
+        ? createFmod20309Files(FMOD, files, () => disposed, (error) => {
+                ioFailure ??= error;
+            })
+        : null;
+
+    if (publicFiles) {
+        FMOD = createFmod20309Compat(FMOD, publicFiles);
+    }
 
     // Original integration 0x18000b7b0..b85e keeps the last listener attributes globally.
     let listenerAttributes = {
@@ -88,7 +106,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         const key = handleKey(kind, id);
         const entry = handles.get(key);
 
-        if (entry?.object.$$) {
+        if (!is203 && entry?.object.$$) {
             entry.object.delete();
         }
 
@@ -118,21 +136,32 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         }
 
         const valueCopy = ['guid', 'parameter', 'parameterID'].includes(kind);
-        const wrapper = object.$$?.ptr;
+        const wrapper = is203 ? undefined : object.$$?.ptr;
 
-        if (!valueCopy && (!Number.isSafeInteger(wrapper) || wrapper <= 0)) {
+        if (!is203 && !valueCopy && (!Number.isSafeInteger(wrapper) || wrapper <= 0)) {
             throw new Error(`FMOD ${kind} has no actual SDK wrapper pointer`);
         }
 
         /* In the pinned 2.04 SDK, Embind points to a wrapper whose first uint32 is
          * the real FMOD handle. Repeated enumeration allocates different wrappers
          * for the same handle. GUID/parameter structs remain separately owned copies. */
-        const id = valueCopy ? next++ : BigInt(FMOD.getValue(wrapper, 'i32') >>> 0);
+        if (valueCopy && next > BigInt(Number.MAX_SAFE_INTEGER)) {
+            throw new Error('FMOD value identity exhausted');
+        }
+
+        let id;
+
+        if (valueCopy) {
+            id = next++;
+        } else {
+            id = is203 ? FMOD.publicOwnerId(kind, object) : BigInt(FMOD.getValue(wrapper, 'i32') >>> 0);
+        }
+
         const key = handleKey(kind, id);
         const existing = handles.get(key);
 
         if (existing) {
-            if (object !== existing.object) {
+            if (!is203 && object !== existing.object) {
                 object.delete();
             }
         } else {
@@ -298,27 +327,31 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
 
             system = FMOD.Studio_System_Create();
             core = system.getCoreSystem();
-            core.setFileSystem(async (name) => {
-                try {
-                    const callbacks = await fileCallbacks(String(name));
-                    const opened = callbacks.opencallback();
 
-                    if (opened.result === FMOD.OK) {
-                        opened.handle.callbacks = callbacks;
+            if (!is203) {
+                core.setFileSystem(async (name) => {
+                    try {
+                        const callbacks = await fileCallbacks(String(name));
+                        const opened = callbacks.opencallback();
+
+                        if (opened.result === FMOD.OK) {
+                            opened.handle.callbacks = callbacks;
+                        }
+
+                        return opened;
+                    } catch (error) {
+                        ioFailure ??= error;
+
+                        return { filesize: 0, handle: null, result: FMOD.ERR_FILE_NOTFOUND };
                     }
+                }, (handle) => handle.callbacks.closecallback(handle),
+                (handle, pointer, count) => handle.callbacks.readcallback(handle, pointer, count),
+                (handle, position) => handle.callbacks.seekcallback(handle, position), undefined, undefined, -1);
+            }
 
-                    return opened;
-                } catch (error) {
-                    ioFailure ??= error;
-
-                    return { filesize: 0, handle: null, result: FMOD.ERR_FILE_NOTFOUND };
-                }
-            }, (handle) => handle.callbacks.closecallback(handle),
-            (handle, pointer, count) => handle.callbacks.readcallback(handle, pointer, count),
-            (handle, position) => handle.callbacks.seekcallback(handle, position), undefined, undefined, -1);
             version = core.getVersion();
 
-            if (version.version !== 0x00_02_04_00) {
+            if (version.version !== expectedVersion) {
                 throw new Error('Unexpected admitted FMOD engine version');
             }
 
@@ -341,6 +374,12 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         },
         async FMOD_System_Update() {
             await requireSystem().update();
+
+            if (is203 && FMOD.getLastError() === FMOD.OK) {
+                for (const entry of FMOD.retirePublicOwners()) {
+                    handles.delete(handleKey(entry.kind, entry.id));
+                }
+            }
 
             return FMOD.OK;
         },
@@ -475,7 +514,10 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         },
         async FMOD_Studio_ReleaseEventInstance(_lib, id) {
             await use(id, 'instance').release();
-            drop('instance', id);
+
+            if (!is203) {
+                drop('instance', id);
+            }
 
             return FMOD.OK;
         },
@@ -575,7 +617,9 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             return writeHandles(lib, destination, use(id, 'event').getInstanceList(length), 'instance');
         },
         FMOD_Studio_EventInstance_SetCallback(_lib, id, callback, mask) {
-            const supported = FMOD.STUDIO_EVENT_CALLBACK_STARTED | FMOD.STUDIO_EVENT_CALLBACK_STOPPED | FMOD.STUDIO_EVENT_CALLBACK_TIMELINE_MARKER;
+            const supported = is203
+                ? FMOD.STUDIO_EVENT_CALLBACK_TIMELINE_MARKER
+                : FMOD.STUDIO_EVENT_CALLBACK_STARTED | FMOD.STUDIO_EVENT_CALLBACK_STOPPED | FMOD.STUDIO_EVENT_CALLBACK_TIMELINE_MARKER;
             let markerPosition;
 
             if ((mask & ~supported) !== 0) {
@@ -987,7 +1031,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
 
     return {
         natives,
-        snapshot: () => ({ initialized, disposed, version, recordDriverQuery, recordSoundQuery, recordVolume, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, callbackFailures, sdkMarkerFallthroughs, callbackEvents: [...callbackEvents], lastCallbackFailures: [...lastCallbackFailures], audibleVerified: false }),
+        snapshot: () => ({ initialized, disposed, version, recordDriverQuery, recordSoundQuery, recordVolume, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, callbackFailures, sdkMarkerFallthroughs, callbackEvents: [...callbackEvents], lastCallbackFailures: [...lastCallbackFailures], audibleVerified: false, ...(publicFiles?.snapshot() ?? {}) }),
         async dispose() {
             /* The host calls teardown after the original VM has joined. Drain complete JNI
              * deliveries (including callbacks outside the SDK lock) before releasing the engine. */
@@ -1012,6 +1056,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                 }
 
                 fileOwners.clear();
+                publicFiles?.clear();
             }
 
             system = undefined;
