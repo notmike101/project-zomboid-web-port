@@ -130,7 +130,7 @@ function validate(scene) {
     integer(maximum, minimum, 63, 'maximum level');
 
     if (width % 8 || height % 8 || !Array.isArray(cells) || cells.length !== width * height * (maximum - minimum + 1)
-        || !Array.isArray(lights) || lights.length > 7 || !Array.isArray(player) || player.length !== 3) {
+        || !Array.isArray(lights) || !Array.isArray(player) || player.length !== 3) {
         unsupported('complete chunk geometry, player or static-light extent');
     }
 
@@ -372,7 +372,7 @@ function traversalOrder(scene, descending = false) {
  * @param {object} scene - Validated region.
  * @param {number} chunkX - Local chunk origin X.
  * @param {number} chunkY - Local chunk origin Y.
- * @param {boolean} descending - Whether source seeding visits upper levels first.
+ * @param {boolean} descending - Whether source seeding visits upper levels first in native row-major order.
  * @returns {number[]} Present square indices.
  */
 function chunkOrder(scene, chunkX, chunkY, descending) {
@@ -385,8 +385,11 @@ function chunkOrder(scene, chunkX, chunkY, descending) {
             z = scene.maximum - step;
         }
 
-        for (let x = chunkX; x < chunkX + 8; x++) {
-            for (let y = chunkY; y < chunkY + 8; y++) {
+        // Native08650 transposes the chunk's y+8*x storage to seed x-fast; LOS retains x-major order.
+        for (let major = 0; major < 8; major++) {
+            for (let minor = 0; minor < 8; minor++) {
+                const x = chunkX + (descending ? minor : major);
+                const y = chunkY + (descending ? major : minor);
                 const index = squareIndex(scene, x, y, z);
 
                 if (index >= 0) {

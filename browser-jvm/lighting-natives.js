@@ -377,7 +377,7 @@ export function createLightingNatives() {
             if (!state) {
                 state = {
                     x, y, width, height, counter: 0, cells: null, published: null, computed: null,
-                    pending: null, deferred: null, workerReady: false, lightsRegistered: false, previousPlayer: null, ranges: new Map(),
+                    pending: null, deferred: null, workerReady: false, registeredLights: new Set(), previousPlayer: null, ranges: new Map(),
                     squareDirty: new Set(), computedSquareDirty: new Set(), chunkDirty: new Set(), computedChunkDirty: new Set(),
                     recycledChunkDirty: new Set(),
                 };
@@ -708,12 +708,49 @@ export function createLightingNatives() {
             validateColor([red, green, blue]);
 
             integer(z, 0, 63, 'light native level');
+            integer(building, -2_147_483_648, 2_147_483_647, 'light building identifier');
 
-            if (building !== -1 || on !== true || lights.has(id) || lights.size >= 7) {
+            if (typeof on !== 'boolean') {
                 unsupported('static-light type, extent or registration');
             }
 
-            lights.set(id, { id, x, y, z, radius, color: [red, green, blue] });
+            if (lights.has(id)) {
+                throw new Error('duplicate light id');
+            }
+
+            lights.set(id, { id, x, y, z, radius, color: [red, green, blue], on });
+        },
+        /**
+         * Removes the registry entry while queued references retain their owned light.
+         *
+         * @param {number} id - Original light identifier.
+         */
+        removeLight(id) {
+            integer(id, -2_147_483_648, 2_147_483_647, 'light identifier');
+
+            if (!lights.delete(id)) {
+                throw new Error('unknown light id');
+            }
+        },
+        /**
+         * Sets the active flag copied by the next original main update.
+         *
+         * @param {number} id - Original light identifier.
+         * @param {boolean} on - Original active flag.
+         */
+        setLightActive(id, on) {
+            integer(id, -2_147_483_648, 2_147_483_647, 'light identifier');
+            const light = lights.get(id);
+
+            if (typeof on !== 'boolean') {
+                unsupported('static-light active flag');
+            }
+
+            if (!light) {
+                throw new Error('unknown light id');
+            }
+
+            light.on = on;
         },
         /**
          * Updates the actual registered static-light color.
@@ -768,29 +805,28 @@ export function createLightingNatives() {
                 return;
             }
 
-            for (const light of lights.values()) {
-                if (light.x < state.x * 8 || light.y < state.y * 8
-                    || light.x >= (state.x + state.width) * 8 || light.y >= (state.y + state.height) * 8) {
-                    unsupported('static light outside qualified region');
-                }
-            }
-
             if (!cleared && state.cells?.some((cell) => cell !== null) && visionChanged(cells, state.cells)) {
                 unsupported('changed vision geometry without LOS invalidation');
             }
 
-            let sceneLights = [];
+            const lightReferences = [...lights.values()].filter((light) => {
+                const x = light.x - state.x * 8;
+                const y = light.y - state.y * 8;
+                const index = light.z * state.width * state.height * 64 + y * state.width * 8 + x;
 
-            if (state.lightsRegistered) {
-                sceneLights = [...lights.values()].map((light) => ({
-                    ...light, x: light.x - state.x * 8, y: light.y - state.y * 8, color: [...light.color],
-                }));
-            }
+                return state.registeredLights.has(light) && x >= 0 && y >= 0
+                    && x < state.width * 8 && y < state.height * 8 && cells[index] !== null;
+            })
+                .map((light) => ({ light, on: light.on, color: [...light.color] }));
+            const sceneLights = lightReferences.filter((reference) => reference.on).map(({ light }) => ({
+                ...light, x: light.x - state.x * 8, y: light.y - state.y * 8, color: [...light.color],
+            }));
 
             const pending = {
                 width: state.width * 8, height: state.height * 8, minimum: 0, maximum: 63, cells,
                 player: playerPosition, seen: state.computed?.map((payload) => Boolean(payload?.[0] & 1)),
                 lights: sceneLights, cleared, submitted: new Set(chunks),
+                lightReferences, lightRegistrations: new Set(lights.values()),
                 origin: [state.x * 8, state.y * 8, 0],
                 perception: perception ?? state.pending?.perception,
                 sky: sky ?? state.pending?.sky,
@@ -838,7 +874,6 @@ export function createLightingNatives() {
             state.pending = pending;
             state.pendingResult = calculated;
             state.deferred = null;
-            state.lightsRegistered = true;
             state.workerReady = false;
             states.set(player, state);
             active = null;
@@ -863,7 +898,24 @@ export function createLightingNatives() {
                 if (state.pending && !state.workerReady) {
                     const previous = state.computed;
 
-                    state.computed = state.pendingResult;
+                    // Active state belongs to the main snapshot; native RGB is read from the shared light at worker time.
+                    const colorChanged = state.pending.lightReferences.some(({ light, on, color }) => on
+                        && color.some((value, channel) => value !== light.color[channel]));
+
+                    if (colorChanged) {
+                        state.computed = calculateRetainedLighting({
+                            ...state.pending,
+                            lights: state.pending.lightReferences.filter((reference) => reference.on).map(({ light }) => ({
+                                ...light, x: light.x - state.x * 8, y: light.y - state.y * 8, color: [...light.color],
+                            })),
+                        });
+                        restoreCoordinates(state, state.computed);
+                    } else {
+                        state.computed = state.pendingResult;
+                    }
+
+                    state.pendingResult = state.computed;
+                    state.registeredLights = state.pending.lightRegistrations;
                     state.computedRooms = visibleRooms(state.pending.cells, state.computed);
                     const changed = changedSquares(state, previous, state.computed, state.pending.submitted);
 
@@ -1021,7 +1073,7 @@ export function createLightingNatives() {
     for (const name of [
         'scrollLeft', 'scrollRight', 'scrollUp', 'scrollDown', 'teleport',
         'squareAddThumpable',
-        'addTempLight', 'removeLight', 'setLightActive', 'addRoomLight', 'removeRoomLight',
+        'addTempLight', 'addRoomLight', 'removeRoomLight',
         'setRoomLightActive', 'updateTorch', 'removeTorch',
         'getVertLight', 'getLightInfo', 'getDarkMulti', 'getTargetDarkMulti', 'getSeen', 'getCanSee', 'getCouldSee',
     ]) {
