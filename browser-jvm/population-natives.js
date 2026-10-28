@@ -220,6 +220,7 @@ export function createPopulationNatives() {
     };
 
     let lock = Promise.resolve();
+    let queuedCalls = 0;
     let rng;
     const nativeDefaults = new Map([
         ['PopulationMultiplier', 1], ['PopulationStartMultiplier', Math.fround(0.8)],
@@ -2240,10 +2241,14 @@ export function createPopulationNatives() {
                 }
             };
 
+            queuedCalls++;
             const promise = lock.then(run);
 
-            lock = promise.catch(() => {
-                // The caller retains its rejected promise; later calls still need the lock.
+            // The caller retains its rejection; both outcomes release the serializer.
+            lock = promise.then(() => {
+                queuedCalls--;
+            }, () => {
+                queuedCalls--;
             });
 
             return promise;
@@ -2255,6 +2260,32 @@ export function createPopulationNatives() {
     for (const name of exportNames) {
         install(`Java_zombie_MapCollisionData_n_1${name}`, collisionService[name] ?? (() => unsupported(`MCD ${name}`)));
     }
+
+    const metaCellName = 'Java_zombie_MapCollisionData_n_1initMetaCell';
+    const queuedMetaCell = natives[metaCellName];
+
+    /**
+     * Counts absent sources synchronously only when no earlier serialized operation can affect them.
+     *
+     * @param {object} lib - Original Java namespace for the existing serialized error route.
+     * @param {...unknown} args - Original cell coordinates and source filename.
+     * @returns {undefined|Promise<unknown>} Actual void result or existing serialized operation.
+     */
+    natives[metaCellName] = (lib, ...args) => {
+        if (args[2] !== null || queuedCalls || state.terminalFailure) {
+            return queuedMetaCell(lib, ...args);
+        }
+
+        state.callCounts ??= {};
+        state.callCounts[metaCellName] = (state.callCounts[metaCellName] ?? 0) + 1;
+        state.trace.push(metaCellName);
+
+        if (state.trace.length > 64) {
+            state.trace.shift();
+        }
+
+        return collisionService.initMetaCell(lib, ...args);
+    };
 
     /* The original initialization owner invokes this scalar setter millions of
        times. It performs no Java calls or IO: successful calls stay synchronous. */
