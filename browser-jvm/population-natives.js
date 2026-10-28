@@ -508,7 +508,7 @@ export function createPopulationNatives() {
         };
 
         const config = configBytes();
-        const result = state.gameState.get('Core.bLastStand')
+        const result = state.gameState.get('Core.bLastStand') || state.gameState.get('World.ZombiesDisabled')
             ? { generated: 0, entries: [] }
             : generate({
                     globalFlags,
@@ -1178,7 +1178,7 @@ export function createPopulationNatives() {
     async function updateRespawn(lib) {
         const hours = state.config.get('RespawnHours');
 
-        if (!(hours > 0) || !state.workerTime || state.gameState.get('PAUSED')) {
+        if (!respawnEnabled() || !state.workerTime || state.gameState.get('PAUSED')) {
             return;
         }
 
@@ -1232,6 +1232,50 @@ export function createPopulationNatives() {
                 state.populationDirty.add(name);
             }
         }
+    }
+
+    /**
+     * Reads native0x1dfa0's shared respawn-enable predicate.
+     *
+     * @returns {boolean} Whether native respawn clock processing is enabled.
+     */
+    function respawnEnabled() {
+        return !state.gameState.get('World.ZombiesDisabled') && state.config.get('RespawnHours') > 0;
+    }
+
+    /**
+     * Checks native0x20550's nonmutating active-cell wake condition.
+     *
+     * @returns {boolean} Whether an original respawn clock needs worker attention.
+     */
+    function respawnNeedsWorker() {
+        if (!respawnEnabled() || !state.workerTime) {
+            return false;
+        }
+
+        const age = state.workerTime[1];
+        const integerAge = age >= -2_147_483_648 && age < 2_147_483_648 ? Math.trunc(age) : -2_147_483_648;
+        const wakeAge = (integerAge << 16) >> 16;
+        const hours = state.config.get('RespawnHours');
+
+        for (const [name, cell] of state.cells) {
+            if (cell.passive || wakeAge <= Math.fround(cell.createdAge + hours)) {
+                continue;
+            }
+
+            const [x, y] = name.split(',').map(Number);
+            const target = populationTarget((cell.targets.reduce((sum, value) => sum + value, 0) << 16) >> 16,
+                state.config.get('PopulationStartMultiplier'), state.config.get('PopulationPeakMultiplier'),
+                state.config.get('PopulationPeakDay'), age);
+            const count = (cell.chunks.reduce((sum, records) => sum + records.length, 0) << 16) >> 16;
+            const deficit = Math.max(0, target - count) - groupedPopulation(x, y);
+
+            if (deficit >= 10) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     const collisionService = {
@@ -2326,7 +2370,7 @@ export function createPopulationNatives() {
          * @returns {boolean} Whether no worker batch is pending.
          */
         shouldWait() {
-            return state.worker.length === 0 && state.virtual.length === 0;
+            return state.worker.length === 0 && state.virtual.length === 0 && !respawnNeedsWorker();
         },
         /**
          * Releases owned queues and state at the original service stop boundary.
@@ -2512,10 +2556,6 @@ export function createPopulationNatives() {
                 unsupported(`game state ${name}/${suffix}`);
             }
 
-            if (suffix.endsWith('_2Z') && name === 'World.ZombiesDisabled' && value) {
-                unsupported('disabled population');
-            }
-
             state.gameState.set(name, value);
         });
     }
@@ -2536,10 +2576,6 @@ export function createPopulationNatives() {
         }
 
         if (boolState.includes(name) && typeof value === 'boolean') {
-            if (name === 'World.ZombiesDisabled' && value) {
-                unsupported('disabled population');
-            }
-
             state.gameState.set(name, value);
 
             return;
