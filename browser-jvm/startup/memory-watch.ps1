@@ -5,6 +5,21 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class StartupMemoryNative {
+ // One immutable record may block on the pipe; sampling never waits or queues writes.
+ static System.Threading.Tasks.Task telemetryWrite;
+ static readonly System.IO.Stream telemetryStream = Console.OpenStandardOutput();
+ public static void Telemetry(string record) {
+  if (telemetryWrite != null) {
+   if (!telemetryWrite.IsCompleted) return;
+   telemetryWrite.GetAwaiter().GetResult();
+  }
+  byte[] bytes = System.Text.Encoding.UTF8.GetBytes(record + "\n");
+  telemetryWrite = System.Threading.Tasks.Task.Factory.StartNew(() => {
+   telemetryStream.Write(bytes, 0, bytes.Length);
+   telemetryStream.Flush();
+  }, System.Threading.CancellationToken.None, System.Threading.Tasks.TaskCreationOptions.DenyChildAttach, System.Threading.Tasks.TaskScheduler.Default);
+ }
+
  [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct Entry {
   public uint size,usage,pid; public UIntPtr heap; public uint module,threads,parent; public int priority; public uint flags;
   [MarshalAs(UnmanagedType.ByValTStr,SizeConst=260)] public string exe;
@@ -63,13 +78,13 @@ $ownedIdentities[$RootProcessId] = $originalCreation.Ticks
 try {
 while ($true) {
     $cycle = [Diagnostics.Stopwatch]::StartNew()
-    [Console]::Out.WriteLine('{"event":"stage","stage":"native-snapshot-start"}')
+    [StartupMemoryNative]::Telemetry('{"event":"stage","stage":"native-snapshot-start"}')
     $rootHandle.Refresh()
     $rootExited = $rootHandle.HasExited
     if (-not $rootExited -and $rootHandle.StartTime.ToUniversalTime() -ne $originalCreation) { throw 'Owned browser identity changed' }
     $all = @([StartupMemoryNative]::Processes())
     $snapshotMilliseconds = $cycle.ElapsedMilliseconds
-    [Console]::Out.WriteLine('{"event":"stage","stage":"owned-process-memory-start"}')
+    [StartupMemoryNative]::Telemetry('{"event":"stage","stage":"owned-process-memory-start"}')
     $ids = [Collections.Generic.HashSet[int]]::new()
     [void]$ids.Add($RootProcessId)
     # Retain previously observed descendants after their immediate parent exits.
@@ -118,15 +133,14 @@ while ($true) {
             if (-not $ownedProcess -or -not $ownedProcess.HasExited) { throw }
         } finally { if ($ownedProcess) { $ownedProcess.Dispose() } }
     })
-    [Console]::Out.WriteLine('{"event":"stage","stage":"system-memory-start"}')
+    [StartupMemoryNative]::Telemetry('{"event":"stage","stage":"system-memory-start"}')
     $system = [StartupMemoryNative]::SystemMemory()
-    if ($rootExited -and $processes.Count -eq 0) { [Console]::Out.WriteLine('{"event":"closed"}'); exit 0 }
+    if ($rootExited -and $processes.Count -eq 0) { [StartupMemoryNative]::Telemetry('{"event":"closed"}'); exit 0 }
     $privateBytes = [long](($processes | Measure-Object privateBytes -Sum).Sum)
     $availableBytes = [long]$system.available
     $reason = if ($rootExited) { 'owned-root-exited-with-descendants' } elseif ($privateBytes -ge $MaxPrivateBytes) { 'owned-private-limit' } elseif ($availableBytes -le $MinAvailableBytes) { 'system-available-floor' } elseif ($privateBytes -ge ($MaxPrivateBytes * 0.9)) { 'owned-private-soft-limit' } elseif ($availableBytes -le ($MinAvailableBytes + 1073741824)) { 'system-available-soft-floor' } else { $null }
     if ($reason -and $null -eq $pressureAt) { $pressureAt = [StartupMemoryNative]::UptimeMilliseconds() }
     $sample = @{ event='sample'; observedAt=[DateTime]::UtcNow.ToString('o'); observedUptimeMilliseconds=[StartupMemoryNative]::UptimeMilliseconds(); stage='native-sample-complete'; sampleMilliseconds=$cycle.ElapsedMilliseconds; snapshotMilliseconds=$snapshotMilliseconds; rootPid=$RootProcessId; rootCreation=$originalCreation.ToString('o'); profile=$ownedProfile; privateBytes=$privateBytes; workingSetBytes=[long](($processes | Measure-Object workingSetBytes -Sum).Sum); systemAvailableBytes=$availableBytes; systemTotalBytes=[long]$system.total; reason=$reason; processCount=$processes.Count; processes=@($processes | Select-Object -First 128) }
-    [Console]::Out.WriteLine(($sample | ConvertTo-Json -Depth 5 -Compress))
     if ($rootExited -or $privateBytes -ge $MaxPrivateBytes -or $availableBytes -le $MinAvailableBytes -or ($null -ne $pressureAt -and ([StartupMemoryNative]::UptimeMilliseconds() - $pressureAt) -ge 5000)) {
         $rootHandle.Refresh()
         if (-not $rootHandle.HasExited -and ($rootHandle.StartTime.ToUniversalTime() -ne $originalCreation -or [StartupMemoryNative]::CommandLine($rootHandle.Handle) -ne $originalCommandLine -or $rootHandle.ProcessName -ne 'chrome')) { throw 'Refusing changed identity at termination' }
@@ -155,10 +169,11 @@ while ($true) {
             }
             $remaining = @($targets | Where-Object { -not $_.WaitForExit(200) })
             if ($remaining.Count -ne 0) { throw "Owned browser termination incomplete: $($remaining.Id -join ',')" }
-            [Console]::Out.WriteLine((@{ event='hard-close'; reason=$reason; rootPid=$RootProcessId; profile=$ownedProfile; action='terminate-verified-process-handles'; verifiedTargetCount=$targets.Count; actionExitCode=0; remainingOwnedProcesses=0 } | ConvertTo-Json -Compress))
+            [StartupMemoryNative]::Telemetry((@{ event='hard-close'; reason=$reason; rootPid=$RootProcessId; profile=$ownedProfile; action='terminate-verified-process-handles'; verifiedTargetCount=$targets.Count; actionExitCode=0; remainingOwnedProcesses=0 } | ConvertTo-Json -Compress))
         } finally { foreach ($target in $targets) { $target.Dispose() } }
         exit 0
     }
+    [StartupMemoryNative]::Telemetry(($sample | ConvertTo-Json -Depth 5 -Compress))
     Start-Sleep -Seconds 2
 }
 } finally { $rootHandle.Dispose() }
