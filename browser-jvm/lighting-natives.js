@@ -1099,15 +1099,16 @@ export function createLightingNatives() {
          * @param {number} strength - Original intensity.
          * @param {boolean} cone - Original cone flag.
          * @param {number} dot - Original cone threshold.
-         * @param {number} focusing - Original vehicle focusing mode; only handheld0 is qualified.
+         * @param {number} focusing - Original signed vehicle focusing value; handheld sources use zero.
          */
         updateTorch(id, x, y, z, r, g, b, angleX, angleY, dist, strength, cone, dot, focusing) {
             integer(id, -2_147_483_648, 2_147_483_647, 'torch identifier');
+            integer(focusing, -2_147_483_648, 2_147_483_647, 'torch focusing');
 
             if ([x, y, z, r, g, b, angleX, angleY, dist, strength, dot]
                 .some((value) => !Number.isFinite(value) || !Number.isFinite(Math.fround(value)))
-                || typeof cone !== 'boolean' || dist < 0 || focusing !== 0) {
-                unsupported('unfocused handheld torch fields');
+                || typeof cone !== 'boolean' || dist < 0) {
+                unsupported('torch fields');
             }
 
             const floats = [x, y, z, r, g, b, angleX, angleY, dist, strength, dot].map(Math.fround);

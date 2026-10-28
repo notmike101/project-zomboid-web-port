@@ -276,17 +276,18 @@ function validate(scene) {
     for (const torch of torches ?? []) {
         if (!torch || typeof torch !== 'object' || typeof torch.cone !== 'boolean'
             || !Array.isArray(torch.color) || torch.color.length !== 3) {
-            unsupported('handheld torch shape');
+            unsupported('torch shape');
         }
 
         const floats = [...torch.color, ...['x', 'y', 'z', 'angleX', 'angleY', 'dist', 'strength', 'dot'].map((key) => torch[key])];
 
         if (floats.some((value) => !Number.isFinite(value) || !Number.isFinite(Math.fround(value)))
-            || torch.dist < 0 || torch.focusing !== 0) {
-            unsupported('unfocused handheld torch fields');
+            || torch.dist < 0) {
+            unsupported('torch fields');
         }
 
         integer(torch.id, -2_147_483_648, 2_147_483_647, 'torch identifier');
+        integer(torch.focusing, -2_147_483_648, 2_147_483_647, 'torch focusing');
 
         if (torchIdentifiers.has(torch.id)) {
             unsupported('duplicate torch identifier');
@@ -1059,7 +1060,7 @@ function darknessMultipliers(scene, seen) {
 }
 
 /**
- * Evaluates native0x9600's unfocused handheld beam at one queued path distance.
+ * Evaluates native0x9600's handheld or focused vehicle beam at one queued path distance.
  *
  * @param {object} torch - Original shared float32 torch fields.
  * @param {number} x - World square X.
@@ -1079,13 +1080,21 @@ function torchColor(torch, x, y, distance) {
 
     const angleX = directionLength === 0 ? 0 : f(torch.angleX / directionLength);
     const angleY = directionLength === 0 ? 0 : f(torch.angleY / directionLength);
-    const dot = f(f(dx * angleX) + f(dy * angleY));
+    let dot = f(f(dx * angleX) + f(dy * angleY));
+
+    // Native 0x9743..0x9785 applies focus to the angular dot, including IEEE infinities/NaN at distance zero.
+    if (torch.focusing !== 0) {
+        dot = torch.focusing < 4
+            ? f(f(torch.dist * dot) / distance)
+            : f(dot - f(torch.dist / f(f(torch.focusing) * distance)));
+    }
+
     const integerDx = f(x - torch.x);
     const integerDy = f(y - torch.y);
     const squared = f(f(integerDx * integerDx) + f(integerDy * integerDy));
 
     if (distance >= torch.dist || squared >= f(torch.dist * torch.dist)
-        || (dot !== -1 && (torch.cone ? dot >= -torch.dot : dot >= f(0.8)))) {
+        || !(dot === -1 || (torch.cone ? dot < -torch.dot : dot < f(0.8)))) {
         return null;
     }
 
