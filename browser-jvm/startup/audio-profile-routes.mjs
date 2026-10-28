@@ -6,7 +6,7 @@ import { hash } from './profile-routes.mjs';
 
 const additions = ['/fmod-runtime.js', '/fmod-natives.js', '/fmod.js', '/fmodstudio.js', '/fmodintegration64.js',
     '/fmod-runtime/fmodstudioL.js', '/fmod-runtime/fmodstudioL.wasm', '/fmod-runtime/manifest.json', '/fmod-runtime/reverb-presets.json'];
-const publicAudioUrls = ['/fmod20309-api.js', '/fmod20309-identities.js', '/fmod20309-files.js'];
+const publicAudioUrls = ['/fmod20309-api.js', '/fmod20309-identities.js', '/fmod20309-files.js', '/fmod-owned-audio.js'];
 const compressionUrls = ['/texture-compression-runtime.js', '/texture-compression/manifest.json',
     '/texture-compression/texture-compression-engine.mjs', '/texture-compression/texture-compression-engine.wasm'];
 

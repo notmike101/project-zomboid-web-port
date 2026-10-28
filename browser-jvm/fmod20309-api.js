@@ -19,13 +19,13 @@ export function createFmod20309Compat(F, fileOwner) {
     };
 
     const raw = (value) => metadata.get(value)?.object ?? value;
-    const scalar = new Set(['getTimelinePosition', 'getPlaybackState', 'getBankCount', 'getEventCount', 'getLength',
+    const scalar = new Set(['getOutput', 'getTimelinePosition', 'getPlaybackState', 'getBankCount', 'getEventCount', 'getLength',
         'getParameterDescriptionCount', 'getInstanceCount', 'getVCACount', 'getPaused', 'getMute', 'isPlaying', 'hasSustainPoint']);
     const resultOnly = new Set(['initialize', 'update', 'setOutput', 'setSoftwareFormat', 'set3DSettings', 'start',
         'loadSampleData', 'setVolume', 'setParameterByName', 'stop', 'release', 'flushCommands', 'set3DLevel',
         'set3DOcclusion', 'setPriority', 'setProperty', 'setPaused', 'setCallback', 'set3DMinMaxDistance', 'setMode',
         'setPitch', 'setReverbProperties', 'set3DAttributes', 'setChannelGroup', 'setNumListeners', 'setListenerAttributes',
-        'setParameterByID', 'keyOff', 'setTimelinePosition', 'setMute', 'stopAllEvents']);
+        'mixerResume', 'setParameterByID', 'keyOff', 'setTimelinePosition', 'setMute', 'stopAllEvents']);
     const objectKinds = {
         getCoreSystem: 'core', createChannelGroup: 'channelGroup', getEvent: 'event', getVCA: 'vca',
         getBus: 'bus', getMasterChannelGroup: 'channelGroup', createDSPByType: 'dsp', playSound: 'channel',
@@ -152,7 +152,13 @@ export function createFmod20309Compat(F, fileOwner) {
                         return out.val;
                     }
 
-                    if (method === 'getID' || method === 'getParameterDescriptionByIndex') {
+                    if (method === 'getParameterDescriptionByIndex') {
+                        record(object.getParameterDescriptionByIndex(args[0], out));
+
+                        return lastResult === F.OK ? out : undefined;
+                    }
+
+                    if (method === 'getID') {
                         record(object[method](...args, out));
 
                         return out.val;
@@ -197,7 +203,24 @@ export function createFmod20309Compat(F, fileOwner) {
 
                     const listKinds = { getBankList: 'bank', getEventList: 'event', getVCAList: 'vca' };
 
-                    if (listKinds[method] || method === 'getParameterDescriptionList') {
+                    if (method === 'getParameterDescriptionList') {
+                        const array = [];
+                        const count = {};
+
+                        record(object.getParameterDescriptionList(array, args[0], count));
+
+                        if (lastResult !== F.OK) {
+                            return undefined;
+                        }
+
+                        if (!Number.isSafeInteger(count.val) || count.val < 0 || count.val > args[0] || array.length !== count.val) {
+                            throw new Error('FMOD parameter list extent mismatch');
+                        }
+
+                        return array;
+                    }
+
+                    if (listKinds[method]) {
                         const count = {};
 
                         record(object[method](out, args[0], count));
@@ -210,7 +233,7 @@ export function createFmod20309Compat(F, fileOwner) {
                             throw new Error('FMOD public list extent mismatch');
                         }
 
-                        return listKinds[method] ? out.val.map((entry) => wrap(entry, listKinds[method])) : out.val;
+                        return out.val.map((entry) => wrap(entry, listKinds[method]));
                     }
 
                     if (method === 'createSound') {
@@ -250,6 +273,11 @@ export function createFmod20309Compat(F, fileOwner) {
                         record(object.loadBankCustom(info, args[1], out));
 
                         return lastResult === F.OK ? wrap(out.val, 'bank') : undefined;
+                    }
+
+                    // Trusted resume is outside the JNI queue; preserve that queue's result accumulator.
+                    if (method === 'mixerResume') {
+                        return object.mixerResume();
                     }
 
                     if (method === 'setListenerAttributes' && args.length === 2) {
@@ -312,7 +340,7 @@ export function createFmod20309Compat(F, fileOwner) {
                             masterChannelGroup = undefined;
                         }
 
-                        return undefined;
+                        return result;
                     }
 
                     throw new Error(`Unimplemented public20309 method: ${kind}.${method}`);

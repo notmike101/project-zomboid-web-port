@@ -98,7 +98,7 @@ const file = path.join(output, 'fmod-runtime/manifest.json');
 await writeFile(file, bytes, { flag: 'wx' });
 routes.push({ url: '/fmod-runtime/manifest.json', file, bytes: bytes.length, sha256: sha(bytes), type: 'application/json' });
 
-for (const name of ['fmod-runtime.js', 'fmod-natives.js', 'fmod20309-api.js', 'fmod20309-identities.js', 'fmod20309-files.js', 'fmod.js', 'fmodstudio.js', 'fmodintegration64.js']) {
+for (const name of ['fmod-runtime.js', 'fmod-natives.js', 'fmod20309-api.js', 'fmod20309-identities.js', 'fmod20309-files.js', 'fmod-owned-audio.js', 'fmod.js', 'fmodstudio.js', 'fmodintegration64.js']) {
     const bytes = await readFile(path.join(import.meta.dirname, name));
     const file = path.join(output, name);
 

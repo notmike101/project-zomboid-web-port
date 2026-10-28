@@ -49,9 +49,10 @@ const javaValue = (value) => {
  * @param {number|null} [output] - Explicit data-only oracle output; browser default is unchanged.
  * @param {Array<object>|null} [reverbPresets] - Verified original-compatible SDK preset definitions.
  * @param {number} [expectedVersion] - Public version pinned by the runtime manifest.
+ * @param {object|null} [audioContexts] - Owned public initialization, resume, and teardown contexts.
  * @returns {object} Original JNI callbacks and owned engine teardown.
  */
-export function createFmodNatives(FMOD, files, output = null, reverbPresets = null, expectedVersion = 0x00_02_04_00) {
+export function createFmodNatives(FMOD, files, output = null, reverbPresets = null, expectedVersion = 0x00_02_04_00, audioContexts = null) {
     if (![0x00_02_03_09, 0x00_02_04_00].includes(expectedVersion)) {
         throw new Error('Unadmitted FMOD engine version');
     }
@@ -66,6 +67,8 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
     let initialized = false;
     let version;
     let recordDriverQuery;
+    let outputType;
+    let systemReleaseResult;
     let recordSoundQuery;
     let recordVolume = 3;
     let rangeBytes = 0;
@@ -367,7 +370,19 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             // HTML5 worklet mixing runs outside this owner; asynchronous stream I/O must stay on serialized update.
             const hostCoreFlags = Number(coreFlags) | FMOD.INIT_STREAM_FROM_UPDATE;
 
-            await requireSystem().initialize(channels, Number(studioFlags), hostCoreFlags, null);
+            const initialize = () => requireSystem().initialize(channels, Number(studioFlags), hostCoreFlags, null);
+
+            if (is203 && audioContexts) {
+                audioContexts.initialize(initialize);
+            } else {
+                await initialize();
+            }
+
+            if (is203) {
+                // Read through the actual public RESULT/out parameter API via the compatibility boundary.
+                outputType = core.getOutput();
+            }
+
             initialized = true;
 
             return FMOD.OK;
@@ -1031,7 +1046,24 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
 
     return {
         natives,
-        snapshot: () => ({ initialized, disposed, version, recordDriverQuery, recordSoundQuery, recordVolume, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, callbackFailures, sdkMarkerFallthroughs, callbackEvents: [...callbackEvents], lastCallbackFailures: [...lastCallbackFailures], audibleVerified: false, ...(publicFiles?.snapshot() ?? {}) }),
+        resumeAudio() {
+            if (!is203 || !audioContexts) {
+                throw new Error('Public SDK audio ownership required');
+            }
+
+            if (!initialized) {
+                return false;
+            }
+
+            const result = audioContexts.initialize(() => core.mixerResume());
+
+            if (result !== FMOD.OK) {
+                throw new Error(`Public FMOD mixerResume: ${FMOD.errorString(result)} (${result})`);
+            }
+
+            return result;
+        },
+        snapshot: () => ({ initialized, disposed, version, outputType, systemReleaseResult, recordDriverQuery, recordSoundQuery, recordVolume, dspObjects: ownedDSPs.length, masterChannelGroup: Boolean(masterChannelGroup), handles: handles.size, rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, pendingCallbacks: pendingCallbacks.length, activeDeliveries: deliveries.size, deliveredCallbacks, callbackFailures, sdkMarkerFallthroughs, callbackEvents: [...callbackEvents], lastCallbackFailures: [...lastCallbackFailures], audibleVerified: false, ...(publicFiles?.snapshot() ?? {}) }),
         async dispose() {
             /* The host calls teardown after the original VM has joined. Drain complete JNI
              * deliveries (including callbacks outside the SDK lock) before releasing the engine. */
@@ -1040,6 +1072,10 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             await lock;
 
             try {
+                if (audioContexts && (initialized || audioContexts.snapshot().length)) {
+                    await audioContexts.close();
+                }
+
                 for (const dsp of ownedDSPs) {
                     dsp.release();
                 }
@@ -1048,7 +1084,15 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                 masterChannelGroup = undefined;
 
                 if (system) {
-                    await system.release();
+                    const result = await system.release();
+
+                    if (is203) {
+                        systemReleaseResult = result;
+
+                        if (result !== FMOD.OK) {
+                            throw new Error(`Public FMOD system release: ${FMOD.errorString(result)} (${result})`);
+                        }
+                    }
                 }
             } finally {
                 for (const handle of fileOwners) {

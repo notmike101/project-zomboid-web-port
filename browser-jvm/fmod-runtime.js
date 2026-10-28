@@ -1,5 +1,6 @@
 /* eslint-disable jsdoc/require-jsdoc -- Private callbacks are owned by the documented runtime loader. */
 import { createFmodNatives } from './fmod-natives.js';
+import { createOwnedAudioContexts } from './fmod-owned-audio.js';
 
 let owner;
 const digest = async (bytes) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
@@ -22,7 +23,7 @@ export function getFmodOwner() {
  * Loads only the explicitly admitted official runtime, without changing its output backend.
  *
  * @param {string} manifestSHA - Frozen generation's SDK manifest identity.
- * @param {Array<object>|null} [bankFiles] - Bank entries from the verified complete media namespace.
+ * @param {Array<object>|null} [bankFiles] - Audio entries from the verified complete media namespace.
  * @returns {Promise<object>} Real FMOD JNI owner.
  */
 export function loadFmodRuntime(manifestSHA, bankFiles = null) {
@@ -53,9 +54,18 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
             throw new Error('Unsupported FMOD runtime manifest');
         }
 
-        if (manifest.version !== '2.04.00' || (manifest.versionHex !== undefined && manifest.versionHex !== 0x00_02_04_00)) {
-            throw new Error('FMOD runtime adapter supports only SDK 2.04.00; other versions can be packaged but are not admitted');
+        const expectedVersion = manifest.versionHex ?? (manifest.version === '2.04.00' ? 0x2_04_00 : undefined);
+        const is203 = manifest.version === '2.03.09' && expectedVersion === 0x2_03_09;
+
+        if (!is203 && !(manifest.version === '2.04.00' && expectedVersion === 0x2_04_00)) {
+            throw new Error('Unadmitted FMOD version pair');
         }
+
+        if (is203 && !Array.isArray(bankFiles)) {
+            throw new Error('Public20309 requires the complete verified audio namespace');
+        }
+
+        const audioContexts = is203 ? createOwnedAudioContexts() : null;
 
         const script = await get('fmodstudioL.js');
         const wasm = await get('fmodstudioL.wasm');
@@ -70,7 +80,7 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
         try {
             const { default: createFMOD } = await import(url);
 
-            FMOD = await createFMOD({
+            const options = {
                 wasmBinary: wasm,
                 INITIAL_MEMORY: 64 * 1_024 * 1_024,
                 locateFile(name) {
@@ -80,7 +90,21 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
 
                     return new URL(`/fmod-runtime/${name}`, location.origin).href;
                 },
-            });
+            };
+
+            if (is203) {
+                FMOD = await new Promise((resolve, reject) => {
+                    options.onRuntimeInitialized = () => resolve(options);
+                    options.onAbort = (reason) => reject(new Error(String(reason)));
+                    const created = createFMOD(options);
+
+                    if (typeof created?.then === 'function') {
+                        created.then(undefined, reject);
+                    }
+                });
+            } else {
+                FMOD = await createFMOD(options);
+            }
         } finally {
             URL.revokeObjectURL(url);
         }
@@ -106,7 +130,38 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
             return known ? new URL(known.path, location.origin).href : url.href;
         };
 
+        const knownAudio = (name) => {
+            const url = bankURL(name);
+
+            return { url, entry: bankCatalog.get(decodeURIComponent(new URL(url).pathname).toLowerCase()) };
+        };
+
         const audio = createFmodNatives(FMOD, {
+            sizeSync(name) {
+                return knownAudio(name).entry?.bytes ?? null;
+            },
+            readSync(name, start, length) {
+                const { url, entry } = knownAudio(name);
+
+                if (!entry || !Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length <= 0
+                    || length > 65_536 || start + length > entry.bytes) {
+                    throw new Error('Unowned public20309 audio range');
+                }
+
+                const xhr = new XMLHttpRequest();
+
+                xhr.open('GET', url, false);
+                xhr.overrideMimeType('text/plain; charset=x-user-defined');
+                xhr.setRequestHeader('Range', `bytes=${start}-${start + length - 1}`);
+                xhr.send();
+
+                if (xhr.status !== 206 || xhr.getResponseHeader('Content-Range') !== `bytes ${start}-${start + length - 1}/${entry.bytes}`
+                    || xhr.responseText.length !== length) {
+                    throw new Error('Public20309 audio range response mismatch');
+                }
+
+                return Uint8Array.from(xhr.responseText, (character) => character.charCodeAt(0) & 255);
+            },
             async size(name) {
                 const url = bankURL(name);
                 const path = decodeURIComponent(new URL(url).pathname);
@@ -142,10 +197,24 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
 
                 return new Uint8Array(await response.arrayBuffer());
             },
-        }, null, presets);
+        }, null, presets, expectedVersion, audioContexts);
         let resumeFailure = null;
         let trustedResumeAt = null;
         const resume = (event) => {
+            if (is203) {
+                if (event.isTrusted) {
+                    try {
+                        if (audio.resumeAudio() !== false) {
+                            trustedResumeAt = Date.now();
+                        }
+                    } catch (error) {
+                        resumeFailure = String(error);
+                    }
+                }
+
+                return;
+            }
+
             // The pinned SDK uses mContext for AudioWorklet and context for ScriptProcessor.
             const context = FMOD.mContext ?? FMOD.context;
 
@@ -168,11 +237,25 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
 
         audio.snapshot = () => ({
             ...snapshot(),
-            audioContextState: (FMOD.mContext ?? FMOD.context)?.state ?? 'uninitialized',
-            audioBackend: (FMOD.mContext && 'AudioWorklet') || (FMOD.context && 'ScriptProcessor') || 'uninitialized',
-            workletReady: Boolean(FMOD.mWorkletNode) && !FMOD.mModulePolling,
-            trustedResumeAt,
-            resumeFailure,
+            ...(is203
+                ? {
+                        audioContexts: audioContexts.snapshot(),
+                        audioContextState: audioContexts.snapshot().findLast((context) => context.state !== 'closed')?.state ?? 'uninitialized',
+                        audioBackend: snapshot().outputType === FMOD.OUTPUTTYPE_AUDIOWORKLET ? 'AudioWorklet' : 'uninitialized',
+                        workletReady: null,
+                        trustedResumeAt,
+                        resumeFailure,
+                    }
+                : {}),
+            ...(!is203
+                ? {
+                        audioContextState: (FMOD.mContext ?? FMOD.context)?.state ?? 'uninitialized',
+                        audioBackend: (FMOD.mContext && 'AudioWorklet') || (FMOD.context && 'ScriptProcessor') || 'uninitialized',
+                        workletReady: Boolean(FMOD.mWorkletNode) && !FMOD.mModulePolling,
+                        trustedResumeAt,
+                        resumeFailure,
+                    }
+                : {}),
         });
         audio.dispose = async () => {
             globalThis.removeEventListener('pointerdown', resume);
