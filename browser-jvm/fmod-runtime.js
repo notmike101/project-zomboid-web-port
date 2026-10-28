@@ -116,6 +116,13 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
         }
 
         const presets = JSON.parse(new TextDecoder().decode(presetBytes));
+        // Public logging level retains warnings/errors without routine SDK tracing.
+        const debugResult = FMOD.Debug_Initialize(FMOD.DEBUG_LEVEL_WARNING);
+
+        if (debugResult !== FMOD.OK) {
+            throw new Error(`FMOD debug logging configuration failed: ${debugResult}`);
+        }
+
         const bankCatalog = bankFiles === null ? null : new Map(bankFiles.map(({ path, bytes }) => [path.toLowerCase(), { path, bytes }]));
         const bankURL = (name) => {
             const path = String(name).replace(/^\/app(?=\/media\/)/u, '');
