@@ -612,7 +612,7 @@ export function createLightingNatives() {
                 ranges: new Map(state.deferred?.ranges ?? state.ranges),
                 playerPosition: state.deferred?.playerPosition, worldPlayer: state.deferred?.worldPlayer,
                 perception: state.deferred?.perception, sky: state.deferred?.sky,
-                sourceUpdate: state.deferred?.sourceUpdate,
+                sourceUpdate: state.deferred?.sourceUpdate, frameCount: state.deferred?.frameCount ?? 0,
             };
         },
         /**
@@ -683,6 +683,8 @@ export function createLightingNatives() {
             }
 
             integer(sky, 0, 0xFF_FF_FF, 'skylight');
+            // eslint-disable-next-line unicorn/prefer-math-trunc -- Original frame command increments a signed int32.
+            update.frameCount = (update.frameCount + 1) | 0;
             update.sky = sky;
             update.sourceUpdate = sourceUpdate;
 
@@ -949,6 +951,24 @@ export function createLightingNatives() {
             lights.set(id, { id, x, y, z, radius, color: [red, green, blue], on });
         },
         /**
+         * Registers the original finite-life point light; life counts submitted main frames.
+         *
+         * @param {number} id - Original identifier.
+         * @param {number} x - World X.
+         * @param {number} y - World Y.
+         * @param {number} z - Native level.
+         * @param {number} radius - Original radius.
+         * @param {number} red - Red channel.
+         * @param {number} green - Green channel.
+         * @param {number} blue - Blue channel.
+         * @param {number} life - Original frame budget.
+         */
+        addTempLight(id, x, y, z, radius, red, green, blue, life) {
+            integer(life, 1, 2_147_483_647, 'temporary-light life');
+            methods.addLight(id, x, y, z, radius, red, green, blue, -1, true);
+            Object.assign(lights.get(id), { initialLife: life, remainingLife: life });
+        },
+        /**
          * Removes the registry entry while queued references retain their owned light.
          *
          * @param {number} id - Original light identifier.
@@ -1122,7 +1142,7 @@ export function createLightingNatives() {
          */
         stateEndUpdate() {
             const update = requireUpdate();
-            const { state, baseState, cells, chunks, player, ranges, perception, sky, sourceUpdate } = update;
+            const { state, baseState, cells, chunks, player, ranges, perception, sky, sourceUpdate, frameCount } = update;
             const playerPosition = update.playerPosition ?? state.pending?.player;
             const cleared = update.cleared ?? state.pending?.cleared;
             const worldPlayer = update.worldPlayer ?? state.previousPlayer;
@@ -1143,7 +1163,7 @@ export function createLightingNatives() {
                 // Original loading submits geometry and frame settings before creating its player.
                 state.deferred = {
                     cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
-                    perception, sky, sourceUpdate: pendingSourceUpdate,
+                    perception, sky, sourceUpdate: pendingSourceUpdate, frameCount,
                     x: state.x, y: state.y, movementCount: state.movements?.length ?? 0,
                     movementRevisions: state.movements?.map((command) => command.revision) ?? [],
                 };
@@ -1158,6 +1178,13 @@ export function createLightingNatives() {
                 return;
             }
 
+            // Native main removes expired temporary owners, preserving queued object references.
+            for (const [id, light] of lights) {
+                if (light.initialLife > 0 && light.remainingLife <= 0 && light.on) {
+                    lights.delete(id);
+                }
+            }
+
             if (!cleared && state.cells?.some((cell) => cell !== null) && visionChanged(cells, state.cells)) {
                 unsupported('changed vision geometry without LOS invalidation');
             }
@@ -1167,11 +1194,12 @@ export function createLightingNatives() {
                 const y = light.y - state.y * 8;
                 const index = light.z * state.width * state.height * 64 + y * state.width * 8 + x;
 
-                return state.registeredLights.has(light) && x >= 0 && y >= 0
+                return (state.registeredLights.has(light) || (light.initialLife > 0 && state.playerInitialized))
+                    && x >= 0 && y >= 0
                     && x < state.width * 8 && y < state.height * 8 && cells[index] !== null;
             })
                 .map((light) => ({ light, on: light.on, color: [...light.color] }));
-            const sceneLights = lightReferences.filter((reference) => reference.on).map(({ light }) => ({
+            const sceneLights = lightReferences.filter((reference) => reference.on && !(reference.light.initialLife > 0 && reference.light.remainingLife <= 0)).map(({ light }) => ({
                 ...light, x: light.x - state.x * 8, y: light.y - state.y * 8, color: [...light.color],
             }));
             const torchReferences = state.playerInitialized ? [...torches.values()] : [];
@@ -1190,7 +1218,7 @@ export function createLightingNatives() {
                 origin: [state.x * 8, state.y * 8, 0],
                 perception: perception ?? state.pending?.perception,
                 sky: sky ?? state.pending?.sky,
-                sourceUpdate: pendingSourceUpdate,
+                sourceUpdate: pendingSourceUpdate, frameCount,
                 previous: state.history ?? state.computed,
                 moved: Boolean(state.moved),
             };
@@ -1211,7 +1239,7 @@ export function createLightingNatives() {
                 state.deferred = {
                     cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
                     playerPosition, worldPlayer, perception: pending.perception, sky: pending.sky,
-                    sourceUpdate: pending.sourceUpdate,
+                    sourceUpdate: pending.sourceUpdate, frameCount,
                     x: state.x, y: state.y, movementCount: state.movements?.length ?? 0,
                     movementRevisions: state.movements?.map((command) => command.revision) ?? [],
                 };
@@ -1278,10 +1306,12 @@ export function createLightingNatives() {
                     const colorChanged = state.pending.lightReferences.some(({ light, on, color }) => on
                         && color.some((value, channel) => value !== light.color[channel]));
 
-                    if (colorChanged || state.pending.torchReferences.length > 0) {
+                    if (colorChanged || state.pending.torchReferences.length > 0
+                        || state.pending.lightReferences.some(({ light }) => light.initialLife > 0)) {
                         state.computed = calculateRetainedLighting({
                             ...state.pending,
-                            lights: state.pending.lightReferences.filter((reference) => reference.on).map(({ light }) => ({
+                            lights: state.pending.lightReferences.filter((reference) => reference.on
+                                && !(reference.light.initialLife > 0 && reference.light.remainingLife <= 0)).map(({ light }) => ({
                                 ...light, x: light.x - state.x * 8, y: light.y - state.y * 8, color: [...light.color],
                             })),
                             torches: state.pending.torchReferences.filter((torch) => torch.id !== 0),
@@ -1289,6 +1319,14 @@ export function createLightingNatives() {
                         restoreCoordinates(state, state.computed);
                     } else {
                         state.computed = state.pendingResult;
+                    }
+
+                    // Native seeds before subtracting the coalesced frame command's count.
+                    for (const light of state.pending.lightRegistrations) {
+                        if (state.playerInitialized && light.initialLife > 0 && light.remainingLife > 0) {
+                            // eslint-disable-next-line unicorn/prefer-math-trunc -- Native lifetime subtraction uses signed int32 before clamping.
+                            light.remainingLife = Math.max(0, (light.remainingLife - state.pending.frameCount) | 0);
+                        }
                     }
 
                     state.pendingResult = state.computed;
@@ -1477,7 +1515,6 @@ export function createLightingNatives() {
     };
 
     for (const name of [
-        'addTempLight',
         'getVertLight', 'getLightInfo', 'getDarkMulti', 'getTargetDarkMulti', 'getSeen', 'getCanSee', 'getCouldSee',
     ]) {
         /**
