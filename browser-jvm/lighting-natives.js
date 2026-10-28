@@ -96,7 +96,9 @@ function changedSquares(state, previous, next, submitted) {
         const x = Math.floor(index % (state.width * 8) / 8) + state.x;
         const y = Math.floor(planeIndex / (state.width * 64)) + state.y;
 
-        if (previous === null || submitted.has(`${x},${y}`)
+        const z = Math.floor(index / (state.width * state.height * 64));
+
+        if (previous === null || submitted.has(`${x},${y}`) || submitted.has(`${x},${y},${z}`)
             || previous[index] === null || element.slice(0, 14).some((value, word) => value !== previous[index][word])) {
             dirty.add(index);
         }
@@ -142,6 +144,100 @@ function restoreCoordinates(state, output) {
         for (let record = 0; record < payload[13]; record++) {
             payload[15 + record * 6] += state.x * 8;
             payload[16 + record * 6] += state.y * 8;
+        }
+    }
+}
+
+/**
+ * Initializes actual newly allocated native level readback without inventing square geometry.
+ *
+ * @param {object} state - Owning region and dirty maps.
+ * @param {Set<string>} allocations - Newly admitted world chunk levels.
+ * @param {Array} output - Existing physical readback slots.
+ * @param {object} origin - Origin belonging to this particular readback buffer.
+ * @param {boolean} dirty - Whether main allocation exposes initial dirty bytes.
+ */
+function allocateLevelReadback(state, allocations, output, origin, dirty) {
+    if (!output) {
+        return;
+    }
+
+    for (const key of allocations) {
+        const [x, y, z] = key.split(',').map(Number);
+
+        if (x < origin.x || y < origin.y || x >= origin.x + state.width || y >= origin.y + state.height) {
+            continue;
+        }
+
+        const first = z * state.width * state.height * 64 + (y - origin.y) * 64 * state.width + (x - origin.x) * 8;
+
+        for (let cell = 0; cell < 64; cell++) {
+            const index = first + Math.floor(cell / 8) * state.width * 8 + cell % 8;
+
+            if (output[index] === null) {
+                output[index] = Array.from({ length: 49 }, () => 0);
+
+                if (dirty) {
+                    state.squareDirty.add(index);
+                    state.chunkDirty.add(key);
+                }
+
+                if (dirty && state.workerReady) {
+                    state.computedSquareDirty.add(index);
+                    state.computedChunkDirty.add(key);
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Retires allocation rights once no retained native chunk owner remains.
+ *
+ * @param {object} state - Working, computed and published chunk owners.
+ * @param {Map<string, number[]>} main - Current main queue's world chunk ranges.
+ */
+function retainReadbackOwners(state, main) {
+    if (!state.allocatedLevels) {
+        return;
+    }
+
+    const owned = new Set([main, state.ranges, state.computedRanges, state.publishedRanges, state.deferred?.ranges]
+        .flatMap((ranges) => [...(ranges?.keys() ?? [])]));
+
+    state.allocatedLevels = new Set([...state.allocatedLevels].filter((key) => owned.has(key.slice(0, key.lastIndexOf(',')))));
+}
+
+/**
+ * Initializes native0xd460's two whole-region dirty banks once for each physical level.
+ * Geometry and readable-payload admission remain separate.
+ *
+ * @param {object} state - Fixed-size native region owner.
+ * @param {Map<string, number[]>} ranges - Main's actual allocated chunk level ranges.
+ */
+function allocateDirtyLevels(state, ranges) {
+    const plane = state.width * state.height * 64;
+    const chunks = state.width * state.height;
+
+    if (!state.physicalLevels) {
+        state.physicalLevels = new Set();
+        state.readSquareDirty = new Uint8Array(plane * 64);
+        state.writeSquareDirty = new Uint8Array(plane * 64);
+        state.readChunkDirty = new Uint8Array(chunks * 64);
+        state.writeChunkDirty = new Uint8Array(chunks * 64);
+    }
+
+    for (const [minimum, maximum] of ranges.values()) {
+        for (let z = minimum; z <= maximum; z++) {
+            if (state.physicalLevels.has(z)) {
+                continue;
+            }
+
+            state.physicalLevels.add(z);
+            state.readSquareDirty.fill(1, z * plane, (z + 1) * plane);
+            state.writeSquareDirty.fill(1, z * plane, (z + 1) * plane);
+            state.readChunkDirty.fill(1, z * chunks, (z + 1) * chunks);
+            state.writeChunkDirty.fill(1, z * chunks, (z + 1) * chunks);
         }
     }
 }
@@ -315,7 +411,7 @@ function visibleRooms(cells, payloads) {
     const identifiers = new Set();
 
     for (const [index, payload] of payloads.entries()) {
-        if (payload?.[0] & 4) {
+        if (cells[index] && (payload?.[0] & 4)) {
             const room = BigInt(cells[index].room ?? -1);
 
             if (room !== -1n) {
@@ -470,10 +566,18 @@ export function createLightingNatives() {
 
         const index = z * state.width * state.height * 64 + (y - originY * 8) * state.width * 8 + x - originX * 8;
         const cells = state.publishedCells ?? state.cells;
-        const ranges = state.publishedRanges ?? state.ranges;
+        const ranges = state.readbackRanges ?? state.publishedRanges ?? state.ranges;
 
         // Bootstrap native readback exposes uninitialized words; keep the explicit publication guard.
         if (!cells || ranges.size === 0) {
+            return { state, index };
+        }
+
+        const allocatedRange = ranges.get(`${Math.floor(x / 8)},${Math.floor(y / 8)}`);
+
+        if (allocatedRange && z >= allocatedRange[0] && z <= allocatedRange[1]
+            && state.allocatedLevels?.has(`${Math.floor(x / 8)},${Math.floor(y / 8)},${z}`)
+            && state.published?.[index] !== null && state.published?.[index] !== undefined) {
             return { state, index };
         }
 
@@ -613,6 +717,7 @@ export function createLightingNatives() {
                 playerPosition: state.deferred?.playerPosition, worldPlayer: state.deferred?.worldPlayer,
                 perception: state.deferred?.perception, sky: state.deferred?.sky,
                 sourceUpdate: state.deferred?.sourceUpdate, frameCount: state.deferred?.frameCount ?? 0,
+                levelSubmissions: new Set(state.deferred?.levelSubmissions), allocations: new Set(state.deferred?.allocations),
             };
         },
         /**
@@ -697,7 +802,7 @@ export function createLightingNatives() {
          */
         chunkBeginUpdate(x, y, minimum, maximum) {
             const update = requireUpdate();
-            const { state, chunks, ranges } = update;
+            const { state, cells, chunks, ranges, allocations } = update;
 
             integer(x, state.x, state.x + state.width - 1, 'chunk X');
             integer(y, state.y, state.y + state.height - 1, 'chunk Y');
@@ -712,7 +817,25 @@ export function createLightingNatives() {
             const previous = ranges.get(`${x},${y}`);
 
             if (previous && (previous[0] !== minimum || previous[1] !== maximum)) {
-                unsupported('changed chunk level extent');
+                const plane = state.width * state.height * 64;
+                const row = state.width * 8;
+                const first = (y - state.y) * 8 * row + (x - state.x) * 8;
+
+                for (let z = minimum; z <= maximum; z++) {
+                    if (z < previous[0] || z > previous[1]) {
+                        allocations.add(`${x},${y},${z}`);
+                    }
+                }
+
+                for (let z = previous[0]; z <= previous[1]; z++) {
+                    if (z >= minimum && z <= maximum) {
+                        continue;
+                    }
+
+                    for (let index = 0; index < 64; index++) {
+                        cells[z * plane + first + Math.floor(index / 8) * row + index % 8] = null;
+                    }
+                }
             }
 
             chunk = { x, y, minimum, maximum };
@@ -730,6 +853,7 @@ export function createLightingNatives() {
             }
 
             level = z;
+            requireUpdate().levelSubmissions.add(`${chunk.x},${chunk.y},${z}`);
         },
         /**
          * Opens one actual chunk-local square.
@@ -1140,7 +1264,7 @@ export function createLightingNatives() {
          */
         stateEndUpdate() {
             const update = requireUpdate();
-            const { state, baseState, cells, chunks, player, ranges, perception, sky, sourceUpdate, frameCount } = update;
+            const { state, baseState, cells, chunks, player, ranges, perception, sky, sourceUpdate, frameCount, levelSubmissions, allocations } = update;
             const playerPosition = update.playerPosition ?? state.pending?.player;
             const cleared = update.cleared ?? state.pending?.cleared;
             const worldPlayer = update.worldPlayer ?? state.previousPlayer;
@@ -1162,6 +1286,7 @@ export function createLightingNatives() {
                 state.deferred = {
                     cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
                     perception, sky, sourceUpdate: pendingSourceUpdate, frameCount,
+                    levelSubmissions, allocations,
                     x: state.x, y: state.y, movementCount: state.movements?.length ?? 0,
                     movementRevisions: state.movements?.map((command) => command.revision) ?? [],
                 };
@@ -1205,7 +1330,7 @@ export function createLightingNatives() {
             const pending = {
                 width: state.width * 8, height: state.height * 8, minimum: 0, maximum: 63, cells,
                 player: playerPosition, seen: (state.history ?? state.computed)?.map((payload) => Boolean(payload?.[0] & 1)),
-                lights: sceneLights, cleared, submitted: new Set(chunks),
+                lights: sceneLights, cleared, submitted: new Set(levelSubmissions),
                 roomLights: state.playerInitialized
                     ? [...roomLights.values()].map((light) => ({
                             ...light, x: light.x - state.x * 8, y: light.y - state.y * 8,
@@ -1217,6 +1342,7 @@ export function createLightingNatives() {
                 perception: perception ?? state.pending?.perception,
                 sky: sky ?? state.pending?.sky,
                 sourceUpdate: pendingSourceUpdate, frameCount,
+                allocations,
                 previous: state.history ?? state.computed,
                 moved: Boolean(state.moved),
             };
@@ -1231,6 +1357,31 @@ export function createLightingNatives() {
             const calculated = calculateRetainedLighting(pending);
 
             restoreCoordinates(state, calculated);
+            allocateDirtyLevels(state, ranges);
+
+            // Native allocates physical readback on main independently from nullable geometry.
+            state.readbackRanges = new Map((state.workerReady ? state.computedRanges : state.publishedRanges) ?? state.ranges);
+
+            for (const [key, range] of ranges) {
+                const old = state.readbackRanges.get(key);
+
+                if (old) {
+                    state.readbackRanges.set(key, [Math.min(old[0], range[0]), Math.max(old[1], range[1])]);
+                }
+            }
+
+            if (state.published && allocations.size > 0) {
+                state.published = [...state.published];
+                state.allocatedLevels = new Set([...(state.allocatedLevels ?? []), ...allocations]);
+                allocateLevelReadback(state, allocations, state.published,
+                    { x: state.publishedX ?? state.x, y: state.publishedY ?? state.y }, true);
+
+                if (state.workerReady) {
+                    state.computed = [...state.computed];
+                    allocateLevelReadback(state, allocations, state.computed,
+                        { x: state.computedX ?? state.x, y: state.computedY ?? state.y }, false);
+                }
+            }
 
             // The native write queue accumulates while its separate worker buffer is pending.
             if (state.pending && !state.workerReady) {
@@ -1238,14 +1389,20 @@ export function createLightingNatives() {
                     cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
                     playerPosition, worldPlayer, perception: pending.perception, sky: pending.sky,
                     sourceUpdate: pending.sourceUpdate, frameCount,
+                    levelSubmissions, allocations,
                     x: state.x, y: state.y, movementCount: state.movements?.length ?? 0,
                     movementRevisions: state.movements?.map((command) => command.revision) ?? [],
                 };
 
                 if (baseState && baseState !== state) {
                     baseState.deferred = state.deferred;
+                    baseState.published = state.published;
+                    baseState.computed = state.computed;
+                    baseState.allocatedLevels = state.allocatedLevels;
+                    baseState.readbackRanges = state.readbackRanges;
                 }
 
+                retainReadbackOwners(baseState ?? state, ranges);
                 active = null;
 
                 return;
@@ -1260,6 +1417,8 @@ export function createLightingNatives() {
                 state.publishedY = state.computedY ?? baseState?.y ?? state.y;
                 state.publishedCells = state.computedCells ?? baseState?.cells ?? state.cells;
                 state.publishedRanges = state.computedRanges ?? baseState?.ranges ?? state.ranges;
+                [state.readSquareDirty, state.writeSquareDirty] = [state.writeSquareDirty, state.readSquareDirty];
+                [state.readChunkDirty, state.writeChunkDirty] = [state.writeChunkDirty, state.readChunkDirty];
                 state.counter++;
                 state.squareDirty = new Set(state.computedSquareDirty);
                 state.chunkDirty = new Set(state.computedChunkDirty);
@@ -1277,6 +1436,7 @@ export function createLightingNatives() {
             delete state.moved;
             state.deferred = null;
             state.workerReady = false;
+            retainReadbackOwners(state, ranges);
             states.set(player, state);
             active = null;
         },
@@ -1327,6 +1487,17 @@ export function createLightingNatives() {
                         }
                     }
 
+                    // Physical per-position readback/seen history outlives retired geometry levels.
+                    state.computed = state.computed.map((payload, index) => {
+                        /* Calculated geometry owns changed/unread bytes in the existing dirty sets.
+                         * Physical initial defaults remain necessary for unprocessed, absent positions. */
+                        if (payload !== null) {
+                            state.writeSquareDirty[index] = 0;
+                        }
+
+                        return payload ?? previous?.[index] ?? null;
+                    });
+                    allocateLevelReadback(state, state.pending.allocations, state.computed, state, false);
                     state.pendingResult = state.computed;
                     state.registeredLights = state.pending.lightRegistrations;
                     state.playerInitialized = true;
@@ -1409,9 +1580,14 @@ export function createLightingNatives() {
             }
 
             const key = `${x},${y},${z}`;
-            const dirty = state.chunkDirty.has(key);
+            const physical = z * state.width * state.height + (y - originY) * state.width + x - originX;
+            const dirty = state.chunkDirty.has(key) || Boolean(state.readChunkDirty?.[physical]);
 
             state.chunkDirty.delete(key);
+
+            if (state.readChunkDirty) {
+                state.readChunkDirty[physical] = 0;
+            }
 
             return dirty;
         },
@@ -1427,7 +1603,8 @@ export function createLightingNatives() {
         getSquareDirty(player, x, y, z) {
             const resolved = lookup(player, x, y, z);
 
-            return resolved !== null && resolved.state.squareDirty.has(resolved.index);
+            return resolved !== null && (resolved.state.squareDirty.has(resolved.index)
+                || Boolean(resolved.state.readSquareDirty?.[resolved.index]));
         },
         /**
          * Copies actual packed native output and consumes only its square dirty bit.
@@ -1462,6 +1639,10 @@ export function createLightingNatives() {
 
             output.set(payload.slice(0, 14 + payload[13] * 6));
             resolved.state.squareDirty.delete(resolved.index);
+
+            if (resolved.state.readSquareDirty) {
+                resolved.state.readSquareDirty[resolved.index] = 0;
+            }
 
             return true;
         },
