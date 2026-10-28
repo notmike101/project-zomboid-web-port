@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
-import { NativeMT } from './population-kernel.js';
+import { NativeMT, collision } from './population-kernel.js';
 import { createPopulationNatives } from './population-natives.js';
-import { decodeCell } from './population-save-codec.js';
+import { decodeCell, encodeCollision } from './population-save-codec.js';
+
+// Original DLL source priority: only exact 32 is unset; zero and flags containing bit 32 stay opaque.
+const sourceFlags = [32, 33, 34, 63, 255, 0, 1, 8];
+const sourceChunks = Array.from({ length: 1_024 }, () => Uint8Array.from({ length: 64 }, (_, i) => sourceFlags[i % 8]));
+const lowerChunks = Array.from({ length: 1_024 }, () => new Uint8Array(64).fill(8));
+const layered = collision(Buffer.from(encodeCollision(lowerChunks)), collision(Buffer.from(encodeCollision(sourceChunks))));
+
+assert.deepEqual([...layered[1].slice(0, 8)], [8, 33, 34, 63, 255, 0, 1, 8]);
+assert.deepEqual([...collision(Buffer.from(encodeCollision(sourceChunks)))[1].slice(0, 8)], sourceFlags);
 
 const originalNow = Date.now;
 let clock = 1_000_000;

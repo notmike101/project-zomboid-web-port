@@ -321,17 +321,31 @@ export function createPopulationNatives() {
         if (!data.collision) {
             const saved = state.pop ? String(await (await helper(lib)).readOwned(`chunkdata/chunkdata_${x}_${y}.bin`)) : '';
 
-            if (!saved && data.filenames.length > 1) {
-                unsupported('ordered collision layers decode not yet qualified');
-            }
-
             if (saved) {
                 data.collision = collision(binary(decoder(saved)));
             } else if (data.filenames.length) {
                 const transport = await helper(lib);
-                const bytes = await transport.fileHex(data.filenames[0]);
 
-                data.collision = collision(binary(decoder(bytes)));
+                const chunks = Array.from({ length: 1_024 }, () => new Uint8Array(64).fill(32));
+
+                for (const filename of data.filenames) {
+                    // eslint-disable-next-line no-await-in-loop -- Original source priority determines the next missing squares.
+                    const bytes = await transport.fileHex(filename);
+
+                    if (bytes !== null) {
+                        collision(binary(decoder(bytes)), chunks);
+                    }
+
+                    if (!chunks.some((chunk) => chunk.includes(32))) {
+                        break;
+                    }
+                }
+
+                if (chunks.every((chunk) => chunk.every((flag) => flag === 32))) {
+                    unsupported('collision sources have no resolved squares');
+                }
+
+                data.collision = chunks;
             } else {
                 data.collision = Array.from({ length: 1_024 }, () => new Uint8Array(64));
             }

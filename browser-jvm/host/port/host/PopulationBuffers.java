@@ -5,6 +5,7 @@ import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
@@ -71,9 +72,13 @@ public final class PopulationBuffers {
         }
     }
 
-    /** Reads an actual source or owned file without altering it. */
+    /** Reads an actual source without altering it; only a missing file returns null. */
     public static String fileHex(String path) throws IOException {
-        return hex(Files.readAllBytes(Path.of(path)));
+        try {
+            return hex(Files.readAllBytes(Path.of(path)));
+        } catch (NoSuchFileException absent) {
+            return null;
+        }
     }
 
     /** Copies original Java byte-array contents across the JNI host boundary. */

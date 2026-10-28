@@ -362,9 +362,10 @@ class NativeMT {
  * Decodes the original v1 collision tags into 1024 square-flag chunks.
  *
  * @param {Uint8Array} bytes - Original wire or transport bytes.
+ * @param {Array<Uint8Array>|null} [previous] - Higher-priority source flags, with exact 32 indicating unset squares.
  * @returns {Array<Uint8Array>} Decoded original square flags.
  */
-function collision(bytes) {
+function collision(bytes, previous = null) {
     const version = bytes.readUInt16BE(0);
 
     if (version >= 2) {
@@ -393,7 +394,17 @@ function collision(bytes) {
         throw new Error('collision EOF mismatch');
     }
 
-    return chunks;
+    if (previous) {
+        for (const [i, chunk] of chunks.entries()) {
+            for (let j = 0; j < 64; j++) {
+                if (previous[i][j] === 32) {
+                    previous[i][j] = chunk[j];
+                }
+            }
+        }
+    }
+
+    return previous ?? chunks;
 }
 
 /**
