@@ -386,9 +386,12 @@ export function createLightingNatives() {
         }
 
         const curtain = type === 'squareAddCurtain';
+        const extended = type === 'squareAddThumpable' || type === 'squareAddWindow';
 
         if ((curtain && (![4, 8].includes(args[0]) || args[1] !== true))
-            || (!curtain && (typeof args[0] !== 'boolean' || args[1] !== false || args[2] !== false))) {
+            || (extended && (args.length !== (type === 'squareAddThumpable' ? 4 : 3)
+                || args.some((value) => typeof value !== 'boolean')))
+            || (!curtain && !extended && (typeof args[0] !== 'boolean' || args[1] !== false || args[2] !== false))) {
             unsupported(`${type} state`);
         }
 
@@ -807,7 +810,18 @@ export function createLightingNatives() {
             stageObject('squareAddDoor', [north, open, transparent]);
         },
         /**
-         * Stages an original intact unbarricaded window.
+         * Stages the original thumpable edge and its literal native flags.
+         *
+         * @param {boolean} north - Original north-facing flag.
+         * @param {boolean} open - Original open flag.
+         * @param {boolean} door - Original door classification.
+         * @param {boolean} transparent - Original doorTrans/open-door flag.
+         */
+        squareAddThumpable(north, open, door, transparent) {
+            stageObject('squareAddThumpable', [north, open, door, transparent]);
+        },
+        /**
+         * Stages the original window edge, including the thumpable companion record.
          *
          * @param {boolean} north - Original north-facing flag.
          * @param {boolean} open - Original open flag.
@@ -1404,7 +1418,6 @@ export function createLightingNatives() {
     };
 
     for (const name of [
-        'squareAddThumpable',
         'addTempLight', 'updateTorch', 'removeTorch',
         'getVertLight', 'getLightInfo', 'getDarkMulti', 'getTargetDarkMulti', 'getSeen', 'getCanSee', 'getCouldSee',
     ]) {

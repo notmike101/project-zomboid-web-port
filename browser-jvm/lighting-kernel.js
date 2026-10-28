@@ -64,11 +64,17 @@ function validateWorldSquare(cell) {
 
         const { type, args } = object;
 
+        // eslint-disable-next-line unicorn/prefer-switch -- Keep the existing bounded object admission branches together.
         if (type === 'squareAddCurtain') {
             if (!Array.isArray(args) || args.length !== 2 || ![4, 8].includes(args[0]) || args[1] !== true) {
                 unsupported('curtain state');
             }
-        } else if (type === 'squareAddDoor' || type === 'squareAddWindow') {
+        } else if (type === 'squareAddThumpable' || type === 'squareAddWindow') {
+            if (!Array.isArray(args) || args.length !== (type === 'squareAddThumpable' ? 4 : 3)
+                || args.some((value) => typeof value !== 'boolean')) {
+                unsupported('thumpable or window state');
+            }
+        } else if (type === 'squareAddDoor') {
             if (!Array.isArray(args) || args.length !== 3 || typeof args[0] !== 'boolean'
                 || args[1] !== false || args[2] !== false) {
                 unsupported('door or window state');
@@ -708,6 +714,8 @@ function clearVision(scene, index, dx, dy, dz) {
  * Classifies an admitted object's crossing edge using native0x3310/0x60e0.
  * Open curtains and intact unbarricaded windows are transparent. Closed doors
  * produce blocking class1 when the ray crosses their north or west plane.
+ * Native object type2 thumpables rotate that plane when open; the caller ignores
+ * their non-door crossings. Type3 windows keep their plane and block only when opaque.
  *
  * @param {object} scene - Validated geometry.
  * @param {number} owner - Object-owning square index.
@@ -717,11 +725,18 @@ function clearVision(scene, index, dx, dy, dz) {
  * @returns {boolean} Whether this object blocks the original ray.
  */
 function objectBlocks(scene, owner, from, to, object) {
-    if (object.type !== 'squareAddDoor') {
+    const { type, args } = object;
+
+    if (type !== 'squareAddDoor' && type !== 'squareAddThumpable' && type !== 'squareAddWindow') {
         return false;
     }
 
-    const axis = object.args[0] ? 1 : 0;
+    if ((type === 'squareAddThumpable' && (!args[2] || args[3])) || (type === 'squareAddWindow' && !args[2])) {
+        return false;
+    }
+
+    const north = type === 'squareAddThumpable' && args[1] ? !args[0] : args[0];
+    const axis = north ? 1 : 0;
     const edge = coordinates(scene, to)[axis] - coordinates(scene, from)[axis];
 
     return owner === from ? edge < 0 : edge > 0;

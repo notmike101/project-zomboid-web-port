@@ -137,3 +137,22 @@ Duplicate IDs throw IllegalStateException("duplicate room-light id"); unknown to
 Native JNI scrollLeft/Right/Up/Down at 0x1800151b0/15250/152f0/15110 enqueue command types 0/1/2/3. Worker 0x18000c400 applies them to its chunk-pointer grid: 0x2ad0/2bc0/2cd0/29e0 discard the outgoing strip, retain overlapping chunk objects, change the chunk origin and mark the map dirty. Teleport 0x180017280 queues/coalesces type7; worker 0x3230 clears chunk ownership and sets its destination. Readback origin moves only at a later main publication. chunkLightingDone 0x135c5 uses published origin fields plus the ready-byte grid; accepting merely the projected bounds would wrongly skip incoming geometry. Map-dirty processing at 0xa109..a11a calls 0xe9f0 to set indexed dirty bytes.
 
 The focused data-only fixture uses a 3-by-3 chunk region, a colored native point source and a directional cone to distinguish retained seen history and world source coordinates. Seven cases qualify 56 readback phases/21,805 packed words and 63 main readiness phases/1,575 booleans. The overwritten-teleport fixture first projects A and submits geometry while a worker is busy, then changes the same queued command to B: geometry submitted at A keeps world coordinates and only its intersection survives at B. Command revision snapshots preserve this behavior without treating queue length as command identity. Forty-four native absent-chunk stale-word reads are excluded; no absent square data is synthesized. Resize remains rejected.
+
+
+## Thumpable caller classification and paired windows (2026-10-28)
+
+Original updateChunk BCI1219..1418 emits squareAddThumpable(north,open,isDoor,spriteDoorTrans || (isDoor && open)) and then squareAddWindow(north,open,barricadeBlocksVision). Native constructors 0x15620/15700/157f0 store object types1/2/3 for door/thumpable/window respectively. The raw type2 crossing predicate at0x33e1 ignores transparent crossings and rotates its plane when open, but its result alone is insufficient: the consuming LOS path at0x6450..6471 ignores type2 non-door crossings. Type3 window crossings use their original north/west plane (not an open-door rotation); opaque companions block independently. The adapter preserves both records and their order, and keeps original Java transmission tuples unchanged.
+
+The data-only native fixture and public-adapter replay use both orientations for each row below, giving14 cases/43,904 exact49-word payload words. Thumpable tuple order is north/open/isDoor/transparent; the window tuple is north/open/opaque. Each square emits the thumpable record first and its window second.
+
+| Case | open | isDoor | transparent | companion opaque |
+| --- | --- | --- | --- | --- |
+| Closed ordinary thumpable | false | false | false | false |
+| Closed door thumpable | false | true | false | false |
+| Open original door | true | true | true | false |
+| Transparent ordinary thumpable | false | false | true | false |
+| Open ordinary thumpable | true | false | false | false |
+| Closed blocking-barricade companion | false | false | false | true |
+| Open-door blocking-barricade companion | true | true | true | true |
+
+This exercises the original caller's forced-open-door transparency and all companion-window open/opaque combinations, rather than every independent four-boolean permutation. The colored source is real; endpoint tuples are the previously supported unfiltered tuples, so this batch makes no new colored-transmission qualification claim. Prior static43,904-word, room81,536-word and ordered-scroll21,805-word component comparisons still match.
