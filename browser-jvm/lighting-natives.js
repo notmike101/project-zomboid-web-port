@@ -238,6 +238,7 @@ export function createLightingNatives() {
     let level = null;
     const states = new Map();
     const lights = new Map();
+    const roomLights = new Map();
     let lastUpdate = null;
 
     /**
@@ -377,7 +378,8 @@ export function createLightingNatives() {
             if (!state) {
                 state = {
                     x, y, width, height, counter: 0, cells: null, published: null, computed: null,
-                    pending: null, deferred: null, workerReady: false, registeredLights: new Set(), previousPlayer: null, ranges: new Map(),
+                    pending: null, deferred: null, workerReady: false, playerInitialized: false,
+                    registeredLights: new Set(), previousPlayer: null, ranges: new Map(),
                     squareDirty: new Set(), computedSquareDirty: new Set(), chunkDirty: new Set(), computedChunkDirty: new Set(),
                     recycledChunkDirty: new Set(),
                 };
@@ -772,6 +774,70 @@ export function createLightingNatives() {
             light.color = [red, green, blue];
         },
         /**
+         * Registers the original room rectangle and its full metadata identifiers.
+         *
+         * @param {number} id - Original room-light identifier.
+         * @param {bigint} buildingId - Original building identifier.
+         * @param {bigint} roomId - Original room identifier.
+         * @param {number} x - Minimum world square X.
+         * @param {number} y - Minimum world square Y.
+         * @param {number} z - Original native level.
+         * @param {number} width - Rectangle width.
+         * @param {number} height - Rectangle height.
+         * @param {boolean} on - Original active flag.
+         */
+        addRoomLight(id, buildingId, roomId, x, y, z, width, height, on) {
+            integer(id, -2_147_483_648, 2_147_483_647, 'room-light identifier');
+            integer(x, -2_147_483_648, 2_147_483_647, 'room-light X');
+            integer(y, -2_147_483_648, 2_147_483_647, 'room-light Y');
+            integer(z, 0, 63, 'room-light level');
+            integer(width, 1, 2_147_483_647, 'room-light width');
+            integer(height, 1, 2_147_483_647, 'room-light height');
+
+            if ([buildingId, roomId].some((value) => typeof value !== 'bigint' || BigInt.asIntN(64, value) !== value)
+                || typeof on !== 'boolean') {
+                unsupported('room-light metadata or active flag');
+            }
+
+            if (roomLights.has(id)) {
+                throw new Error('duplicate room-light id');
+            }
+
+            roomLights.set(id, { id, buildingId, roomId, x, y, z, width, height, on });
+        },
+        /**
+         * Removes a room registration without changing its already queued main snapshot.
+         *
+         * @param {number} id - Original room-light identifier.
+         */
+        removeRoomLight(id) {
+            integer(id, -2_147_483_648, 2_147_483_647, 'room-light identifier');
+
+            if (!roomLights.delete(id)) {
+                throw new Error('unknown room-light id');
+            }
+        },
+        /**
+         * Sets the room flag copied by the next original main transaction.
+         *
+         * @param {number} id - Original room-light identifier.
+         * @param {boolean} on - Original active flag.
+         */
+        setRoomLightActive(id, on) {
+            integer(id, -2_147_483_648, 2_147_483_647, 'room-light identifier');
+            const light = roomLights.get(id);
+
+            if (typeof on !== 'boolean') {
+                unsupported('room-light active flag');
+            }
+
+            if (!light) {
+                throw new Error('unknown room-light id');
+            }
+
+            light.on = on;
+        },
+        /**
          * Publishes the previous worker buffer and queues the validated retained scene.
          */
         stateEndUpdate() {
@@ -789,7 +855,7 @@ export function createLightingNatives() {
                     openChunk: Boolean(chunk), openSquare: Boolean(square), level,
                     undefinedCells: cells.includes(undefined), playerPresent: Boolean(playerPosition),
                     clearedPresent: cleared !== undefined, sourceUpdatePresent: pendingSourceUpdate !== undefined,
-                    ranges: ranges.size, width: state.width, height: state.height, lights: lights.size,
+                    ranges: ranges.size, width: state.width, height: state.height, lights: lights.size, roomLights: roomLights.size,
                 })}`);
             }
 
@@ -826,6 +892,11 @@ export function createLightingNatives() {
                 width: state.width * 8, height: state.height * 8, minimum: 0, maximum: 63, cells,
                 player: playerPosition, seen: state.computed?.map((payload) => Boolean(payload?.[0] & 1)),
                 lights: sceneLights, cleared, submitted: new Set(chunks),
+                roomLights: state.playerInitialized
+                    ? [...roomLights.values()].map((light) => ({
+                            ...light, x: light.x - state.x * 8, y: light.y - state.y * 8,
+                        }))
+                    : [],
                 lightReferences, lightRegistrations: new Set(lights.values()),
                 origin: [state.x * 8, state.y * 8, 0],
                 perception: perception ?? state.pending?.perception,
@@ -916,6 +987,7 @@ export function createLightingNatives() {
 
                     state.pendingResult = state.computed;
                     state.registeredLights = state.pending.lightRegistrations;
+                    state.playerInitialized = true;
                     state.computedRooms = visibleRooms(state.pending.cells, state.computed);
                     const changed = changedSquares(state, previous, state.computed, state.pending.submitted);
 
@@ -1062,6 +1134,7 @@ export function createLightingNatives() {
         destroy() {
             states.clear();
             lights.clear();
+            roomLights.clear();
             active = null;
             chunk = null;
             square = null;
@@ -1073,8 +1146,7 @@ export function createLightingNatives() {
     for (const name of [
         'scrollLeft', 'scrollRight', 'scrollUp', 'scrollDown', 'teleport',
         'squareAddThumpable',
-        'addTempLight', 'addRoomLight', 'removeRoomLight',
-        'setRoomLightActive', 'updateTorch', 'removeTorch',
+        'addTempLight', 'updateTorch', 'removeTorch',
         'getVertLight', 'getLightInfo', 'getDarkMulti', 'getTargetDarkMulti', 'getSeen', 'getCanSee', 'getCouldSee',
     ]) {
         /**

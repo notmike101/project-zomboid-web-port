@@ -229,6 +229,41 @@ function validate(scene) {
 
         identifiers.add(light.id);
     }
+
+    const { roomLights } = scene;
+
+    if (roomLights !== undefined && !Array.isArray(roomLights)) {
+        unsupported('room-light list');
+    }
+
+    const roomIdentifiers = new Set();
+
+    for (const room of roomLights ?? []) {
+        if (!room || typeof room !== 'object' || typeof room.on !== 'boolean') {
+            unsupported('room-light state');
+        }
+
+        for (const field of ['id', 'x', 'y', 'width', 'height']) {
+            integer(room[field], -2_147_483_648, 2_147_483_647, `room-light ${field}`);
+        }
+
+        integer(room.z, 0, 63, 'room-light level');
+
+        for (const field of ['buildingId', 'roomId']) {
+            const value = room[field];
+
+            if ((typeof value !== 'bigint' && !Number.isSafeInteger(value))
+                || BigInt(value) < -(1n << 63n) || BigInt(value) >= 1n << 63n) {
+                unsupported(`room-light ${field}`);
+            }
+        }
+
+        if (roomIdentifiers.has(room.id)) {
+            unsupported('duplicate room-light identifier');
+        }
+
+        roomIdentifiers.add(room.id);
+    }
 }
 
 /**
@@ -519,6 +554,7 @@ function relax(source, target, cost, transforms) {
         if (existing) {
             existing.distance = distance;
             existing.color = transforms ? transmit(record.color, transforms) : record.color;
+            existing.light = record.light;
         } else if (target.length < 5) {
             target.push({ ...record, distance, color: transforms ? transmit(record.color, transforms) : record.color });
         } else {
@@ -557,21 +593,50 @@ function propagate(scene, order) {
     const records = scene.cells.map(() => []);
     const seeds = [];
 
+    /* Native0x1cf0 seeds every present square of the clipped room rectangle,
+     * retaining each square's coordinates as the source of the shared room ID. */
+    for (const room of scene.roomLights ?? []) {
+        if (!room.on) {
+            continue;
+        }
+
+        // eslint-disable-next-line unicorn/prefer-math-trunc -- Native adds signed32 rectangle edges.
+        const endX = (room.x + room.width) | 0;
+        // eslint-disable-next-line unicorn/prefer-math-trunc -- Native adds signed32 rectangle edges.
+        const endY = (room.y + room.height) | 0;
+
+        for (let y = Math.max(0, room.y); y < Math.min(scene.height, endY); y++) {
+            for (let x = Math.max(0, room.x); x < Math.min(scene.width, endX); x++) {
+                const index = squareIndex(scene, x, y, room.z);
+
+                if (index < 0) {
+                    continue;
+                }
+
+                const light = { id: room.id, x, y, z: room.z, radius: 7, room: true };
+
+                relax([{ light, distance: 0, color: [229, 216, 209] }], records[index], 0, null);
+            }
+        }
+    }
+
     for (const index of order) {
+        let staticSources = 0;
+
         for (const light of scene.lights) {
             if (squareIndex(scene, light.x, light.y, light.z) === index) {
-                if (records[index].length >= 5) {
+                if (++staticSources > 5) {
                     unsupported('more than five coincident source lights');
                 }
 
                 const color = light.color.map((value) => Math.trunc(Math.fround(Math.fround(value) * 255)));
 
-                records[index].push({ light, distance: 0, color });
-
-                if (!seeds.includes(index)) {
-                    seeds.push(index);
-                }
+                relax([{ light, distance: 0, color }], records[index], 0, null);
             }
+        }
+
+        if (records[index].some((record) => squareIndex(scene, record.light.x, record.light.y, record.light.z) === index)) {
+            seeds.push(index);
         }
     }
 
@@ -1057,7 +1122,7 @@ export function calculateLighting(scene) {
         for (const [recordIndex, record] of records[index].entries()) {
             const { light, color } = record;
 
-            payload.set([light.id, light.x, light.y, light.z, light.radius, pack(color)], 14 + recordIndex * 6);
+            payload.set([light.id, light.x, light.y, light.z, light.radius, pack(color) | (light.room ? 0x01_00_00_00 : 0)], 14 + recordIndex * 6);
         }
     }
 
