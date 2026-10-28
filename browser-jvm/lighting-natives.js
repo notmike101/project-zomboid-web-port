@@ -168,7 +168,7 @@ function calculateRetainedLighting(scene) {
     }
 
     if (maximum < minimum) {
-        unsupported('empty geometry');
+        return Array.from({ length: scene.cells.length }, () => null);
     }
 
     const compact = calculateLighting({
@@ -311,6 +311,11 @@ export function createLightingNatives() {
         }
 
         const index = z * state.width * state.height * 64 + (y - state.y * 8) * state.width * 8 + x - state.x * 8;
+
+        // Bootstrap native readback exposes uninitialized words; keep the explicit publication guard.
+        if (!state.cells || state.ranges.size === 0) {
+            return { state, index };
+        }
 
         if (state.cells[index] === null) {
             const range = state.ranges.get(`${Math.floor(x / 8)},${Math.floor(y / 8)}`);
@@ -741,9 +746,26 @@ export function createLightingNatives() {
             const pendingSourceUpdate = sourceUpdate ?? state.pending?.sourceUpdate;
 
             if (chunk || square || level !== null || cells.includes(undefined)
-                || !playerPosition || cleared === undefined || pendingSourceUpdate === undefined
-                || ranges.size === 0 || ranges.size > 9) {
-                unsupported('incomplete region update');
+                || cleared === undefined || pendingSourceUpdate === undefined
+                || ranges.size > state.width * state.height) {
+                unsupported(`incomplete region update: ${JSON.stringify({
+                    openChunk: Boolean(chunk), openSquare: Boolean(square), level,
+                    undefinedCells: cells.includes(undefined), playerPresent: Boolean(playerPosition),
+                    clearedPresent: cleared !== undefined, sourceUpdatePresent: pendingSourceUpdate !== undefined,
+                    ranges: ranges.size, width: state.width, height: state.height, lights: lights.size,
+                })}`);
+            }
+
+            if (!playerPosition) {
+                // Original loading submits geometry and frame settings before creating its player.
+                state.deferred = {
+                    cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
+                    perception, sky, sourceUpdate: pendingSourceUpdate,
+                };
+                states.set(player, state);
+                active = null;
+
+                return;
             }
 
             for (const light of lights.values()) {
@@ -753,7 +775,7 @@ export function createLightingNatives() {
                 }
             }
 
-            if (!cleared && state.cells && visionChanged(cells, state.cells)) {
+            if (!cleared && state.cells?.some((cell) => cell !== null) && visionChanged(cells, state.cells)) {
                 unsupported('changed vision geometry without LOS invalidation');
             }
 
@@ -777,7 +799,7 @@ export function createLightingNatives() {
             const [playerX, playerY, playerZ] = playerPosition;
             const playerIndex = playerZ * pending.width * pending.height + Math.floor(playerY) * pending.width + Math.floor(playerX);
 
-            if (cells[playerIndex] === null) {
+            if (cells[playerIndex] === null && cells.some((cell) => cell !== null)) {
                 unsupported('player on absent square');
             }
 
