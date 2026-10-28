@@ -136,7 +136,15 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
             return { url, entry: bankCatalog.get(decodeURIComponent(new URL(url).pathname).toLowerCase()) };
         };
 
+        const bankBudget = bankCatalog
+            ? [...bankCatalog.values()].filter((entry) => /\.bank$/iu.test(entry.path))
+                    .reduce((sum, entry) => sum + entry.bytes, 0)
+            : 0;
         const audio = createFmodNatives(FMOD, {
+            bankBudget,
+            canonicalPath(name) {
+                return decodeURIComponent(new URL(bankURL(name)).pathname);
+            },
             sizeSync(name) {
                 return knownAudio(name).entry?.bytes ?? null;
             },

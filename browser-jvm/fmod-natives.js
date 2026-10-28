@@ -89,11 +89,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
     let sdkMarkerFallthroughs = 0;
     const callbackEvents = [];
     const lastCallbackFailures = [];
-    const publicFiles = is203
-        ? createFmod20309Files(FMOD, files, () => disposed, (error) => {
-                ioFailure ??= error;
-            })
-        : null;
+    const publicFiles = is203 ? createFmod20309Files(FMOD, files) : null;
 
     if (publicFiles) {
         FMOD = createFmod20309Compat(FMOD, publicFiles);
@@ -408,7 +404,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
         },
         async FMOD_Studio_LoadBankFile(_lib, name) {
             const path = String(name);
-            // Deferred sample opens use the system-owned callback table, including after a failed bank load.
+            // Version-selected backing is retained VFS data on 2.03 and real file callbacks on 2.04.
             const bank = await requireSystem().loadBankFile(path, FMOD.STUDIO_LOAD_BANK_NORMAL);
             const result = FMOD.getLastError();
 
@@ -1100,7 +1096,6 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
                 }
 
                 fileOwners.clear();
-                publicFiles?.clear();
             }
 
             system = undefined;

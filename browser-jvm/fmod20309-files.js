@@ -1,170 +1,135 @@
 /* eslint-disable jsdoc/require-jsdoc -- Internal public-SDK boundary helpers are owned by the FMOD runtime. */
-// Public synchronous custom-file callbacks required by the supplied HTML5 2.03 SDK.
-export function createFmod20309Files(publicSDK, files, isDisposed, onFailure) {
+// Owns adopted encoded VFS buffers; bank backings live until successful SDK system release.
+export function createFmod20309Files(publicSDK, files) {
     let rangeBytes = 0;
     let rangeReads = 0;
     let maxRangeBytes = 0;
-    let openFiles = 0;
-    let deliveredBytes = 0;
-    let cacheBytes = 0;
-    let peakCacheBytes = 0;
-    const fileOwners = new Set();
-    const cache = new Map();
-    const callbackOwners = new Map();
-    const callbackInfos = [];
-    let nextFileHandle = 1;
-    const clearFileCache = () => {
-        cache.clear();
-        cacheBytes = 0;
-    };
+    const bankBackings = new Map();
+    let bankBytes = 0;
+    let pendingBankBytes = 0;
+    let peakBankBytes = 0;
+    let nextBank = 1;
+    const bankBudget = files.bankBudget;
+    const keyFor = (path) => files.canonicalPath
+        ? files.canonicalPath(path).toLowerCase()
+        : new URL(String(path).replace(/^\/app(?=\/media\/)/u, ''), 'https://fmod-owned.invalid/').pathname.toLowerCase();
 
-    const callbacks = {
-        open(name, size, handle, userdata) {
+    function readSource(path, length) {
+        const data = new Uint8Array(length);
+
+        for (let start = 0; start < length; start += 65_536) {
+            const count = Math.min(65_536, length - start);
+            const bytes = files.readSync(path, start, count);
+
+            if (!(bytes instanceof Uint8Array) || bytes.byteLength !== count) {
+                throw new Error('Encoded audio source range extent mismatch');
+            }
+
+            data.set(bytes, start);
+            rangeReads++;
+            rangeBytes += count;
+            maxRangeBytes = Math.max(maxRangeBytes, count);
+        }
+
+        return data;
+    }
+
+    async function readBankSource(path, length) {
+        const data = new Uint8Array(length);
+        let next = 0;
+        let failed = false;
+        let failure;
+        const worker = async () => {
             try {
-                if (isDisposed()) {
-                    return publicSDK.ERR_INVALID_HANDLE;
-                }
+                while (next < length && !failed) {
+                    const start = next;
+                    const count = Math.min(65_536, length - start);
 
-                const path = String(userdata ?? name);
-                const bytes = files.sizeSync(path);
+                    next += count;
+                    // eslint-disable-next-line no-await-in-loop -- Four workers bound the pending source reads.
+                    const bytes = files.read ? await files.read(path, start, count) : files.readSync(path, start, count);
 
-                if (bytes === null) {
-                    return publicSDK.ERR_FILE_NOTFOUND;
-                }
-
-                if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > 0xFF_FF_FF_FF) {
-                    throw new Error('Invalid actual FMOD file size');
-                }
-
-                if (!Number.isSafeInteger(nextFileHandle) || nextFileHandle > 0x7F_FF_FF_FF) {
-                    throw new Error('FMOD file owner identity exhausted');
-                }
-
-                const owner = { path, position: 0, bytes };
-                const id = nextFileHandle++;
-
-                callbackOwners.set(id, owner);
-                fileOwners.add(owner);
-                openFiles++;
-                size.val = bytes;
-                handle.val = id;
-
-                return publicSDK.OK;
-            } catch (error) {
-                onFailure(error);
-
-                return publicSDK.ERR_FILE_BAD;
-            }
-        },
-        close(handle) {
-            const owner = callbackOwners.get(handle);
-
-            if (!owner) {
-                return publicSDK.ERR_INVALID_HANDLE;
-            }
-
-            callbackOwners.delete(handle);
-            fileOwners.delete(owner);
-            openFiles--;
-            clearFileCache();
-
-            return publicSDK.OK;
-        },
-        seek(handle, position) {
-            const owner = callbackOwners.get(handle);
-
-            if (!owner) {
-                return publicSDK.ERR_INVALID_HANDLE;
-            }
-
-            if (!Number.isSafeInteger(position) || position < 0) {
-                return publicSDK.ERR_FILE_COULDNOTSEEK;
-            }
-
-            owner.position = position;
-
-            return publicSDK.OK;
-        },
-        read(handle, buffer, count, bytesread) {
-            try {
-                const owner = callbackOwners.get(handle);
-
-                if (!owner || isDisposed()) {
-                    return publicSDK.ERR_INVALID_HANDLE;
-                }
-
-                if (!Number.isSafeInteger(count) || count < 0) {
-                    throw new Error('Invalid SDK read count');
-                }
-
-                const requested = Math.min(count, Math.max(0, owner.bytes - owner.position));
-                let copied = 0;
-
-                while (copied < requested) {
-                    const position = owner.position + copied;
-                    const start = Math.floor(position / 65_536) * 65_536;
-                    const key = `${owner.path}:${start}`;
-                    let bytes = cache.get(key);
-
-                    if (bytes) {
-                        cache.delete(key);
-                    } else {
-                        if (cache.size === 4) {
-                            const oldest = cache.keys().next().value;
-
-                            cacheBytes -= cache.get(oldest).byteLength;
-                            cache.delete(oldest);
-                        }
-
-                        const size = Math.min(65_536, owner.bytes - start);
-
-                        bytes = files.readSync(owner.path, start, size);
-
-                        if (!(bytes instanceof Uint8Array) || bytes.byteLength !== size) {
-                            throw new Error('FMOD range provider extent mismatch');
-                        }
-
-                        rangeReads++;
-                        rangeBytes += size;
-                        maxRangeBytes = Math.max(maxRangeBytes, size);
-                        cacheBytes += size;
-                        peakCacheBytes = Math.max(peakCacheBytes, cacheBytes);
+                    if (!(bytes instanceof Uint8Array) || bytes.byteLength !== count) {
+                        throw new Error('Encoded bank range extent mismatch');
                     }
 
-                    cache.set(key, bytes);
-                    const offset = position - start;
-                    const length = Math.min(requested - copied, bytes.byteLength - offset);
-
-                    for (let index = 0; index < length; index++) {
-                        publicSDK.setValue(buffer + copied + index, bytes[offset + index], 'i8');
-                    }
-
-                    copied += length;
+                    data.set(bytes, start);
+                    rangeReads++;
+                    rangeBytes += count;
+                    maxRangeBytes = Math.max(maxRangeBytes, count);
+                }
+            } catch (error) {
+                if (!failed) {
+                    failure = error;
                 }
 
-                owner.position += copied;
-                deliveredBytes += copied;
-                bytesread.val = copied;
-
-                return copied === count ? publicSDK.OK : publicSDK.ERR_FILE_EOF;
-            } catch (error) {
-                onFailure(error);
-
-                return publicSDK.ERR_FILE_BAD;
+                failed = true;
             }
-        },
-    };
+        };
 
-    function bankInfo(path) {
-        const info = new publicSDK.STUDIO_BANK_INFO();
+        await Promise.allSettled(Array.from({ length: 4 }, worker));
 
-        Object.assign(info, {
-            opencallback: callbacks.open, closecallback: callbacks.close, readcallback: callbacks.read,
-            seekcallback: callbacks.seek, userdata: String(path),
-        });
-        callbackInfos.push(info);
+        if (failed) {
+            throw failure;
+        }
 
-        return info;
+        return data;
+    }
+
+    // The JNI owner serializes bank staging; no SDK call is active while source reads await.
+    async function stageBank(path) {
+        const key = keyFor(path);
+        const existing = bankBackings.get(key);
+
+        if (existing) {
+            return { path: existing.path };
+        }
+
+        const length = files.sizeSync(path);
+
+        // Actual missing VFS path is still passed to the SDK so its real error is preserved.
+        if (length === null) {
+            return { path: String(path) };
+        }
+
+        if (!Number.isSafeInteger(bankBudget) || bankBudget < 0 || !Number.isSafeInteger(length) || length <= 0
+            || bankBytes + pendingBankBytes + length > bankBudget) {
+            throw new Error('Bank staging exceeds the verified bank namespace byte budget');
+        }
+
+        const name = `fmod-bank-owned-${nextBank++}.bank`;
+
+        pendingBankBytes += length;
+        peakBankBytes = Math.max(peakBankBytes, bankBytes + pendingBankBytes);
+
+        let data;
+
+        try {
+            data = await readBankSource(path, length);
+        } finally {
+            pendingBankBytes -= length;
+        }
+
+        publicSDK.FS_createDataFile('/', name, data, true, false, true);
+        const backing = { path: `/${name}`, bytes: length, loaded: false };
+
+        bankBackings.set(key, backing);
+        bankBytes += length;
+        peakBankBytes = Math.max(peakBankBytes, bankBytes);
+
+        return {
+            path: backing.path,
+            commit() {
+                backing.loaded = true;
+            },
+            rollback() {
+                if (!backing.loaded && bankBackings.get(key) === backing) {
+                    publicSDK.FS_unlink(backing.path);
+                    bankBackings.delete(key);
+                    bankBytes -= backing.bytes;
+                }
+            },
+        };
     }
 
     // Largest supplied unbanked sound is 45,508,652 bytes; stage one file at a time, never the catalog.
@@ -192,21 +157,7 @@ export function createFmod20309Files(publicSDK, files, isDisposed, onFailure) {
         }
 
         const name = `fmod-owned-${nextStaged++}.${extension}`;
-        const data = new Uint8Array(length);
-
-        for (let start = 0; start < length; start += 65_536) {
-            const count = Math.min(65_536, length - start);
-            const bytes = files.readSync(path, start, count);
-
-            if (!(bytes instanceof Uint8Array) || bytes.byteLength !== count) {
-                throw new Error('Unbanked source range extent mismatch');
-            }
-
-            data.set(bytes, start);
-            rangeReads++;
-            rangeBytes += count;
-            maxRangeBytes = Math.max(maxRangeBytes, count);
-        }
+        const data = readSource(path, length);
 
         publicSDK.FS_createDataFile('/', name, data, true, false, true);
         const virtualPath = `/${name}`;
@@ -230,12 +181,13 @@ export function createFmod20309Files(publicSDK, files, isDisposed, onFailure) {
     }
 
     return {
-        bankInfo,
+        stageBank,
         stageSound,
-        clear: clearFileCache,
         dispose() {
-            if (callbackOwners.size || fileOwners.size || openFiles) {
-                throw new Error('FMOD SDK release left open custom file owners');
+            for (const [key, backing] of bankBackings) {
+                publicSDK.FS_unlink(backing.path);
+                bankBackings.delete(key);
+                bankBytes -= backing.bytes;
             }
 
             for (const [path, bytes] of staged) {
@@ -243,12 +195,7 @@ export function createFmod20309Files(publicSDK, files, isDisposed, onFailure) {
                 stagedBytes -= bytes;
                 staged.delete(path);
             }
-
-            callbackInfos.length = 0;
-            callbackOwners.clear();
-            fileOwners.clear();
-            clearFileCache();
         },
-        snapshot: () => ({ rangeBytes, rangeReads, maxRangeBytes, openFiles, deliveredBytes, cacheBytes, peakCacheBytes, stagedBytes, peakStagedBytes, stagedFiles: staged.size, stagingBudget }),
+        snapshot: () => ({ rangeBytes, rangeReads, maxRangeBytes, openFiles: 0, deliveredBytes: 0, cacheBytes: 0, peakCacheBytes: 0, stagedBytes, peakStagedBytes, stagedFiles: staged.size, stagingBudget, bankBytes, pendingBankBytes, peakBankBytes, bankBudget, bankBackings: bankBackings.size }),
     };
 }

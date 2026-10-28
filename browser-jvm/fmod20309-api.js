@@ -268,11 +268,23 @@ export function createFmod20309Compat(F, fileOwner) {
                     }
 
                     if (method === 'loadBankFile') {
-                        const info = fileOwner.bankInfo(args[0]);
+                        return (async () => {
+                            const source = await fileOwner.stageBank(args[0]);
+                            // An SDK exception leaves ownership unknown; retain its backing until system release.
+                            const result = object.loadBankFile(source.path, args[1], out);
 
-                        record(object.loadBankCustom(info, args[1], out));
+                            record(result);
 
-                        return lastResult === F.OK ? wrap(out.val, 'bank') : undefined;
+                            if (result !== F.OK) {
+                                source.rollback?.();
+
+                                return undefined;
+                            }
+
+                            source.commit?.();
+
+                            return wrap(out.val, 'bank');
+                        })();
                     }
 
                     // Trusted resume is outside the JNI queue; preserve that queue's result accumulator.
