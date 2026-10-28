@@ -76,16 +76,18 @@ export function startMemoryGuard({ pid, output, onPressure, onFailure }) {
                 switch (value.event) {
                     case 'sample': {
                         const sampledAt = Date.parse(value.observedAt);
+                        const receivedAt = Date.now();
 
-                        if (!Number.isFinite(sampledAt) || sampledAt > Date.now()) {
-                            throw new Error('Memory observer reported an invalid or future sample timestamp');
+                        // Allow small cross-runtime clock skew without extending sample freshness.
+                        if (!Number.isFinite(sampledAt) || sampledAt > receivedAt + 16) {
+                            throw new Error(`Memory observer reported an invalid or future sample timestamp: observed=${value.observedAt}, received=${receivedAt}, skew=${sampledAt - receivedAt}ms`);
                         }
 
-                        lastSeen = sampledAt;
+                        lastSeen = Math.min(sampledAt, receivedAt);
                         latest = value;
                         peakPrivateBytes = Math.max(peakPrivateBytes, value.privateBytes);
 
-                        if (Date.now() - sampledAt <= 15_000) {
+                        if (receivedAt - lastSeen <= 15_000) {
                             ready();
                         }
 
