@@ -211,15 +211,18 @@ public final class BrowserOriginalBoot {
         if (!(current instanceof zombie.gameStates.GameLoadingState)) return;
         try {
             Class<?> type = zombie.gameStates.GameLoadingState.class;
-            boolean done = loadingBoolean(type, "done");
-            boolean shown = loadingBoolean(type, "showedClickToSkip");
-            boolean error = loadingBoolean(type, "unexpectedError");
+            boolean done = loadingBoolean(type, null, "done");
+            boolean shown = loadingBoolean(type, null, "showedClickToSkip");
+            boolean error = loadingBoolean(type, null, "unexpectedError");
             Thread loader = zombie.gameStates.GameLoadingState.loader;
             Boolean busy = done ? zombie.iso.WorldStreamer.instance.isBusy() : null;
             Boolean animations = Boolean.FALSE.equals(busy)
                     ? zombie.core.skinnedmodel.ModelManager.instance.isLoadingAnimations() : null;
             boolean ready = done && shown && !error && Boolean.FALSE.equals(busy) && Boolean.FALSE.equals(animations);
             String json = "{\"loadingWitness\":true,\"state\":" + quote(state()) + ",\"done\":" + done
+                    + ",\"gameLoadingString\":" + quote(zombie.gameStates.GameLoadingState.gameLoadingString)
+                    + ",\"waitForAssetLoadingToFinish1\":" + loadingBoolean(type, current, "waitForAssetLoadingToFinish1")
+                    + ",\"waitForAssetLoadingToFinish2\":" + loadingBoolean(type, current, "waitForAssetLoadingToFinish2")
                     + ",\"showedClickToSkip\":" + shown + ",\"unexpectedError\":" + error
                     + ",\"worldStreamerBusy\":" + busy + ",\"animationsLoading\":" + animations
                     + ",\"readyForPhysicalClick\":" + ready + ",\"loaderPresent\":" + (loader != null)
@@ -236,12 +239,12 @@ public final class BrowserOriginalBoot {
         } catch (ReflectiveOperationException error) { throw new IllegalStateException("Original loading observation failed", error); }
     }
 
-    private static boolean loadingBoolean(Class<?> type, String name) throws ReflectiveOperationException {
+    private static boolean loadingBoolean(Class<?> type, Object receiver, String name) throws ReflectiveOperationException {
         var field = type.getDeclaredField(name);
-        if (field.getType() != boolean.class || !java.lang.reflect.Modifier.isStatic(field.getModifiers()))
+        if (field.getType() != boolean.class || java.lang.reflect.Modifier.isStatic(field.getModifiers()) != (receiver == null))
             throw new IllegalStateException("Unexpected original loading field: " + name);
         field.setAccessible(true);
-        return field.getBoolean(null);
+        return field.getBoolean(receiver);
     }
 
     static void finishJava() throws Exception {

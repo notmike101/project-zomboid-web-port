@@ -14,7 +14,7 @@ import { launchPersistentPlay, playPort } from './persistent-play.mjs';
 import { createOriginalBootRoutes, hash } from './profile-routes.mjs';
 
 const ownerStartedAt = Date.now();
-const outerDeadlineAt = ownerStartedAt + 2_640_000;
+const outerDeadlineAt = ownerStartedAt + 5_400_000;
 let ownerPhase = 'admission-preflight';
 let browserServer;
 let rejectHostFailure;
