@@ -76,35 +76,12 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
 
         const url = URL.createObjectURL(new Blob([script], { type: 'text/javascript' }));
         let FMOD;
-        let sdkWarningRecords;
 
         try {
             const { default: createFMOD } = await import(url);
 
-            sdkWarningRecords = new Map([
-                ['[WRN] FMOD_OS_CriticalSection_Enter            : cannot enter NULL critical section\n', { count: 0, firstObservedAt: null, lastObservedAt: null }],
-                ['[WRN] FMOD_OS_CriticalSection_Leave            : cannot leave NULL critical section\n', { count: 0, firstObservedAt: null, lastObservedAt: null }],
-            ]);
-            const sdkPrint = (...messages) => {
-                const record = messages.length === 1 && sdkWarningRecords.get(messages[0]);
-
-                if (record) {
-                    record.count += 1;
-                    record.lastObservedAt = Date.now();
-                    record.firstObservedAt ??= record.lastObservedAt;
-
-                    if (record.count > 1) {
-                        return;
-                    }
-                }
-
-                // eslint-disable-next-line no-console -- Preserve the SDK default print channel for all forwarded output.
-                console.log(...messages);
-            };
-
             const options = {
                 wasmBinary: wasm,
-                print: sdkPrint,
                 INITIAL_MEMORY: 64 * 1_024 * 1_024,
                 locateFile(name) {
                     if (name !== 'fmodstudioL.wasm') {
@@ -275,7 +252,6 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
 
         audio.snapshot = () => ({
             ...snapshot(),
-            sdkWarningAggregates: [...sdkWarningRecords].map(([message, record]) => ({ message, ...record })),
             ...(is203
                 ? {
                         audioContexts: audioContexts.snapshot(),
