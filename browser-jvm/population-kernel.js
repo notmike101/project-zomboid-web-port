@@ -951,16 +951,20 @@ function mapCollisionPath(startX, startY, targetX, targetY, flags) {
  * @returns {boolean} Whether the inspected prefix is clear.
  */
 function virtualLineClear(x, y, tx, ty, flags, limit = 10) {
-    const dx = tx - x;
-    const dy = ty - y;
-    const horizontal = Math.abs(dy) < Math.abs(dx);
+    /* Original016570 subtracts and takes absolute values in signed int32, including overflow. */
+    /* eslint-disable unicorn/prefer-math-trunc */
+    const dx = (tx - x) | 0;
+    const dy = (ty - y) | 0;
+    const horizontal = (Math.abs(dy) | 0) < (Math.abs(dx) | 0);
+    /* eslint-enable unicorn/prefer-math-trunc */
     const step = (horizontal ? dx : dy) < 0 ? -1 : 1;
+    const slope = f(f(horizontal ? dy : dx) / f(horizontal ? dx : dy));
     let position = f((horizontal ? y : x) + 0.5);
 
     while ((horizontal ? x !== tx : y !== ty) && limit-- > 0) {
         const before = Math.trunc(position);
 
-        position = f(position + f(f((horizontal ? dy : dx) / (horizontal ? dx : dy)) * step));
+        position = f(position + f(slope * step));
         const after = Math.trunc(position);
 
         if (populationBlocked(flags, horizontal ? x : before, horizontal ? before : y,
@@ -1400,4 +1404,52 @@ function soundChunks(sound) {
     return chunks;
 }
 
-export { populationSpawnable, populationTarget, respawnClock, respawnRequest, respawnPlacement, mapCollisionPath, NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual, soundTarget, worldSoundGroups, soundChunks };
+/**
+ * Applies original0203a0's ordered per-player target update, including first cancellation insertion.
+ *
+ * @param {number[][]} targets - Worker-owned triples in native insertion order.
+ * @param {number[]} request - Original signed player ID, x and y.
+ */
+function applyAggroTarget(targets, request) {
+    const index = targets.findIndex((target) => target[0] === request[0]);
+
+    if (index === -1) {
+        targets.push([...request]);
+    } else if (request[1] === -1 && request[2] === -1) {
+        targets.splice(index, 1);
+    } else {
+        targets[index][1] = request[1];
+        targets[index][2] = request[2];
+    }
+}
+
+/**
+ * Selects original01d240's first nearest target below 300 using signed-int arithmetic.
+ *
+ * @param {number[][]} targets - Ordered actual worker target triples.
+ * @param {number} x - Original floored square x.
+ * @param {number} y - Original floored square y.
+ * @returns {number[]|null} Borrowed winning triple, or no target.
+ */
+function nearestAggroTarget(targets, x, y) {
+    let best = 2_147_483_647;
+    let selected = null;
+
+    for (const target of targets) {
+        /* Native signed-int overflow is observable here; truncation would change selection. */
+        /* eslint-disable unicorn/prefer-math-trunc */
+        const dx = (target[1] - x) | 0;
+        const dy = (target[2] - y) | 0;
+        const distance = ((dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy)) | 0;
+        /* eslint-enable unicorn/prefer-math-trunc */
+
+        if (distance < best && distance < 300) {
+            best = distance;
+            selected = target;
+        }
+    }
+
+    return selected;
+}
+
+export { applyAggroTarget, nearestAggroTarget, populationSpawnable, populationTarget, respawnClock, respawnRequest, respawnPlacement, mapCollisionPath, NativeMT, collision, generate, redistributionReachable, redistributionSquares, redistributionGroups, virtualLineClear, moveVirtual, advanceVirtual, scatterVirtual, soundTarget, worldSoundGroups, soundChunks };

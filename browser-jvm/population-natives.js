@@ -1,4 +1,4 @@
-import { populationSpawnable, respawnRequest, respawnPlacement, mapCollisionPath, populationTarget, respawnClock, NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual, soundChunks, worldSoundGroups, soundTarget } from './population-kernel.js';
+import { applyAggroTarget, nearestAggroTarget, populationSpawnable, respawnRequest, respawnPlacement, mapCollisionPath, populationTarget, respawnClock, NativeMT, collision, generate, redistributionGroups, advanceVirtual, scatterVirtual, soundChunks, worldSoundGroups, soundTarget } from './population-kernel.js';
 
 import { decodeCell, encodeCell, decodeIDs, encodeIDs, decodeVirtual, encodeVirtual, encodeCollision, remapOutfit } from './population-save-codec.js';
 
@@ -216,6 +216,7 @@ export function createPopulationNatives() {
         virtual: [],
         savedVirtualNames: null,
         sounds: [],
+        aggroTargets: [],
         terminalFailure: null,
     };
 
@@ -764,6 +765,11 @@ export function createPopulationNatives() {
             }
 
             if (!publish && !blocked) {
+                return;
+            }
+
+            // Original01741a keeps a stopped group virtual while an aggro target is nearby.
+            if (!publish && nearestAggroTarget(state.aggroTargets, Math.floor(leader.x), Math.floor(leader.y))) {
                 return;
             }
 
@@ -1479,6 +1485,76 @@ export function createPopulationNatives() {
 
     const populationService = {
         /**
+         * Transfers an original unloaded zombie into the producer queue without changing its identity.
+         *
+         * @param {object} lib - Actual Java namespace, unused by scalar record transport.
+         * @param {number} x - Original float x.
+         * @param {number} y - Original float y.
+         * @param {number} z - Original float z.
+         * @param {number} direction - Original Java direction byte.
+         * @param {number} outfit - Original signed packed outfit.
+         * @param {number} flags - Original signed state flags.
+         * @param {number} px - Original path target x or INT_MIN.
+         * @param {number} py - Original path target y or INT_MIN.
+         * @param {number} supplied - Original persistent ID, zero requests native allocation.
+         */
+        addZombie(lib, x, y, z, direction, outfit, flags, px, py, supplied) {
+            for (const value of [x, y, z]) {
+                finite(value, 'add coordinate');
+                finite(Math.fround(value), 'add float coordinate');
+            }
+
+            for (const value of [direction, outfit, flags, px, py, supplied]) {
+                integer(value, 'add integer');
+
+                if (value < -2_147_483_648 || value > 2_147_483_647) {
+                    unsupported('add int32');
+                }
+            }
+
+            if (!state.pop || direction < -128 || direction > 127
+                || !inGrid(Math.floor(Math.fround(x) / 256), Math.floor(Math.fround(y) / 256))) {
+                unsupported('add lifecycle/coordinates/direction');
+            }
+
+            const id = supplied || state.nextID;
+
+            if (id > 2_147_483_647) {
+                unsupported('persistent ID overflow');
+            }
+
+            requireActive();
+            const record = { x: Math.fround(x), y: Math.fround(y), z: Math.fround(z), direction: direction & 255, outfit, state: flags, px, py, id };
+
+            if (!supplied) {
+                state.nextID++;
+            }
+
+            state.producer.push({ type: 'add', record });
+        },
+        /**
+         * Queues an original signed player target for ordered worker transfer.
+         *
+         * @param {object} lib - Actual Java namespace, unused by this scalar operation.
+         * @param {number} player - Original player ID.
+         * @param {number} x - Original target square x, or cancellation sentinel.
+         * @param {number} y - Original target square y, or cancellation sentinel.
+         */
+        aggroTarget(lib, player, x, y) {
+            const target = [player, x, y].map((value) => {
+                integer(value, 'aggro target integer');
+
+                if (value < -2_147_483_648 || value > 2_147_483_647) {
+                    unsupported('aggro target int32');
+                }
+
+                return value;
+            });
+
+            requireActive();
+            state.producer.push({ type: 'aggro', target });
+        },
+        /**
          * Initializes the original service bounds and owned lifecycle.
          *
          * @param {object} lib - Actual CheerpJ Java class namespace.
@@ -1517,6 +1593,7 @@ export function createPopulationNatives() {
             }));
             state.savedVirtualNames = restored.names;
             state.sounds = [];
+            state.aggroTargets = [];
 
             state.reopenID = ids ? decodeIDs(decoder(ids)) : 1;
             state.pop = true;
@@ -1775,6 +1852,13 @@ export function createPopulationNatives() {
             }
 
             const sampledTime = Date.now();
+            const nextAggroTargets = state.aggroTargets.map((target) => [...target]);
+
+            for (const task of batch) {
+                if (task.type === 'aggro') {
+                    applyAggroTarget(nextAggroTargets, task.target);
+                }
+            }
 
             await sequence(generation, (coordinates) => validateGeneration(lib, coordinates));
 
@@ -1782,8 +1866,13 @@ export function createPopulationNatives() {
             await sequence(batch.filter((task) => task.type === 'load' || task.type === 'add'), (task) => task.type === 'load'
                 ? cellCollision(lib, Math.floor(task.x / 32), Math.floor(task.y / 32))
                 : cellCollision(lib, Math.floor(task.record.x / 256), Math.floor(task.record.y / 256)));
+            await sequence(batch.filter((task) => task.type === 'add' && task.record.px === -2_147_483_648
+                && Math.trunc(task.record.z) === 0
+                && nearestAggroTarget(nextAggroTargets, Math.floor(task.record.x), Math.floor(task.record.y))),
+            (task) => collisionNeighborhood(lib, Math.floor(task.record.x / 256), Math.floor(task.record.y / 256)));
 
             state.worker.splice(0);
+            state.aggroTargets = nextAggroTargets;
 
             for (const task of batch) {
                 if (task.type === 'time') {
@@ -1847,6 +1936,29 @@ export function createPopulationNatives() {
                 const cell = await ensureCell(lib, Math.floor(r.x / 8), Math.floor(r.y / 8));
                 const index = ((Math.floor(r.x / 8) % 32 + 32) % 32) + ((Math.floor(r.y / 8) % 32 + 32) % 32) * 32;
 
+                if (r.px !== -2_147_483_648) {
+                    state.virtual.push({ records: [r], targetX: r.px, targetY: r.py, alternate: false });
+                    state.virtualDirty = true;
+                    dirtyRecord(r);
+
+                    return;
+                }
+
+                // Original01b8dd admits an untargeted ground record to a real moving group.
+                if (r.px === -2_147_483_648 && Math.trunc(r.z) === 0
+                    && nearestAggroTarget(state.aggroTargets, Math.floor(r.x), Math.floor(r.y))) {
+                    const flags = virtualFlags(await collisionNeighborhood(lib, Math.floor(r.x / 256), Math.floor(r.y / 256)));
+
+                    if (!(flags(Math.floor(r.x), Math.floor(r.y)) & 0x19)) {
+                        state.virtual.push({ records: [r], targetX: r.px, targetY: -2_147_483_648, alternate: false });
+                        r.py = -2_147_483_648;
+                        state.virtualDirty = true;
+                        dirtyRecord(r);
+
+                        return;
+                    }
+                }
+
                 cell.chunks[index].push(r);
                 dirtyRecord(r);
             });
@@ -1898,6 +2010,18 @@ export function createPopulationNatives() {
             await updateRespawn(lib);
             await updateSounds(lib, batch, sampledTime);
             await updateVirtual(lib);
+
+            // Original022435 retargets surviving moving groups after their movement/sound pass.
+            for (const group of state.virtual) {
+                const leader = group.records[0];
+                const target = nearestAggroTarget(state.aggroTargets, Math.floor(leader.x), Math.floor(leader.y));
+
+                if (target) {
+                    [group.targetX, group.targetY] = target.slice(1);
+                    Object.assign(leader, { px: group.targetX, py: group.targetY });
+                    state.virtualDirty = true;
+                }
+            }
 
             if (interval > 0 && nextTime && !state.gameState.get('PAUSED')) {
                 await sequence([...state.cells].filter(([, value]) => !value.passive), async ([name, cell]) => {
@@ -2155,6 +2279,7 @@ export function createPopulationNatives() {
             state.virtual = [];
             state.savedVirtualNames = null;
             state.sounds = [];
+            state.aggroTargets = [];
             state.registry.clear();
             state.consumed.clear();
             state.config = new Map(nativeDefaults);
@@ -2391,6 +2516,7 @@ export function createPopulationNatives() {
             virtualGroups: state.virtual.length,
             virtualRecords: state.virtual.reduce((sum, group) => sum + group.records.length, 0),
             activeSounds: state.sounds.length,
+            aggroTargets: state.aggroTargets.length,
 
             successfulSaves: state.successfulSaves ?? 0,
             saveDeadline: state.autoSaveDeadline,
