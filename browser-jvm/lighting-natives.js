@@ -147,6 +147,126 @@ function restoreCoordinates(state, output) {
 }
 
 /**
+ * Retains only overlapping world squares when the native chunk-pointer grid moves.
+ *
+ * @param {Array} values - Original region-indexed storage.
+ * @param {object} from - Original chunk origin and extent.
+ * @param {object} to - Destination chunk origin and extent.
+ * @returns {Array} Destination storage with absent incoming strips.
+ */
+function moveRegion(values, from, to) {
+    if (!values) {
+        return values;
+    }
+
+    const width = to.width * 8;
+    const height = to.height * 8;
+    const plane = width * height;
+    const result = Array.from({ length: values.length }, () => null);
+    const dx = (to.x - from.x) * 8;
+    const dy = (to.y - from.y) * 8;
+
+    for (let z = 0; z < 64; z++) {
+        for (let y = Math.max(0, -dy); y < Math.min(height, height - dy); y++) {
+            for (let x = Math.max(0, -dx); x < Math.min(width, width - dx); x++) {
+                result[z * plane + y * width + x] = values[z * plane + (y + dy) * width + x + dx];
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * Applies ordered native worker commands to a private geometry/history projection.
+ *
+ * @param {object} state - Committed main/worker state.
+ * @returns {object} Projected state without changing published buffers.
+ */
+function projectMovement(state) {
+    const { deferred, computed, computedX, computedY, x, y, cells, ranges, movements = [] } = state;
+    let projected = {
+        ...state, x: deferred?.x ?? x, y: deferred?.y ?? y,
+        cells: deferred?.cells ?? cells, ranges: deferred?.ranges ?? ranges,
+    };
+    let history = computed;
+    let historyOrigin = { ...state, x: computedX ?? x, y: computedY ?? y };
+
+    if (deferred?.movementRevisions?.some((revision, index) => revision !== movements[index]?.revision)) {
+        let destination = { ...state };
+
+        for (const command of movements.slice(0, deferred.movementCount)) {
+            destination = {
+                ...destination,
+                x: command.x ?? destination.x + command.dx, y: command.y ?? destination.y + command.dy,
+            };
+        }
+
+        // Coalescing changes the earlier teleport, not the world coordinates of later queued geometry.
+        projected.cells = moveRegion(projected.cells, projected, destination);
+        projected = { ...projected, x: destination.x, y: destination.y };
+        projected.ranges = new Map([...projected.ranges].filter(([key]) => {
+            const [chunkX, chunkY] = key.split(',').map(Number);
+
+            return chunkX >= destination.x && chunkY >= destination.y
+                && chunkX < destination.x + destination.width && chunkY < destination.y + destination.height;
+        }));
+    }
+
+    for (const [commandIndex, command] of movements.entries()) {
+        const historyNext = {
+            ...historyOrigin,
+            x: command.x ?? historyOrigin.x + command.dx, y: command.y ?? historyOrigin.y + command.dy,
+        };
+
+        history = command.teleport ? history?.map(() => null) : moveRegion(history, historyOrigin, historyNext);
+        historyOrigin = historyNext;
+
+        if (commandIndex < (deferred?.movementCount ?? 0)) {
+            continue;
+        }
+
+        const next = { ...projected, x: command.x ?? projected.x + command.dx, y: command.y ?? projected.y + command.dy };
+
+        projected.cells = command.teleport
+            ? projected.cells?.map(() => null)
+            : moveRegion(projected.cells, projected, next);
+        projected = { ...next, cells: projected.cells };
+        projected.ranges = new Map([...projected.ranges].filter(([key]) => {
+            const [x, y] = key.split(',').map(Number);
+
+            return !command.teleport && x >= next.x && y >= next.y && x < next.x + next.width && y < next.y + next.height;
+        }));
+    }
+
+    projected.history = history;
+    projected.moved = true;
+
+    if (deferred) {
+        projected.deferred = {
+            ...deferred, x: projected.x, y: projected.y, cells: projected.cells, ranges: projected.ranges,
+            movementCount: movements.length,
+            movementRevisions: movements.map((command) => command.revision),
+        };
+    }
+
+    return projected;
+}
+
+/**
+ * Marks native indexed readback bytes when a worker consumes a moved map.
+ *
+ * @param {object} state - Player buffers and dirty bytes.
+ */
+function markMovedReadback(state) {
+    for (const [index, payload] of (state.published ?? []).entries()) {
+        if (payload !== null) {
+            state.squareDirty.add(index);
+        }
+    }
+}
+
+/**
  * Calculates only the actual loaded level span while retaining the native64-level indices.
  * Sparse region slots remain absent and are never exposed as invented square payloads.
  *
@@ -291,6 +411,36 @@ export function createLightingNatives() {
     }
 
     /**
+     * Queues native movement without changing the currently published region.
+     *
+     * @param {number} player - Original player index.
+     * @param {object} command - Ordered chunk movement or coalesced teleport.
+     */
+    function queueMovement(player, command) {
+        const state = playerState(player);
+
+        if (!state) {
+            if (command.teleport) {
+                unsupported('teleport before region initialization');
+            }
+
+            return;
+        }
+
+        state.movements ??= [];
+        state.movementRevision = (state.movementRevision ?? 0) + 1;
+
+        const previous = command.teleport && state.movements.find((movement) => movement.teleport);
+        const revised = { ...command, revision: state.movementRevision };
+
+        if (previous) {
+            Object.assign(previous, revised);
+        } else {
+            state.movements.push(revised);
+        }
+    }
+
+    /**
      * Resolves an actual published square inside the fixed region.
      *
      * @param {number} player - Original player index.
@@ -306,20 +456,25 @@ export function createLightingNatives() {
         integer(y, -2_147_483_648, 2_147_483_647, 'square Y');
         integer(z, 0, 63, 'square level');
 
-        if (!state || x < state.x * 8 || y < state.y * 8
-            || x >= (state.x + state.width) * 8 || y >= (state.y + state.height) * 8) {
+        const originX = state?.publishedX ?? state?.x;
+        const originY = state?.publishedY ?? state?.y;
+
+        if (!state || x < originX * 8 || y < originY * 8
+            || x >= (originX + state.width) * 8 || y >= (originY + state.height) * 8) {
             return null;
         }
 
-        const index = z * state.width * state.height * 64 + (y - state.y * 8) * state.width * 8 + x - state.x * 8;
+        const index = z * state.width * state.height * 64 + (y - originY * 8) * state.width * 8 + x - originX * 8;
+        const cells = state.publishedCells ?? state.cells;
+        const ranges = state.publishedRanges ?? state.ranges;
 
         // Bootstrap native readback exposes uninitialized words; keep the explicit publication guard.
-        if (!state.cells || state.ranges.size === 0) {
+        if (!cells || ranges.size === 0) {
             return { state, index };
         }
 
-        if (state.cells[index] === null) {
-            const range = state.ranges.get(`${Math.floor(x / 8)},${Math.floor(y / 8)}`);
+        if (cells[index] === null) {
+            const range = ranges.get(`${Math.floor(x / 8)},${Math.floor(y / 8)}`);
 
             if (range && z >= range[0] && z <= range[1]) {
                 unsupported('absent-square readback');
@@ -332,6 +487,50 @@ export function createLightingNatives() {
     }
 
     const methods = {
+        /**
+         * Queues the native westward chunk-grid shift.
+         *
+         * @param {number} player - Original player index.
+         */
+        scrollLeft(player) {
+            queueMovement(player, { dx: -1, dy: 0 });
+        },
+        /**
+         * Queues the native eastward chunk-grid shift.
+         *
+         * @param {number} player - Original player index.
+         */
+        scrollRight(player) {
+            queueMovement(player, { dx: 1, dy: 0 });
+        },
+        /**
+         * Queues the native northward chunk-grid shift.
+         *
+         * @param {number} player - Original player index.
+         */
+        scrollUp(player) {
+            queueMovement(player, { dx: 0, dy: -1 });
+        },
+        /**
+         * Queues the native southward chunk-grid shift.
+         *
+         * @param {number} player - Original player index.
+         */
+        scrollDown(player) {
+            queueMovement(player, { dx: 0, dy: 1 });
+        },
+        /**
+         * Replaces the queued teleport destination without reordering the command.
+         *
+         * @param {number} player - Original player index.
+         * @param {number} x - New minimum world chunk X.
+         * @param {number} y - New minimum world chunk Y.
+         */
+        teleport(player, x, y) {
+            integer(x, 0, 65_535, 'region X');
+            integer(y, 0, 65_535, 'region Y');
+            queueMovement(player, { x, y, teleport: true });
+        },
         /**
          * Stores the genuine native solver's qualified configuration value.
          *
@@ -370,9 +569,18 @@ export function createLightingNatives() {
             integer(height, 1, 13, 'region height');
 
             let state = playerState(player);
+            const baseState = state;
 
-            if (state && (state.x !== x || state.y !== y || state.width !== width || state.height !== height)) {
-                unsupported('region scroll or resize');
+            if (state && (state.width !== width || state.height !== height)) {
+                unsupported('region resize');
+            }
+
+            if (state?.movements?.length) {
+                state = projectMovement(state);
+            }
+
+            if (state && (state.x !== x || state.y !== y)) {
+                unsupported('region origin without queued movement');
             }
 
             if (!state) {
@@ -396,7 +604,7 @@ export function createLightingNatives() {
             }
 
             active = {
-                state, player, cells, chunks: new Set(state.deferred?.chunks), cleared: state.deferred?.cleared,
+                state, baseState, player, cells, chunks: new Set(state.deferred?.chunks), cleared: state.deferred?.cleared,
                 ranges: new Map(state.deferred?.ranges ?? state.ranges),
                 playerPosition: state.deferred?.playerPosition, worldPlayer: state.deferred?.worldPlayer,
                 perception: state.deferred?.perception, sky: state.deferred?.sky,
@@ -681,12 +889,15 @@ export function createLightingNatives() {
          */
         chunkLightingDone(x, y) {
             const { state } = requireUpdate();
+            const originX = state.publishedX ?? state.x;
+            const originY = state.publishedY ?? state.y;
+            const ranges = state.publishedRanges ?? state.ranges;
 
             integer(x, -2_147_483_648, 2_147_483_647, 'chunk X');
             integer(y, -2_147_483_648, 2_147_483_647, 'chunk Y');
 
-            return state.published !== null && x >= state.x && y >= state.y
-                && x < state.x + state.width && y < state.y + state.height;
+            return state.published !== null && x >= originX && y >= originY
+                && x < originX + state.width && y < originY + state.height && ranges.has(`${x},${y}`);
         },
         /**
          * Registers a genuine bounded static point light.
@@ -842,7 +1053,7 @@ export function createLightingNatives() {
          */
         stateEndUpdate() {
             const update = requireUpdate();
-            const { state, cells, chunks, player, ranges, perception, sky, sourceUpdate } = update;
+            const { state, baseState, cells, chunks, player, ranges, perception, sky, sourceUpdate } = update;
             const playerPosition = update.playerPosition ?? state.pending?.player;
             const cleared = update.cleared ?? state.pending?.cleared;
             const worldPlayer = update.worldPlayer ?? state.previousPlayer;
@@ -864,8 +1075,15 @@ export function createLightingNatives() {
                 state.deferred = {
                     cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
                     perception, sky, sourceUpdate: pendingSourceUpdate,
+                    x: state.x, y: state.y, movementCount: state.movements?.length ?? 0,
+                    movementRevisions: state.movements?.map((command) => command.revision) ?? [],
                 };
-                states.set(player, state);
+
+                if (baseState && baseState !== state) {
+                    baseState.deferred = state.deferred;
+                }
+
+                states.set(player, baseState ?? state);
                 active = null;
 
                 return;
@@ -890,7 +1108,7 @@ export function createLightingNatives() {
 
             const pending = {
                 width: state.width * 8, height: state.height * 8, minimum: 0, maximum: 63, cells,
-                player: playerPosition, seen: state.computed?.map((payload) => Boolean(payload?.[0] & 1)),
+                player: playerPosition, seen: (state.history ?? state.computed)?.map((payload) => Boolean(payload?.[0] & 1)),
                 lights: sceneLights, cleared, submitted: new Set(chunks),
                 roomLights: state.playerInitialized
                     ? [...roomLights.values()].map((light) => ({
@@ -902,6 +1120,8 @@ export function createLightingNatives() {
                 perception: perception ?? state.pending?.perception,
                 sky: sky ?? state.pending?.sky,
                 sourceUpdate: pendingSourceUpdate,
+                previous: state.history ?? state.computed,
+                moved: Boolean(state.moved),
             };
             const [playerX, playerY, playerZ] = playerPosition;
             const playerIndex = playerZ * pending.width * pending.height + Math.floor(playerY) * pending.width + Math.floor(playerX);
@@ -921,7 +1141,14 @@ export function createLightingNatives() {
                     cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
                     playerPosition, worldPlayer, perception: pending.perception, sky: pending.sky,
                     sourceUpdate: pending.sourceUpdate,
+                    x: state.x, y: state.y, movementCount: state.movements?.length ?? 0,
+                    movementRevisions: state.movements?.map((command) => command.revision) ?? [],
                 };
+
+                if (baseState && baseState !== state) {
+                    baseState.deferred = state.deferred;
+                }
+
                 active = null;
 
                 return;
@@ -932,6 +1159,10 @@ export function createLightingNatives() {
                 state.recycledChunkDirty = new Set(state.chunkDirty);
                 state.published = state.computed;
                 state.publishedRooms = state.computedRooms;
+                state.publishedX = state.computedX ?? baseState?.x ?? state.x;
+                state.publishedY = state.computedY ?? baseState?.y ?? state.y;
+                state.publishedCells = state.computedCells ?? baseState?.cells ?? state.cells;
+                state.publishedRanges = state.computedRanges ?? baseState?.ranges ?? state.ranges;
                 state.counter++;
                 state.squareDirty = new Set(state.computedSquareDirty);
                 state.chunkDirty = new Set(state.computedChunkDirty);
@@ -944,6 +1175,9 @@ export function createLightingNatives() {
             state.previousPlayer = worldPlayer;
             state.pending = pending;
             state.pendingResult = calculated;
+            state.movements = [];
+            delete state.history;
+            delete state.moved;
             state.deferred = null;
             state.workerReady = false;
             states.set(player, state);
@@ -967,7 +1201,7 @@ export function createLightingNatives() {
 
             for (const state of states.values()) {
                 if (state.pending && !state.workerReady) {
-                    const previous = state.computed;
+                    const previous = state.pending.previous;
 
                     // Active state belongs to the main snapshot; native RGB is read from the shared light at worker time.
                     const colorChanged = state.pending.lightReferences.some(({ light, on, color }) => on
@@ -989,11 +1223,30 @@ export function createLightingNatives() {
                     state.registeredLights = state.pending.lightRegistrations;
                     state.playerInitialized = true;
                     state.computedRooms = visibleRooms(state.pending.cells, state.computed);
-                    const changed = changedSquares(state, previous, state.computed, state.pending.submitted);
+                    state.computedX = state.x;
+                    state.computedY = state.y;
+                    state.computedCells = state.pending.cells;
+                    state.computedRanges = new Map(state.ranges);
+                    const submitted = state.pending.moved ? new Set(state.ranges.keys()) : state.pending.submitted;
+                    const changed = changedSquares(state, previous, state.computed, submitted);
+
+                    if (state.pending.moved) {
+                        // Native0xa109..a11a marks every indexed readback dirty while its moved map is dirty.
+                        markMovedReadback(state);
+                    }
 
                     // Native ready chunks inherit readback dirty bytes at worker time, before marking changes.
                     state.computedSquareDirty = new Set([...state.squareDirty, ...changed]);
                     state.computedChunkDirty = new Set([...state.recycledChunkDirty, ...changedChunks(state, changed)]);
+
+                    if (state.pending.moved) {
+                        state.computedChunkDirty = new Set([...state.computedChunkDirty].filter((key) => {
+                            const [x, y] = key.split(',').map(Number);
+
+                            return x >= state.x && y >= state.y && x < state.x + state.width && y < state.y + state.height;
+                        }));
+                    }
+
                     state.workerReady = true;
                     lastUpdate = { counter: state.counter, cells: state.computed.length };
                 }
@@ -1037,6 +1290,13 @@ export function createLightingNatives() {
             integer(z, 0, 63, 'chunk level');
 
             if (!state) {
+                return false;
+            }
+
+            const originX = state.publishedX ?? state.x;
+            const originY = state.publishedY ?? state.y;
+
+            if (x < originX || y < originY || x >= originX + state.width || y >= originY + state.height) {
                 return false;
             }
 
@@ -1144,7 +1404,6 @@ export function createLightingNatives() {
     };
 
     for (const name of [
-        'scrollLeft', 'scrollRight', 'scrollUp', 'scrollDown', 'teleport',
         'squareAddThumpable',
         'addTempLight', 'updateTorch', 'removeTorch',
         'getVertLight', 'getLightInfo', 'getDarkMulti', 'getTargetDarkMulti', 'getSeen', 'getCanSee', 'getCouldSee',
