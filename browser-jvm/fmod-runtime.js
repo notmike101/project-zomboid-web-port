@@ -53,6 +53,10 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
             throw new Error('Unsupported FMOD runtime manifest');
         }
 
+        if (manifest.version !== '2.04.00' || (manifest.versionHex !== undefined && manifest.versionHex !== 0x00_02_04_00)) {
+            throw new Error('FMOD runtime adapter supports only SDK 2.04.00; other versions can be packaged but are not admitted');
+        }
+
         const script = await get('fmodstudioL.js');
         const wasm = await get('fmodstudioL.wasm');
 
