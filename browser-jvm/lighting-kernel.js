@@ -64,20 +64,14 @@ function validateWorldSquare(cell) {
 
         const { type, args } = object;
 
-        // eslint-disable-next-line unicorn/prefer-switch -- Keep the existing bounded object admission branches together.
         if (type === 'squareAddCurtain') {
-            if (!Array.isArray(args) || args.length !== 2 || ![4, 8].includes(args[0]) || args[1] !== true) {
+            if (!Array.isArray(args) || args.length !== 2 || ![4, 8, 16, 32].includes(args[0]) || typeof args[1] !== 'boolean') {
                 unsupported('curtain state');
             }
-        } else if (type === 'squareAddThumpable' || type === 'squareAddWindow') {
+        } else if (type === 'squareAddThumpable' || type === 'squareAddWindow' || type === 'squareAddDoor') {
             if (!Array.isArray(args) || args.length !== (type === 'squareAddThumpable' ? 4 : 3)
                 || args.some((value) => typeof value !== 'boolean')) {
-                unsupported('thumpable or window state');
-            }
-        } else if (type === 'squareAddDoor') {
-            if (!Array.isArray(args) || args.length !== 3 || typeof args[0] !== 'boolean'
-                || args[1] !== false || args[2] !== false) {
-                unsupported('door or window state');
+                unsupported('door, thumpable or window state');
             }
         } else {
             unsupported('square object type');
@@ -712,9 +706,9 @@ function clearVision(scene, index, dx, dy, dz) {
 
 /**
  * Classifies an admitted object's crossing edge using native0x3310/0x60e0.
- * Open curtains and intact unbarricaded windows are transparent. Closed doors
- * produce blocking class1 when the ray crosses their north or west plane.
- * Native object type2 thumpables rotate that plane when open; the caller ignores
+ * Open curtains and intact unbarricaded windows are transparent. Opaque doors
+ * produce blocking class1 on their crossing plane and rotate that plane when open.
+ * Native object type2 thumpables also rotate when open; the caller ignores
  * their non-door crossings. Type3 windows keep their plane and block only when opaque.
  *
  * @param {object} scene - Validated geometry.
@@ -727,15 +721,29 @@ function clearVision(scene, index, dx, dy, dz) {
 function objectBlocks(scene, owner, from, to, object) {
     const { type, args } = object;
 
+    if (type === 'squareAddCurtain') {
+        if (args[1]) {
+            return false;
+        }
+
+        const axis = args[0] & 40 ? 1 : 0;
+        const edge = coordinates(scene, to)[axis] - coordinates(scene, from)[axis];
+        const positive = Boolean(args[0] & 48);
+        const crossing = owner === from ? edge : -edge;
+
+        return positive ? crossing > 0 : crossing < 0;
+    }
+
     if (type !== 'squareAddDoor' && type !== 'squareAddThumpable' && type !== 'squareAddWindow') {
         return false;
     }
 
-    if ((type === 'squareAddThumpable' && (!args[2] || args[3])) || (type === 'squareAddWindow' && !args[2])) {
+    if ((type === 'squareAddThumpable' && (!args[2] || args[3])) || (type === 'squareAddWindow' && !args[2])
+        || (type === 'squareAddDoor' && args[2])) {
         return false;
     }
 
-    const north = type === 'squareAddThumpable' && args[1] ? !args[0] : args[0];
+    const north = (type === 'squareAddThumpable' || type === 'squareAddDoor') && args[1] ? !args[0] : args[0];
     const axis = north ? 1 : 0;
     const edge = coordinates(scene, to)[axis] - coordinates(scene, from)[axis];
 

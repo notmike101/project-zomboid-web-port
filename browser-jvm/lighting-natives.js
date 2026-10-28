@@ -386,9 +386,9 @@ export function createLightingNatives() {
         }
 
         const curtain = type === 'squareAddCurtain';
-        const extended = type === 'squareAddThumpable' || type === 'squareAddWindow';
+        const extended = type === 'squareAddThumpable' || type === 'squareAddWindow' || type === 'squareAddDoor';
 
-        if ((curtain && (![4, 8].includes(args[0]) || args[1] !== true))
+        if ((curtain && (![4, 8, 16, 32].includes(args[0]) || typeof args[1] !== 'boolean'))
             || (extended && (args.length !== (type === 'squareAddThumpable' ? 4 : 3)
                 || args.some((value) => typeof value !== 'boolean')))
             || (!curtain && !extended && (typeof args[0] !== 'boolean' || args[1] !== false || args[2] !== false))) {
@@ -791,7 +791,7 @@ export function createLightingNatives() {
             square.transmission = [...values];
         },
         /**
-         * Stages an original open curtain in its qualified north or west orientation.
+         * Stages an original open or closed curtain on its actual attached side.
          *
          * @param {number} mask - Original curtain attachment bits.
          * @param {boolean} open - Original open flag.
@@ -800,7 +800,7 @@ export function createLightingNatives() {
             stageObject('squareAddCurtain', [mask, open]);
         },
         /**
-         * Stages an original closed door and its actual ray-blocking plane.
+         * Stages an original door and its actual open/transparency crossing state.
          *
          * @param {boolean} north - Original north-facing flag.
          * @param {boolean} open - Original open flag.

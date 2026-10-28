@@ -156,3 +156,10 @@ The data-only native fixture and public-adapter replay use both orientations for
 | Open-door blocking-barricade companion | true | true | true | true |
 
 This exercises the original caller's forced-open-door transparency and all companion-window open/opaque combinations, rather than every independent four-boolean permutation. The colored source is real; endpoint tuples are the previously supported unfiltered tuples, so this batch makes no new colored-transmission qualification claim. Prior static43,904-word, room81,536-word and ordered-scroll21,805-word component comparisons still match.
+
+
+## Door and curtain interaction predicates (2026-10-28)
+
+Original updateChunk emits squareAddDoor(north,isOpen,doorTrans), forces transparency for open garage doors, and clears it for vision-blocking barricades. Closed doors without curtains supply a0.15 endpoint transmission; closed attached curtains supply0.33. Standalone IsoCurtain emits one attachment mask W4/N8/E16/S32 plus IsOpen, with original side-specific filtering tuples. Native type1 crossing at0x345b rotates its plane on open and returns the transparent classification when requested; the consuming path at0x6418..642b/6450..6462 distinguishes that result from an opaque blocking crossing. Type0 curtain constructor0x15550 stores mask and open; predicate0x34c7..3545 treats closed west/north as negative-side crossings and east/south as positive-side crossings.
+
+The focused data-only fixture has eight door tuples (both north values, both open values, both transparent values), eight curtain tuples (four actual masks, open/closed), and two attached-curtain closed-door orientations. Its boundary clears both endpoint cardinal/diagonal adjacency bits, forcing0x4d50/0x4800 endpoint transmission rather than bypassing it via an opaque adjacency edge. The original0.15/0.33 float32 coefficients therefore affect actual packed light records and colors. All18 kernel and public-adapter snapshots match56,448 packed words; the fourteen paired thumpable/window cases still match43,904 words. This adds no colored-ambient qualification or support for arbitrary combined curtain masks.
