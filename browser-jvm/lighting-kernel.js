@@ -80,36 +80,150 @@ function validateWorldSquare(cell) {
 }
 
 /**
- * Rejects order-dependent ambient filters until native pointer-seed ordering is qualified.
- * Native0x8650/0x6a40 iterates a pointer-hashed seed set; whole-RGB replacements
- * can disagree across native allocations when competing paths have different hues.
+ * Traverses native pointer-key container mechanics using retained browser owner identities.
+ * Identities are platform allocations, not a claim of matching native heap addresses.
  *
- * @param {object} scene - Validated geometry and skylight.
+ * @param {bigint[]} identities - Unique unsigned 64-bit owner identities in insertion order.
+ * @returns {number[]} Original insertion indices in native container traversal order.
  */
-function validateAmbient(scene) {
-    if (!scene.sky) {
-        return;
-    }
+function ambientSeedOrder(identities) {
+    const hashes = [];
+    const inserted = new Set();
+    const previous = new Int32Array(identities.length).fill(-1);
+    const next = new Int32Array(identities.length).fill(-1);
+    let count = 8;
+    let buckets = new Int32Array(count).fill(-1);
+    let head = -1;
+    let tail = -1;
+    let size = 0;
 
-    const red = scene.sky & 255;
-    const green = scene.sky >>> 8 & 255;
-    const blue = scene.sky >>> 16 & 255;
-    const coloredSky = red !== green || red !== blue;
+    // Links preserve native bucket-relative insertion without quadratic array splices.
+    /**
+     * Links a seed before its bucket head, or at the traversal tail.
+     *
+     * @param {number} index - Seed index.
+     * @param {number} first - Bucket head or -1.
+     */
+    const insertBefore = (index, first) => {
+        const before = first === -1 ? tail : previous[first];
 
-    for (const cell of scene.cells) {
-        if (!cell?.transmission) {
+        previous[index] = before;
+        next[index] = first;
+
+        if (before === -1) {
+            head = index;
+        } else {
+            next[before] = index;
+        }
+
+        if (first === -1) {
+            tail = index;
+        } else {
+            previous[first] = index;
+        }
+    };
+
+    /**
+     * Copies traversal before rehash mutates its links.
+     *
+     * @returns {number[]} Current seed indices.
+     */
+    const traversal = () => {
+        const order = [];
+
+        for (let index = head; index !== -1; index = next[index]) {
+            order.push(index);
+        }
+
+        return order;
+    };
+
+    /**
+     * Detaches a seed during native bucket regrouping.
+     *
+     * @param {number} index - Existing seed index.
+     */
+    const detach = (index) => {
+        const before = previous[index];
+        const after = next[index];
+
+        if (before === -1) {
+            head = after;
+        } else {
+            next[before] = after;
+        }
+
+        if (after === -1) {
+            tail = before;
+        } else {
+            previous[after] = before;
+        }
+    };
+
+    for (const [index, identity] of identities.entries()) {
+        if (typeof identity !== 'bigint' || identity < 0n || identity > 0xFF_FF_FF_FF_FF_FF_FF_FFn) {
+            throw new RangeError('Invalid lighting square owner identity');
+        }
+
+        if (inserted.has(identity)) {
             continue;
         }
 
-        for (const offset of [0, 5, 10, 15]) {
-            const values = cell.transmission;
+        let hash = 0xCB_F2_9C_E4_84_22_23_25n;
 
-            if (values[offset + 3] > 0 && (coloredSky
-                || values[offset] !== values[offset + 1] || values[offset] !== values[offset + 2])) {
-                unsupported('colored ambient transmission');
+        for (let byte = 0n; byte < 8n; byte++) {
+            hash = BigInt.asUintN(64, (hash ^ (identity >> (byte * 8n) & 255n)) * 0x1_00_00_00_01_B3n);
+        }
+
+        hashes[index] = hash;
+
+        if (size + 1 > count) {
+            count = count < 512 ? count * 8 : count * 2;
+            buckets = new Int32Array(count).fill(-1);
+
+            for (const node of traversal()) {
+                const key = Number(hashes[node] & BigInt(count - 1));
+                const first = buckets[key];
+
+                if (first !== -1) {
+                    detach(node);
+                    insertBefore(node, first);
+                }
+
+                buckets[key] = node;
             }
         }
+
+        const key = Number(hash & BigInt(count - 1));
+
+        insertBefore(index, buckets[key]);
+        buckets[key] = index;
+        inserted.add(identity);
+        size++;
     }
+
+    return traversal();
+}
+
+const directSquareOwners = new WeakMap();
+let nextDirectSquareOwner = 1n;
+
+/**
+ * Retains identity for direct kernel users as the adapter does for serialized owners.
+ *
+ * @param {object} cell - A real retained square object.
+ * @returns {bigint} Platform-local owner identity.
+ */
+function squareOwnerIdentity(cell) {
+    if (cell.ownerIdentity !== undefined) {
+        return cell.ownerIdentity;
+    }
+
+    if (!directSquareOwners.has(cell)) {
+        directSquareOwners.set(cell, nextDirectSquareOwner++);
+    }
+
+    return directSquareOwners.get(cell);
 }
 
 /**
@@ -197,8 +311,6 @@ function validate(scene) {
     if (sky && minimum < 32) {
         unsupported('outdoor basement lighting');
     }
-
-    validateAmbient(scene);
 
     if (seen !== undefined && (!Array.isArray(seen) || seen.length !== cells.length
         || Array.from(seen).some((value) => typeof value !== 'boolean'))) {
@@ -994,7 +1106,18 @@ function ambientColors(scene) {
         }
     }
 
-    for (const seedIndex of seeds) {
+    /* Native0x8991 inserts exterior owners before0x8a60 drains the hash-list order.
+       Preserve the established monochrome/no-transmission fast path byte for byte. */
+    const coloredTransmission = scene.cells.some((cell) => cell?.transmission
+        && [0, 5, 10, 15].some((offset) => cell.transmission[offset + 3] > 0
+            && ((seed[0] !== seed[1] || seed[0] !== seed[2])
+                || cell.transmission[offset] !== cell.transmission[offset + 1]
+                || cell.transmission[offset] !== cell.transmission[offset + 2])));
+    const traversal = coloredTransmission
+        ? ambientSeedOrder(seeds.map((index) => squareOwnerIdentity(scene.cells[index]))).map((index) => seeds[index])
+        : seeds;
+
+    for (const seedIndex of traversal) {
         const queue = [seedIndex];
 
         for (let cursor = 0; cursor < queue.length; cursor++) {
@@ -1342,3 +1465,5 @@ export function calculateLighting(scene) {
 
     return output.map((payload) => payload === null ? null : [...payload]);
 }
+
+export { ambientSeedOrder };

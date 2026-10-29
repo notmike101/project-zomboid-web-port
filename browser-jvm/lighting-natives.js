@@ -457,6 +457,7 @@ export function createLightingNatives() {
     const roomLights = new Map();
     const torches = new Map();
     let lastUpdate = null;
+    let nextSquareOwner = 1n;
 
     /**
      * Requires the original native update transaction.
@@ -870,7 +871,13 @@ export function createLightingNatives() {
                 unsupported('square lifecycle');
             }
 
-            square = { x: chunk.x * 8 + x, y: chunk.y * 8 + y, z };
+            const { state, cells } = requireUpdate();
+            const worldX = chunk.x * 8 + x;
+            const worldY = chunk.y * 8 + y;
+            const index = z * state.width * state.height * 64
+                + (worldY - state.y * 8) * state.width * 8 + worldX - state.x * 8;
+
+            square = { x: worldX, y: worldY, z, ownerIdentity: cells[index]?.ownerIdentity ?? nextSquareOwner++ };
         },
         /**
          * Stages genuine adjacency and vision data; unsupported world features reject.
@@ -968,6 +975,7 @@ export function createLightingNatives() {
                 + (square.y - state.y * 8) * state.width * 8 + square.x - state.x * 8;
 
             cells[index] = {
+                ownerIdentity: square.ownerIdentity,
                 mask: square.mask, vision: square.vision, up: square.up, down: square.down, stairs: square.stairs,
                 building: square.building, room: square.room === -1n ? -1 : square.room,
                 lightLevel: square.lightLevel, openAir: square.openAir,
