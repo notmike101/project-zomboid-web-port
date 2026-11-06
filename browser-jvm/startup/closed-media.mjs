@@ -163,6 +163,24 @@ async function createClosedMedia({ mediaRoot, ledger, absent, hookSource, snapsh
 
     assert.equal(names.size, absent.length);
 
+    // Original scene resolution probes FBX/GLB alternatives before falling back to X files.
+    for (const entry of entries.values()) {
+        if (entry.kind !== 'file' || !/^(?:anims_x|models_x)\/.*\.(?:x|fbx|glb)$/iu.test(entry.relative)
+            || entry.relative.includes('%')) {
+            continue;
+        }
+
+        const stem = entry.relative.slice(0, entry.relative.lastIndexOf('.')).toLowerCase();
+
+        for (const extension of ['fbx', 'glb']) {
+            const candidate = `${stem}.${extension}`;
+
+            if (!entries.has(candidate)) {
+                names.add(`/media/${candidate}`);
+            }
+        }
+    }
+
     /* eslint-disable no-await-in-loop */
     for (const name of names) {
         assert.ok(name.startsWith('/media/') && ordinary(name.slice(7)) && !name.includes('%'));

@@ -39,6 +39,7 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
     }
 
     const original = descriptor.value;
+    const absentFolded = new Map([...absent].map((name) => [name.toLowerCase(), name]));
     const positives = new Map();
     let inodeHelper;
 
@@ -55,8 +56,6 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
         }
 
         inodeHelper = helperDescriptor.value;
-
-        const absentFolded = new Set([...absent].map((name) => name.toLowerCase()));
 
         for (const entry of positiveCertificate.files) {
             const folded = typeof entry.path === 'string' ? entry.path.toLowerCase() : null;
@@ -84,13 +83,21 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
      */
     function wrapped(...args) {
         const [actualMount, name, fileRef, onData, callback] = args;
+        let absentName = typeof name === 'string' && /^[\x20-\x7E]+$/u.test(name)
+            ? absentFolded.get(name.toLowerCase())
+            : undefined;
+
+        if (absent.has(name)) {
+            absentName = name;
+        }
+
         const positive = typeof name === 'string' && name.startsWith('/media/') && /^[\x20-\x7E]+$/u.test(name)
             ? positives.get(name.toLowerCase())
             : undefined;
 
-        if (active && actualMount === mount && absent.has(name) && mount.inodeMap[name] === undefined) {
+        if (active && actualMount === mount && absentName !== undefined && mount.inodeMap[name] === undefined) {
             intercepted++;
-            pathCounts.set(name, pathCounts.get(name) + 1);
+            pathCounts.set(absentName, pathCounts.get(absentName) + 1);
             fileRef.permType = 0;
             fileRef.inodeId = 0;
             fileRef.lastModified = 0;
@@ -143,6 +150,7 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
             if (Object.getOwnPropertyDescriptor(host, 'webStatAsyncImpl')?.value !== wrapped) {
                 active = false;
                 absent.clear();
+                absentFolded.clear();
                 positives.clear();
                 throw new Error('Metadata hook owner changed before disposal');
             }
@@ -150,6 +158,7 @@ export function installNegativeStat(host, mount, certificate, positiveCertificat
             Object.defineProperty(host, 'webStatAsyncImpl', descriptor);
             active = false;
             absent.clear();
+            absentFolded.clear();
         },
     };
 }
