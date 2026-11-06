@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream, writeFileSync } from 'node:fs';
-import { readFile, writeFile, stat, mkdtemp } from 'node:fs/promises';
+import { readFile, writeFile, stat, mkdir, mkdtemp } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { freemem, tmpdir } from 'node:os';
+import { freemem } from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { certifyPublished } from './certify-published.mjs';
@@ -120,7 +120,11 @@ let checkpointPending;
 let memoryGuard;
 const checkpointErrors = [];
 
-output = await mkdtemp(path.join(tmpdir(), 'pz-original-first-gate-'));
+// Keep run evidence beside its private generation so temporary-file cleanup cannot erase it.
+const runs = path.join(path.dirname(path.resolve(generationFile)), 'runs');
+
+await mkdir(runs, { recursive: true });
+output = await mkdtemp(path.join(runs, 'original-world-'));
 writeFileSync(path.join(output, 'deadline-established.json'), JSON.stringify(deadlineRecord));
 process.stdout.write(`${JSON.stringify({ output, generationFile, phase: 'startup-preflight' })}\n`);
 

@@ -1,9 +1,10 @@
-/* eslint-disable no-await-in-loop -- Importer children and snapshot transfers intentionally run sequentially. */
+/* eslint-disable no-await-in-loop -- Input validation and snapshot transfers intentionally run sequentially. */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { hash } from './profile-routes.mjs';
 
 const [installationArgument, planArgument, jdkArgument, outputArgument, mode] = process.argv.slice(2);
@@ -44,14 +45,11 @@ await mkdir(classes);
  *
  * @param {string} tool - JDK executable.
  * @param {string[]} args - Exact arguments.
- * @returns {string} Tool output.
+ * @returns {Promise<string>} Tool output.
  */
-function command(tool, args) {
-    const result = spawnSync(path.join(jdk, 'bin', `${tool}${process.platform === 'win32' ? '.exe' : ''}`), args,
-        { cwd: workspace, encoding: 'utf8', maxBuffer: 4 * 1_024 * 1_024 });
-
-    assert.ifError(result.error);
-    assert.equal(result.status, 0, result.stderr || result.stdout);
+async function command(tool, args) {
+    const result = await promisify(execFile)(path.join(jdk, 'bin', `${tool}${process.platform === 'win32' ? '.exe' : ''}`), args,
+        { cwd: workspace, encoding: 'utf8', maxBuffer: 4 * 1_024 * 1_024, windowsHide: true });
 
     return result.stdout;
 }
@@ -66,16 +64,17 @@ assert.equal(sourceIdentities.find((record) => record.file === plan).sha256, pla
 const validator = path.join(output, 'ValidateManifestPlan.java');
 
 await writeFile(validator, 'public final class ValidateManifestPlan { public static void main(String[] args)throws Exception { System.out.println(PrepareManifestScenes.inputs(java.nio.file.Path.of(args[0])).size()); } }\n');
-command('javac', ['-J-Xmx256m', '--release', '17', '-cp', game, '-d', classes, ...sources, validator]);
+await command('javac', ['-J-Xmx256m', '--release', '17', '-cp', game, '-d', classes, ...sources, validator]);
 const classpath = [classes, game].join(path.delimiter);
 const batches = [];
+const batchSize = Math.min(4_096, Math.ceil(lines.length / 4));
 
-for (let offset = 0; offset < lines.length; offset += 4_096) {
-    const selected = lines.slice(offset, offset + 4_096);
+for (let offset = 0; offset < lines.length; offset += batchSize) {
+    const selected = lines.slice(offset, offset + batchSize);
     const file = path.join(output, `plan-${batches.length}.tsv`);
 
     await writeFile(file, `${selected.join('\n')}\n`, { flag: 'wx' });
-    assert.equal(Number(command('java', ['-Xmx128m', '-cp', classpath, 'ValidateManifestPlan', file]).trim()), selected.length);
+    assert.equal(Number((await command('java', ['-Xmx128m', '-cp', classpath, 'ValidateManifestPlan', file])).trim()), selected.length);
     const staging = path.join(output, `batch-${batches.length}`);
     const args = ['-Xmx128m', '-cp', classpath, 'PrepareManifestScenes', installation, file, staging, dll];
 
@@ -96,9 +95,12 @@ await writeFile(path.join(output, 'recipe.json'), JSON.stringify(recipe, null, 2
 if (mode === '--plan-only') {
     console.info(JSON.stringify({ output, batches: batches.length, identities: lines.length, nativeImporterExecuted: false }));
 } else {
-    // Each existing preparer owns one <=4096 plan and one original-native child at a time.
-    for (const batch of batches) {
-        command('java', batch.javaArguments);
+    // At most four bounded JVM owners, each reclaiming its native importer after every asset.
+    const prepared = await Promise.allSettled(batches.map((batch) => command('java', batch.javaArguments)));
+    const failed = prepared.find((result) => result.status === 'rejected');
+
+    if (failed) {
+        throw failed.reason;
     }
 
     const combined = path.join(output, 'combined');
