@@ -24,7 +24,7 @@ export async function installAssetStreaming(mount) {
     let evictedChunks = 0;
 
     /**
-     * Keeps a small seek window once all reads sharing an inode have completed.
+     * Keeps a small seek window, or releases all chunks after reaching EOF.
      * Pending download callback arrays are never removed.
      *
      * @param {object} file - Original runtime inode.
@@ -37,7 +37,7 @@ export async function installAssetStreaming(mount) {
         for (let index = 0; index < file.chunks.length; index++) {
             const chunk = file.chunks[index];
 
-            if ((index < first || index > last + 1) && chunk instanceof Uint8Array) {
+            if ((end >= file.length || index < first || index > last + 1) && chunk instanceof Uint8Array) {
                 evictedBytes += chunk.byteLength;
                 evictedChunks++;
                 file.chunks[index] = null;
