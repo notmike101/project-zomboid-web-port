@@ -308,10 +308,6 @@ function validate(scene) {
 
     integer(sky ?? 0, 0, 0xFF_FF_FF, 'skylight');
 
-    if (sky && minimum < 32) {
-        unsupported('outdoor basement lighting');
-    }
-
     if (seen !== undefined && (!Array.isArray(seen) || seen.length !== cells.length
         || Array.from(seen).some((value) => typeof value !== 'boolean'))) {
         unsupported('seen history');
@@ -1139,6 +1135,23 @@ function ambientColors(scene) {
                 if (color.some((value, channel) => value > ambient[adjacent][channel])) {
                     ambient[adjacent] = color.map((value) => Math.max(0, Math.trunc(value)));
                     queue.push(adjacent);
+                }
+            }
+
+            // Native0x580b admits a downward skylight edge only from ground level, with a32-byte loss.
+            if (coordinates(scene, index)[2] === 32 && allowed(scene, index, 9)) {
+                const below = neighbor(scene, index, 9);
+                const cell = scene.cells[below];
+
+                if (cell.openAir && BigInt(cell.room ?? -1) === -1n) {
+                    continue;
+                }
+
+                const color = ambient[index].map((value) => value - 32);
+
+                if (color.some((value, channel) => value > ambient[below][channel])) {
+                    ambient[below] = color.map((value) => Math.max(0, value));
+                    queue.push(below);
                 }
             }
         }
