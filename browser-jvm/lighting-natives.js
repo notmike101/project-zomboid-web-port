@@ -1,5 +1,8 @@
 import { calculateLighting } from './lighting-kernel.js';
 
+// Uncomputed slots are read-only zeros; calculation replaces each slot with its own result.
+const initialReadback = Object.freeze(Array.from({ length: 49 }, () => 0));
+
 /** Native argument failure that original Java callers can catch without losing cleanup. */
 class NativeArgumentError extends Error {
     name = 'NativeArgumentError';
@@ -175,7 +178,7 @@ function allocateLevelReadback(state, allocations, output, origin, dirty) {
             const index = first + Math.floor(cell / 8) * state.width * 8 + cell % 8;
 
             if (output[index] === null) {
-                output[index] = Array.from({ length: 49 }, () => 0);
+                output[index] = initialReadback;
 
                 if (dirty) {
                     state.squareDirty.add(index);
