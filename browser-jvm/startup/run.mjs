@@ -422,6 +422,7 @@ try {
             ? {
                     ...globalThis.originalBoot,
                     mediaNegativeStat: globalThis.originalBoot.mediaNegativeStatSnapshot?.() ?? null,
+                    assetStreaming: globalThis.originalBoot.assetStreamingSnapshot?.() ?? null,
                     resources: await globalThis.originalBoot.resourceTelemetrySnapshot?.() ?? null,
                 }
             : null)

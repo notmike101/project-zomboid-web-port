@@ -1,4 +1,5 @@
 /* eslint-disable import/no-unresolved -- Served at the frozen generation root with its sibling adapter routes. */
+import { installAssetStreaming } from './asset-streaming.js';
 import { createBrowserClock } from './browser-clock.js';
 import { createBrowserMouse } from './browser-mouse.js';
 import { createBrowserPhysics } from './browser-physics.js';
@@ -33,6 +34,7 @@ let metadataOwner;
 let metadataDescriptor;
 let audioOwner;
 let compression;
+let assetStreaming;
 
 globalThis.originalBoot = { observations, failures, hostReports, completed: false, vmExitObserved: false };
 /**
@@ -41,6 +43,12 @@ globalThis.originalBoot = { observations, failures, hostReports, completed: fals
  * @returns {object|null} Current real owner snapshot, or no installed owner.
  */
 globalThis.originalBoot.mediaNegativeStatSnapshot = () => metadataOwner?.snapshot() ?? null;
+/**
+ * Reports actual HTTP asset streaming activity.
+ *
+ * @returns {object|null} Read and eviction counters.
+ */
+globalThis.originalBoot.assetStreamingSnapshot = () => assetStreaming?.snapshot() ?? null;
 stop.addEventListener('click', () => {
     stopped = true;
     stop.disabled = true;
@@ -343,6 +351,7 @@ try {
 
     metadataDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'webStatAsyncImpl');
     metadataOwner = installNegativeStat(globalThis, appMounts[0], mediaCertificate, positiveCertificate);
+    assetStreaming = await installAssetStreaming(appMounts[0]);
     installUnsafeShortRepair(globalThis.cj3Module);
     installUnsafeFloatVolatile(globalThis.cj3Module);
     installNativeLibraryLoader(globalThis.cj3Module);
@@ -415,6 +424,15 @@ try {
             globalThis.originalBoot.audioAfterDispose = audioOwner.snapshot();
         } catch (error) {
             failures.push({ audioDisposeError: String(error.stack || error) });
+        }
+    }
+
+    if (assetStreaming) {
+        try {
+            globalThis.originalBoot.assetStreamingFinal = assetStreaming.snapshot();
+            assetStreaming.dispose();
+        } catch (error) {
+            failures.push({ assetStreamingDisposeError: String(error.stack || error) });
         }
     }
 

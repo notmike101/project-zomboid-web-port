@@ -1,5 +1,7 @@
 # Toward a playable original-bytecode port
 
+Asset streaming (2026-11-07): the server already streams HTTP byte ranges. The new browser adapter evicts consumed raw media/prepared-file chunks outside an eight-chunk seek window plus read-ahead, after concurrent reads complete. It preserves original range fetching and leaves JARs, runtime files and writable saves alone. The bounded real-browser read check passes; next measure actual full-world eviction counters and retained Java objects. This is not yet a fix for the post-streaming V8 heap failure.
+
 Latest connected-world blocker (2026-11-06): original binary chunk streaming finished, then Chromium exhausted its approximately 4 GiB V8 heap before `IngameState`. The retained crash dump reports `Ineffective mark-compacts near heap limit`; this occurred below the whole-browser RAM ceiling. Identify retained allocations in the next run; do not treat additional free system RAM as a fix for this heap limit.
 
 End-of-day checkpoint (2026-11-06): the Web Crypto importer path has now run during normal world loading, retaining source, snapshot and path/flags integrity checks. Subsequent loading phases completed faster, but the run hit the unchanged browser-memory guard after streaming. This is separate from the earlier confirmed V8 heap exhaustion. The final candidate also includes shared immutable initial lighting readback and was intentionally stopped during loading at the user's request. No Ingame, movement, interaction or save/reopen proof exists yet.

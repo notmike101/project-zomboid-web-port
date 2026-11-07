@@ -8,6 +8,7 @@ import { loadClosedMedia } from './closed-media.mjs';
 
 const headers = { 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp' };
 const sourceModules = [
+    'asset-streaming.js',
     'negative-stat.js', 'sprite-webgl.js', 'sprite-attrib.js', 'glsl-compat.js', 'keyboard.js', 'browser-mouse.js', 'display-events.js',
     'custom-cursor.js', 'controller-natives.js', 'browser-clock.js', 'browser-physics.js', 'ragdoll-definitions.js',
     'file-watch-natives.js', 'process-natives.js', 'native-library-loader.js', 'unsafe-short-repair.js', 'unsafe-float-volatile.js',
