@@ -752,7 +752,7 @@ export function createLightingNatives() {
             }
 
             if (flagA !== false || flagB !== false || flagC !== false || flagD !== false
-                || fatigue !== 0 || range < 0 || range > 20 || cone < -1 || cone > 1) {
+                || fatigue < 0 || fatigue > 1 || range < 0 || range > 20 || cone < -1 || cone > 1) {
                 unsupported('player flags or perception');
             }
 

@@ -301,7 +301,7 @@ function validate(scene) {
         const { directionX, directionY, range, fatigue, cone } = perception;
 
         if (![directionX, directionY, range, fatigue, cone].every(Number.isFinite)
-            || range < 0 || range > 20 || fatigue !== 0 || cone < -1 || cone > 1) {
+            || range < 0 || range > 20 || fatigue < 0 || fatigue > 1 || cone < -1 || cone > 1) {
             unsupported('player perception');
         }
     }
