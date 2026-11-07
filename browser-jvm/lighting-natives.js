@@ -751,14 +751,14 @@ export function createLightingNatives() {
                 unsupported('player outside qualified region');
             }
 
-            if (flagA !== false || flagB !== false || flagC !== false || flagD !== false
+            if (flagA !== false || flagB !== false || flagC !== false || typeof flagD !== 'boolean'
                 || fatigue < 0 || fatigue > 1 || range < 0 || range > 20 || cone < -1 || cone > 1) {
                 unsupported('player flags or perception');
             }
 
             update.playerPosition = [x - state.x * 8, y - state.y * 8, z];
             update.worldPlayer = [x, y, z];
-            update.perception = { directionX, directionY, range, fatigue, cone };
+            update.perception = { directionX, directionY, range, fatigue, cone, shortSighted: flagD };
         },
         /**
          * Stages original frame settings and LOS invalidation.
