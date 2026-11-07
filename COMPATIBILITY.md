@@ -1,5 +1,7 @@
 # Incremental original-bytecode compatibility
 
+The latest original world run completed the `WorldStreamer.isBusy()` loop, then the renderer exhausted its V8 heap before gameplay. Protected-input audit and owned-process cleanup completed. Ingame rendering, movement, interaction and whole-world save/reopen remain unverified; startup now records renderer crashes explicitly instead of waiting for the owner deadline.
+
 Importer hashing now has an optional browser-native SHA-256 path enabled by original startup. The Java helper compiles, and the actual browser callback matches three recorded animation/model snapshot hashes (148,646–415,996 bytes). Desktop preparation retains Java hashing. This does not yet qualify the new JNI path in a complete world load or establish a full-load speedup.
 
 Current frontier (2026-11-06): the audio-enabled original world completed map metadata, zones, collision, animal/zombie population and pathfinding initialization, created the world cell and streamed binary chunks without the earlier startup lighting exception. That run was intentionally stopped while animations were still loading to advance to the current-code candidate. The new candidate adds fatigue, Short Sighted and basement daylight support, plus per-scene reflection metadata caching in the importer adapter. The cache preserves exact byte-for-byte roundtrips for three real animation/model snapshots; its browser speedup is not yet measured. Original game classes remain unchanged. Ingame movement, interaction, save/reopen and full playability remain unverified.
