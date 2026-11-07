@@ -384,6 +384,11 @@ try {
         await route.continue();
     });
     page = await context.newPage();
+    page.on('crash', () => {
+        evidence.rendererCrash = { observedAt: new Date().toISOString(), url: page.url() };
+        writeFileSync(path.join(output, 'renderer-crash.json'), JSON.stringify(evidence.rendererCrash));
+        rejectHostFailure(new Error('Original browser renderer crashed'));
+    });
     networkObserver = await createGateNetworkObserver(context, page);
 
     try {
