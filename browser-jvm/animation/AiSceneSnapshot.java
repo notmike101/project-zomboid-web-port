@@ -43,7 +43,13 @@ public final class AiSceneSnapshot {
  }
  static final class Reader {
   final DataInputStream in;final Map<Integer,Object> seen=new HashMap<>();Reader(DataInputStream in){this.in=in;}
+  final Map<Class<?>,Constructor<?>[]> constructors=new HashMap<>();
+  final Map<Class<?>,Map<String,Field>> fields=new HashMap<>();
   byte[] scratch;
+  Field field(Class<?> type,String name)throws ReflectiveOperationException{
+   Map<String,Field> declared=fields.computeIfAbsent(type,ignored->new HashMap<>());
+   Field field=declared.get(name);if(field==null){field=type.getDeclaredField(name);field.setAccessible(true);declared.put(name,field);}return field;
+  }
   void readBuffer(ByteBuffer target,int capacity)throws IOException{
    int size=Math.min(capacity,65536);
    if(size>0&&(scratch==null||scratch.length<size))scratch=new byte[size];
@@ -54,8 +60,8 @@ public final class AiSceneSnapshot {
    // These original wrappers only store their buffer; decoded real fields replace it before return.
    // Original AiLightType.<clinit> assigns DIRECTIONAL raw 1; raw 0 is rejected.
    boolean bufferWrapper=type==AiVector.class||type==AiQuaternion.class||type==AiColor.class;
-   var constructors=type.getDeclaredConstructors();Arrays.sort(constructors,Comparator.comparingInt(Constructor::getParameterCount));
-   for(var c:constructors){c.setAccessible(true);Object[] args=new Object[c.getParameterCount()];var types=c.getParameterTypes();for(int i=0;i<args.length;i++){var t=types[i];args[i]=type==AiLight.class&&i==1?1:bufferWrapper&&t==ByteBuffer.class?ByteBuffer.allocate(0):t==String.class?"":t==int.class?0:t==long.class?0L:t==float.class?0f:t==double.class?0d:t==boolean.class?false:t.isArray()?Array.newInstance(t.getComponentType(),16):null;}if(type.getName().equals("jassimp.AiMaterial$Property"))args[3]=1;try{return c.newInstance(args);}catch(InvocationTargetException e){}}
+   var candidates=constructors.get(type);if(candidates==null){candidates=type.getDeclaredConstructors();Arrays.sort(candidates,Comparator.comparingInt(Constructor::getParameterCount));constructors.put(type,candidates);}
+   for(var c:candidates){c.setAccessible(true);Object[] args=new Object[c.getParameterCount()];var types=c.getParameterTypes();for(int i=0;i<args.length;i++){var t=types[i];args[i]=type==AiLight.class&&i==1?1:bufferWrapper&&t==ByteBuffer.class?ByteBuffer.allocate(0):t==String.class?"":t==int.class?0:t==long.class?0L:t==float.class?0f:t==double.class?0d:t==boolean.class?false:t.isArray()?Array.newInstance(t.getComponentType(),16):null;}if(type.getName().equals("jassimp.AiMaterial$Property"))args[3]=1;try{return c.newInstance(args);}catch(InvocationTargetException e){}}
    throw new IOException("No usable importer constructor: "+type.getName());
   }
   @SuppressWarnings({"unchecked","rawtypes"}) Object value()throws Exception{
@@ -66,7 +72,7 @@ public final class AiSceneSnapshot {
     case 11:{int id=in.readInt(),n=in.readInt();var list=new ArrayList<>();seen.put(id,list);for(int i=0;i<n;i++)list.add(value());return list;}
     case 12:{int id=in.readInt(),n=in.readInt();var map=new LinkedHashMap<>();seen.put(id,map);for(int i=0;i<n;i++)map.put(value(),value());return map;}
     case 13:{int id=in.readInt(),n=in.readInt();var set=new LinkedHashSet<>();seen.put(id,set);for(int i=0;i<n;i++)set.add(value());return set;}
-    case 14:{int id=in.readInt();Class<?> type=type(in.readUTF());Object result=construct(type);seen.put(id,result);int n=in.readInt();for(int i=0;i<n;i++){var field=type.getDeclaredField(in.readUTF());field.setAccessible(true);field.set(result,value());}return result;}
+    case 14:{int id=in.readInt();Class<?> type=type(in.readUTF());Object result=construct(type);seen.put(id,result);int n=in.readInt();for(int i=0;i<n;i++)field(type,in.readUTF()).set(result,value());return result;}
     default:throw new IOException("Unexpected snapshot tag "+tag);
    }
   }
