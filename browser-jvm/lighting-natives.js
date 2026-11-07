@@ -1277,9 +1277,10 @@ export function createLightingNatives() {
             const cleared = update.cleared ?? state.pending?.cleared;
             const worldPlayer = update.worldPlayer ?? state.previousPlayer;
             const pendingSourceUpdate = sourceUpdate ?? state.pending?.sourceUpdate;
+            const emptyRegion = !playerPosition && ranges.size === 0 && cells.every((cell) => cell === null);
 
             if (chunk || square || level !== null || cells.includes(undefined)
-                || cleared === undefined || pendingSourceUpdate === undefined
+                || (!emptyRegion && (cleared === undefined || pendingSourceUpdate === undefined))
                 || ranges.size > state.width * state.height) {
                 unsupported(`incomplete region update: ${JSON.stringify({
                     openChunk: Boolean(chunk), openSquare: Boolean(square), level,
@@ -1290,7 +1291,7 @@ export function createLightingNatives() {
             }
 
             if (!playerPosition) {
-                // Original loading submits geometry and frame settings before creating its player.
+                // Loading can submit an empty region before frame settings or player creation.
                 state.deferred = {
                     cells: [...cells], chunks: new Set(chunks), ranges: new Map(ranges), cleared,
                     perception, sky, sourceUpdate: pendingSourceUpdate, frameCount,
