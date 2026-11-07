@@ -49,7 +49,7 @@ function command(tool, args, cwd = work) {
     return result.stdout;
 }
 
-const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|port\/host\/(?:BrowserAvatarDiagnostics|PopulationBuffers|FmodArrays|(?:SpriteBuffers|ClipperSupport)(?:\$[^/]+)?)|org\/lwjgl\/stb\/STBImage)\.class$/u;
+const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|PrepareManifestScenes(?:\$[^/]+)?|port\/host\/(?:BrowserAvatarDiagnostics|PopulationBuffers|FmodArrays|(?:SpriteBuffers|ClipperSupport)(?:\$[^/]+)?)|org\/lwjgl\/stb\/STBImage)\.class$/u;
 const shadowedGraphics = /^port\/host\/SpriteGraphics(?:\$[^/]+)?\.class$/u;
 const earlierArchives = classpath.slice(0, classpath.indexOf(entry));
 
@@ -68,6 +68,7 @@ try {
         .map((name) => path.join(java, name));
 
     sources.push(path.resolve(import.meta.dirname, '../host/port/host/BrowserAvatarDiagnostics.java'));
+    sources.push(path.resolve(import.meta.dirname, '../animation/manifest/PrepareManifestScenes.java'));
     sources.push(path.resolve(import.meta.dirname, '../host/org/lwjgl/stb/STBImage.java'));
     sources.push(...['SpriteBuffers.java', 'PopulationBuffers.java', 'FmodArrays.java', 'ClipperSupport.java'].map((name) => path.resolve(import.meta.dirname, '../host/port/host', name)));
     await mkdir(classes);

@@ -10,8 +10,14 @@ public final class PrepareManifestScenes {
     record Input(String key, String relative, String sourceHash, long bytes, String flags, long raw) {}
     static final Set<String> FLAGS = Set.of("FIND_INSTANCES", "MAKE_LEFT_HANDED", "LIMIT_BONE_WEIGHTS", "TRIANGULATE", "OPTIMIZE_MESHES", "REMOVE_REDUNDANT_MATERIALS", "JOIN_IDENTICAL_VERTICES");
     static final Map<String, Long> FLAG_VALUES = Map.of("FIND_INSTANCES",1048576L,"MAKE_LEFT_HANDED",4L,"LIMIT_BONE_WEIGHTS",512L,"TRIANGULATE",8L,"OPTIMIZE_MESHES",2097152L,"REMOVE_REDUNDANT_MATERIALS",4096L,"JOIN_IDENTICAL_VERTICES",2L);
-    static String digest(byte[] bytes) throws Exception { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
+    private static final boolean BROWSER_DIGEST = Boolean.getBoolean("pz.browser.importerDigest");
+    private static native String browserDigest(byte[] bytes) throws IOException;
+    static String digest(byte[] bytes) throws Exception {
+        return BROWSER_DIGEST ? browserDigest(bytes)
+            : HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+    }
     static String hash(Path path) throws Exception {
+        if (BROWSER_DIGEST) return digest(Files.readAllBytes(path));
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         try (InputStream stream = Files.newInputStream(path)) { byte[] block = new byte[65536]; for (int n; (n = stream.read(block)) != -1;) digest.update(block, 0, n); }
         return HexFormat.of().formatHex(digest.digest());

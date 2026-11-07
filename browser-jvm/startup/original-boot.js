@@ -221,12 +221,30 @@ try {
     await startSchedulerRuntime({
         version: 17,
         status: 'none',
-        javaProperties: ['user.dir=/app', `user.home=${root}`, 'java.library.path=/app/',
+        javaProperties: ['user.dir=/app', `user.home=${root}`, 'java.library.path=/app/', 'pz.browser.importerDigest=true',
             `pz.browser.audio=${Boolean(audioOwner)}`, `pz.browser.novoip=${admission.noVoip === true}`,
             ...(admission.textureCompressionEnabled === undefined ? [] : [`pz.browser.textureCompression=${admission.textureCompressionEnabled}`])],
         natives: {
             ...graphics.natives, ...keyboard.natives, ...mouse.natives, ...display.natives,
             ...controllers.natives, ...clock.natives, ...physics.natives, ...watch.natives, ...processes.natives,
+            /**
+             * Checks original importer inputs with the browser's SHA-256 implementation.
+             *
+             * @param {object} lib - Current Java native namespace.
+             * @param {Int8Array} bytes - Actual source or snapshot bytes.
+             * @returns {Promise<string>} Lowercase SHA-256, or a real Java I/O exception.
+             */
+            async Java_PrepareManifestScenes_browserDigest(lib, bytes) {
+                try {
+                    const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(bytes));
+
+                    return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');
+                } catch (error) {
+                    const IOException = await lib.java.io.IOException;
+
+                    throw await new IOException(`Importer SHA-256 failed: ${error.name}`);
+                }
+            },
             /**
              * Retains actual original owner and render observations.
              *
