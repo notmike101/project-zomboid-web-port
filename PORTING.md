@@ -1,5 +1,7 @@
 # Toward a playable original-bytecode port
 
+FMOD bank streaming (2026-11-07): the maintained 2.03.09 adapter now mounts seekable, read-only SDK nodes over the existing certified 64 KiB range service, with a shared 8 MiB LRU cache. The actual browser bank/music lifecycle check passes without full-bank retention. Include this adapter in the next frozen audio package; do not modify the active world generation. The running asset-streaming candidate still uses the previous full-bank adapter, so its memory result cannot qualify this additional reduction.
+
 Asset streaming (2026-11-07): the server already streams HTTP byte ranges. The new browser adapter evicts consumed raw media/prepared-file chunks outside an eight-chunk seek window plus read-ahead, after concurrent reads complete. It preserves original range fetching and leaves JARs, runtime files and writable saves alone. The bounded real-browser read check passes; next measure actual full-world eviction counters and retained Java objects. This is not yet a fix for the post-streaming V8 heap failure.
 
 Latest connected-world blocker (2026-11-06): original binary chunk streaming finished, then Chromium exhausted its approximately 4 GiB V8 heap before `IngameState`. The retained crash dump reports `Ineffective mark-compacts near heap limit`; this occurred below the whole-browser RAM ceiling. Identify retained allocations in the next run; do not treat additional free system RAM as a fix for this heap limit.

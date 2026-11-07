@@ -1,13 +1,16 @@
 /* eslint-disable jsdoc/require-jsdoc -- Internal public-SDK boundary helpers are owned by the FMOD runtime. */
-// Owns adopted encoded VFS buffers; bank backings live until successful SDK system release.
+// Owns bounded encoded bank ranges and staged unbanked sounds until SDK release.
 export function createFmod20309Files(publicSDK, files) {
     let rangeBytes = 0;
     let rangeReads = 0;
     let maxRangeBytes = 0;
     const bankBackings = new Map();
-    let bankBytes = 0;
-    let pendingBankBytes = 0;
-    let peakBankBytes = 0;
+    let bankSourceBytes = 0;
+    const cacheBudget = 8 * 1_024 * 1_024;
+    const cache = new Map();
+    let cacheBytes = 0;
+    let peakCacheBytes = 0;
+    let deliveredBytes = 0;
     let nextBank = 1;
     const bankBudget = files.bankBudget;
     const keyFor = (path) => files.canonicalPath
@@ -34,50 +37,90 @@ export function createFmod20309Files(publicSDK, files) {
         return data;
     }
 
-    async function readBankSource(path, length) {
-        const data = new Uint8Array(length);
-        let next = 0;
-        let failed = false;
-        let failure;
-        const worker = async () => {
-            try {
-                while (next < length && !failed) {
-                    const start = next;
-                    const count = Math.min(65_536, length - start);
+    function bankChunk(path, key, start, length) {
+        const id = `${key}:${start}`;
+        let bytes = cache.get(id);
 
-                    next += count;
-                    // eslint-disable-next-line no-await-in-loop -- Four workers bound the pending source reads.
-                    const bytes = files.read ? await files.read(path, start, count) : files.readSync(path, start, count);
+        if (bytes) {
+            cache.delete(id);
+        } else {
+            bytes = files.readSync(path, start, Math.min(65_536, length - start));
 
-                    if (!(bytes instanceof Uint8Array) || bytes.byteLength !== count) {
-                        throw new Error('Encoded bank range extent mismatch');
-                    }
-
-                    data.set(bytes, start);
-                    rangeReads++;
-                    rangeBytes += count;
-                    maxRangeBytes = Math.max(maxRangeBytes, count);
-                }
-            } catch (error) {
-                if (!failed) {
-                    failure = error;
-                }
-
-                failed = true;
+            if (!(bytes instanceof Uint8Array) || bytes.byteLength !== Math.min(65_536, length - start)) {
+                throw new Error('Encoded bank range extent mismatch');
             }
-        };
 
-        await Promise.allSettled(Array.from({ length: 4 }, worker));
+            rangeReads++;
+            rangeBytes += bytes.byteLength;
+            maxRangeBytes = Math.max(maxRangeBytes, bytes.byteLength);
 
-        if (failed) {
-            throw failure;
+            while (cacheBytes + bytes.byteLength > cacheBudget) {
+                const oldest = cache.keys().next().value;
+
+                cacheBytes -= cache.get(oldest).byteLength;
+                cache.delete(oldest);
+            }
+
+            cacheBytes += bytes.byteLength;
+            peakCacheBytes = Math.max(peakCacheBytes, cacheBytes);
         }
 
-        return data;
+        cache.set(id, bytes);
+
+        return bytes;
     }
 
-    // The JNI owner serializes bank staging; no SDK call is active while source reads await.
-    async function stageBank(path) {
+    function mountBank(path, name, length) {
+        const node = publicSDK.FS_createDevice('/', name, () => null, null);
+        const getattr = node.node_ops.getattr;
+
+        // The SDK exports device creation; its returned node supplies seekable range reads.
+        node.node_ops = {
+            ...node.node_ops,
+            getattr(file) {
+                return { ...getattr(file), size: length, blocks: Math.ceil(length / 4_096) };
+            },
+        };
+        node.stream_ops = {
+            llseek(stream, offset, whence) {
+                let position = offset;
+
+                if (whence === 1) {
+                    position += stream.position;
+                }
+
+                if (whence === 2) {
+                    position += length;
+                }
+
+                if (!Number.isSafeInteger(position) || position < 0 || ![0, 1, 2].includes(whence)) {
+                    throw new Error('Invalid encoded bank seek');
+                }
+
+                return position;
+            },
+            read(_stream, buffer, offset, count, position) {
+                const available = Math.max(0, Math.min(count, length - position));
+
+                for (let done = 0; done < available;) {
+                    const start = Math.floor((position + done) / 65_536) * 65_536;
+                    const bytes = bankChunk(path, name, start, length);
+                    const within = position + done - start;
+                    const copied = Math.min(available - done, bytes.byteLength - within);
+
+                    buffer.set(bytes.subarray(within, within + copied), offset + done);
+                    done += copied;
+                }
+
+                deliveredBytes += available;
+
+                return available;
+            },
+        };
+    }
+
+    // Bank nodes retain metadata only; the shared range cache owns encoded bytes.
+    function stageBank(path) {
         const key = keyFor(path);
         const existing = bankBackings.get(key);
 
@@ -93,29 +136,17 @@ export function createFmod20309Files(publicSDK, files) {
         }
 
         if (!Number.isSafeInteger(bankBudget) || bankBudget < 0 || !Number.isSafeInteger(length) || length <= 0
-            || bankBytes + pendingBankBytes + length > bankBudget) {
+            || bankSourceBytes + length > bankBudget) {
             throw new Error('Bank staging exceeds the verified bank namespace byte budget');
         }
 
         const name = `fmod-bank-owned-${nextBank++}.bank`;
 
-        pendingBankBytes += length;
-        peakBankBytes = Math.max(peakBankBytes, bankBytes + pendingBankBytes);
-
-        let data;
-
-        try {
-            data = await readBankSource(path, length);
-        } finally {
-            pendingBankBytes -= length;
-        }
-
-        publicSDK.FS_createDataFile('/', name, data, true, false, true);
+        mountBank(path, name, length);
         const backing = { path: `/${name}`, bytes: length, loaded: false };
 
         bankBackings.set(key, backing);
-        bankBytes += length;
-        peakBankBytes = Math.max(peakBankBytes, bankBytes);
+        bankSourceBytes += length;
 
         return {
             path: backing.path,
@@ -126,7 +157,7 @@ export function createFmod20309Files(publicSDK, files) {
                 if (!backing.loaded && bankBackings.get(key) === backing) {
                     publicSDK.FS_unlink(backing.path);
                     bankBackings.delete(key);
-                    bankBytes -= backing.bytes;
+                    bankSourceBytes -= backing.bytes;
                 }
             },
         };
@@ -187,8 +218,11 @@ export function createFmod20309Files(publicSDK, files) {
             for (const [key, backing] of bankBackings) {
                 publicSDK.FS_unlink(backing.path);
                 bankBackings.delete(key);
-                bankBytes -= backing.bytes;
+                bankSourceBytes -= backing.bytes;
             }
+
+            cache.clear();
+            cacheBytes = 0;
 
             for (const [path, bytes] of staged) {
                 publicSDK.FS_unlink(path);
@@ -196,6 +230,6 @@ export function createFmod20309Files(publicSDK, files) {
                 staged.delete(path);
             }
         },
-        snapshot: () => ({ rangeBytes, rangeReads, maxRangeBytes, openFiles: 0, deliveredBytes: 0, cacheBytes: 0, peakCacheBytes: 0, stagedBytes, peakStagedBytes, stagedFiles: staged.size, stagingBudget, bankBytes, pendingBankBytes, peakBankBytes, bankBudget, bankBackings: bankBackings.size }),
+        snapshot: () => ({ rangeBytes, rangeReads, maxRangeBytes, openFiles: 0, deliveredBytes, cacheBytes, peakCacheBytes, cacheBudget, stagedBytes, peakStagedBytes, stagedFiles: staged.size, stagingBudget, bankBytes: 0, pendingBankBytes: 0, peakBankBytes: 0, bankSourceBytes, bankBudget, bankBackings: bankBackings.size }),
     };
 }
