@@ -258,7 +258,7 @@ function validate(scene) {
         }
 
         integer(cell.mask, 0, 255, 'flat adjacency');
-        integer(cell.vision, 0, 0x7_FF_FF_FF, 'vision matrix');
+        integer(cell.vision, 0, 0x7F_FF_FF_FF, 'vision and player-seen bits');
 
         for (const name of ['up', 'down', 'stairs']) {
             if (cell[name] !== undefined && typeof cell[name] !== 'boolean') {
@@ -1412,7 +1412,8 @@ export function calculateLighting(scene, sources) {
     const torches = torchLighting(scene);
     const couldSee = visibility(scene);
     const canSee = couldSee.map((value, index) => value && withinCone(scene, index));
-    const seen = canSee.map((value, index) => value || Boolean(scene.seen?.[index]));
+    // Original squareSet packs player-zero seen history above the 27 adjacency bits.
+    const seen = canSee.map((value, index) => value || Boolean(scene.seen?.[index]) || Boolean(scene.cells[index]?.vision & 1 << 27));
     const darkness = darknessMultipliers(scene, seen);
     const ambient = sources?.ambient ?? ambientColors(scene);
 

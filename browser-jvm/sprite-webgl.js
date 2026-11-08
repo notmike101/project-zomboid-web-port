@@ -2238,6 +2238,9 @@ export function createSpriteNatives(canvas, report, compression = null) {
         };
     }
 
+    // The original GL11 wrapper delegates this call directly to its GL11C native.
+    natives.Java_org_lwjgl_opengl_GL11C_glCullFace = (_lib, mode) => gl.cullFace(mode);
+
     return {
         natives, diagnostics,
         /**

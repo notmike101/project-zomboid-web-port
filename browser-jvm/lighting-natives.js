@@ -438,7 +438,7 @@ function visionChanged(cells, previous) {
     return cells.some((cell, index) => {
         const old = previous[index];
 
-        return cell !== old && (cell?.vision !== old?.vision || cell?.stairs !== old?.stairs
+        return cell !== old && ((cell?.vision & 0x7_FF_FF_FF) !== (old?.vision & 0x7_FF_FF_FF) || cell?.stairs !== old?.stairs
             || JSON.stringify(cell?.objects ?? []) !== JSON.stringify(old?.objects ?? []));
     });
 }
@@ -902,7 +902,7 @@ export function createLightingNatives() {
             }
 
             integer(mask, 0, 255, 'flat adjacency');
-            integer(vision, 0, 0x7_FF_FF_FF, 'vision matrix');
+            integer(vision, 0, 0x7F_FF_FF_FF, 'vision and player-seen bits');
             integer(lightLevel, 0, 0xFF_FF_FF, 'square ambient');
 
             if (typeof up !== 'boolean' || typeof down !== 'boolean' || typeof stairs !== 'boolean'
@@ -1342,7 +1342,9 @@ export function createLightingNatives() {
 
             const pending = {
                 width: state.width * 8, height: state.height * 8, minimum: 0, maximum: 63, cells,
-                player: playerPosition, seen: (state.history ?? state.computed)?.map((payload) => Boolean(payload?.[0] & 1)),
+                player: playerPosition,
+                // Resubmitted live squares replace seen bits; retired levels retain physical history.
+                seen: (state.history ?? state.computed)?.map((payload, index) => (!state.cells?.[index] || cells[index] === state.cells[index]) && Boolean(payload?.[0] & 1)),
                 lights: sceneLights, cleared, submitted: new Set(levelSubmissions),
                 roomLights: state.playerInitialized
                     ? [...roomLights.values()].map((light) => ({
@@ -1734,6 +1736,7 @@ export function createLightingNatives() {
             try {
                 return method(...args);
             } catch (error) {
+                console.error(`LightingJNI.${name}: ${error.message}`);
                 return throwJavaFailure(lib, error);
             }
         },
