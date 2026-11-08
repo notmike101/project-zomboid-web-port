@@ -780,9 +780,9 @@ export function createLightingNatives() {
             finite([red, green, blue, ambient, night, view, maximumView, sourceUpdate, sky], 'frame input');
 
             if ([red, green, blue, ambient, night].some((value) => value < 0 || value > 1)
-                || view < 0 || maximumView < view || maximumView > 256 || typeof cleared !== 'boolean'
+                || view < 0 || view > 256 || maximumView < 0 || maximumView > 256 || typeof cleared !== 'boolean'
                 || ![0, 100].includes(sourceUpdate)) {
-                unsupported('ambient, sunlight or frame settings');
+                unsupported(`ambient, sunlight or frame settings ${JSON.stringify({ red, green, blue, ambient, night, view, maximumView, cleared, sourceUpdate, sky })}`);
             }
 
             integer(sky, 0, 0xFF_FF_FF, 'skylight');
