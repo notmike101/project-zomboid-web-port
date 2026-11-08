@@ -1341,6 +1341,7 @@ function torchLighting(scene) {
 /**
  * Applies native integer attenuation, channel maxima, and float32 darkness.
  *
+ * @param {object} scene - Current geometry and outdoor skylight.
  * @param {object[][]} records - Per-square native light records.
  * @param {number[]} darkness - Per-square darkness multipliers.
  * @param {number[][]} ambient - Per-square ambient RGB.
@@ -1348,9 +1349,11 @@ function torchLighting(scene) {
  * @param {boolean[]} canSee - Current native player visibility.
  * @returns {number[][]} Per-square integer center RGB.
  */
-function centerColors(records, darkness, ambient, torchColors, canSee) {
+function centerColors(scene, records, darkness, ambient, torchColors, canSee) {
+    const sky = [scene.sky & 255, scene.sky >>> 8 & 255, scene.sky >>> 16 & 255];
+
     return records.map((squareRecords, index) => {
-        let color = ambient[index];
+        let color = scene.cells[index]?.openAir ? maximumColor(ambient[index], sky) : ambient[index];
 
         for (const record of squareRecords) {
             const attenuation = Math.fround(1 - Math.fround(record.distance / record.light.radius));
@@ -1393,9 +1396,10 @@ function sharedCorner(scene, work, index, corner) {
  * The bounded closure and native function provenance are in lighting-provenance.md.
  *
  * @param {object} scene - Complete local geometry, static lights, player and optional seen history.
+ * @param {object} [sources] - Retained static propagation and ambient buffers for an unchanged source update.
  * @returns {number[][]} One49-int native payload for every row-major square.
  */
-export function calculateLighting(scene) {
+export function calculateLighting(scene, sources) {
     scene = {
         ...scene, minimum: scene?.minimum ?? 32, maximum: scene?.maximum ?? 32,
         player: scene?.player?.length === 2 ? [...scene.player, 32] : scene?.player,
@@ -1404,14 +1408,20 @@ export function calculateLighting(scene) {
     validate(scene);
 
     const order = traversalOrder(scene);
-    const records = propagate(scene, traversalOrder(scene, true));
+    const records = sources?.records ?? propagate(scene, traversalOrder(scene, true));
     const torches = torchLighting(scene);
     const couldSee = visibility(scene);
     const canSee = couldSee.map((value, index) => value && withinCone(scene, index));
     const seen = canSee.map((value, index) => value || Boolean(scene.seen?.[index]));
     const darkness = darknessMultipliers(scene, seen);
-    const ambient = ambientColors(scene);
-    const colors = centerColors(records, darkness, ambient, torches.colors, canSee);
+    const ambient = sources?.ambient ?? ambientColors(scene);
+
+    if (sources) {
+        sources.records = records;
+        sources.ambient = ambient;
+    }
+
+    const colors = centerColors(scene, records, darkness, ambient, torches.colors, canSee);
     const work = scene.cells.map(() => []);
     const lower = colors.map((color, index) => allowed(scene, index, 9)
         ? maximumColor(color, colors[neighbor(scene, index, 9)])

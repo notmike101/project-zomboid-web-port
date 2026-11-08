@@ -370,9 +370,10 @@ function markMovedReadback(state) {
  * Sparse region slots remain absent and are never exposed as invented square payloads.
  *
  * @param {object} scene - Staged native region.
+ * @param {object} [sources] - Static source buffers retained between worker updates.
  * @returns {number[][]} Owned64-level payload array with explicit absent slots.
  */
-function calculateRetainedLighting(scene) {
+function calculateRetainedLighting(scene, sources) {
     const plane = scene.width * scene.height;
     let minimum = 64;
     let maximum = -1;
@@ -393,7 +394,7 @@ function calculateRetainedLighting(scene) {
     const compact = calculateLighting({
         ...scene, minimum, maximum, cells: scene.cells.slice(minimum * plane, (maximum + 1) * plane),
         seen: scene.seen?.slice(minimum * plane, (maximum + 1) * plane),
-    });
+    }, sources);
     const output = Array.from({ length: scene.cells.length }, () => null);
 
     for (const [index, element] of compact.entries()) {
@@ -1366,7 +1367,14 @@ export function createLightingNatives() {
             }
 
             // Validate and calculate before committing any retained geometry or publication.
-            const calculated = calculateRetainedLighting(pending);
+            pending.reusedSources = pending.sourceUpdate === 0 && Boolean(state.staticSources)
+                && !pending.moved && pending.submitted.size === 0
+                && !pending.lightReferences.some(({ light }) => light.initialLife > 0)
+                && pending.lightRegistrations.size === state.registeredLights.size
+                && [...pending.lightRegistrations].every((light) => state.registeredLights.has(light))
+                && pending.cells.every((cell, index) => cell === state.computedCells?.[index]);
+            pending.sources = pending.reusedSources ? state.staticSources : {};
+            const calculated = calculateRetainedLighting(pending, pending.sources);
 
             restoreCoordinates(state, calculated);
             allocateDirtyLevels(state, ranges);
@@ -1463,21 +1471,20 @@ export function createLightingNatives() {
                 unsupported('worker timestamp or global-light invalidation');
             }
 
-            // Native 0x180009c30 uses global invalidation to request the full calculation at 0x180008650.
-            if (!dirty && [...states.values()].some((state) => state.pending && !state.workerReady && state.pending.sourceUpdate === 0)) {
-                unsupported('retained source update without global invalidation');
-            }
-
             for (const state of states.values()) {
                 if (state.pending && !state.workerReady) {
                     const previous = state.pending.previous;
+                    // Native0xc400/0x9c30 retain static propagation while visibility and torches still update.
+                    const reuseSources = !dirty && state.pending.reusedSources;
 
                     // Active state belongs to the main snapshot; native RGB is read from the shared light at worker time.
                     const colorChanged = state.pending.lightReferences.some(({ light, on, color }) => on
                         && color.some((value, channel) => value !== light.color[channel]));
 
-                    if (colorChanged || state.pending.torchReferences.length > 0
+                    if ((state.pending.reusedSources && !reuseSources) || colorChanged || state.pending.torchReferences.length > 0
                         || state.pending.lightReferences.some(({ light }) => light.initialLife > 0)) {
+                        const sources = reuseSources ? state.staticSources : {};
+
                         state.computed = calculateRetainedLighting({
                             ...state.pending,
                             lights: state.pending.lightReferences.filter((reference) => reference.on
@@ -1485,10 +1492,12 @@ export function createLightingNatives() {
                                 ...light, x: light.x - state.x * 8, y: light.y - state.y * 8, color: [...light.color],
                             })),
                             torches: state.pending.torchReferences.filter((torch) => torch.id !== 0),
-                        });
+                        }, sources);
+                        state.staticSources = sources;
                         restoreCoordinates(state, state.computed);
                     } else {
                         state.computed = state.pendingResult;
+                        state.staticSources = state.pending.sources;
                     }
 
                     // Native seeds before subtracting the coalesced frame command's count.
