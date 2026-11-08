@@ -641,8 +641,11 @@ int add_vehicle(int id,float x,float y,float z,float qx,float qy,float qz,float 
     vehicleReadbackValid=false;gContactAddedCallback=nativeContactAdded;ownedWorld->world.setInternalTickCallback(nativeVehiclePreTick,nullptr,true);return 1;
 }
 int set_vehicle_active(int id,int active){
+    if(!ownedWorld||(active!=0&&active!=1))return 0;
     auto* ownedVehicle=findVehicle(id);
-    if(!ownedVehicle||ownedVehicle->id!=id||(active!=0&&active!=1)||ownedVehicle->isStatic)return 0;
+    if(!ownedVehicle)return active?0:1;
+    // Native activation of a static vehicle returns without changing its state; deactivation is allowed.
+    if(ownedVehicle->isStatic&&active)return 1;
     ownedVehicle->active=active;ownedVehicle->body->forceActivationState(active?DISABLE_DEACTIVATION:ACTIVE_TAG);return 1;
 }
 int set_vehicle_mass(int id,float mass){

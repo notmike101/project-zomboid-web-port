@@ -264,7 +264,8 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
          * @param {boolean} active - Requested original activation state.
          */
         setVehicleActive(lib, id, active) {
-            expect(typeof active === 'boolean' && engine._set_vehicle_active(id, Number(active)) === 1, 'Actual vehicle activation rejected');
+            expect(typeof active === 'boolean' && engine._set_vehicle_active(id, Number(active)) === 1,
+                `Actual vehicle activation rejected: id=${id}, active=${String(active)}, type=${typeof active}`);
         },
         /**
          * Dispatches setVehicleStatic to the actual qualified engine operation.
