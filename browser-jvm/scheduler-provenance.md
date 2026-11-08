@@ -1,9 +1,8 @@
-# Qualified currentThread scheduling boundary
+# Qualified thread scheduling boundaries
 
-This adapter provides a cooperative scheduling opportunity at the actual Java
-`Thread.currentThread()` host-service boundary. It does not implement general
-preemption. In particular, an original `LightingThread.stop()` loop containing
-only `Thread.isAlive()` remains outside this repair.
+This adapter provides cooperative scheduling opportunities at the actual Java
+`Thread.currentThread()` host-service boundary and compiled `Thread.isAlive()`
+entry. It does not implement general preemption.
 
 Preparation downloads the official CheerpJ 4.3 runtime and loader from
 <https://cjrtnc.leaningtech.com/4.3/>. Those proprietary sources and their derived
@@ -15,7 +14,19 @@ The original runtime SHA-256 is
 the original loader SHA-256 is
 `5b0ec873d1ae97d184928041b5f97ecf36eb990dac3baec5836a90bd87fa7a9f`.
 Preparation requires the full hashes and exactly one qualified `an1` body.
-The derived manifest lists every changed body: current-thread scheduling (`an1`), explicit yield scheduling (`anV`), null-write exception translation (`e5`), and asynchronous directory/stat completion (`Qk`, `PS`). No diagnostic sleep wrapper is included.
+The derived manifest lists every changed body: current-thread scheduling (`an1`), explicit yield scheduling (`anV`), compiled liveness scheduling (`iI`), null-write exception translation (`e5`), and asynchronous directory/stat completion (`Qk`, `PS`). No diagnostic sleep wrapper is included.
+
+A debugger capture of original quit handling found `LightingThread.stop()` spinning
+on `Thread.isAlive()` while the lighting worker waited to run. Java 17 compiles
+this predicate into a direct `eetop` read, bypassing the native liveness service.
+Registration now wraps only `java/lang/Thread.isAlive:()Z`. After the existing
+16 ms budget, it schedules the runtime's ordinary Java-entry frame (method pointer
+with entry bit, bytecode PC zero, original receiver and caller), then resumes the
+unchanged predicate. It does not change game or JRE bytecode, completion flags,
+thread status, or interrupt state. A small real-JVM/browser reproduction verifies
+unstarted/running/terminated worker results and completion of an isAlive-only
+shutdown loop while preserving owner identity and interrupt state. Original
+whole-world save/quit verification remains a separate gate.
 
 Original `an1` allocates a local-reference slot for the real current Java thread
 object (`Q.a7`), increments the real slot cursor, and returns the real slot index.

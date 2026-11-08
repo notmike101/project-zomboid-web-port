@@ -14,6 +14,9 @@ const replacement = 'function an1(h){var f=null,c=0,a=null;a=Q;f=a.a7;c=a.i1|0;a
 const yieldOriginal = 'function anV(a){a1({p:a,f:7,pc:86,a:null,o:0});throw \'CheerpJContinue\';}';
 // An immediately due scheduler event makes OL select another runnable thread without a Java sleep or interrupt change.
 const yieldReplacement = 'function anV(a){Q.d16=+Date.now();Q.i20=Q.i20&65280|2;a1({p:a,f:7,pc:86,a:null,o:0});throw \'CheerpJContinue\';}';
+const aliveOriginal = 'function iI(h,f,c){var a=0,j=null;';
+// Java 17 compiles isAlive as an eetop read; yield at its real compiled-method entry.
+const aliveReplacement = 'function iI(h,f,c){var a=0,j=null;if(aN(h|0)==="isAlive"&&aN(8+h|0)==="()Z"&&D(HEAP8,HEAP32[8+(HEAP32[16+h>>2]|0)>>2]|0)==="java/lang/Thread"){var originalAlive=c;c=function(thread,caller){if(+Date.now()- +$.d7>16){a1({p:caller,f:h|1,pc:0,a:[thread],o:0});throw \'CheerpJContinue\';}return originalAlive(thread,caller);};}';
 // Chrome reports writes differently from reads; preserve the runtime's existing Java exception paths.
 const nullRead = 'h="Cannot read properties of null ";c:if(!(a.startsWith(h)))';
 const nullReadWrite = 'h="Cannot read properties of null ";c:if(!(a.startsWith(h)||a.startsWith("Cannot set properties of null ")))';
@@ -67,13 +70,13 @@ export function deriveSchedulerRuntime(runtime, loader) {
         throw new Error('Unqualified scheduler loader function');
     }
 
-    const yielded = replaceOne(replaceOne(runtime.toString('utf8'), original, replacement), yieldOriginal, yieldReplacement);
+    const yielded = replaceOne(replaceOne(replaceOne(runtime.toString('utf8'), original, replacement), yieldOriginal, yieldReplacement), aliveOriginal, aliveReplacement);
     const exceptions = replaceOne(replaceOne(yielded, nullRead, nullReadWrite), undefinedRead, undefinedReadWrite);
     // Async filesystem completion must use current native memory views after another thread grows memory.
     const listed = replaceOne(exceptions, 'function Qk(r,p){', 'function Qk(r,p){r.a4=r.a2.a2.a10;');
     const runtimeSource = replaceOne(listed, 'function PS(j){', 'function PS(j){j.a2=j.a1.a2.a12;');
     const loaderModule = `// Copyright 2017-2022 Leaning Technologies Ltd\n// Derived from the pinned official CheerpJ 4.3 loader; only its runtime import URI changes.\nexport default ${replaceOne(loadFunction, 'import(cj3LoaderPath + "/cj3.js")', 'import("/scheduler-runtime/cj3.js")')}\n`;
-    const manifest = { ...schedulerPins, runtimeOutputSha: digest(runtimeSource), loaderModuleSha: digest(loaderModule), modifiedBodies: ['an1', 'anV', 'e5', 'Qk', 'PS'] };
+    const manifest = { ...schedulerPins, runtimeOutputSha: digest(runtimeSource), loaderModuleSha: digest(loaderModule), modifiedBodies: ['an1', 'anV', 'iI', 'e5', 'Qk', 'PS'] };
 
     return { runtimeSource, loaderModule, manifest };
 }
