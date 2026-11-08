@@ -163,7 +163,7 @@ export function normalizeDesktopShader(source, stage) {
     const functions = new Map();
     const definitions = [];
     const identifiers = new Set();
-    const legacyTextureArities = new Set();
+    const legacyTextureSignatures = new Set();
     let legacyTextureName = 'portLegacyTexture2D';
     const legacyColor = stage === 'vertex' ? 'gl_FrontColor' : 'gl_Color';
     let needsLegacyColor = false;
@@ -414,7 +414,9 @@ export function normalizeDesktopShader(source, stage) {
 
                     result = selected.result;
                 } else if (name === 'texture2D') {
-                    if (argumentTypes[0] !== 'sampler2D' || argumentTypes[1] !== 'vec2'
+                    const resultType = { sampler2D: 'vec4', isampler2D: 'ivec4', usampler2D: 'uvec4' }[argumentTypes[0]];
+
+                    if (!resultType || argumentTypes[1] !== 'vec2'
                         || (args.length !== 2 && !(stage === 'fragment' && args.length === 3 && Number.isFinite(conversion(argumentTypes[2], 'float'))))) {
                         throw new Error(`Unqualified legacy texture2D(${argumentTypes.join(', ')}) in ${stage} shader`);
                     }
@@ -424,8 +426,8 @@ export function normalizeDesktopShader(source, stage) {
                     }
 
                     node.identifier.identifier = legacyTextureName;
-                    legacyTextureArities.add(args.length);
-                    result = 'vec4';
+                    legacyTextureSignatures.add(`${argumentTypes[0]}:${args.length}`);
+                    result = resultType;
                 } else if (/^(?:texture|textureLod|textureProj)$/.test(name)) {
                     result = 'vec4';
                 } else if (['dot', 'length', 'distance', 'determinant'].includes(name)) {
@@ -590,8 +592,13 @@ export function normalizeDesktopShader(source, stage) {
         ast.program.splice(firstFunction, 0, ...parse(prototypes.join(''), { quiet: true }).program);
     }
 
-    if (legacyTextureArities.size) {
-        const helpers = [...legacyTextureArities].map((arity) => `highp vec4 ${legacyTextureName}(highp sampler2D image, highp vec2 uv${arity === 3 ? ', highp float bias' : ''}) { return texture(image, uv${arity === 3 ? ', bias' : ''}); }\n`);
+    if (legacyTextureSignatures.size) {
+        const helpers = [...legacyTextureSignatures].map((signature) => {
+            const [sampler, arity] = signature.split(':');
+            const resultType = { sampler2D: 'vec4', isampler2D: 'ivec4', usampler2D: 'uvec4' }[sampler];
+
+            return `highp ${resultType} ${legacyTextureName}(highp ${sampler} image, highp vec2 uv${arity === '3' ? ', highp float bias' : ''}) { return texture(image, uv${arity === '3' ? ', bias' : ''}); }\n`;
+        });
         const firstGlobal = ast.program.findIndex((node) => node.type !== 'preprocessor' && node.declaration?.type !== 'precision');
 
         /* Resolve the builtin before an original global named texture enters scope.

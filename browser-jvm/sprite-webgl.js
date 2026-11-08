@@ -241,7 +241,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
 
         const legacy = version[1] === '120';
 
-        source = `${source.slice(0, version.index)}#version 300 es\nprecision highp float;\nprecision highp int;\n${source.slice(version.index + version[0].length)}`;
+        source = `${source.slice(0, version.index)}#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp isampler2D;\nprecision highp usampler2D;\n${source.slice(version.index + version[0].length)}`;
         source = source.replaceAll(/^(\s*uniform\s+(float|int|vec[2-4])\s+([A-Z_a-z]\w*)\s*)=\s*([^;]+);/gm, (all, declaration, type, name, text) => {
             const literal = text.trim();
             const integer = type === 'int';
