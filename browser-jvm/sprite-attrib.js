@@ -289,6 +289,7 @@ export class SpriteAttributeState {
         const saved = { mask: mask & 0x20_0F_FF_FF, references: new Set() };
 
         if (saved.mask & groups.CURRENT) {
+            saved.currentColor = host.currentColor.slice();
             saved.current = [];
 
             for (let index = 0; index < gl.getParameter(gl.MAX_VERTEX_ATTRIBS); index++) {
@@ -400,6 +401,7 @@ export class SpriteAttributeState {
         const saved = this.server.pop();
 
         if (saved.current) {
+            host.currentColor.set(saved.currentColor);
             for (let index = 0; index < saved.current.length; index++) {
                 const value = saved.current[index];
 

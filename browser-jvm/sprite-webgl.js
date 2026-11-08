@@ -1,4 +1,4 @@
-import { normalizeDesktopShader, preprocessShaderUnit, instrumentAlphaTest, hasAlphaIdentifiers, alphaNames } from './glsl-compat.js';
+import { normalizeDesktopShader, preprocessShaderUnit, instrumentAlphaTest, hasAlphaIdentifiers, alphaNames, currentColorName } from './glsl-compat.js';
 import { SpriteAttributeState } from './sprite-attrib.js';
 
 /**
@@ -114,7 +114,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
     const attached = new Map();
     const locationOwners = new Map();
     const clientArrays = new Set([32_884, 32_885, 32_886, 32_887, 32_888, 32_889, 33_879, 33_886]);
-    const compatibility = { activeUnit: gl.TEXTURE0, legacyTexture: new Map(), lineSmoothEnabled: false, alphaEnabled: false, alphaFunction: 519, alphaReference: 0, error: 0 };
+    const compatibility = { activeUnit: gl.TEXTURE0, legacyTexture: new Map(), currentColor: new Float32Array([1, 1, 1, 1]), lineSmoothEnabled: false, alphaEnabled: false, alphaFunction: 519, alphaReference: 0, error: 0 };
     const attributeState = new SpriteAttributeState(gl, buffers, textures, compatibility);
     const alphaPrograms = new WeakMap();
     /**
@@ -130,7 +130,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
         for (let index = 0; index < gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS); index++) {
             const uniform = gl.getActiveUniform(program, index);
 
-            if (!info?.supported || !alphaNames.slice(1).includes(uniform.name)) {
+            if (uniform.name !== currentColorName && (!info?.supported || !alphaNames.slice(1).includes(uniform.name))) {
                 result.push(uniform);
             }
         }
@@ -144,6 +144,10 @@ export function createSpriteNatives(canvas, report, compression = null) {
     const applyAlpha = () => {
         const program = gl.getParameter(gl.CURRENT_PROGRAM);
         const info = program && alphaPrograms.get(program);
+
+        if (info?.colorLocation) {
+            gl.uniform4fv(info.colorLocation, compatibility.currentColor);
+        }
 
         if (compatibility.alphaEnabled && !info?.supported) {
             throw new Error(`Unsupported alpha-test draw: ${info?.reason || 'no instrumented fragment program'}`);
@@ -1610,6 +1614,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
                 ...alphaInfo,
                 functionLocation: gl.getUniformLocation(program, alphaNames[1]),
                 referenceLocation: gl.getUniformLocation(program, alphaNames[2]),
+                colorLocation: gl.getUniformLocation(program, currentColorName),
             });
             const previous = gl.getParameter(gl.CURRENT_PROGRAM);
 
@@ -2240,6 +2245,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
 
     // The original GL11 wrapper delegates this call directly to its GL11C native.
     natives.Java_org_lwjgl_opengl_GL11C_glCullFace = (_lib, mode) => gl.cullFace(mode);
+    natives.Java_org_lwjgl_opengl_GL11_glColor3f = (_lib, red, green, blue) => compatibility.currentColor.set([red, green, blue, 1]);
 
     return {
         natives, diagnostics,
@@ -2249,6 +2255,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
          * @returns {object} Current WebGL state for a synchronous owner observation.
          */
         inspectState: () => ({
+            currentColor: [...compatibility.currentColor],
             drawFramebuffer: observedHandle(framebuffers, gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)),
             readFramebuffer: observedHandle(framebuffers, gl.getParameter(gl.READ_FRAMEBUFFER_BINDING)),
             program: observedHandle(programs, gl.getParameter(gl.CURRENT_PROGRAM)),

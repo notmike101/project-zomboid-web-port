@@ -164,6 +164,7 @@ export function normalizeDesktopShader(source, stage) {
     let legacyTextureName = 'portLegacyTexture2D';
     const legacyColor = stage === 'vertex' ? 'gl_FrontColor' : 'gl_Color';
     let needsLegacyColor = false;
+    let needsCurrentColor = false;
 
     visit(ast, {
         identifier: {
@@ -175,6 +176,16 @@ export function normalizeDesktopShader(source, stage) {
              */
             enter: ({ node }) => {
                 identifiers.add(node.identifier);
+
+                if (node.identifier === currentColorName) {
+                    throw new Error('Shader identifier collides with the current-color adapter');
+                }
+
+                if (stage === 'vertex' && node.identifier === 'gl_Color') {
+                    node.identifier = currentColorName;
+                    types.set(node, 'vec4');
+                    needsCurrentColor = true;
+                }
 
                 if (node.identifier === legacyColor) {
                     node.identifier = 'portLegacyFrontColor';
@@ -568,6 +579,10 @@ export function normalizeDesktopShader(source, stage) {
         prototypes.unshift(`${stage === 'vertex' ? 'out' : 'in'} highp vec4 portLegacyFrontColor;\n`);
     }
 
+    if (needsCurrentColor && firstFunction !== -1) {
+        prototypes.unshift(`uniform highp vec4 ${currentColorName};\n`);
+    }
+
     if (prototypes.length && firstFunction !== -1) {
         ast.program.splice(firstFunction, 0, ...parse(prototypes.join(''), { quiet: true }).program);
     }
@@ -585,6 +600,7 @@ export function normalizeDesktopShader(source, stage) {
     return generate(ast);
 }
 
+export const currentColorName = 'portLegacyCurrentColor';
 export const alphaNames = ['portAlphaOriginalMain', 'portAlphaFunction', 'portAlphaReference', 'portAlphaValue', 'portAlphaPassed'];
 
 /**
