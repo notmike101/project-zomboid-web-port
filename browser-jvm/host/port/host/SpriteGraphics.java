@@ -215,7 +215,15 @@ public final class SpriteGraphics {
         destination.duplicate().put(source.duplicate());
     }
 
-    public static void memSet(ByteBuffer value,int fill){if(!value.isDirect())throw new IllegalArgumentException("Direct buffer required");if(value.isReadOnly())throw new ReadOnlyBufferException();for(int i=value.position();i<value.limit();i++)value.put(i,(byte)fill);}
+    public static void memSet(ByteBuffer value, int fill) {
+        if (!value.isDirect()) throw new IllegalArgumentException("Direct buffer required");
+        if (value.isReadOnly()) throw new ReadOnlyBufferException();
+        ByteBuffer output = value.duplicate();
+        byte[] block = new byte[Math.min(output.remaining(), 16384)];
+        Arrays.fill(block, (byte) fill);
+        // Bulk writes avoid a native boundary crossing for every pixel byte.
+        while (output.hasRemaining()) output.put(block, 0, Math.min(output.remaining(), block.length));
+    }
 
     public static native int bufferCreate();
     public static native void bufferBind(int target,int id);
