@@ -574,7 +574,7 @@ export function createLightingNatives() {
         const ranges = state.readbackRanges ?? state.publishedRanges ?? state.ranges;
 
         // Bootstrap reads resolve the region, but cannot consume a result before publication.
-        if (!cells || ranges.size === 0) {
+        if (!state.published || !cells || ranges.size === 0) {
             return { state, index };
         }
 
@@ -590,7 +590,7 @@ export function createLightingNatives() {
             const range = ranges.get(`${Math.floor(x / 8)},${Math.floor(y / 8)}`);
 
             if (range && z >= range[0] && z <= range[1]) {
-                unsupported('absent-square readback');
+                return { state, index };
             }
 
             return null;
@@ -1624,7 +1624,7 @@ export function createLightingNatives() {
         getSquareDirty(player, x, y, z) {
             const resolved = lookup(player, x, y, z);
 
-            return resolved !== null && (resolved.state.squareDirty.has(resolved.index)
+            return resolved !== null && resolved.state.published !== null && (resolved.state.squareDirty.has(resolved.index)
                 || Boolean(resolved.state.readSquareDirty?.[resolved.index]));
         },
         /**
@@ -1655,18 +1655,18 @@ export function createLightingNatives() {
 
             const payload = resolved.state.published[resolved.index];
 
-            if (payload === null) {
-                unsupported('unpublished square geometry');
+            if (payload !== null) {
+                output.set(payload.slice(0, 14 + payload[13] * 6));
             }
 
-            output.set(payload.slice(0, 14 + payload[13] * 6));
             resolved.state.squareDirty.delete(resolved.index);
 
             if (resolved.state.readSquareDirty) {
                 resolved.state.readSquareDirty[resolved.index] = 0;
             }
 
-            return true;
+            // Initial absent geometry has uninitialized native bytes; retain the caller's cached lighting.
+            return payload !== null;
         },
         /**
          * Reads the room count belonging to the actual published worker buffer.
