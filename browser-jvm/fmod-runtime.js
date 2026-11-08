@@ -75,6 +75,7 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
         }
 
         const url = URL.createObjectURL(new Blob([script], { type: 'text/javascript' }));
+        const repeatedWarnings = { Enter: 0, Leave: 0 };
         let FMOD;
 
         try {
@@ -83,6 +84,23 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
             const options = {
                 wasmBinary: wasm,
                 INITIAL_MEMORY: 64 * 1_024 * 1_024,
+                print(...args) {
+                    const warning = is203 && args.length === 1 && typeof args[0] === 'string'
+                        && /^\[WRN\] FMOD_OS_CriticalSection_(Enter +: cannot enter|Leave +: cannot leave) NULL critical section\s*$/u.exec(args[0]);
+
+                    if (warning) {
+                        const kind = warning[1].startsWith('Enter') ? 'Enter' : 'Leave';
+                        const count = ++repeatedWarnings[kind];
+
+                        // Keep exact counts without flooding console/CDP with identical SDK warnings.
+                        if (count !== 1) {
+                            if (count % 1024 === 0) console.log(`${args[0].trimEnd()} (total occurrences: ${count})`);
+                            return;
+                        }
+                    }
+
+                    console.log(...args);
+                },
                 locateFile(name) {
                     if (name !== 'fmodstudioL.wasm') {
                         throw new Error(`Unadmitted FMOD runtime file: ${name}`);
@@ -252,6 +270,7 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
 
         audio.snapshot = () => ({
             ...snapshot(),
+            repeatedWarnings: { ...repeatedWarnings },
             ...(is203
                 ? {
                         audioContexts: audioContexts.snapshot(),
