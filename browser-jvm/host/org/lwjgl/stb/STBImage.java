@@ -114,10 +114,10 @@ public final class STBImage {
                 ByteBuffer source = ByteBuffer.allocate(Math.multiplyExact(Math.multiplyExact(width, height), sourceChannels));
                 decoder.decode(source, Math.multiplyExact(width, sourceChannels), height, format, PNGDecoder.IDAT);
                 byte[] sourcePixels = source.array();
-                byte[] pixels = copyRGBA ? sourcePixels : new byte[resultBytes];
+                byte[] pixels = copyRGBA ? sourcePixels : new byte[Math.multiplyExact(width, count)];
                 if (!copyRGBA) {
-                    int destination = 0;
                     for (int row = 0; row < height; row++) {
+                        int destination = 0;
                         int sourceRow = flipped ? height - row - 1 : row;
                         for (int column = 0; column < width; column++) {
                             int at = (sourceRow * width + column) * sourceChannels;
@@ -139,10 +139,11 @@ public final class STBImage {
                                 if (count == 4) pixels[destination++] = (byte) a;
                             }
                         }
+                        result.put(pixels);
                     }
+                } else {
+                    result.put(pixels);
                 }
-                // One bulk Java NIO transfer avoids a native boundary call for every color component.
-                result.put(pixels);
             }
             result.flip();
             synchronized (images) { images.put(result, Boolean.FALSE); }
