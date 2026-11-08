@@ -131,12 +131,15 @@ function pair(node, left, right) {
         return undefined;
     }
 
-    if (scalar(left) === 'float' && scalar(right) !== 'float' && conversion(right, 'float') === 1) {
-        node.right = cast(node.right, 'float');
-        right = 'float';
-    } else if (scalar(right) === 'float' && scalar(left) !== 'float' && conversion(left, 'float') === 1) {
-        node.left = cast(node.left, 'float');
-        left = 'float';
+    const leftTarget = /^[iu]vec[2-4]$/.test(left) ? left.slice(1) : 'float';
+    const rightTarget = /^[iu]vec[2-4]$/.test(right) ? right.slice(1) : 'float';
+
+    if (scalar(left) === 'float' && scalar(right) !== 'float' && conversion(right, rightTarget) === 1) {
+        node.right = cast(node.right, rightTarget);
+        right = rightTarget;
+    } else if (scalar(right) === 'float' && scalar(left) !== 'float' && conversion(left, leftTarget) === 1) {
+        node.left = cast(node.left, leftTarget);
+        left = leftTarget;
     }
 
     if (left === right || right === scalar(left)) {
