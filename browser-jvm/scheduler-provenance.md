@@ -14,7 +14,17 @@ The original runtime SHA-256 is
 the original loader SHA-256 is
 `5b0ec873d1ae97d184928041b5f97ecf36eb990dac3baec5836a90bd87fa7a9f`.
 Preparation requires the full hashes and exactly one qualified `an1` body.
-The derived manifest lists every changed body: current-thread scheduling (`an1`), explicit yield scheduling (`anV`), compiled liveness scheduling (`iI`), null-write exception translation (`e5`), and asynchronous directory/stat completion (`Qk`, `PS`). No diagnostic sleep wrapper is included.
+The derived manifest lists every changed body: current-thread scheduling (`an1`), explicit yield scheduling (`anV`), compiled liveness scheduling (`iI`), register-pressure fallback (`so`), null-write exception translation (`e5`), and asynchronous directory/stat completion (`Qk`, `PS`). No diagnostic sleep wrapper is included.
+
+Original zombie initialization exposed malformed generated code at the compiler's
+255-temporary limit: a dispatch-table temporary was overwritten before its method
+call. A small Java reproduction with nested component access and 100 registrations
+passes on the JVM, fails in the old browser compiler, and passes 1,000 iterations
+with the fallback. Compilation now returns its existing failure result when the
+generated declaration reaches `t255`, leaving that method in the real interpreter.
+Other methods still compile; original bytecode and exception handling are unchanged.
+This conservative fallback may slow large methods that would otherwise compile
+correctly. Whole-world reload qualification remains separate from this reproduction.
 
 A debugger capture of original quit handling found `LightingThread.stop()` spinning
 on `Thread.isAlive()` while the lighting worker waited to run. Java 17 compiles

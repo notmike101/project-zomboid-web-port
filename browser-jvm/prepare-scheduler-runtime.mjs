@@ -22,6 +22,9 @@ const nullRead = 'h="Cannot read properties of null ";c:if(!(a.startsWith(h)))';
 const nullReadWrite = 'h="Cannot read properties of null ";c:if(!(a.startsWith(h)||a.startsWith("Cannot set properties of null ")))';
 const undefinedRead = 'f="Cannot read properties of undefined ";d:if(!(a.startsWith(f)))';
 const undefinedReadWrite = 'f="Cannot read properties of undefined ";d:if(!(a.startsWith(f)||a.startsWith("Cannot set properties of undefined ")))';
+// shortcut: 4.3 saturates temporary registers in large inlined methods; interpret until a replacement compiler is qualified.
+const compileOriginal = 'if(F!==null){c="(function";';
+const compileReplacement = 'if(F!==null){if(/(?:var |,)t255=/.test(F)){P(p);return null;}c="(function";';
 
 /**
  * Computes a byte-exact digest.
@@ -71,12 +74,13 @@ export function deriveSchedulerRuntime(runtime, loader) {
     }
 
     const yielded = replaceOne(replaceOne(replaceOne(runtime.toString('utf8'), original, replacement), yieldOriginal, yieldReplacement), aliveOriginal, aliveReplacement);
-    const exceptions = replaceOne(replaceOne(yielded, nullRead, nullReadWrite), undefinedRead, undefinedReadWrite);
+    const compiled = replaceOne(yielded, compileOriginal, compileReplacement);
+    const exceptions = replaceOne(replaceOne(compiled, nullRead, nullReadWrite), undefinedRead, undefinedReadWrite);
     // Async filesystem completion must use current native memory views after another thread grows memory.
     const listed = replaceOne(exceptions, 'function Qk(r,p){', 'function Qk(r,p){r.a4=r.a2.a2.a10;');
     const runtimeSource = replaceOne(listed, 'function PS(j){', 'function PS(j){j.a2=j.a1.a2.a12;');
     const loaderModule = `// Copyright 2017-2022 Leaning Technologies Ltd\n// Derived from the pinned official CheerpJ 4.3 loader; only its runtime import URI changes.\nexport default ${replaceOne(loadFunction, 'import(cj3LoaderPath + "/cj3.js")', 'import("/scheduler-runtime/cj3.js")')}\n`;
-    const manifest = { ...schedulerPins, runtimeOutputSha: digest(runtimeSource), loaderModuleSha: digest(loaderModule), modifiedBodies: ['an1', 'anV', 'iI', 'e5', 'Qk', 'PS'] };
+    const manifest = { ...schedulerPins, runtimeOutputSha: digest(runtimeSource), loaderModuleSha: digest(loaderModule), modifiedBodies: ['an1', 'anV', 'iI', 'so', 'e5', 'Qk', 'PS'] };
 
     return { runtimeSource, loaderModule, manifest };
 }
