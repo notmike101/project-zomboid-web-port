@@ -241,7 +241,9 @@ public final class SpriteGraphics {
     public static boolean glIsBuffer(int id){return SpriteBuffers.isBuffer(id);}
     public static void glBufferData(int target,long size,int usage){SpriteBuffers.data(target,size,usage);}
     public static void glBufferData(int target,ByteBuffer data,int usage){SpriteBuffers.data(target,data,usage);}
+    public static void glBufferData(int target,FloatBuffer data,int usage){SpriteBuffers.data(target,data,usage);}
     public static void glBufferSubData(int target,long offset,ByteBuffer data){SpriteBuffers.subData(target,offset,data);}
+    public static void glBufferSubData(int target,long offset,FloatBuffer data){SpriteBuffers.subData(target,offset,data);}
     public static void glGetBufferSubData(int target,long offset,ByteBuffer data){SpriteBuffers.getData(target,offset,data);}
     public static ByteBuffer glMapBuffer(int target,int access,long length,ByteBuffer previous){return SpriteBuffers.map(target,access,length,previous);}
     public static ByteBuffer glMapBuffer(int target,int access,ByteBuffer previous){return glMapBuffer(target,access,glGetBufferParameteri(target,0x8764),previous);}

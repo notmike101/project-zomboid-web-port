@@ -3,6 +3,7 @@ package port.host;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.IntBuffer;
+import java.nio.FloatBuffer;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 
@@ -14,8 +15,8 @@ import java.util.LinkedHashSet;
 /** Real WebGL buffer storage with owned CPU mappings, uploaded when unmapped.
  * Native pointers are never published. Buffer positions/limits do not control
  * the mapped range, and accessing a mapping after unmap is outside its lifetime.
- * The adapter covers selected scalar/ByteBuffer ARB/core entry points; typed
- * buffer/array overloads, native-address APIs, explicit-flush/persistent mappings,
+ * The adapter covers selected scalar/ByteBuffer ARB/core entry points and FloatBuffer uploads;
+ * other typed buffer/array overloads, native-address APIs, explicit-flush/persistent mappings,
  * and targets outside array, element-array, and copy buffers are unsupported.
  * This is not a full desktop ARB extension or desktop GL version implementation.
  */
@@ -87,6 +88,19 @@ public final class SpriteBuffers {
     private static void resize(int target, Entry entry) {
         int size = parameter(target, 0x8764);
         if (entry.capacity != size) { release(entry); entry.capacity = size; }
+    }
+
+    public static void data(int target, FloatBuffer source, int usage) {
+        Entry entry = bound(target);
+        if (entry == null || !writable(entry) || !size((long) source.remaining() * Float.BYTES)) return;
+        SpriteGraphics.bufferDataBytes(target, bytes(source), usage);
+        resize(target, entry);
+    }
+
+    public static void subData(int target, long offset, FloatBuffer source) {
+        Entry entry = bound(target);
+        if (entry == null || !writable(entry) || !range(entry, offset, (long) source.remaining() * Float.BYTES)) return;
+        SpriteGraphics.bufferUpload(target, (int) offset, bytes(source));
     }
 
     public static void subData(int target, long offset, ByteBuffer source) {
@@ -209,6 +223,12 @@ public final class SpriteBuffers {
     private static byte[] bytes(ByteBuffer source, int start, int length) {
         byte[] data = new byte[length];
         for (int i = 0; i < length; i++) data[i] = source.get(start + i);
+        return data;
+    }
+
+    private static byte[] bytes(FloatBuffer source) {
+        byte[] data = new byte[source.remaining() * Float.BYTES];
+        ByteBuffer.wrap(data).order(source.order()).asFloatBuffer().put(source.duplicate());
         return data;
     }
 
