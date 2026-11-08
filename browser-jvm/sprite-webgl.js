@@ -106,6 +106,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
     const textureLevels = new WeakMap();
     const bufferExtents = new WeakMap();
     const framebuffers = new Map();
+    const ownedFramebuffers = new WeakSet();
     const renderbuffers = new Map();
     const locations = new Map();
     const shaderSources = new Map();
@@ -118,6 +119,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
     const compatibility = { activeUnit: gl.TEXTURE0, legacyTexture: new Map(), textureEnvironment: new Map(), currentColor: new Float32Array([1, 1, 1, 1]), lineSmoothEnabled: false, alphaEnabled: false, alphaFunction: 519, alphaReference: 0, error: 0 };
     const attributeState = new SpriteAttributeState(gl, buffers, textures, compatibility);
     const alphaPrograms = new WeakMap();
+    let alphaFramebufferTypes = new WeakMap();
     /**
      * Excludes injected uniforms while retaining every original uniform on unsupported programs.
      *
@@ -154,10 +156,17 @@ export function createSpriteNatives(canvas, report, compression = null) {
             throw new Error(`Unsupported alpha-test draw: ${info?.reason || 'no instrumented fragment program'}`);
         }
 
-        if (compatibility.alphaEnabled && gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)) {
-            const type = gl.getFramebufferAttachmentParameter(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE);
+        const framebuffer = compatibility.alphaEnabled && gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
 
-            if (type !== gl.NONE && gl.getFramebufferAttachmentParameter(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE) === gl.FLOAT) {
+        if (framebuffer) {
+            // Only facade-owned attachments have all storage changes intercepted below.
+            if (!ownedFramebuffers.has(framebuffer) || !alphaFramebufferTypes.has(framebuffer)) {
+                const type = gl.getFramebufferAttachmentParameter(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE);
+                alphaFramebufferTypes.set(framebuffer, type !== gl.NONE
+                    && gl.getFramebufferAttachmentParameter(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE) === gl.FLOAT);
+            }
+
+            if (alphaFramebufferTypes.get(framebuffer)) {
                 throw new Error('Unsupported alpha-test draw: floating-point color attachment');
             }
         }
@@ -2146,7 +2155,15 @@ export function createSpriteNatives(canvas, report, compression = null) {
          *
          * @returns {unknown} Result of the declared browser or runtime operation.
          */
-        glGenFramebuffers: () => add(framebuffers, gl.createFramebuffer()),
+        glGenFramebuffers: () => {
+            const framebuffer = gl.createFramebuffer();
+
+            if (framebuffer) {
+                ownedFramebuffers.add(framebuffer);
+            }
+
+            return add(framebuffers, framebuffer);
+        },
         /**
          * Executes the selected glBindFramebuffer operation against the actual WebGL context.
          *
@@ -2185,6 +2202,16 @@ export function createSpriteNatives(canvas, report, compression = null) {
     };
 
     api.drawArrays = api.glDrawArrays;
+
+    // Attachment/storage changes invalidate the real type query; ordinary draws need no GPU round trip.
+    for (const name of ['textureBytes', 'glDeleteTextures', 'glDeleteRenderbuffers', 'glRenderbufferStorage',
+        'glRenderbufferStorageMultisample', 'glFramebufferRenderbuffer', 'glFramebufferTexture2D']) {
+        const callback = api[name];
+        api[name] = (...args) => {
+            alphaFramebufferTypes = new WeakMap();
+            return callback(...args);
+        };
+    }
 
     const natives = {};
 
