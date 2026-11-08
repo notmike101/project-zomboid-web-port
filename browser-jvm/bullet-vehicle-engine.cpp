@@ -806,7 +806,7 @@ static int packVehicle(OwnedVehicle& owner,float* output){
     for(int axis=0;axis<3;axis++)output[8+axis]=velocity[axis];
     output[11]=vehicle.getCurrentSpeedKmHour();
     output[12]=owner.collisionEvent?1:0;owner.collisionEvent=false;output[13]=float(vehicle.getNumWheels())+0.1f;
-    for(int i=0;i<4;i++){
+    for(int i=0;i<vehicle.getNumWheels();i++){
         auto& wheel=vehicle.getWheelInfo(i);int cursor=14+i*4;
         output[cursor]=wheel.m_steering;output[cursor+1]=wheel.m_rotation;
         output[cursor+2]=wheel.m_skidInfo;output[cursor+3]=wheel.m_raycastInfo.m_suspensionLength;
@@ -823,7 +823,7 @@ extern "C" int step_vehicle_freefall(float delta){
 }
 extern "C" int get_vehicle_physics(float* output,int count){
     auto* ownedVehicle=singleVehicle();
-    if(!output||count<30||!ownedVehicle||!ownedVehicle->hasPublishedStep||ownedVehicle->vehicle->getNumWheels()!=4)return 0;
+    if(!output||count<30||!ownedVehicle||!ownedVehicle->hasPublishedStep||ownedVehicle->vehicle->getNumWheels()>4)return 0;
     return packVehicle(*ownedVehicle,output);
 }
 
@@ -990,9 +990,13 @@ extern "C" int get_vehicle_physics_batch(int offset,float* output,int count){
     int records=btMin(count/30,int(vehicleReadback.size())-offset);
     for(int index=0;index<records;index++){
         auto* owner=findVehicle(vehicleReadback[offset+index]);
-        if(!owner||owner->vehicle->getNumWheels()!=4)return -1;
+        if(!owner||owner->vehicle->getNumWheels()>4)return -1;
     }
-    for(int index=0;index<records;index++)packVehicle(*findVehicle(vehicleReadback[offset+index]),output+index*30);
+    int cursor=0;
+    for(int index=0;index<records;index++){
+        auto& owner=*findVehicle(vehicleReadback[offset+index]);
+        packVehicle(owner,output+cursor);cursor+=14+4*owner.vehicle->getNumWheels();
+    }
     return records;
 }
 

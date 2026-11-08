@@ -236,7 +236,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
         addVehicle(lib, id, x, y, z, qx, qy, qz, qw, name) {
             const definition = definitions.get(String(name));
 
-            expect(definition?.wheels === 4, 'Original owner component requires a registered four-wheel definition');
+            expect(definition && definition.wheels <= 4, `Original owner requires a registered zero-to-four-wheel definition: ${name}`);
 
             expect(Number.isInteger(id) && !vehicleIds.has(id), 'Unsupported duplicate vehicle owner');
 
@@ -1191,10 +1191,12 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             expect(pointer !== 0, 'Actual readback allocation failed');
 
             try {
+                // Native JNI preserves the caller tail after variable-length wheel records.
+                engine.HEAPF32.set(values, pointer / 4);
                 const written = engine._get_vehicle_physics_batch(offset, pointer, values.length);
 
                 expect(written >= 0 && written <= Math.floor(values.length / 30), 'Actual ordered vehicle snapshot readback rejected');
-                values.set(engine.HEAPF32.subarray(pointer / 4, pointer / 4 + written * 30));
+                values.set(engine.HEAPF32.subarray(pointer / 4, pointer / 4 + values.length));
 
                 return written;
             } finally {
