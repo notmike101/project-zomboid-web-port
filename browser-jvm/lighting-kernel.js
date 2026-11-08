@@ -269,8 +269,7 @@ function validate(scene) {
         validateWorldSquare(cell);
     }
 
-    if (!Array.from(player).every(Number.isFinite) || player[0] < 0 || player[1] < 0
-        || player[0] >= width || player[1] >= height || Math.floor(player[2]) < minimum || Math.floor(player[2]) > maximum) {
+    if (!Array.from(player).every(Number.isFinite) || Math.floor(player[2]) < minimum || Math.floor(player[2]) > maximum) {
         unsupported('player position');
     }
 
@@ -1049,7 +1048,7 @@ function withinCone(scene, index) {
     const distance = Math.fround(Math.sqrt(Math.fround(Math.fround(dx * dx) + Math.fround(dy * dy))));
 
     if (distance < Math.fround(Math.fround(1 - fatigue) * range)
-        || (x === Math.floor(scene.player[0]) && y === Math.floor(scene.player[1]) && z === Math.floor(scene.player[2]))) {
+        || (x === Math.trunc(scene.player[0] + origin[0]) - origin[0] && y === Math.trunc(scene.player[1] + origin[1]) - origin[1] && z === Math.trunc(scene.player[2]))) {
         return true;
     }
 
@@ -1410,8 +1409,13 @@ export function calculateLighting(scene, sources) {
     const order = traversalOrder(scene);
     const records = sources?.records ?? propagate(scene, traversalOrder(scene, true));
     const torches = torchLighting(scene);
-    const couldSee = visibility(scene);
-    const canSee = couldSee.map((value, index) => value && withinCone(scene, index));
+    // Native0xc400 truncates the world-square lookup;0x41a0 retains visibility when that square is absent.
+    const lookup = scene.player.map((value, axis) => Math.trunc(value + (scene.origin?.[axis] ?? 0)) - (scene.origin?.[axis] ?? 0));
+    const playerPresent = squareIndex(scene, ...lookup) >= 0;
+    const couldSee = playerPresent ? visibility(scene)
+        : scene.cells.map((cell, index) => Boolean(scene.previous?.[index]?.[0] & 4));
+    const canSee = couldSee.map((value, index) => playerPresent
+        ? value && withinCone(scene, index) : Boolean(scene.previous?.[index]?.[0] & 2));
     // Original squareSet packs player-zero seen history above the 27 adjacency bits.
     const seen = canSee.map((value, index) => value || Boolean(scene.seen?.[index]) || Boolean(scene.cells[index]?.vision & 1 << 27));
     const darkness = darknessMultipliers(scene, seen);

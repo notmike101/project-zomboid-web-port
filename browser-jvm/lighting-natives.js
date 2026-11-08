@@ -394,6 +394,7 @@ function calculateRetainedLighting(scene, sources) {
     const compact = calculateLighting({
         ...scene, minimum, maximum, cells: scene.cells.slice(minimum * plane, (maximum + 1) * plane),
         seen: scene.seen?.slice(minimum * plane, (maximum + 1) * plane),
+        previous: scene.previous?.slice(minimum * plane, (maximum + 1) * plane),
     }, sources);
     const output = Array.from({ length: scene.cells.length }, () => null);
 
@@ -749,11 +750,6 @@ export function createLightingNatives() {
 
             z = Math.fround(z);
             integer(Math.floor(z), 0, 63, 'player native level');
-
-            if (x < state.x * 8 || y < state.y * 8
-                || x >= (state.x + state.width) * 8 || y >= (state.y + state.height) * 8) {
-                unsupported('player outside qualified region');
-            }
 
             if (flagA !== false || flagB !== false || flagC !== false || typeof flagD !== 'boolean'
                 || fatigue < 0 || fatigue > 1 || range < 0 || range > 20 || cone < -1 || cone > 1) {
@@ -1364,7 +1360,8 @@ export function createLightingNatives() {
             const [playerX, playerY, playerZ] = playerPosition;
             const playerIndex = Math.floor(playerZ) * pending.width * pending.height + Math.floor(playerY) * pending.width + Math.floor(playerX);
 
-            if (cells[playerIndex] === null && cells.some((cell) => cell !== null)) {
+            if (playerX >= 0 && playerX < pending.width && playerY >= 0 && playerY < pending.height
+                && cells[playerIndex] === null && cells.some((cell) => cell !== null)) {
                 unsupported('player on absent square');
             }
 
