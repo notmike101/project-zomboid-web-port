@@ -77,19 +77,17 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
     /**
      * Decodes the complete original chunk command into actual geometry.
      *
+     * @param {object} lib - Original Java namespace for the bulk buffer helper.
      * @param {object} buffer - Original direct Java ByteBuffer.
      */
-    async function command(buffer) {
+    async function command(lib, buffer) {
         const length = await buffer.position();
 
         expect(Number.isInteger(length) && length >= 13 && length <= 4_096, 'Original command extent');
 
-        const bytes = new Uint8Array(length);
-
-        for (let i = 0; i < length; i++) {
-            // eslint-disable-next-line no-await-in-loop -- Read the original ByteBuffer in command order.
-            bytes[i] = await buffer.get(i) & 255;
-        }
+        const helper = await lib.port.host.PopulationBuffers;
+        const encoded = String(await helper.bufferHex(buffer, length));
+        const bytes = Uint8Array.from(encoded.match(/../gu) ?? [], (value) => Number.parseInt(value, 16));
 
         const data = new DataView(bytes.buffer);
 
@@ -1053,7 +1051,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
          * @param {object} buffer - Original direct Java ByteBuffer.
          */
         async ToBullet(lib, buffer) {
-            await command(buffer);
+            await command(lib, buffer);
         },
         /**
          * Invokes original Java callbacks before actual publication and simulation.

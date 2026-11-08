@@ -124,7 +124,7 @@ export async function prepareBulletVehicleQualification({ outputDirectory, gameD
     const classes = path.join(output, `classes-${randomUUID()}`);
     const javac = path.join(jdkDirectory, 'bin/javac.exe');
     const jar = path.join(jdkDirectory, 'bin/jar.exe');
-    const javaSources = ['BulletQualification.java', 'VehicleContactQualification.java'];
+    const javaSources = ['BulletQualification.java', 'VehicleContactQualification.java', 'host/port/host/PopulationBuffers.java'];
 
     await mkdir(classes);
     await Promise.all([capture(javac), capture(jar), ...javaSources.map((name) => capture(path.join(import.meta.dirname, name)))]);
