@@ -59,6 +59,7 @@ public final class BrowserOriginalBoot {
             zombie.debug.DebugLog.getInstance().setStdErr(System.err);
             zombie.core.random.RandStandard.INSTANCE.init();
             zombie.core.random.RandLua.INSTANCE.init();
+            zombie.core.physics.Bullet.init();
             org.lwjglx.opengl.Display.init();
             if (System.getProperty("lokiUrl") != null)
                 throw new IllegalStateException("Original remote logging branch is outside this offline admission");
