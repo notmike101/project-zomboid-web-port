@@ -137,7 +137,7 @@ public final class BrowserOriginalBoot {
         if (lastResourceObservation == 0 || now - lastResourceObservation >= 5_000_000_000L) {
             lastResourceObservation = now;
             report("{\"resourceTelemetry\":{\"observedAt\":" + System.currentTimeMillis()
-                    + ",\"directBuffers\":" + ownedDirectBuffers() + "}}");
+                    + ",\"directBuffers\":" + ownedDirectBuffers() + ",\"player\":" + playerTelemetry() + "}}");
         }
         observeLoading();
         String current = state();
@@ -145,6 +145,15 @@ public final class BrowserOriginalBoot {
             lastState = current;
             report("{\"originalState\":" + quote(current) + "}");
         }
+    }
+
+    private static String playerTelemetry() {
+        if (!"zombie.gameStates.IngameState".equals(state())) return "null";
+        zombie.characters.IsoPlayer player = zombie.characters.IsoPlayer.getInstance();
+        if (player == null) return "null";
+        float x = player.getX(), y = player.getY(), z = player.getZ();
+        if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)) return "null";
+        return "{\"x\":" + x + ",\"y\":" + y + ",\"z\":" + z + "}";
     }
 
     /** Scanned only by the original observation producer at the bounded resource cadence. */
