@@ -835,7 +835,7 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             // Native 0x18000b03a..b08a copies last-listener velocity/orientation, replacing position.
             use(id, 'instance').set3DAttributes({ ...listenerAttributes, position: { x, y, z } });
 
-            return FMOD.OK;
+            return FMOD.getLastError();
         },
 
         FMOD_Studio_Bank_GetVCACount(_lib, id) {
@@ -959,7 +959,8 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
 
                     const error = FMOD.getLastError();
 
-                    if (error !== FMOD.OK) {
+                    // This JNI entry returns FMOD_RESULT, including pre-listener invalid-orientation errors.
+                    if (error !== FMOD.OK && !(name === 'FMOD_Studio_EventInstance3D' && value === error)) {
                         throw new Error(`Original ${name}: ${FMOD.errorString(error)} (${error})`);
                     }
 
