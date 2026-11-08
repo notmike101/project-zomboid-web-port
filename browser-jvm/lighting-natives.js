@@ -573,7 +573,7 @@ export function createLightingNatives() {
         const cells = state.publishedCells ?? state.cells;
         const ranges = state.readbackRanges ?? state.publishedRanges ?? state.ranges;
 
-        // Bootstrap native readback exposes uninitialized words; keep the explicit publication guard.
+        // Bootstrap reads resolve the region, but cannot consume a result before publication.
         if (!cells || ranges.size === 0) {
             return { state, index };
         }
@@ -1635,7 +1635,7 @@ export function createLightingNatives() {
          * @param {number} y - World square Y.
          * @param {number} z - Native level32.
          * @param {Int32Array} output - Actual Java int-array storage.
-         * @returns {boolean} Whether this square belongs to the initialized region.
+         * @returns {boolean} Whether this square has a published result.
          */
         getSquareLighting(player, x, y, z, output) {
             const resolved = lookup(player, x, y, z);
@@ -1645,7 +1645,8 @@ export function createLightingNatives() {
             }
 
             if (!resolved.state.published) {
-                unsupported('unpublished lighting readback');
+                // Native storage is uninitialized here; false preserves the original caller's cached visibility.
+                return false;
             }
 
             if (!(output instanceof Int32Array) || output.length < 49) {

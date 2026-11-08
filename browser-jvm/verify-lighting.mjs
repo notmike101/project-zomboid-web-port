@@ -414,7 +414,10 @@ function verifyValidation() {
     backend.methods.destroy();
     stageValidationPlane(backend.methods, true);
     backend.methods.stateEndUpdate();
-    assert.throws(() => backend.methods.getSquareLighting(0, 1, 1, 32, new Int32Array(49)), /unpublished lighting readback/u);
+    const unpublished = new Int32Array(49).fill(123);
+
+    assert.equal(backend.methods.getSquareLighting(0, 1, 1, 32, unpublished), false);
+    assert.ok(unpublished.every((value) => value === 123));
     backend.methods.DoLightingUpdateNew(1_000_000_000n, false);
     stageValidationPlane(backend.methods, false);
     backend.methods.stateEndUpdate();
