@@ -12,11 +12,13 @@ public final class PrepareAnimationSdk {
     private static final String ACTION_CONTEXT = "zombie/characters/action/ActionContext.class";
     private static final String TILE_OVERLAYS = "zombie/iso/TileOverlays.class";
     private static final String FLUID_CONTAINER = "zombie/entity/components/fluids/FluidContainer.class";
+    private static final String LIGHT_SWITCH = "zombie/iso/objects/IsoLightSwitch.class";
     private static final Map<String, String> EXPECTED = Map.of(
             ANIM_LAYER, "8b59bfb1ec0c8e7e174cd3ba09042ff3bc9fe82bec38745c73d1f410daca0bc5",
             ACTION_CONTEXT, "3948dce849e7c6f4ac9522abc0ce802b948b04e341bb3f05d65c3704544690ac",
             TILE_OVERLAYS, "e1b95c1db4b843b207afe284fbd0f6625403849c4fecefeeed675544662bd49b",
-            FLUID_CONTAINER, "aea1900a815ee2729a5b7c071ead4956e072b4e5ab416eaeaeb5598f00466048");
+            FLUID_CONTAINER, "aea1900a815ee2729a5b7c071ead4956e072b4e5ab416eaeaeb5598f00466048",
+            LIGHT_SWITCH, "9267088ed424aee1348c3eae65e50d86811646219330a7230eb1f8e6183e20b5");
 
     private static String hash(byte[] bytes) throws Exception {
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
@@ -44,7 +46,7 @@ public final class PrepareAnimationSdk {
                 } catch (Exception failure) { throw new IllegalStateException(failure); }
             }).cached();
             var cf = ClassFile.of(ClassFile.ClassHierarchyResolverOption.of(resolver));
-            for (String entry : List.of(ANIM_LAYER, ACTION_CONTEXT, TILE_OVERLAYS, FLUID_CONTAINER)) {
+            for (String entry : List.of(ANIM_LAYER, ACTION_CONTEXT, TILE_OVERLAYS, FLUID_CONTAINER, LIGHT_SWITCH)) {
                 byte[] original;
                 var source = zip.getEntry(entry);
                 if (source == null) throw new IllegalArgumentException("Missing original class: " + entry);
@@ -97,6 +99,13 @@ public final class PrepareAnimationSdk {
                                         || signature.equals("getPrimaryFluidAmount()F")))) {
                             if (signature.equals("readFromScript(Lzombie/scripting/entity/ComponentScript;)V") && offset != 126)
                                 throw new IllegalArgumentException("Unqualified initial-fluid getFirst BCI" + offset);
+                            helper = "port.host.ListFirstSupport";
+                            methodName = "getFirst";
+                            descriptor = "(Ljava/util/List;)Ljava/lang/Object;";
+                        } else if (entry.equals(LIGHT_SWITCH) && call.owner().asInternalName().equals("java/util/ArrayList")
+                                && call.name().equalsString("getFirst") && call.type().equalsString("()Ljava/lang/Object;")) {
+                            if (!signature.equals("getPrimaryLight()Lzombie/iso/IsoLightSource;") || offset != 18)
+                                throw new IllegalArgumentException("Unqualified light-switch getFirst: " + signature + " BCI" + offset);
                             helper = "port.host.ListFirstSupport";
                             methodName = "getFirst";
                             descriptor = "(Ljava/util/List;)Ljava/lang/Object;";

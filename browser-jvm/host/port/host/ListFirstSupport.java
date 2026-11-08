@@ -2,7 +2,7 @@ package port.host;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.NoSuchElementException;
-/** Java21 ArrayList.getFirst operation for the original AnimLayer's exact ArrayList receiver. */
+/** Java21 getFirst operation for the qualified original callers' exact ArrayList receivers. */
 public final class ListFirstSupport {
  private ListFirstSupport() { }
  public static <E> E getFirst(List<E> list) {
