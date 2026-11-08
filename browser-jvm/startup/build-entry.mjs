@@ -49,7 +49,7 @@ function command(tool, args, cwd = work) {
     return result.stdout;
 }
 
-const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|PrepareManifestScenes(?:\$[^/]+)?|port\/host\/(?:BrowserAvatarDiagnostics|PopulationBuffers|FmodArrays|(?:SpriteBuffers|ClipperSupport)(?:\$[^/]+)?)|org\/lwjgl\/stb\/STBImage)\.class$/u;
+const authored = /^(?:zombie\/Browser(?:LifecycleBoot|LifecycleController|OriginalBoot)(?:\$[^/]+)?|PrepareManifestScenes(?:\$[^/]+)?|port\/host\/(?:BrowserAvatarDiagnostics|PopulationBuffers|FmodArrays|(?:SpriteBuffers|ClipperSupport)(?:\$[^/]+)?)|org\/lwjgl\/stb\/STBImage(?:Write)?)\.class$/u;
 const shadowedGraphics = /^port\/host\/SpriteGraphics(?:\$[^/]+)?\.class$/u;
 const earlierArchives = classpath.slice(0, classpath.indexOf(entry));
 
@@ -60,6 +60,8 @@ assert.ok(!earlierArchives.some((record) => command('jar', ['--list', '--file', 
 assert.equal(classpath.findIndex((record) => command('jar', ['--list', '--file', path.resolve(record.file)])
     .split(/\r?\n/u).includes('org/lwjgl/stb/STBImage.class')), classpath.indexOf(entry),
 'The authored STB adapter must resolve from the entry archive');
+assert.ok(!earlierArchives.some((record) => command('jar', ['--list', '--file', path.resolve(record.file)])
+    .split(/\r?\n/u).includes('org/lwjgl/stb/STBImageWrite.class')), 'The PNG writer must resolve from the entry archive');
 
 try {
     const classes = path.join(work, 'classes');
@@ -70,6 +72,7 @@ try {
     sources.push(path.resolve(import.meta.dirname, '../host/port/host/BrowserAvatarDiagnostics.java'));
     sources.push(path.resolve(import.meta.dirname, '../animation/manifest/PrepareManifestScenes.java'));
     sources.push(path.resolve(import.meta.dirname, '../host/org/lwjgl/stb/STBImage.java'));
+    sources.push(path.resolve(import.meta.dirname, '../host/org/lwjgl/stb/STBImageWrite.java'));
     sources.push(...['SpriteBuffers.java', 'PopulationBuffers.java', 'FmodArrays.java', 'ClipperSupport.java'].map((name) => path.resolve(import.meta.dirname, '../host/port/host', name)));
     await mkdir(classes);
     command('javac', ['--release', '17', '-classpath', classpath.map((record) => path.resolve(record.file)).join(path.delimiter),

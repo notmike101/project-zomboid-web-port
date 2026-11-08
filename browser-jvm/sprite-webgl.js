@@ -2254,6 +2254,8 @@ export function createSpriteNatives(canvas, report, compression = null) {
 
     // The original GL11 wrapper delegates this call directly to its GL11C native.
     natives.Java_org_lwjgl_opengl_GL11C_glCullFace = (_lib, mode) => gl.cullFace(mode);
+    natives.Java_org_lwjgl_opengl_GL11C_glPixelStorei = (_lib, name, value) => gl.pixelStorei(name, value);
+    natives.Java_org_lwjgl_opengl_GL11C_glReadBuffer = (_lib, mode) => gl.readBuffer(mode);
     natives.Java_org_lwjgl_opengl_GL11_glColor3f = (_lib, red, green, blue) => compatibility.currentColor.set([red, green, blue, 1]);
 
     return {
