@@ -317,7 +317,7 @@ int clear_geometry(){
     geometryBodies.clear();return 1;
 }
 int build_geometry(int wx,int wy,int level,const int* cells){
-    if(!ownedWorld||!cells||(level<0||level>63))return 0;
+    if(!ownedWorld||!cells||(level<-32||level>63))return 0;
     std::shared_ptr<Chunk> chunk;
     for(auto& map:activeMaps)if(map){chunk=map->at(wx,wy);if(chunk)break;}
     if(!chunk)return 0;
@@ -844,7 +844,7 @@ static bool vehicle_region_published(const OwnedVehicle& owner){
 }
 extern "C" int replace_chunk_level(int wx,int wy,int min,int max,int level,const int* cells){
     auto chunk=find_chunk(wx,wy);
-    if(!chunk||!cells||min<0||max>63||min>max||level<min||level>max)return 0;
+    if(!chunk||!cells||min<-32||max>63||min>max||max-min>=64||level<min||level>max)return 0;
     for(int i=0;i<256;i++)if(!validCell(cells[i]))return 0;
     for(int square=0;square<64;square++){int stairs=0;for(int slot=0;slot<4;slot++)if(cells[square*4+slot]==8||cells[square*4+slot]==9)stairs++;if(stairs>1)return 0;}
     std::vector<std::unique_ptr<ChunkRecord>> pending(max-min+1);
@@ -932,7 +932,8 @@ extern "C" int vehicle_material(double* output){
 }
 
 extern "C" int set_chunk_levels(int wx,int wy,int min,int max){
-    auto chunk=find_chunk(wx,wy);if(!chunk||min<0||max>63||min>max)return 0;
+    // Signed game levels include basements; native world borders still use 0..63.
+    auto chunk=find_chunk(wx,wy);if(!chunk||min<-32||max>63||min>max||max-min>=64)return 0;
     if(chunk->minLevel==min&&chunk->maxLevel==max)return 1;
     std::vector<std::unique_ptr<ChunkRecord>> pending(max-min+1);
     for(int z=min;z<=max;z++)if(z<chunk->minLevel||z>chunk->maxLevel)pending[z-min]=std::make_unique<ChunkRecord>(chunk.get());
