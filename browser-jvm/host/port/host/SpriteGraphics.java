@@ -8,6 +8,7 @@ import org.lwjgl.opengl.GLCapabilities;
 public final class SpriteGraphics {
     private static final IdentityHashMap<Buffer,ByteBuffer> allocations = new IdentityHashMap<>();
     private static final sun.misc.Unsafe memory = memory();
+    private static final ThreadLocal<byte[]> textureTransfer = ThreadLocal.withInitial(() -> new byte[128 * 1024]);
     // The qualified Java 17 runtime supports immediate direct-buffer release; fail initialization if unavailable.
     private static sun.misc.Unsafe memory() {
         try {
@@ -388,12 +389,16 @@ public final class SpriteGraphics {
         for (int i = ids.position(); i < ids.limit(); i++) glDeleteTextures(ids.get(i));
     }
     public static native void glTexParameteri(int target,int name,int value);
-    public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,ByteBuffer data){int count=data==null?0:textureByteCount(width,height,format,type);byte[] bytes=null;if(data!=null){if(data.remaining()<count)throw new IllegalArgumentException("Texture buffer too short");bytes=new byte[count];data.duplicate().get(bytes);}textureBytes(target,level,internal,width,height,border,format,type,bytes);}
+    public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,ByteBuffer data){int count=data==null?0:textureByteCount(width,height,format,type);byte[] bytes=null;if(data!=null){if(data.remaining()<count)throw new IllegalArgumentException("Texture buffer too short");bytes=textureTransfer(count);data.duplicate().get(bytes,0,count);}textureBytes(target,level,internal,width,height,border,format,type,bytes);}
     /** The original FBO allocation uses this typed-null overload; client IntBuffer pixels remain unsupported. */
     public static void glTexImage2D(int target,int level,int internal,int width,int height,int border,int format,int type,IntBuffer data){if(data!=null)throw new UnsupportedOperationException("IntBuffer texture uploads are outside the bounded browser backend");textureBytes(target,level,internal,width,height,border,format,type,null);}
+    // WebGL consumes the transfer synchronously; reuse bounded storage for small tile uploads.
+    private static byte[] textureTransfer(int count) {
+        return count <= 128 * 1024 ? textureTransfer.get() : new byte[count];
+    }
     private static native int textureByteCount(int width,int height,int format,int type);
     private static native void textureBytes(int target,int level,int internal,int width,int height,int border,int format,int type,byte[] data);
-    public static void glTexSubImage2D(int target,int level,int x,int y,int width,int height,int format,int type,ByteBuffer data){Objects.requireNonNull(data,"pixels");int count=textureByteCount(width,height,format,type);if(data.remaining()<count)throw new IllegalArgumentException("Texture update buffer too short");byte[] bytes=new byte[count];data.duplicate().get(bytes);textureSubBytes(target,level,x,y,width,height,format,type,bytes);}
+    public static void glTexSubImage2D(int target,int level,int x,int y,int width,int height,int format,int type,ByteBuffer data){Objects.requireNonNull(data,"pixels");int count=textureByteCount(width,height,format,type);if(data.remaining()<count)throw new IllegalArgumentException("Texture update buffer too short");byte[] bytes=textureTransfer(count);data.duplicate().get(bytes,0,count);textureSubBytes(target,level,x,y,width,height,format,type,bytes);}
     private static native void textureSubBytes(int target,int level,int x,int y,int width,int height,int format,int type,byte[] data);
     public static void glGetTexImage(int target,int level,int format,int type,ByteBuffer data){Objects.requireNonNull(data,"pixels");if(data.isReadOnly())throw new ReadOnlyBufferException();int count=textureReadByteCount(target,level,format,type);if(data.remaining()<count)throw new IllegalArgumentException("Texture readback buffer too short");byte[] bytes=new byte[count];data.duplicate().get(bytes);textureReadBytes(target,level,format,type,bytes);data.duplicate().put(bytes);}
     private static native int textureReadByteCount(int target,int level,int format,int type);
