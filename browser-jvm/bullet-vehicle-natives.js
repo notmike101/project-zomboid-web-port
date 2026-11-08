@@ -12,8 +12,20 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
     const base = createBulletNatives(engine, { registeredStaticMeshes: true });
     const definitions = new Map();
     const calls = [];
+    let droppedCalls = 0;
     const vehicleIds = new Set();
     let readbackCount = null;
+
+    /** Retains recent diagnostics without growing for the lifetime of a world.
+     * @param {object} entry - One native-call observation.
+     */
+    function record(entry) {
+        if (calls.length === 4096) {
+            calls.splice(0, 1024);
+            droppedCalls += 1024;
+        }
+        calls.push(entry);
+    }
 
     /**
      * Rejects unsupported input before changing engine state.
@@ -137,7 +149,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             engine._free(pointer);
         }
 
-        calls.push({ method: 'ToBullet', x, y, min, max, level, cells: seen.size });
+        record({ method: 'ToBullet', x, y, min, max, level, cells: seen.size });
     }
 
     /**
@@ -241,7 +253,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
             expect(engine._select_vehicle_definition(definition.key) === 1 && engine._add_vehicle(id, x, y, z, qx, qy, qz, qw) === 1, 'Actual vehicle creation rejected');
             vehicleIds.add(id);
             readbackCount = null;
-            calls.push({ method: 'addVehicle', id, name: String(name), x, y, z, qx, qy, qz, qw });
+            record({ method: 'addVehicle', id, name: String(name), x, y, z, qx, qy, qz, qw });
         },
         /**
          * Dispatches removeVehicle to the actual qualified engine operation.
@@ -334,7 +346,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
 
             // Native 0x18000e390 looks up the owner before accessing even a null array.
             if (!vehicleIds.has(id)) {
-                calls.push({ method: 'setVehicleParams', id, outcome: 'lookup-miss', result: -1 });
+                record({ method: 'setVehicleParams', id, outcome: 'lookup-miss', result: -1 });
 
                 return -1;
             }
@@ -1090,7 +1102,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
                         // eslint-disable-next-line no-await-in-loop -- Original callbacks precede this map's actual body publication.
                         const uploaded = await Bullet.updatePhysicsForLevelIfNeeded(x, y, level);
 
-                        calls.push({ method: 'original-level-callback', x, y, level, uploaded });
+                        record({ method: 'original-level-callback', x, y, level, uploaded });
                     }
 
                     expect(engine._finish_vehicle_publication(id) === 1, 'Actual level body publication rejected');
@@ -1139,7 +1151,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
                 engine._free(state);
             }
 
-            calls.push({ method: 'stepSimulation', delta, callbacks: publicationCallbacks, dynamics, geometryBodies: engine._geometry_count(), registeredVehicles: engine._registered_vehicle_count() });
+            record({ method: 'stepSimulation', delta, callbacks: publicationCallbacks, dynamics, geometryBodies: engine._geometry_count(), registeredVehicles: engine._registered_vehicle_count() });
         },
         /**
          * Dispatches getVehicleCount to the actual qualified engine operation.
@@ -1238,7 +1250,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
          * @returns {unknown} Actual operation result.
          */
         natives[`Java_zombie_core_physics_Bullet_${name}`] = (...args) => {
-            calls.push({ enter: name, args: args.slice(1).filter((value) => ['number', 'boolean', 'string'].includes(typeof value)) });
+            record({ enter: name, args: args.slice(1).filter((value) => ['number', 'boolean', 'string'].includes(typeof value)) });
 
             return checked(args[0], () => operation(...args));
         };
@@ -1272,7 +1284,7 @@ export function createVehicleWorldNatives(engine, { ragdollDefinitions = () => [
                 }
             }
 
-            return { ...observed, definitionCount: definitions.size, vehicleId: vehicleIds.size === 1 ? vehicleIds.values().next().value : null, vehicleIds: [...vehicleIds], calls: calls.slice() };
+            return { ...observed, definitionCount: definitions.size, vehicleId: vehicleIds.size === 1 ? vehicleIds.values().next().value : null, vehicleIds: [...vehicleIds], calls: calls.slice(), droppedCalls };
         },
     };
 }
