@@ -6,7 +6,7 @@ const bulletPrefix = 'Java_zombie_core_physics_Bullet_';
 const retainedDefinitions = new Set(['defineRagdollBodyDynamics', 'defineRagdollConstraints', 'defineRagdollAnchors', 'defineRagdollBodyPartInfo', 'initializeRagdollSkeleton', 'setBallisticsTargetAdjustingShapeScale']);
 
 /**
- * Composes one real Bullet world with the existing Clipper, collision and ragdoll-definition owner.
+ * Composes one real Bullet world with the existing Clipper and ragdoll-definition owner.
  *
  * @returns {Promise<object>} The one native owner for this browser VM.
  */
@@ -36,8 +36,11 @@ export async function createBrowserPhysics() {
     }
 
     const bullet = createVehicleWorldNatives(engine, { ragdollDefinitions });
-    const natives = Object.fromEntries(Object.entries(platform.natives).filter(([name]) => !name.startsWith(bulletPrefix)
-        || retainedDefinitions.has(name.slice(bulletPrefix.length))));
+    // Population and collision JNI must resolve to the real PZPopMan library owner.
+    const natives = Object.fromEntries(Object.entries(platform.natives).filter(([name]) =>
+        !name.startsWith('Java_zombie_MapCollisionData_')
+        && !name.startsWith('Java_zombie_popman_ZombiePopulationManager_')
+        && (!name.startsWith(bulletPrefix) || retainedDefinitions.has(name.slice(bulletPrefix.length)))));
 
     Object.assign(natives, bullet.natives, {
         /**
