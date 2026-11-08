@@ -870,14 +870,10 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             drop('parameter', id);
         },
         FMOD_Studio_System_SetParameterByID(_lib, id, value, ignore) {
-            requireSystem().setParameterByID(use(id, 'parameterID'), value, ignore);
-
-            return FMOD.OK;
+            return requireSystem().setParameterByID(use(id, 'parameterID'), value, ignore);
         },
         FMOD_Studio_EventInstance_SetParameterByID(_lib, instance, id, value, ignore) {
-            use(instance, 'instance').setParameterByID(use(id, 'parameterID'), value, ignore);
-
-            return FMOD.OK;
+            return use(instance, 'instance').setParameterByID(use(id, 'parameterID'), value, ignore);
         },
         FMOD_Studio_EventDescription_GetID(_lib, id) {
             return retain('guid', use(id, 'event').getID());
@@ -960,8 +956,11 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
 
                     const error = FMOD.getLastError();
 
-                    // This JNI entry returns FMOD_RESULT, including pre-listener invalid-orientation errors.
-                    if (error !== FMOD.OK && !(name === 'FMOD_Studio_EventInstance3D' && value === error)) {
+                    // These original JNI entries return FMOD_RESULT to Java, including SDK failures.
+                    const returnsResult = name === 'FMOD_Studio_EventInstance3D'
+                        || name === 'FMOD_Studio_System_SetParameterByID'
+                        || name === 'FMOD_Studio_EventInstance_SetParameterByID';
+                    if (error !== FMOD.OK && !(returnsResult && value === error)) {
                         throw new Error(`Original ${name}: ${FMOD.errorString(error)} (${error})`);
                     }
 
