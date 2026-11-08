@@ -2189,6 +2189,18 @@ export function createSpriteNatives(canvas, report, compression = null) {
     const natives = {};
 
     for (const [name, callback] of Object.entries(api)) {
+        if (!['adoptDisplay', 'resizeDisplay', 'destroyDisplay', 'setTitle'].includes(name)) {
+            natives[`Java_port_host_SpriteGraphics_${name}`] = (_lib, ...args) => {
+                try {
+                    return callback(...args);
+                } catch (error) {
+                    // Preserve native failure rejection without suspending every successful WebGL call.
+                    return Promise.reject(error);
+                }
+            };
+            continue;
+        }
+
         /**
          * Forwards a declared Java native call and awaits actual asynchronous browser work.
          *
