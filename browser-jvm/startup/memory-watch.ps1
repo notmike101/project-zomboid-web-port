@@ -78,13 +78,11 @@ $ownedIdentities[$RootProcessId] = $originalCreation.Ticks
 try {
 while ($true) {
     $cycle = [Diagnostics.Stopwatch]::StartNew()
-    [StartupMemoryNative]::Telemetry('{"event":"stage","stage":"native-snapshot-start"}')
     $rootHandle.Refresh()
     $rootExited = $rootHandle.HasExited
     if (-not $rootExited -and $rootHandle.StartTime.ToUniversalTime() -ne $originalCreation) { throw 'Owned browser identity changed' }
     $all = @([StartupMemoryNative]::Processes())
     $snapshotMilliseconds = $cycle.ElapsedMilliseconds
-    [StartupMemoryNative]::Telemetry('{"event":"stage","stage":"owned-process-memory-start"}')
     $ids = [Collections.Generic.HashSet[int]]::new()
     [void]$ids.Add($RootProcessId)
     # Retain previously observed descendants after their immediate parent exits.
@@ -133,7 +131,6 @@ while ($true) {
             if (-not $ownedProcess -or -not $ownedProcess.HasExited) { throw }
         } finally { if ($ownedProcess) { $ownedProcess.Dispose() } }
     })
-    [StartupMemoryNative]::Telemetry('{"event":"stage","stage":"system-memory-start"}')
     $system = [StartupMemoryNative]::SystemMemory()
     if ($rootExited -and $processes.Count -eq 0) { [StartupMemoryNative]::Telemetry('{"event":"closed"}'); exit 0 }
     $privateBytes = [long](($processes | Measure-Object privateBytes -Sum).Sum)

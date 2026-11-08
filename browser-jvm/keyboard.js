@@ -232,13 +232,17 @@ export function keyboardNatives(canvas) {
              *
              * @param {object} lib - Java callback library.
              * @param {number} key - Original GLFW physical key code.
-             * @returns {Promise<number>} One for a held physical key, otherwise zero.
+             * @returns {number|Promise<number>} Immediate held state; Java failures reject asynchronously.
              */
-            async Java_port_host_BrowserKeyboard_key(lib, key) {
-                await owner(lib);
+            Java_port_host_BrowserKeyboard_key(lib, key) {
+                if (disposed || !canvas.isConnected || unsupported) {
+                    return owner(lib);
+                }
 
                 if ((key === 161 || key === 162) && [...pressed].some((code) => !code || code === 'Unidentified' || code.startsWith('Intl'))) {
-                    throw await new (await lib.java.lang.UnsupportedOperationException)('International WORLD key mapping unavailable');
+                    return (async () => {
+                        throw await new (await lib.java.lang.UnsupportedOperationException)('International WORLD key mapping unavailable');
+                    })();
                 }
 
                 let code = special[key];

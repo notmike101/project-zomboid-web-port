@@ -138,7 +138,8 @@ public final class BrowserOriginalBoot {
         if (lastResourceObservation == 0 || now - lastResourceObservation >= 5_000_000_000L) {
             lastResourceObservation = now;
             report("{\"resourceTelemetry\":{\"observedAt\":" + System.currentTimeMillis()
-                    + ",\"directBuffers\":" + ownedDirectBuffers() + ",\"player\":" + playerTelemetry() + "}}");
+                    + ",\"directBuffers\":" + ownedDirectBuffers() + ",\"player\":" + playerTelemetry()
+                    + ",\"input\":" + inputTelemetry() + "}}");
         }
         observeLoading();
         String current = state();
@@ -155,6 +156,22 @@ public final class BrowserOriginalBoot {
         float x = player.getX(), y = player.getY(), z = player.getZ();
         if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)) return "null";
         return "{\"x\":" + x + ",\"y\":" + y + ",\"z\":" + z + "}";
+    }
+
+    /** Reads menu/input gates on the game owner without invoking Lua handlers. */
+    private static String inputTelemetry() {
+        if (!"zombie.gameStates.IngameState".equals(state())) return "null";
+        Object klass = LuaManager.env.rawget("MainScreen");
+        Object instance = klass instanceof se.krka.kahlua.vm.KahluaTable table ? table.rawget("instance") : null;
+        se.krka.kahlua.vm.KahluaTable menu = instance instanceof se.krka.kahlua.vm.KahluaTable table ? table : null;
+        boolean typing = Core.currentTextEntryBox != null && Core.currentTextEntryBox.isDoingTextEntry();
+        return "{\"menuKey\":" + Core.getInstance().getKey(zombie.input.KeybindId.MAIN_MENU.getId())
+                + ",\"escapeDown\":" + zombie.input.GameKeyboard.isKeyDownRaw(1)
+                + ",\"loadingSuppressesKeys\":" + zombie.input.GameKeyboard.noEventsWhileLoading
+                + ",\"luaKeyEvents\":" + zombie.input.GameKeyboard.doLuaKeyPressed
+                + ",\"uiThreadMatches\":" + (LuaManager.thread == zombie.ui.UIManager.defaultthread)
+                + ",\"typing\":" + typing + ",\"menuExists\":" + (menu != null)
+                + ",\"menuInGame\":" + (menu != null && Boolean.TRUE.equals(menu.rawget("inGame"))) + "}";
     }
 
     /** Scanned only by the original observation producer at the bounded resource cadence. */

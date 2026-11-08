@@ -150,10 +150,12 @@ export function createBrowserMouse(canvas) {
              * @param {object} lib - Current Java class proxy namespace.
              * @param {number} _window - Preserved vendor window argument.
              * @param {number} index - Vendor button index.
-             * @returns {Promise<number>} GLFW-compatible pressed state.
+             * @returns {number|Promise<number>} Immediate pressed state; Java failures reject asynchronously.
              */
-            async Java_port_host_BrowserMouse_button(lib, _window, index) {
-                await requireOwner(lib);
+            Java_port_host_BrowserMouse_button(lib, _window, index) {
+                if (disposed || !canvas.isConnected) {
+                    return requireOwner(lib);
+                }
 
                 return Number(held.has(index));
             },
