@@ -193,7 +193,14 @@ export function loadFmodRuntime(manifestSHA, bankFiles = null) {
                     throw new Error('Public20309 audio range response mismatch');
                 }
 
-                return Uint8Array.from(xhr.responseText, (character) => character.charCodeAt(0) & 255);
+                const text = xhr.responseText;
+                const bytes = new Uint8Array(length);
+
+                for (let index = 0; index < length; index++) {
+                    bytes[index] = text.charCodeAt(index) & 255;
+                }
+
+                return bytes;
             },
             async size(name) {
                 const url = bankURL(name);
