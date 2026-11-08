@@ -1397,7 +1397,7 @@ function sharedCorner(neighbors, work, index, corner) {
  * The bounded closure and native function provenance are in lighting-provenance.md.
  *
  * @param {object} scene - Complete local geometry, static lights, player and optional seen history.
- * @param {object} [sources] - Retained static propagation and ambient buffers for an unchanged source update.
+ * @param {object} [sources] - Retained buffers for an unchanged source update and geometry.
  * @returns {number[][]} One49-int native payload for every row-major square.
  */
 export function calculateLighting(scene, sources) {
@@ -1408,7 +1408,7 @@ export function calculateLighting(scene, sources) {
     };
     validate(scene);
 
-    const order = traversalOrder(scene);
+    const order = sources?.order ?? traversalOrder(scene);
     const records = sources?.records ?? propagate(scene, traversalOrder(scene, true));
     const torches = torchLighting(scene);
     // Native0xc400 truncates the world-square lookup;0x41a0 retains visibility when that square is absent.
@@ -1429,14 +1429,21 @@ export function calculateLighting(scene, sources) {
     }
 
     const colors = centerColors(scene, records, darkness, ambient, torches.colors, canSee);
-    // Geometry is unchanged across all three corner passes in this calculation.
-    const neighbors = new Int32Array(scene.cells.length * 8);
+    const neighbors = sources?.neighbors ?? new Int32Array(scene.cells.length * 8);
 
-    for (const index of order) {
-        for (let direction = 0; direction < 8; direction++) {
-            neighbors[index * 8 + direction] = propagationAllowed(scene, index, direction)
-                ? neighbor(scene, index, direction) : -1;
+    // The owner discards sources when geometry changes, including streamed chunks.
+    if (!sources?.neighbors) {
+        for (const index of order) {
+            for (let direction = 0; direction < 8; direction++) {
+                neighbors[index * 8 + direction] = propagationAllowed(scene, index, direction)
+                    ? neighbor(scene, index, direction) : -1;
+            }
         }
+    }
+
+    if (sources) {
+        sources.order = order;
+        sources.neighbors = neighbors;
     }
 
     const work = scene.cells.map(() => []);
