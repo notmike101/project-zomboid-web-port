@@ -68,9 +68,12 @@ export function deriveSchedulerRuntime(runtime, loader) {
     }
 
     const yielded = replaceOne(replaceOne(runtime.toString('utf8'), original, replacement), yieldOriginal, yieldReplacement);
-    const runtimeSource = replaceOne(replaceOne(yielded, nullRead, nullReadWrite), undefinedRead, undefinedReadWrite);
+    const exceptions = replaceOne(replaceOne(yielded, nullRead, nullReadWrite), undefinedRead, undefinedReadWrite);
+    // Async filesystem completion must use current native memory views after another thread grows memory.
+    const listed = replaceOne(exceptions, 'function Qk(r,p){', 'function Qk(r,p){r.a4=r.a2.a2.a10;');
+    const runtimeSource = replaceOne(listed, 'function PS(j){', 'function PS(j){j.a2=j.a1.a2.a12;');
     const loaderModule = `// Copyright 2017-2022 Leaning Technologies Ltd\n// Derived from the pinned official CheerpJ 4.3 loader; only its runtime import URI changes.\nexport default ${replaceOne(loadFunction, 'import(cj3LoaderPath + "/cj3.js")', 'import("/scheduler-runtime/cj3.js")')}\n`;
-    const manifest = { ...schedulerPins, runtimeOutputSha: digest(runtimeSource), loaderModuleSha: digest(loaderModule), modifiedBodies: ['an1', 'anV', 'e5'] };
+    const manifest = { ...schedulerPins, runtimeOutputSha: digest(runtimeSource), loaderModuleSha: digest(loaderModule), modifiedBodies: ['an1', 'anV', 'e5', 'Qk', 'PS'] };
 
     return { runtimeSource, loaderModule, manifest };
 }

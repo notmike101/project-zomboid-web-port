@@ -1,5 +1,7 @@
 # Toward a playable original-bytecode port
 
+Next full-world candidate includes the pinned runtime async filesystem view repair (Qk directory completion and PS stat completion). Both isolated browser reproductions fail before and pass after forced native memory growth; the actual world allocation burst captured millions of directory strings. Keep streaming, original game classes and existing memory guards unchanged; verify Ingame, movement and original save/reopen next.
+
 Pending integration: lighting region updates now avoid allocating an unused empty region before copying retained/deferred cells. The focused four-update allocation check passes; preserve the active immutable run and include this change in its successor.
 
 Current blockers after streaming integration (2026-11-07): post-streaming V8 heap exhaustion remains unresolved. Arm the bounded debugger during world streaming and capture directly when owned memory rises 256 MiB above the stream-end baseline. The latest run instead stopped during chunk streaming: the writable filesystem reported the same chunk absent immediately before a failed read-open, with no intervening creation/deletion. Investigate the existence-check return/continuation path; do not suppress the caught-exception guard. Preserve original game code and the existing memory limits.

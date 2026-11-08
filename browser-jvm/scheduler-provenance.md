@@ -15,7 +15,7 @@ The original runtime SHA-256 is
 the original loader SHA-256 is
 `5b0ec873d1ae97d184928041b5f97ecf36eb990dac3baec5836a90bd87fa7a9f`.
 Preparation requires the full hashes and exactly one qualified `an1` body.
-Only that runtime body changes. No diagnostic sleep wrapper is included.
+The derived manifest lists every changed body: current-thread scheduling (`an1`), explicit yield scheduling (`anV`), null-write exception translation (`e5`), and asynchronous directory/stat completion (`Qk`, `PS`). No diagnostic sleep wrapper is included.
 
 Original `an1` allocates a local-reference slot for the real current Java thread
 object (`Q.a7`), increments the real slot cursor, and returns the real slot index.
@@ -85,3 +85,5 @@ owner-handle fallback. The public forced-termination case enters an actual busy
 renderer loop and confirms actual ChildProcess exit before closed=true is recorded.
 There is no numeric-PID fallback in the verifier. The API contract is documented in
 <https://github.com/microsoft/playwright/blob/main/docs/src/api/class-browserserver.md>.
+
+Async directory and stat completion refresh their captured output view from the owning thread's current native memory before writing. Another Java thread can grow WebAssembly memory while filesystem I/O is pending, detaching the captured view. The original offsets, results, errors and continuation remain unchanged. A bounded browser reproduction forces growth from 10 MiB to 74 MiB while each operation waits: baseline listing hangs and missing-file existence is wrong; both repaired cases return the expected results. This qualifies these two boundaries, not every asynchronous native callback or full-world playability.

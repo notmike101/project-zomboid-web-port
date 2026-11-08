@@ -1,5 +1,5 @@
 const resourceBase = 'https://cjrtnc.leaningtech.com/4.3';
-const runtimeSha = '6b87e309d08bef334783b7e663f5e7a40cad1a740cc594401ec6fb26f2766a17';
+const runtimeSha = 'a125a4c46f5f14d4708af53de84d6c7ce32a4134edb50faea9bb9d3535873e1d';
 const moduleSha = 'd59f0db67d1fc1e9f0c36046e75f47c663024ecfd87e508032084c38ecb07577';
 const functionSha = '7dd431da5a167f01e4c1581e87c858e2bfbcace51ee46187e9d82e003fa54c7b';
 let startPromise;
@@ -47,7 +47,7 @@ async function initialize(options) {
         throw new Error('Unqualified scheduler loader state before VM startup');
     }
 
-    if (await digest(runtime) !== runtimeSha || manifest.runtimeOutputSha !== runtimeSha || await digest(loader) !== moduleSha || manifest.loaderModuleSha !== moduleSha || JSON.stringify(manifest.modifiedBodies) !== '["an1","anV","e5"]') {
+    if (await digest(runtime) !== runtimeSha || manifest.runtimeOutputSha !== runtimeSha || await digest(loader) !== moduleSha || manifest.loaderModuleSha !== moduleSha || JSON.stringify(manifest.modifiedBodies) !== '["an1","anV","e5","Qk","PS"]') {
         throw new Error('Derived scheduler asset mismatch before VM startup');
     }
 

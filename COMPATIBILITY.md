@@ -1,6 +1,8 @@
 # Incremental original-bytecode compatibility
 
-Lighting updates now copy the selected retained/deferred region directly, avoiding an unused 692,224-slot empty array on each full-region update. Four empty-region lifecycle updates preserve the unpublished state and initialize the empty array only once. This allocation reduction is not yet included in the active frozen world run and does not establish a fix for heap exhaustion.
+The post-streaming allocation capture now identifies a native directory-listing loop retaining over eleven million entries. Pinned runtime list/stat callbacks held typed arrays across asynchronous filesystem work; native memory growth detached those arrays. Refreshing the views at callback entry fixes a bounded Chromium reproduction: the baseline directory listing hangs and absent-file stat returns present, while both repaired cases pass after the same 10 MiB to 74 MiB memory growth. Full-world confirmation and playability remain pending.
+
+Lighting updates now copy the selected retained/deferred region directly, avoiding an unused 692,224-slot empty array on each full-region update. Four empty-region lifecycle updates preserve the unpublished state and initialize the empty array only once. This allocation reduction ran in the subsequent world attempt; it did not prevent the directory-listing heap exhaustion.
 
 Completed HTTP assets now release their final seek window after all overlapping reads finish. The focused Chromium check retained zero raw bytes after a complete 8 MiB read and after reading/refetching 32 small prepared files twice (11,399,872 bytes checked), with byte-preserving sequential, backward and overlapping reads. This avoids retaining entire small assets after decoding; it does not bound decoded Java objects or pending download buffers.
 
