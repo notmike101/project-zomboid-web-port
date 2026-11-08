@@ -280,12 +280,14 @@ export function createSpriteNatives(canvas, report, compression = null) {
             }
 
             const pattern = integer ? /^[+-]?\d+$/ : /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?$/;
+            // The installed removeHole shader initializes its cutoff with a literal float quotient.
+            const quotient = !integer && /^([+-]?(?:\d+\.\d*|\.\d+))\s*\/\s*([+-]?(?:\d+\.\d*|\.\d+))$/.exec(literal);
 
-            if (!pattern.test(literal)) {
+            if (!pattern.test(literal) && !quotient) {
                 throw new Error(`Unsupported GLSL uniform initializer ${literal}`);
             }
 
-            let value = Number(literal);
+            let value = quotient ? Math.fround(Number(quotient[1])) / Math.fround(Number(quotient[2])) : Number(literal);
 
             if (integer) {
                 if (!Number.isInteger(value) || value < -2_147_483_648 || value > 2_147_483_647) {
