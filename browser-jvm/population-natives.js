@@ -1681,6 +1681,7 @@ export function createPopulationNatives() {
 
             state.reopenID = ids ? decodeIDs(decoder(ids)) : 1;
             state.pop = true;
+            state.successfulSaves = 0;
             state.origins = [];
             state.lastSavedID = ids ? decodeIDs(decoder(ids)) : 0;
             state.config = new Map(nativeDefaults);

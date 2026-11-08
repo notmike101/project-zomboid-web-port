@@ -168,6 +168,19 @@ async function fixture(bounds = [0, 0, 1, 1]) {
 }
 
 try {
+    // Original Quit clears outfits; reopening must start a new save lifecycle on the same owner.
+    const reopened = await fixture();
+    await reopened.z('setOutfitNames', ['Original']);
+    await reopened.z('save');
+    await reopened.z('stop');
+    await reopened.m('stop');
+    await reopened.m('init', 0, 0, 1, 1);
+    await reopened.z('init', false, false, 0, 0, 1, 1);
+    assert.equal(reopened.service.diagnostics().successfulSaves, 0);
+    await reopened.z('setOutfitNames', ['Original']);
+    await reopened.z('save');
+    await assert.rejects(reopened.z('setOutfitNames', ['Changed']), /outfit table mutation after initial save/u);
+
     // Manual pre-worker snapshot preserves pending commands, release wins, original write order.
     const pending = await fixture();
 
