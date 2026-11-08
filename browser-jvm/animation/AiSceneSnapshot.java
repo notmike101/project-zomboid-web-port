@@ -50,6 +50,7 @@ public final class AiSceneSnapshot {
  static final class Reader {
   final DataInputStream in;final boolean directBuffers;final Map<Integer,Object> seen=new HashMap<>();Reader(DataInputStream in,boolean directBuffers){this.in=in;this.directBuffers=directBuffers;}
   final Map<Class<?>,Constructor<?>[]> constructors=new HashMap<>();
+  final Map<String,Class<?>> types=new HashMap<>();
   final Map<Class<?>,Map<String,Field>> fields=new HashMap<>();
   byte[] scratch;
   Field field(Class<?> type,String name)throws ReflectiveOperationException{
@@ -61,13 +62,13 @@ public final class AiSceneSnapshot {
    if(size>0&&(scratch==null||scratch.length<size))scratch=new byte[size];
    for(int remaining=capacity;remaining>0;){int count=Math.min(remaining,scratch.length);in.readFully(scratch,0,count);target.put(scratch,0,count);remaining-=count;}
   }
-  Class<?> type(String name)throws Exception{return switch(name){case "int"->int.class;case "byte"->byte.class;case "short"->short.class;case "long"->long.class;case "float"->float.class;case "double"->double.class;case "boolean"->boolean.class;case "char"->char.class;default->{if(!name.startsWith("jassimp.")&&!name.equals("java.lang.String")&&!name.equals("java.nio.ByteBuffer")&&!name.equals("java.lang.Object"))throw new IOException("Unexpected snapshot type "+name);yield Class.forName(name);}};}
+  Class<?> type(String name)throws Exception{return switch(name){case "int"->int.class;case "byte"->byte.class;case "short"->short.class;case "long"->long.class;case "float"->float.class;case "double"->double.class;case "boolean"->boolean.class;case "char"->char.class;default->{if(!name.startsWith("jassimp.")&&!name.equals("java.lang.String")&&!name.equals("java.nio.ByteBuffer")&&!name.equals("java.lang.Object"))throw new IOException("Unexpected snapshot type "+name);Class<?> resolved=types.get(name);if(resolved==null){resolved=Class.forName(name);types.put(name,resolved);}yield resolved;}};}
   Object construct(Class<?> type)throws Exception{
    // These original wrappers only store their buffer; decoded real fields replace it before return.
    // Original AiLightType.<clinit> assigns DIRECTIONAL raw 1; raw 0 is rejected.
    boolean bufferWrapper=type==AiVector.class||type==AiQuaternion.class||type==AiColor.class;
    var candidates=constructors.get(type);if(candidates==null){candidates=type.getDeclaredConstructors();Arrays.sort(candidates,Comparator.comparingInt(Constructor::getParameterCount));constructors.put(type,candidates);}
-   for(var c:candidates){c.setAccessible(true);Object[] args=new Object[c.getParameterCount()];var types=c.getParameterTypes();for(int i=0;i<args.length;i++){var t=types[i];args[i]=type==AiLight.class&&i==1?1:bufferWrapper&&t==ByteBuffer.class?ByteBuffer.allocate(0):t==String.class?"":t==int.class?0:t==long.class?0L:t==float.class?0f:t==double.class?0d:t==boolean.class?false:t.isArray()?Array.newInstance(t.getComponentType(),16):null;}if(type.getName().equals("jassimp.AiMaterial$Property"))args[3]=1;try{return c.newInstance(args);}catch(InvocationTargetException e){}}
+   for(var c:candidates){if(!c.isAccessible())c.setAccessible(true);Object[] args=new Object[c.getParameterCount()];var types=c.getParameterTypes();for(int i=0;i<args.length;i++){var t=types[i];args[i]=type==AiLight.class&&i==1?1:bufferWrapper&&t==ByteBuffer.class?ByteBuffer.allocate(0):t==String.class?"":t==int.class?0:t==long.class?0L:t==float.class?0f:t==double.class?0d:t==boolean.class?false:t.isArray()?Array.newInstance(t.getComponentType(),16):null;}if(type.getName().equals("jassimp.AiMaterial$Property"))args[3]=1;try{return c.newInstance(args);}catch(InvocationTargetException e){}}
    throw new IOException("No usable importer constructor: "+type.getName());
   }
   @SuppressWarnings({"unchecked","rawtypes"}) Object value()throws Exception{
