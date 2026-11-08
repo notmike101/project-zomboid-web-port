@@ -5,19 +5,32 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class StartupMemoryNative {
- // One immutable record may block on the pipe; sampling never waits or queues writes.
+ // Keep only the newest pending sample while a pipe write is blocked.
  static System.Threading.Tasks.Task telemetryWrite;
+ static readonly object telemetryGate = new object();
+ static string telemetryPending;
+ static bool telemetryWriting;
  static readonly System.IO.Stream telemetryStream = Console.OpenStandardOutput();
  public static void Telemetry(string record) {
-  if (telemetryWrite != null) {
-   if (!telemetryWrite.IsCompleted) return;
-   telemetryWrite.GetAwaiter().GetResult();
+  lock (telemetryGate) {
+   if (telemetryWrite != null && telemetryWrite.IsCompleted) telemetryWrite.GetAwaiter().GetResult();
+   telemetryPending = record;
+   if (telemetryWriting) return;
+   telemetryWriting = true;
+   telemetryWrite = System.Threading.Tasks.Task.Factory.StartNew(() => {
+    while (true) {
+     string next;
+     lock (telemetryGate) {
+      next = telemetryPending;
+      telemetryPending = null;
+      if (next == null) { telemetryWriting = false; return; }
+     }
+     byte[] bytes = System.Text.Encoding.UTF8.GetBytes(next + "\n");
+     telemetryStream.Write(bytes, 0, bytes.Length);
+     telemetryStream.Flush();
+    }
+   }, System.Threading.CancellationToken.None, System.Threading.Tasks.TaskCreationOptions.DenyChildAttach, System.Threading.Tasks.TaskScheduler.Default);
   }
-  byte[] bytes = System.Text.Encoding.UTF8.GetBytes(record + "\n");
-  telemetryWrite = System.Threading.Tasks.Task.Factory.StartNew(() => {
-   telemetryStream.Write(bytes, 0, bytes.Length);
-   telemetryStream.Flush();
-  }, System.Threading.CancellationToken.None, System.Threading.Tasks.TaskCreationOptions.DenyChildAttach, System.Threading.Tasks.TaskScheduler.Default);
  }
 
  [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct Entry {
@@ -122,7 +135,7 @@ while ($true) {
         try {
             $ownedProcess = [Diagnostics.Process]::GetProcessById($row.ProcessId)
             if ($ownedProcess.StartTime.ToUniversalTime().Ticks -eq $ownedIdentities[$row.ProcessId]) {
-                [pscustomobject]@{ pid=$row.ProcessId; parent=$row.ParentProcessId; name=$row.Name; commandLine=[StartupMemoryNative]::CommandLine($ownedProcess.Handle); privateBytes=$ownedProcess.PrivateMemorySize64; workingSetBytes=$ownedProcess.WorkingSet64; creation=$ownedProcess.StartTime.ToUniversalTime().ToString('o') }
+                [pscustomobject]@{ pid=$row.ProcessId; parent=$row.ParentProcessId; name=$row.Name; commandLine=$(if ($row.ProcessId -eq $RootProcessId) { $originalCommandLine }); privateBytes=$ownedProcess.PrivateMemorySize64; workingSetBytes=$ownedProcess.WorkingSet64; creation=$ownedProcess.StartTime.ToUniversalTime().ToString('o') }
             }
         } catch [ArgumentException] {
             if ($ownedProcess -and -not $ownedProcess.HasExited) { throw }
