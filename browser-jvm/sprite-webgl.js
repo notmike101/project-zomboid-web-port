@@ -114,7 +114,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
     const attached = new Map();
     const locationOwners = new Map();
     const clientArrays = new Set([32_884, 32_885, 32_886, 32_887, 32_888, 32_889, 33_879, 33_886]);
-    const compatibility = { activeUnit: gl.TEXTURE0, legacyTexture: new Map(), currentColor: new Float32Array([1, 1, 1, 1]), lineSmoothEnabled: false, alphaEnabled: false, alphaFunction: 519, alphaReference: 0, error: 0 };
+    const compatibility = { activeUnit: gl.TEXTURE0, legacyTexture: new Map(), textureEnvironment: new Map(), currentColor: new Float32Array([1, 1, 1, 1]), lineSmoothEnabled: false, alphaEnabled: false, alphaFunction: 519, alphaReference: 0, error: 0 };
     const attributeState = new SpriteAttributeState(gl, buffers, textures, compatibility);
     const alphaPrograms = new WeakMap();
     /**
@@ -1171,17 +1171,20 @@ export function createSpriteNatives(canvas, report, compression = null) {
             return cap === gl.TEXTURE_2D ? compatibility.legacyTexture.get(compatibility.activeUnit) === true : gl.isEnabled(cap);
         },
         /**
-         * Retains the qualified default MODULATE invariant;
-         invalid enums do not change GPU state.
+         * Retains per-unit state; active fragment shaders bypass the texture environment.
          *
          * @param {number} target - Original texture environment selector.
          * @param {number} name - Original parameter name.
-         * @param {number} value - Qualified MODULATE value, or invalid enum to report.
+         * @param {number} value - MODULATE, shader-only REPLACE, or an invalid enum to report.
          */
         textureEnvironment: (target, name, value) => {
-            if (target !== 8_960 || name !== 8_704 || value !== 8_448) {
+            if (target !== 8_960 || name !== 8_704 || (value !== 8_448 && !(value === 7_681 && gl.getParameter(gl.CURRENT_PROGRAM)))) {
                 compatibility.error ||= gl.INVALID_ENUM;
+
+                return;
             }
+
+            compatibility.textureEnvironment.set(compatibility.activeUnit, value);
         },
         /**
          * Preserves filled rasterization without sending unavailable desktop enums to WebGL.
@@ -2255,6 +2258,7 @@ export function createSpriteNatives(canvas, report, compression = null) {
          * @returns {object} Current WebGL state for a synchronous owner observation.
          */
         inspectState: () => ({
+            textureEnvironment: [...compatibility.textureEnvironment],
             currentColor: [...compatibility.currentColor],
             drawFramebuffer: observedHandle(framebuffers, gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)),
             readFramebuffer: observedHandle(framebuffers, gl.getParameter(gl.READ_FRAMEBUFFER_BINDING)),

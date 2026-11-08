@@ -360,6 +360,7 @@ export class SpriteAttributeState {
         }
 
         if (saved.mask & groups.TEXTURE) {
+            saved.textureEnvironment = new Map(host.textureEnvironment);
             saved.textures = this.captureTextures();
 
             for (const object of saved.textures.parameters.keys()) {
@@ -507,6 +508,7 @@ export class SpriteAttributeState {
         }
 
         if (saved.textures) {
+            host.textureEnvironment = saved.textureEnvironment;
             for (const [object, value] of saved.textures.parameters) {
                 gl.bindTexture(value.target, object);
 

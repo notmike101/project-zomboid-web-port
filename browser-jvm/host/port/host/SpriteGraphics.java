@@ -274,10 +274,11 @@ public final class SpriteGraphics {
     public static native void glBlendFuncSeparate(int srcRgb,int dstRgb,int srcAlpha,int dstAlpha);
     public static native void glBlendEquation(int mode);
     public static native void glViewport(int x,int y,int width,int height);
-    /** Only default MODULATE is admitted; other known selector families remain unqualified. */
+    /** Fragment shaders bypass texture environments; REPLACE is admitted for that vehicle path. */
     public static void glTexEnvi(int target, int name, int value) {
         if (target == 8960 && name == 8704 && value != 8448
-                && Set.of(260, 8449, 3042, 7681, 34160).contains(value)) {
+                && Set.of(260, 8449, 3042, 7681, 34160).contains(value)
+                && !(value == 7681 && glGetInteger(35725) != 0)) {
             throw new UnsupportedOperationException("Unqualified texture environment mode: " + value);
         }
         if ((target == 8960 && name != 8704
