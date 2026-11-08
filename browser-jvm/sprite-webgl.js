@@ -79,7 +79,8 @@ export function createSpriteNatives(canvas, report, compression = null) {
      *
      * @param size
      */
-    const blockExtent = (size) => size === 1 || size === 2 || size % 4 === 0;
+    const blockExtent = (size, level) => (size === 1 || size === 2 || size % 4 === 0)
+        && (size * 2 ** Math.min(level, 2)) % 4 === 0;
 
     // Observe this context once; masked strings alone cannot identify software rendering.
     const debugRenderer = gl.getExtension('WEBGL_debug_renderer_info');
@@ -1956,7 +1957,10 @@ export function createSpriteNatives(canvas, report, compression = null) {
                     throw new RangeError('Unsupported compressed texture dimensions/target');
                 }
 
-                if (blockExtent(w) && blockExtent(h)) {
+                const baseLevel = textureLevels.get(gl.getParameter(gl.TEXTURE_BINDING_2D))?.get(0);
+
+                // S3TC requires block-aligned implied base dimensions and a consistent mip format.
+                if (blockExtent(w, level) && blockExtent(h, level) && (level === 0 || baseLevel?.compressed !== false)) {
                     const binding = gl.getParameter(gl.TEXTURE_BINDING_2D);
 
                     if (!binding) {
