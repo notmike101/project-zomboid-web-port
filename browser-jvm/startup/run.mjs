@@ -307,7 +307,7 @@ try {
         browserServer = playOwner;
         evidence.persistentPlay = { profile: playOwner.profile, root: playOwner.root, origin };
     } else {
-        browserServer = await chromium.launchServer({ executablePath, headless: false });
+        browserServer = await chromium.launchServer({ executablePath, headless: false, args: ['--js-flags=--max-old-space-size=3072'] });
     }
 
     memoryGuard = startMemoryGuard({
