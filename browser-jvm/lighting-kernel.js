@@ -583,7 +583,7 @@ function chunkOrder(scene, chunkX, chunkY, descending) {
  * @returns {number[]} Detached maximum RGB triple.
  */
 function maximumColor(first, second) {
-    return first.map((value, channel) => Math.max(value, second[channel]));
+    return [Math.max(first[0], second[0]), Math.max(first[1], second[1]), Math.max(first[2], second[2])];
 }
 
 /**
@@ -1379,17 +1379,25 @@ function centerColors(scene, records, darkness, ambient, torchColors, canSee) {
  * @returns {number[]} Shared-corner maximum RGB.
  */
 function sharedCorner(neighbors, work, index, corner) {
-    let color = work[index][corner];
+    const color = work[index][corner];
+    let red = color[0];
+    let green = color[1];
+    let blue = color[2];
+    const floor = Math.floor(corner / 4) * 4;
 
     for (const [direction, adjacentCorner] of cornerNeighbors[corner % 4]) {
         const adjacent = neighbors[index * 8 + direction];
 
         if (adjacent >= 0) {
-            color = maximumColor(color, work[adjacent][adjacentCorner + Math.floor(corner / 4) * 4]);
+            const other = work[adjacent][adjacentCorner + floor];
+
+            red = Math.max(red, other[0]);
+            green = Math.max(green, other[1]);
+            blue = Math.max(blue, other[2]);
         }
     }
 
-    return color;
+    return [red, green, blue];
 }
 
 /**
@@ -1414,10 +1422,12 @@ export function calculateLighting(scene, sources) {
     // Native0xc400 truncates the world-square lookup;0x41a0 retains visibility when that square is absent.
     const lookup = scene.player.map((value, axis) => Math.trunc(value + (scene.origin?.[axis] ?? 0)) - (scene.origin?.[axis] ?? 0));
     const playerPresent = squareIndex(scene, ...lookup) >= 0;
-    const couldSee = playerPresent ? visibility(scene)
+    const couldSee = playerPresent
+        ? visibility(scene)
         : scene.cells.map((cell, index) => Boolean(scene.previous?.[index]?.[0] & 4));
     const canSee = couldSee.map((value, index) => playerPresent
-        ? value && withinCone(scene, index) : Boolean(scene.previous?.[index]?.[0] & 2));
+        ? value && withinCone(scene, index)
+        : Boolean(scene.previous?.[index]?.[0] & 2));
     // Original squareSet packs player-zero seen history above the 27 adjacency bits.
     const seen = canSee.map((value, index) => value || Boolean(scene.seen?.[index]) || Boolean(scene.cells[index]?.vision & 1 << 27));
     const darkness = darknessMultipliers(scene, seen);
@@ -1436,7 +1446,8 @@ export function calculateLighting(scene, sources) {
         for (const index of order) {
             for (let direction = 0; direction < 8; direction++) {
                 neighbors[index * 8 + direction] = propagationAllowed(scene, index, direction)
-                    ? neighbor(scene, index, direction) : -1;
+                    ? neighbor(scene, index, direction)
+                    : -1;
             }
         }
     }
