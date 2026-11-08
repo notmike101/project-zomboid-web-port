@@ -14,6 +14,10 @@ public final class PrepareAnimationSdk {
     private static final String FLUID_CONTAINER = "zombie/entity/components/fluids/FluidContainer.class";
     private static final String LIGHT_SWITCH = "zombie/iso/objects/IsoLightSwitch.class";
     private static final String ITEM_ON_CREATE = "zombie/scripting/logic/ItemCodeOnCreate.class";
+    private static final Map<String, String> MATH_SITES = Map.of(
+            "zombie/GameTime.class", "(DDD)D",
+            "zombie/network/fields/character/Prediction.class", "(FFF)F",
+            "zombie/inventory/InventoryItem.class", "(JJJ)J");
     private static final Map<String, Integer> GAMEPLAY_SITES = Map.ofEntries(
             Map.entry("zombie/audio/FMODAmbientWalls.class", 1),
             Map.entry("zombie/audio/SoundInstanceLimiter$SoundInstanceGroup.class", 1),
@@ -34,6 +38,9 @@ public final class PrepareAnimationSdk {
             Map.entry("zombie/randomizedWorld/randomizedBuilding/RBWoodcraft.class", 1),
             Map.entry("zombie/scripting/logic/RecipeCodeOnCreate.class", 69));
     private static final Map<String, String> EXPECTED = Map.ofEntries(
+            Map.entry("zombie/GameTime.class", "8db2fde2e2e3ac69292947b20ff0f9873b930c5a9d0745fe58b87a70d08a9139"),
+            Map.entry("zombie/network/fields/character/Prediction.class", "a55154b33f286b83632549b6cf93641ba199d2334b3d42daa09c6c2e9b1d1653"),
+            Map.entry("zombie/inventory/InventoryItem.class", "ec68194e5c2ccff52cbd78c67545aeceeb205f00e29efd44f5151764f0ce7f6b"),
             Map.entry(ANIM_LAYER, "8b59bfb1ec0c8e7e174cd3ba09042ff3bc9fe82bec38745c73d1f410daca0bc5"),
             Map.entry(ACTION_CONTEXT, "3948dce849e7c6f4ac9522abc0ce802b948b04e341bb3f05d65c3704544690ac"),
             Map.entry(TILE_OVERLAYS, "e1b95c1db4b843b207afe284fbd0f6625403849c4fecefeeed675544662bd49b"),
@@ -158,6 +165,13 @@ public final class PrepareAnimationSdk {
                             helper = "port.host.ListFirstSupport";
                             methodName = "getFirst";
                             descriptor = "(Ljava/util/List;)Ljava/lang/Object;";
+                        } else if (MATH_SITES.containsKey(entry)
+                                && call.owner().asInternalName().equals("java/lang/Math")
+                                && call.name().equalsString("clamp")
+                                && call.type().equalsString(MATH_SITES.get(entry))) {
+                            helper = "port.host.MathClampSupport";
+                            methodName = "clamp";
+                            descriptor = MATH_SITES.get(entry);
                         } else if (GAMEPLAY_SITES.containsKey(entry)
                                 && Set.of("java/util/List", "java/util/ArrayList", "java/util/Stack").contains(call.owner().asInternalName())
                                 && Set.of("getFirst", "getLast", "removeFirst", "removeLast").contains(call.name().stringValue())
@@ -183,7 +197,7 @@ public final class PrepareAnimationSdk {
                 classes.put(entry, adapted);
                 records.add("{\"entry\":\"" + entry + "\",\"inputClassSha256\":\"" + before
                         + "\",\"outputClassSha256\":\"" + hash(adapted) + "\",\"receiver\":\""
-                        + (entry.equals(ACTION_CONTEXT) || entry.equals("zombie/characters/IsoPlayer.class")
+                        + (MATH_SITES.containsKey(entry) ? "static primitive arguments" : entry.equals(ACTION_CONTEXT) || entry.equals("zombie/characters/IsoPlayer.class")
                             ? "exact java.util.Stack; inherited List default sequence" : "exact java.util.ArrayList; runtime checked")
                         + "\",\"sites\":[" + String.join(",", sites) + "]}");
             }

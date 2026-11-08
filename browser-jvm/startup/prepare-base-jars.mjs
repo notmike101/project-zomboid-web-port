@@ -145,7 +145,7 @@ prepare('PrepareVendor', [game, 'animation-view.jar']);
 prepare('PrepareAnimationSdk', ['atomic-view.jar', 'animation-sdk-view.jar', 'animation-sdk-adaptation.json']);
 await compile('animation-classes', ['animation/BrowserClientAnimation.java', 'animation/AiSceneSnapshot.java',
     'animation/PreparedSceneLoader.java', 'animation/PathCompat.java', ...['ReferenceExchange', 'BrowserClock',
-        'ListFirstSupport', 'StackFirstSupport', 'ArrayListFirstSupport', 'CharacterFrame', 'ScriptBootstrap']
+        'ListFirstSupport', 'StackFirstSupport', 'ArrayListFirstSupport', 'MathClampSupport', 'CharacterFrame', 'ScriptBootstrap']
         .map((name) => `host/port/host/${name}.java`)], [game, path.join(output, 'sprite-classes'), path.join(output, 'world-classes')]);
 archive('animation-entry.jar', 'animation-classes');
 prepare('PrepareKeyboardEvents', ['atomic-view.jar', 'play-input-view.jar', 'keyboard.json']);

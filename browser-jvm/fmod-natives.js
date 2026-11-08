@@ -759,7 +759,8 @@ export function createFmodNatives(FMOD, files, output = null, reverbPresets = nu
             return FMOD.OK;
         },
         FMOD_Channel_SetPaused(_lib, id, paused) {
-            use(id, 'channel').setPaused(Boolean(paused));
+            // SoundManager also passes its InGameNonBank channel group to this ChannelControl entry.
+            use(id, handles.has(handleKey('channel', id)) ? 'channel' : 'channelGroup').setPaused(Boolean(paused));
 
             return FMOD.OK;
         },
