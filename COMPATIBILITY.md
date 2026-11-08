@@ -1,5 +1,7 @@
 # Incremental original-bytecode compatibility
 
+Lighting updates now copy the selected retained/deferred region directly, avoiding an unused 692,224-slot empty array on each full-region update. Four empty-region lifecycle updates preserve the unpublished state and initialize the empty array only once. This allocation reduction is not yet included in the active frozen world run and does not establish a fix for heap exhaustion.
+
 Completed HTTP assets now release their final seek window after all overlapping reads finish. The focused Chromium check retained zero raw bytes after a complete 8 MiB read and after reading/refetching 32 small prepared files twice (11,399,872 bytes checked), with byte-preserving sequential, backward and overlapping reads. This avoids retaining entire small assets after decoding; it does not bound decoded Java objects or pending download buffers.
 
 The latest world trace narrows the intermittent chunk-open failure: the writable filesystem reported the same chunk absent (`permType: 0`) immediately before its failed read-open, with no intervening creation or deletion in the recorded sequence. Investigate the existence-check return/continuation path before changing storage behavior. This run stopped before the post-streaming allocation burst; its cause and full playability remain unresolved.

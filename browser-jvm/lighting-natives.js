@@ -705,14 +705,14 @@ export function createLightingNatives() {
                 };
             }
 
-            let cells = Array.from({ length: width * height * 64 * 64 }, () => null);
-
-            if (state.cells) {
-                cells = [...state.cells];
-            }
+            let cells;
 
             if (state.deferred) {
                 cells = [...state.deferred.cells];
+            } else if (state.cells) {
+                cells = [...state.cells];
+            } else {
+                cells = Array.from({ length: width * height * 64 * 64 }, () => null);
             }
 
             active = {

@@ -1,5 +1,7 @@
 # Toward a playable original-bytecode port
 
+Pending integration: lighting region updates now avoid allocating an unused empty region before copying retained/deferred cells. The focused four-update allocation check passes; preserve the active immutable run and include this change in its successor.
+
 Current blockers after streaming integration (2026-11-07): post-streaming V8 heap exhaustion remains unresolved. Arm the bounded debugger during world streaming and capture directly when owned memory rises 256 MiB above the stream-end baseline. The latest run instead stopped during chunk streaming: the writable filesystem reported the same chunk absent immediately before a failed read-open, with no intervening creation/deletion. Investigate the existence-check return/continuation path; do not suppress the caught-exception guard. Preserve original game code and the existing memory limits.
 
 Completed-asset eviction (2026-11-07): release the final raw HTTP seek window at EOF after overlapping reads finish, so thousands of small decoded assets do not each keep their entire input. The focused Chromium check preserves bytes/refetching and retains zero completed-file bytes. This incremental change is qualified separately; prepare a new immutable generation before the next full-world run.
