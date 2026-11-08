@@ -11,7 +11,10 @@ import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Objects;
 import port.host.SpriteGraphics;
+import zombie.GameWindow;
+import zombie.core.opengl.RenderThread;
 import zombie.core.textures.PNGDecoder;
+import zombie.gameStates.GameLoadingState;
 
 /** Real PNG subset of STBImage for the browser JVM. Other image encodings fail explicitly. */
 public final class STBImage {
@@ -29,7 +32,11 @@ public final class STBImage {
         Objects.requireNonNull(filename, "filename");
         check(x); check(y); check(channels); checkDesired(desired);
         try (InputStream stream = Files.newInputStream(Path.of(filename.toString()))) {
-            return decode(stream, x, y, channels, desired);
+            ByteBuffer image = decode(stream, x, y, channels, desired);
+            if (filename.toString().replace('\\', '/').startsWith("/app/media/depthmaps/DEPTH_")) {
+                synchronized (images) { images.put(image, Boolean.TRUE); }
+            }
+            return image;
         } catch (IOException | RuntimeException exception) {
             failure.set(exception.toString());
             return null;
@@ -68,10 +75,21 @@ public final class STBImage {
 
     public static void stbi_image_free(ByteBuffer image) {
         if (image == null) return;
+        Boolean depthMap;
         synchronized (images) {
-            if (images.remove(image) == null) throw new IllegalArgumentException("Foreign or released STB image");
+            depthMap = images.remove(image);
+            if (depthMap == null) throw new IllegalArgumentException("Foreign or released STB image");
         }
         SpriteGraphics.memFree(image);
+        if (depthMap) {
+            long queuedBytes = SpriteGraphics.allocationSnapshot()[1];
+            if (queuedBytes > 64L * 1024 * 1024 && RenderThread.isRunning()
+                    && GameWindow.states.current instanceof GameLoadingState) {
+                // Drain queued tile uploads between decoded PNGs, outside the direct-buffer allocator lock.
+                RenderThread.invokeOnRenderContext(() -> {});
+                System.out.println("PORT-TILE-DEPTH-UPLOAD-DRAIN " + queuedBytes + " " + SpriteGraphics.allocationSnapshot()[1]);
+            }
+        }
     }
 
     private static ByteBuffer decode(InputStream stream, int[] x, int[] y, int[] channels, int desired) throws IOException {
@@ -127,7 +145,7 @@ public final class STBImage {
                 result.put(pixels);
             }
             result.flip();
-            synchronized (images) { images.put(result, Boolean.TRUE); }
+            synchronized (images) { images.put(result, Boolean.FALSE); }
             if (x != null) x[0] = width;
             if (y != null) y[0] = height;
             if (channels != null) channels[0] = natural;
