@@ -25,7 +25,7 @@ public final class PreparedSceneLoader {
    if(!sourceHash.equals(properties.getProperty(name+".source")))throw new java.io.IOException("Original source SHA mismatch");
    byte[] snapshot=Files.readAllBytes(Path.of("/app",name+".ais"));String snapshotHash=HexFormat.of().formatHex(digest.digest(snapshot));
    if(!snapshotHash.equals(properties.getProperty(name+".snapshot")))throw new java.io.IOException("Prepared data SHA mismatch");
-   return AiSceneSnapshot.decode(snapshot);
+   return AiSceneSnapshot.decodeForBrowser(snapshot);
   }catch(java.io.IOException error){throw error;}catch(Exception error){throw new java.io.IOException("Prepared importer data unavailable",error);}
  }
 }

@@ -36,7 +36,7 @@ public final class ManifestSceneLoader {
             if (!PrepareManifestScenes.hash(source).equals(index.getProperty(key + ".source"))) throw new IOException("Original source changed");
             byte[] snapshot = Files.readAllBytes(Path.of("/app/prepared", key + ".ais"));
             if (!PrepareManifestScenes.digest(snapshot).equals(index.getProperty(key + ".snapshot"))) throw new IOException("Snapshot identity changed");
-            return AiSceneSnapshot.decode(snapshot);
+            return AiSceneSnapshot.decodeForBrowser(snapshot);
         } catch (IOException failure) { throw failure; }
         catch (Exception failure) { throw new IOException("Original prepared importer unavailable", failure); }
     }

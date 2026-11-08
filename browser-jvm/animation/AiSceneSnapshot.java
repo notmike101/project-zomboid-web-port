@@ -14,7 +14,13 @@ public final class AiSceneSnapshot {
   var bytes=new ByteArrayOutputStream();var out=new DataOutputStream(bytes);out.writeInt(MAGIC);for(String name:ABI)out.writeInt(Jassimp.class.getField(name).getInt(null));new Writer(out).value(scene);out.close();return bytes.toByteArray();
  }
  public static AiScene decode(byte[] bytes)throws Exception{
-  var in=new DataInputStream(new ByteArrayInputStream(bytes));if(in.readInt()!=MAGIC)throw new IOException("Unrecognized snapshot");for(String name:ABI)Jassimp.class.getField(name).setInt(null,in.readInt());Object result=new Reader(in).value();if(in.read()!=-1)throw new IOException("Trailing snapshot data");return (AiScene)result;
+  return decode(bytes,true);
+ }
+ public static AiScene decodeForBrowser(byte[] bytes)throws Exception{
+  return decode(bytes,false);
+ }
+ private static AiScene decode(byte[] bytes,boolean directBuffers)throws Exception{
+  var in=new DataInputStream(new ByteArrayInputStream(bytes));if(in.readInt()!=MAGIC)throw new IOException("Unrecognized snapshot");for(String name:ABI)Jassimp.class.getField(name).setInt(null,in.readInt());Object result=new Reader(in,directBuffers).value();if(in.read()!=-1)throw new IOException("Trailing snapshot data");return (AiScene)result;
  }
  static final class Writer {
   final DataOutputStream out;final IdentityHashMap<Object,Integer> seen=new IdentityHashMap<>();Writer(DataOutputStream out){this.out=out;}
@@ -42,7 +48,7 @@ public final class AiSceneSnapshot {
   }
  }
  static final class Reader {
-  final DataInputStream in;final Map<Integer,Object> seen=new HashMap<>();Reader(DataInputStream in){this.in=in;}
+  final DataInputStream in;final boolean directBuffers;final Map<Integer,Object> seen=new HashMap<>();Reader(DataInputStream in,boolean directBuffers){this.in=in;this.directBuffers=directBuffers;}
   final Map<Class<?>,Constructor<?>[]> constructors=new HashMap<>();
   final Map<Class<?>,Map<String,Field>> fields=new HashMap<>();
   byte[] scratch;
@@ -67,7 +73,8 @@ public final class AiSceneSnapshot {
   @SuppressWarnings({"unchecked","rawtypes"}) Object value()throws Exception{
    int tag=in.readUnsignedByte();switch(tag){
     case 0:return null;case 1:{int id=in.readInt();if(!seen.containsKey(id))throw new IOException("Missing reference "+id);return seen.get(id);}case 2:return in.readUTF();case 3:return in.readInt();case 4:return in.readLong();case 5:return Float.intBitsToFloat(in.readInt());case 6:return Double.longBitsToDouble(in.readLong());case 7:return in.readBoolean();case 8:return Enum.valueOf((Class)type(in.readUTF()),in.readUTF());case 16:return in.readByte();case 17:return in.readShort();case 18:return in.readChar();
-    case 9:{int id=in.readInt();boolean direct=in.readBoolean(),readOnly=in.readBoolean(),little=in.readBoolean();int position=in.readInt(),limit=in.readInt(),capacity=in.readInt();ByteBuffer b=direct?ByteBuffer.allocateDirect(capacity):ByteBuffer.allocate(capacity);readBuffer(b,capacity);b.limit(limit).position(position);if(readOnly)b=b.asReadOnlyBuffer();b.order(little?ByteOrder.LITTLE_ENDIAN:ByteOrder.BIG_ENDIAN);seen.put(id,b);return b;}
+    // Browser scene consumers use Java reads; keep imported bytes out of the capped JNI heap.
+    case 9:{int id=in.readInt();boolean direct=in.readBoolean(),readOnly=in.readBoolean(),little=in.readBoolean();int position=in.readInt(),limit=in.readInt(),capacity=in.readInt();ByteBuffer b=direct&&directBuffers?ByteBuffer.allocateDirect(capacity):ByteBuffer.allocate(capacity);readBuffer(b,capacity);b.limit(limit).position(position);if(readOnly)b=b.asReadOnlyBuffer();b.order(little?ByteOrder.LITTLE_ENDIAN:ByteOrder.BIG_ENDIAN);seen.put(id,b);return b;}
     case 10:{int id=in.readInt();Class<?> component=type(in.readUTF());int n=in.readInt();Object result=Array.newInstance(component,n);seen.put(id,result);for(int i=0;i<n;i++)Array.set(result,i,value());return result;}
     case 11:{int id=in.readInt(),n=in.readInt();var list=new ArrayList<>();seen.put(id,list);for(int i=0;i<n;i++)list.add(value());return list;}
     case 12:{int id=in.readInt(),n=in.readInt();var map=new LinkedHashMap<>();seen.put(id,map);for(int i=0;i<n;i++)map.put(value(),value());return map;}
