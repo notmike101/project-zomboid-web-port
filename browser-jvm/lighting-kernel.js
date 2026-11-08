@@ -1372,18 +1372,20 @@ function centerColors(scene, records, darkness, ambient, torchColors, canSee) {
 /**
  * Takes a shared-corner maximum from the current three admitted neighbors.
  *
- * @param {object} scene - Validated scene.
+ * @param {Int32Array} neighbors - Admitted horizontal neighbors for this calculation.
  * @param {number[][][]} work - Per-square corner colors.
  * @param {number} index - Current square index.
  * @param {number} corner - Current corner index.
  * @returns {number[]} Shared-corner maximum RGB.
  */
-function sharedCorner(scene, work, index, corner) {
+function sharedCorner(neighbors, work, index, corner) {
     let color = work[index][corner];
 
     for (const [direction, adjacentCorner] of cornerNeighbors[corner % 4]) {
-        if (propagationAllowed(scene, index, direction)) {
-            color = maximumColor(color, work[neighbor(scene, index, direction)][adjacentCorner + Math.floor(corner / 4) * 4]);
+        const adjacent = neighbors[index * 8 + direction];
+
+        if (adjacent >= 0) {
+            color = maximumColor(color, work[adjacent][adjacentCorner + Math.floor(corner / 4) * 4]);
         }
     }
 
@@ -1427,6 +1429,16 @@ export function calculateLighting(scene, sources) {
     }
 
     const colors = centerColors(scene, records, darkness, ambient, torches.colors, canSee);
+    // Geometry is unchanged across all three corner passes in this calculation.
+    const neighbors = new Int32Array(scene.cells.length * 8);
+
+    for (const index of order) {
+        for (let direction = 0; direction < 8; direction++) {
+            neighbors[index * 8 + direction] = propagationAllowed(scene, index, direction)
+                ? neighbor(scene, index, direction) : -1;
+        }
+    }
+
     const work = scene.cells.map(() => []);
     const lower = colors.map((color, index) => allowed(scene, index, 9)
         ? maximumColor(color, colors[neighbor(scene, index, 9)])
@@ -1441,8 +1453,10 @@ export function calculateLighting(scene, sources) {
             let color = seeds[index];
 
             for (const [direction] of cornerNeighbors[corner % 4]) {
-                if (propagationAllowed(scene, index, direction)) {
-                    color = maximumColor(color, seeds[neighbor(scene, index, direction)]);
+                const adjacent = neighbors[index * 8 + direction];
+
+                if (adjacent >= 0) {
+                    color = maximumColor(color, seeds[adjacent]);
                 }
             }
 
@@ -1452,7 +1466,7 @@ export function calculateLighting(scene, sources) {
 
     for (const index of order) {
         for (let corner = 0; corner < 8; corner++) {
-            work[index][corner] = sharedCorner(scene, work, index, corner);
+            work[index][corner] = sharedCorner(neighbors, work, index, corner);
         }
     }
 
@@ -1468,7 +1482,7 @@ export function calculateLighting(scene, sources) {
         payload[4] = pack(ambient[index]);
 
         for (let corner = 0; corner < 8; corner++) {
-            const color = sharedCorner(scene, work, index, corner);
+            const color = sharedCorner(neighbors, work, index, corner);
 
             payload[5 + corner] = pack(color) | 0xFF_00_00_00;
         }
